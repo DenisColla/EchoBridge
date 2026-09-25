@@ -1,0 +1,18 @@
+{
+  "name": "gmail-voice-reader",
+  "private": true,
+  "version": "1.0.0",
+  "description": "EchoBridge Mail: legge ad alta voce le email di Gmail, riassume quelle lunghe in 3 punti e prepara risposte dettate a voce.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
