@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EchoBridge Mail — Impostazioni</title>
+<style>
+  :root { --bg:#f8fafd; --card:#fff; --fg:#1f1f1f; --muted:#5f6368; --line:#dadce0; --accent:#0b57d0; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#131314; --card:#1f1f1f; --fg:#e3e3e3; --muted:#a8a8a8; --line:#3c4043; --accent:#8ab4f8; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 "Google Sans",Roboto,system-ui,sans-serif; }
+  main { max-width:680px; margin:32px auto; padding:0 16px; }
+  h1 { font-size:22px; margin:0 0 4px; } .sub { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { display:block; font-weight:500; margin:12px 0 4px; } label:first-of-type { margin-top:0; }
+  .hint { color:var(--muted); font-size:12.5px; margin-top:4px; }
+  input[type=text], input[type=password], input[type=number], select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:transparent; color:inherit; font:inherit; }
+  select option { background:var(--card); }
+  .row { display:flex; gap:8px; align-items:center; } .row > :first-child { flex:1; }
+  .check { display:flex; gap:8px; align-items:center; font-weight:400; }
+  button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--accent); font:inherit; font-weight:500; cursor:pointer; white-space:nowrap; }
+  button:hover { background:color-mix(in srgb, var(--accent) 10%, transparent); }
+  #saved { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--fg); color:var(--bg); padding:8px 16px; border-radius:8px; opacity:0; transition:opacity .2s; }
+  #saved.on { opacity:1; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>EchoBridge Mail</h1>
+  <p class="sub">Apri un'email in Gmail e premi ▶ nella barra in basso (o <b>Alt+Shift+L</b>). 🎤 o <b>Alt+Shift+R</b> per rispondere a voce.</p>
+
+  <section>
+    <h2>Intelligenza artificiale (riassunti e risposte)</h2>
+    <label for="apiKey">Chiave API Anthropic</label>
+    <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
+    <div class="hint">Salvata solo su questo computer e inviata solo ad api.anthropic.com. Senza chiave l'estensione funziona lo stesso: lettura completa + punti chiave estratti offline. Crea la chiave su <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.</div>
+
+    <label for="model">Modello</label>
+    <select id="model"></select>
+
+    <label for="summaryMinLines">Riassumi solo le email più lunghe di (righe)</label>
+    <input id="summaryMinLines" type="number" min="1" max="50">
+    <div class="hint">Le email brevi vengono solo lette: zero token spesi.</div>
+
+    <label for="summaryLang">Lingua del riassunto e degli annunci</label>
+    <select id="summaryLang"><option value="it">Italiano</option><option value="en">English</option></select>
+  </section>
+
+  <section>
+    <h2>Voce</h2>
+    <label for="voiceName">Voce preferita</label>
+    <div class="row"><select id="voiceName"></select><button id="testVoice" type="button">▶ Prova</button></div>
+    <div class="hint">"Automatica" sceglie la voce migliore per la lingua di ogni email. Su Edge le voci "Online (Natural)" sono le più naturali.</div>
+
+    <label for="rate">Velocità</label>
+    <select id="rate"></select>
+
+    <label class="check"><input id="autoPlay" type="checkbox"> Leggi automaticamente quando apro un'email</label>
+  </section>
+
+  <section>
+    <h2>Risposte a voce</h2>
+    <label for="replyMode">Modalità</label>
+    <select id="replyMode">
+      <option value="ai">AI — dico cosa rispondere, Claude scrive la mail</option>
+      <option value="literal">Dettatura — inserisce esattamente ciò che dico</option>
+    </select>
+    <div class="hint">La bozza viene solo inserita nella risposta di Gmail: l'invio resta sempre a te.</div>
+
+    <label for="replyTone">Tono</label>
+    <input id="replyTone" type="text">
+
+    <label for="signature">Firma (nome da usare in chiusura)</label>
+    <input id="signature" type="text" placeholder="es. Denis Colla">
+
+    <label for="dictationLang">Lingua della dettatura</label>
+    <select id="dictationLang">
+      <option value="it-IT">Italiano</option><option value="en-US">English (US)</option><option value="en-GB">English (UK)</option>
+      <option value="es-ES">Español</option><option value="fr-FR">Français</option><option value="de-DE">Deutsch</option>
+    </select>
+  </section>
+
+  <section>
+    <h2>Altro</h2>
+    <div class="row">
+      <span>Scorciatoie da tastiera</span><button id="shortcuts" type="button">Modifica</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span id="cacheInfo">Riassunti in cache</span><button id="clearCache" type="button">Svuota cache</button>
+    </div>
+  </section>
+</main>
+<div id="saved" role="status">Salvato ✓</div>
+<script src="options.js"></script>
+</body>
+</html>
