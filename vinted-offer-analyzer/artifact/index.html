@@ -684,7 +684,7 @@ function pickMoments(input, now) {
 
   const hoursToChosen = (chosen.date.getTime() - now.getTime()) / 3_600_000
   const quick = hoursToChosen > QUICK_ALTERNATIVE_MIN_HOURS
-    ? [...evaluated.filter((s) => s !== chosen && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
+    ? [...eligible.filter((s) => s.date.getTime() < chosen.date.getTime() && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
     : null
 
   // Best slot per distinct day, excluding the chosen day (and "now").

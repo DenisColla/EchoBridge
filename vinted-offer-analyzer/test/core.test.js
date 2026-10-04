@@ -214,6 +214,10 @@ test('quick alternative exists only when the recommended moment is more than 36 
   }
   const tonight = analyzeOffer({ ...base, targetPrice: '92' }, SUNDAY_AFTERNOON)
   assert.equal(tonight.quick, null)
+
+  // Regression: the quick alternative must always come BEFORE the recommended moment.
+  const edge = analyzeOffer({ category: 'fast_fashion', listPrice: '132.5', targetPrice: '62.23', listingAge: 'today', sellerProfile: 'inactive', listingSignal: 'fixed_price' }, new Date(2027, 1, 12, 21, 46))
+  if (edge.quick) assert.ok(edge.quick.date.getTime() < edge.optimal.date.getTime())
 })
 
 test('suggested price appears only when the probability is low and is above the target', () => {
