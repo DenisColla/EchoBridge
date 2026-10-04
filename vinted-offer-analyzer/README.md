@@ -80,8 +80,9 @@ offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
 
 La cartella `mobile/` contiene l'app Expo / React Native pronta: stesso motore (copiato in `mobile/core` da
 `npm run sync-core`), lista "da comprare" con link, notifiche locali 10 minuti prima della finestra consigliata,
-evento in calendario, registro degli esiti. Su Windows basta `mobile\start.bat`: installa i prerequisiti, compila e
-lascia l'APK in `mobile\dist\OffertaVintedTiming.apk`. Istruzioni complete in `mobile/README.md`.
+evento in calendario, registro degli esiti. Un APK già compilato è in `mobile/dist/OffertaVintedTiming-arm64.apk`:
+basta copiarlo sul telefono e aprirlo. Su Windows `mobile\start.bat` installa i prerequisiti, compila e lascia la
+versione universale in `mobile\dist\OffertaVintedTiming.apk`. Istruzioni complete in `mobile/README.md`.
 
 ## Claude Artifacts
 
