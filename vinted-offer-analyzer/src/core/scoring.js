@@ -1,5 +1,5 @@
 import {
-  AGE_CURVE, BASE_CURVE, CATEGORIES, GAP_CURVE, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
+  AGE_CURVE, BASE_CURVE, CATEGORIES, GAP_CURVE, HOLIDAY_WINDOW_LABELS, HOLIDAY_WINDOW_WHY, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
   MONTH_END_WEIGHT, MONTH_START_WEIGHT, MONTH_WINDOWS, NEGATIVE_CAP, NEUTRAL_WINDOW, POSITIVE_CAP,
   RISK_BANDS, TIME_WINDOWS, UNCERTAINTY_MAX, UNCERTAINTY_PER_UNKNOWN,
 } from './constants.js'
@@ -10,8 +10,9 @@ export const findCategory = (id) => CATEGORIES.find((c) => c.id === id) || null
 export const findListingAge = (id) => LISTING_AGES.find((a) => a.id === id) || LISTING_AGES[0]
 export const findListingSignal = (id) => LISTING_SIGNALS.find((s) => s.id === id) || LISTING_SIGNALS[0]
 
+/** Quantised to 1e-6 so that exact 15% / 30% / 40% offers on decimal prices do not drift across a band edge. */
 export const computeDiscountPct = (listPrice, targetPrice) =>
-  listPrice > 0 ? ((listPrice - targetPrice) / listPrice) * 100 : 0
+  listPrice > 0 ? Math.round(((listPrice - targetPrice) / listPrice) * 100 * 1e6) / 1e6 : 0
 
 /** < 15% low · 15–30% (inclusive) medium · > 30% high */
 export const riskBandFor = (discountPct) => {
@@ -74,7 +75,11 @@ export const effectiveWeekday = (date) => (isItalianHoliday(date) ? 0 : date.get
 export const timeWindowAt = (date) => {
   const day = effectiveWeekday(date)
   const minutes = minutesOfDay(date)
-  return TIME_WINDOWS.find((w) => w.days.includes(day) && minutes >= w.from && minutes < w.to) || NEUTRAL_WINDOW
+  const window = TIME_WINDOWS.find((w) => w.days.includes(day) && minutes >= w.from && minutes < w.to) || NEUTRAL_WINDOW
+  if (day !== date.getDay() && HOLIDAY_WINDOW_LABELS[window.id]) {
+    return { ...window, label: HOLIDAY_WINDOW_LABELS[window.id], why: HOLIDAY_WINDOW_WHY, holiday: true }
+  }
+  return window
 }
 
 /** Inactive sellers read the offer at a random moment: timing barely matters for them. */

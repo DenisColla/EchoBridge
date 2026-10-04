@@ -65,6 +65,9 @@ const toPercent = (p) => Math.round(p * 100)
 /** "+5", "−5" (typographic minus) or "±0". */
 const formatSignedPoints = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : '±0')
 
+/** "+5 punti", "−1 punto", "±0 punti". */
+const formatPoints = (n) => `${formatSignedPoints(n)} ${Math.abs(n) === 1 ? 'punto' : 'punti'}`
+
 // ───────────────────────── src/core/dates.js ─────────────────────────
 /**
  * Date helpers with Italian formatting. Deliberately avoids Intl so that the
@@ -309,8 +312,12 @@ const TIME_WINDOWS = [
   { id: 'pre_lunch', days: WEEKDAYS, from: h(12), to: h(12, 30), weight: -0.25, tier: 'D', label: 'Tarda mattinata', range: '12:00–12:30', why: 'Prima di pranzo la fame e la fretta rendono il venditore poco paziente.' },
   { id: 'lunch', days: WEEKDAYS, from: h(12, 30), to: h(14), weight: -0.35, tier: 'D', label: 'Pausa pranzo infrasettimanale', range: '12:30–14:00', why: 'La pausa pranzo è fretta e stress: il rischio di una reazione irritata è il più alto della giornata.' },
   { id: 'work_afternoon', days: WEEKDAYS, from: h(14), to: h(18), weight: -0.1, tier: 'C', label: 'Pomeriggio lavorativo', range: '14:00–18:00', why: 'Nel pomeriggio lavorativo l\'attenzione è frammentata.' },
-  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.05, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'A cena il telefono c\'è ma l\'attenzione è a tavola.' },
+  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.05, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'Dopo cena il telefono torna in mano, anche se l\'attenzione è ancora dispersa.' },
 ]
+
+/** Italian public holidays are scored as Sundays; these labels replace the Sunday-specific prose on a weekday holiday. */
+const HOLIDAY_WINDOW_LABELS = { sunday_night: 'Sera di festa', sunday_afternoon: 'Pomeriggio di festa', sunday_morning: 'Mattina di festa' }
+const HOLIDAY_WINDOW_WHY = 'È un giorno festivo: il venditore è a casa, rilassato e con tempo per valutare l\'offerta con calma, come di domenica.'
 
 const NEUTRAL_WINDOW = { id: 'neutral', days: ALL_DAYS, from: 0, to: h(24), weight: 0, tier: 'C', label: 'Fascia neutra', range: '', why: 'In questa fascia non c\'è nessun effetto psicologico marcato.' }
 
@@ -363,8 +370,9 @@ const findCategory = (id) => CATEGORIES.find((c) => c.id === id) || null
 const findListingAge = (id) => LISTING_AGES.find((a) => a.id === id) || LISTING_AGES[0]
 const findListingSignal = (id) => LISTING_SIGNALS.find((s) => s.id === id) || LISTING_SIGNALS[0]
 
+/** Quantised to 1e-6 so that exact 15% / 30% / 40% offers on decimal prices do not drift across a band edge. */
 const computeDiscountPct = (listPrice, targetPrice) =>
-  listPrice > 0 ? ((listPrice - targetPrice) / listPrice) * 100 : 0
+  listPrice > 0 ? Math.round(((listPrice - targetPrice) / listPrice) * 100 * 1e6) / 1e6 : 0
 
 /** < 15% low · 15–30% (inclusive) medium · > 30% high */
 const riskBandFor = (discountPct) => {
@@ -427,7 +435,11 @@ const effectiveWeekday = (date) => (isItalianHoliday(date) ? 0 : date.getDay())
 const timeWindowAt = (date) => {
   const day = effectiveWeekday(date)
   const minutes = minutesOfDay(date)
-  return TIME_WINDOWS.find((w) => w.days.includes(day) && minutes >= w.from && minutes < w.to) || NEUTRAL_WINDOW
+  const window = TIME_WINDOWS.find((w) => w.days.includes(day) && minutes >= w.from && minutes < w.to) || NEUTRAL_WINDOW
+  if (day !== date.getDay() && HOLIDAY_WINDOW_LABELS[window.id]) {
+    return { ...window, label: HOLIDAY_WINDOW_LABELS[window.id], why: HOLIDAY_WINDOW_WHY, holiday: true }
+  }
+  return window
 }
 
 /** Inactive sellers read the offer at a random moment: timing barely matters for them. */
@@ -648,30 +660,35 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
 function pickMoments(input, now) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
-  // "Now" competes only when the current window is not unfavourable: we never recommend sending at 2 AM.
-  const eligible = evaluated.filter((s) => s.kind !== 'now' || s.score.timeWindow.weight >= 0)
+  // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
+  const nowIsFavourable = timeWindowAt(now).weight >= 0
+  const eligible = evaluated.filter((s) => s.kind !== 'now' || (nowIsFavourable && s.score.timeWindow.weight >= 0))
   const ranking = [...eligible].sort(byUtilityThenDate)
   const best = ranking[0]
   const threshold = best.utility - Math.max(NEAR_TIE_ABS, NEAR_TIE_REL * best.utility)
   const chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
-  const alsoGood = !isSameDay(best.date, chosen.date) && best.utility > chosen.utility ? best : null
+  // A strictly better slot (any day, even later the same evening) is reported alongside the recommendation.
+  const alsoGood = best !== chosen && best.utility > chosen.utility ? best : null
 
   const nowSlot = evaluated.find((s) => s.kind === 'now')
+  const nowEligible = eligible.includes(nowSlot)
+  const closeEnough = nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE
   const sendNow = {
     slot: nowSlot,
-    ok: chosen.kind === 'now' || nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE,
+    ok: chosen.kind === 'now' || (nowEligible && closeEnough),
+    reason: chosen.kind === 'now' ? 'chosen' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
     deltaPoints: Math.round((nowSlot.pOverall - chosen.pOverall) * 100),
     window: nowSlot.score.timeWindow,
-    windowEndsAt: atTime(nowSlot.date, Math.floor(nowSlot.score.timeWindow.to / 60) % 24, nowSlot.score.timeWindow.to % 60),
+    windowEndsAt: addMinutes(startOfDay(nowSlot.date), nowSlot.score.timeWindow.to),
   }
 
   const hoursToChosen = (chosen.date.getTime() - now.getTime()) / 3_600_000
   const quick = hoursToChosen > QUICK_ALTERNATIVE_MIN_HOURS
-    ? [...eligible.filter((s) => s.date.getTime() < chosen.date.getTime() && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
+    ? [...eligible.filter((s) => s.kind !== 'now' && s.daysWaited < chosen.daysWaited && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
     : null
 
-  // Best slot per distinct day, excluding the chosen day (and "now").
-  const seenDays = new Set([startOfDay(chosen.date).getTime()])
+  // Best slot per distinct day, excluding "now" and the days already shown (chosen, alsoGood, quick); listed chronologically.
+  const seenDays = new Set([chosen, alsoGood, quick].filter(Boolean).map((s) => startOfDay(s.date).getTime()))
   const alternatives = []
   for (const s of ranking) {
     const key = startOfDay(s.date).getTime()
@@ -680,8 +697,9 @@ function pickMoments(input, now) {
     alternatives.push(s)
     if (alternatives.length >= 3) break
   }
+  alternatives.sort((a, b) => a.date - b.date)
 
-  const topDays = [chosen, ...alternatives].slice(0, 5).map((s) => s.pOverall)
+  const topDays = [chosen, ...(alsoGood ? [alsoGood] : []), ...alternatives].slice(0, 5).map((s) => s.pOverall)
   const spread = Math.max(...topDays) - Math.min(...topDays)
   const maxAccept = Math.max(...evaluated.map((s) => s.score.pAccept))
 
@@ -702,10 +720,10 @@ const describeWindow = (w) => ({
 /** All negative windows, worst first. */
 const avoidWindows = () => TIME_WINDOWS.filter((w) => w.weight < 0).sort((a, b) => a.weight - b.weight).map(describeWindow)
 
-/** Negative windows that apply on the given day. */
+/** Negative windows that apply on the given day, worst first. */
 const avoidWindowsOn = (date) => {
   const day = effectiveWeekday(date)
-  return TIME_WINDOWS.filter((w) => w.weight < 0 && w.days.includes(day)).sort((a, b) => a.from - b.from).map(describeWindow)
+  return TIME_WINDOWS.filter((w) => w.weight < 0 && w.days.includes(day)).sort((a, b) => a.weight - b.weight || a.from - b.from).map(describeWindow)
 }
 
 // ───────────────────────── src/core/messages.js ─────────────────────────
@@ -749,10 +767,36 @@ const closing = (sendAt) => {
   return s ? `Grazie e ${s}!` : 'Grazie!'
 }
 
-function buildMessages({ itemTitle, targetPrice, listingAge, sendAt }) {
+/**
+ * `beforeOffer` = true when the strategy is to write first and send the offer only after a reply
+ * (high block risk or inactive seller): the templates then propose the price instead of announcing a sent offer.
+ */
+function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer = false }) {
   const item = itemTitle && itemTitle.trim() ? `"${itemTitle.trim()}"` : "l'articolo"
+  const Item = item === "l'articolo" ? "L'articolo" : item
   const price = formatEuro(targetPrice)
   const isOld = listingAge && (listingAge.id === 'over_month' || listingAge.id === 'weeks_2_4')
+
+  if (beforeOffer) {
+    return [
+      {
+        tone: 'cordiale',
+        text: `Ciao! Mi piace molto ${item}. Ti andrebbe bene ${price}? Se per te può andare ti invio subito l'offerta e completo l'acquisto. ${closing(sendAt)}`,
+      },
+      {
+        tone: 'diretto',
+        text: `Ciao! Ti propongo ${price} per ${item}. Se per te va bene ti invio subito l'offerta. Grazie!`,
+      },
+      {
+        tone: 'impegno',
+        text: `Ciao! ${isOld ? 'Ho visto che ' + item + ' è online da un po\': ' : ''}ti propongo ${price}. Se accetti ti invio l'offerta e completo subito l'acquisto, così puoi spedire appena ti è comodo. ${closing(sendAt)}`,
+      },
+      {
+        tone: 'motivato',
+        text: `Ciao! ${Item} mi interessa davvero: potrei arrivare a ${price}, che è il massimo del mio budget in questo momento. Se per te può andare ti invio subito l'offerta. ${closing(sendAt)}`,
+      },
+    ]
+  }
 
   return [
     {
@@ -769,7 +813,7 @@ function buildMessages({ itemTitle, targetPrice, listingAge, sendAt }) {
     },
     {
       tone: 'motivato',
-      text: `Ciao! ${item === "l'articolo" ? "L'articolo" : item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
+      text: `Ciao! ${Item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
     },
   ]
 }
@@ -777,9 +821,10 @@ function buildMessages({ itemTitle, targetPrice, listingAge, sendAt }) {
 // ───────────────────────── src/core/reasoning.js ─────────────────────────
 const roundPct = (v) => Math.round(v)
 
-/** Italian partitive article before a number: "dell'8%", "dell'11%", "dell'80%", otherwise "del 25%". */
+/** Italian partitive article before a number: "dell'8%", "dell'11%", "dell'80%", "dello 0%", otherwise "del 25%". */
 const articleFor = (n) => {
   const r = Math.round(n)
+  if (r === 0) return 'dello '
   return r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89) ? "dell'" : 'del '
 }
 
@@ -795,7 +840,7 @@ const dayPart = (date) => {
  * now → "adesso", today → "stasera/oggi alle ore", tomorrow → "domani sera, lunedì 5 ottobre, alle ore",
  * later → "giovedì 29 ottobre alle ore 21:45" + "tra 5 giorni".
  */
-function buildVerdict(chosen, sendNow, now) {
+function buildVerdict(chosen, sendNow, now, best = null) {
   const k = calendarDaysBetween(now, chosen.date)
   const time = formatTime(chosen.date)
   const dateLabel = formatLongDate(chosen.date, now)
@@ -807,9 +852,17 @@ function buildVerdict(chosen, sendNow, now) {
   let sublabel
   if (chosen.kind === 'now') {
     headline = "Invia l'offerta adesso"
-    sublabel = window.weight > 0
-      ? `Sei nella finestra giusta: dura fino alle ${formatTime(sendNow.windowEndsAt)}`
-      : 'Aspettare non migliorerebbe le probabilità'
+    const gain = best && best !== chosen ? Math.round((best.pOverall - chosen.pOverall) * 100) : 0
+    if (window.weight > 0 && ['S', 'A', 'B'].includes(window.tier)) {
+      sublabel = `Sei nella finestra giusta: dura fino alle ${formatTime(sendNow.windowEndsAt)}`
+    } else if (gain >= 1 && best) {
+      const when = isSameDay(best.date, chosen.date) ? `alle ${formatTime(best.date)}` : `${formatLongDate(best.date, now)} alle ${formatTime(best.date)}`
+      sublabel = `Aspettare ${when} varrebbe al massimo ${gain} ${gain === 1 ? 'punto' : 'punti'} in più: non vale il rischio`
+    } else if (window.weight > 0) {
+      sublabel = 'Fascia accettabile: le finestre migliori sono in tarda serata, ma aspettare cambia poco'
+    } else {
+      sublabel = 'Aspettare non migliorerebbe le probabilità'
+    }
   } else if (k === 0) {
     headline = `Invia l'offerta ${chosen.date.getHours() >= 17 ? 'stasera' : 'oggi'} alle ore ${time}`
     sublabel = capitalize(dateLabel)
@@ -824,13 +877,21 @@ function buildVerdict(chosen, sendNow, now) {
   return { headline, sublabel, when: formatRelativeDay(chosen.date, now), dateLabel, timeLabel: time, windowLabel, expiresLabel, isHoliday: isItalianHoliday(chosen.date) }
 }
 
-/** Opening sentence keyed by risk band. */
-function openingSentence(input) {
+/** Opening sentence keyed by risk band (and by whether timing actually moves the needle). */
+function openingSentence(input, timingMatters = true) {
   const d = roundPct(input.discountPct)
   const art = articleFor(d)
   if (input.riskBand.id === 'low') return `Sconto contenuto ${art}${d}%: quasi ogni fascia serale funziona, quindi conta soprattutto la rapidità.`
   if (input.riskBand.id === 'medium') return `Sconto ${art}${d}%, zona negoziabile: serve un momento in cui il venditore è rilassato e poco difensivo.`
+  if (!timingMatters) return `Sconto aggressivo ${art}${d}%: le probabilità restano basse in qualunque fascia, quindi conta più il prezzo del tempismo.`
   return `Sconto aggressivo ${art}${d}%: serve tempismo perfetto, con la minima resistenza possibile da parte del venditore.`
+}
+
+/** One sentence, built once, for the "timing barely matters" case. */
+function buildTimingNote(moments, chosen) {
+  if (moments.timingMatters) return null
+  const n = Math.max(1, Math.round(moments.spread * 100))
+  return `Qui il tempismo pesa poco (circa ${n} ${n === 1 ? 'punto' : 'punti'} tra le finestre migliori): ${chosen.kind === 'now' ? 'puoi inviare adesso' : 'la prima buona fascia va bene'}.`
 }
 
 /**
@@ -852,11 +913,13 @@ function buildReasons(input, chosen, attribution) {
         break
       case 'month':
         if (row.weight > 0) text = chosen.score.monthWindow.why
-        else if (row.weight < 0) text = 'Siamo a inizio mese, quando il venditore è meno pressato: per questo non conviene rinviare oltre.'
+        else if (row.weight < 0) text = k <= 1
+          ? 'Siamo a inizio mese, quando il venditore è meno pressato: per questo non conviene rinviare oltre.'
+          : 'Siamo a inizio mese, quando il venditore è meno pressato: aspettare ancora non cambierebbe il quadro.'
         break
       case 'age':
         if (listingAge.id === 'today') text = 'L\'annuncio è appena stato pubblicato: il venditore è ancora ottimista sul prezzo.'
-        else if (positive) text = `L'annuncio è online ${listingAge.label.toLowerCase().replace(' fa', '')}: il venditore vuole liberarsi dell'invenduto e la finestra ottimale si anticipa.`
+        else if (positive) text = `L'annuncio è online da ${listingAge.label.toLowerCase().replace(' fa', '')}: il venditore vuole liberarsi dell'invenduto e la finestra ottimale si anticipa.`
         else if (row.weight < 0) text = 'L\'annuncio è recente: il venditore non ha ancora motivo di cedere sul prezzo.'
         break
       case 'wait':
@@ -864,7 +927,8 @@ function buildReasons(input, chosen, attribution) {
         break
       case 'category':
         if (!category) break
-        if (category.disposable) text = `${category.label} è una categoria ad alta rotazione: il venditore vuole liberarsi del capo, ma l'articolo può sparire in fretta.`
+        if (category.id === 'kids') text = 'Nei vestiti per bambini il venditore vuole soprattutto fare spazio e accetta più volentieri.'
+        else if (category.disposable) text = 'Nel fast fashion il venditore vuole liberarsi del capo e accetta più volentieri.'
         else if (category.premium) text = `${category.label}: il venditore conosce il valore di ciò che vende e negozia lentamente.`
         else if (category.id === 'electronics') text = 'Elettronica: il venditore confronta con il prezzo del nuovo e cede poco.'
         break
@@ -897,30 +961,28 @@ function buildReasons(input, chosen, attribution) {
   return sentences.slice(0, 3)
 }
 
-function buildTips({ input, moments, blockRisk, twoStep, chosen, now }) {
+function buildTips({ input, blockRisk, twoStep, chosen, now, messageBeforeOffer }) {
   const tips = []
-  const { riskBand, discountPct, sellerProfile, listingAge, targetPrice } = input
+  const { riskBand, discountPct, sellerProfile, listingAge, targetPrice, listPrice } = input
 
   tips.push(`L'offerta resta valida circa ${VINTED.OFFER_VALIDITY_HOURS} ore e Vinted consente al massimo ${VINTED.OFFERS_PER_DAY} offerte al giorno: usa la prima nel momento giusto.`)
-  if (!moments.timingMatters) {
-    tips.push(`Qui il tempismo pesa poco (circa ${Math.max(1, Math.round(moments.spread * 100))} punti tra le finestre migliori): la prima buona fascia serale va bene.`)
-  }
   if (discountPct < 5) {
     tips.push('Sconto quasi simbolico: valuta di comprare a prezzo pieno o di chiedere la spedizione inclusa invece di un\'offerta.')
   }
   if (twoStep) {
     tips.push(`Strategia a due step: apri a ${twoStep.openingPrice} €, lascia che il venditore controproponga e chiudi intorno a ${Math.round(targetPrice)} €.`)
   }
-  if (blockRisk.level === 'high') {
-    tips.push('Rischio di reazione brusca alto: manda prima un messaggio cordiale, poi l\'offerta.')
-  }
-  if (sellerProfile === 'inactive') {
-    tips.push('Prima dell\'offerta scrivi un messaggio breve: i messaggi non scadono e ti dicono se il venditore è ancora attivo.')
-  } else if (listingAge.days >= 7 && chosen.daysWaited >= 1) {
+  if (messageBeforeOffer) {
+    tips.push(blockRisk.level === 'high'
+      ? 'Rischio di reazione brusca alto: manda prima il messaggio e invia l\'offerta solo dopo la risposta.'
+      : 'Prima dell\'offerta scrivi un messaggio breve: i messaggi non scadono e ti dicono se il venditore è ancora attivo.')
+  } else if (listingAge.days >= 7 && chosen.daysWaited >= 1 && sellerProfile !== 'inactive') {
     tips.push('Metti subito il like: molti venditori inviano uno sconto spontaneo ai follower entro 48–72 ore.')
   }
-  if (targetPrice >= 10 && Number.isInteger(targetPrice) && targetPrice % 5 === 0 && riskBand.id !== 'low') {
-    tips.push(`Un importo preciso (ad esempio ${targetPrice - 1} € invece di ${targetPrice} €) sembra più ragionato e viene contro-rilanciato meno.`)
+  const precise = targetPrice - 1
+  if (targetPrice >= 10 && Number.isInteger(targetPrice) && targetPrice % 5 === 0 && riskBand.id !== 'low'
+    && computeDiscountPct(listPrice, precise) <= VINTED.MAX_DISCOUNT_PCT) {
+    tips.push(`Un importo preciso (ad esempio ${precise} € invece di ${targetPrice} €) sembra più ragionato e viene contro-rilanciato meno.`)
   }
   if (now.getMonth() === 7 && now.getDate() <= 25) {
     tips.push('Siamo in piena estate: controlla che il venditore non sia in modalità vacanza prima di inviare.')
@@ -929,19 +991,43 @@ function buildTips({ input, moments, blockRisk, twoStep, chosen, now }) {
 }
 
 // ───────────────────────── src/core/analyze.js ─────────────────────────
+/** Below this discount (or euro gap) an offer is pointless: buy at list price. */
+const MIN_MEANINGFUL_DISCOUNT_PCT = 0.5
+const MIN_MEANINGFUL_GAP_EUR = 0.5
+
+/**
+ * Parses a price typed the Italian way: "12,50", "1.200", "1.200,50", "45 €".
+ * Returns NaN for anything that is not a plain decimal number.
+ */
+function parsePrice(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN
+  let s = String(raw ?? '').trim().replace(/€/g, '').replace(/\s+/g, '')
+  if (!s) return NaN
+  if (s.includes('.') && s.includes(',')) {
+    // Both separators: the last one is the decimal mark.
+    s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '')
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(s)) {
+    s = s.replace(/\./g, '') // Italian thousands separator
+  } else {
+    s = s.replace(',', '.')
+  }
+  if (!/^\d+(\.\d{1,2})?$/.test(s)) return NaN
+  return Number(s)
+}
+
 /**
  * Validates raw form values. Returns { ok, errors, input } where `input` is the
  * normalised object consumed by the scoring engine.
  */
 function normalizeInput(raw) {
   const errors = {}
-  const listPrice = Number(String(raw.listPrice ?? '').replace(',', '.'))
-  const targetPrice = Number(String(raw.targetPrice ?? '').replace(',', '.'))
+  const listPrice = parsePrice(raw.listPrice)
+  const targetPrice = parsePrice(raw.targetPrice)
   const category = findCategory(raw.category)
 
   if (!category) errors.category = 'Scegli una categoria.'
-  if (!Number.isFinite(listPrice) || listPrice <= 0) errors.listPrice = 'Inserisci il prezzo di listino (maggiore di 0).'
-  if (!Number.isFinite(targetPrice) || targetPrice <= 0) errors.targetPrice = 'Inserisci il prezzo che vorresti pagare.'
+  if (!Number.isFinite(listPrice) || listPrice <= 0) errors.listPrice = 'Inserisci il prezzo di listino (maggiore di 0, ad esempio 12,50).'
+  if (!Number.isFinite(targetPrice) || targetPrice <= 0) errors.targetPrice = 'Inserisci il prezzo che vorresti pagare (ad esempio 10).'
   if (Object.keys(errors).length) return { ok: false, errors, input: null }
 
   return { ok: true, errors: {}, input: withPrices({
@@ -963,24 +1049,33 @@ const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 
 
 /**
  * Smallest price increase (from the target upward) whose best moment reaches the
- * target overall probability. Re-runs the scheduler at each candidate price.
+ * target overall probability. Probes the top of the range first so that an
+ * unreachable target costs one scheduler run, then bisects the price grid.
  */
 function suggestPrice(input, now, targetProbability) {
   const step = priceStepFor(input.listPrice)
-  let guard = 0
-  for (let price = input.targetPrice + step; price < input.listPrice && guard < 600; price += step, guard++) {
-    const candidate = withPrices(input, input.listPrice, Math.round(price * 100) / 100)
+  const steps = Math.floor((input.listPrice - input.targetPrice) / step) - (Number.isInteger((input.listPrice - input.targetPrice) / step) ? 1 : 0)
+  if (steps < 1) return null
+  const evaluate = (i) => {
+    const candidate = withPrices(input, input.listPrice, Math.round((input.targetPrice + i * step) * 100) / 100)
     const moments = pickMoments(candidate, now)
-    if (moments.chosen.pOverall >= targetProbability) {
-      return {
-        price: candidate.targetPrice,
-        discountPct: candidate.discountPct,
-        probability: moments.chosen.pOverall,
-        date: moments.chosen.date,
-      }
-    }
+    return { candidate, moments, ok: moments.chosen.pOverall >= targetProbability }
   }
-  return null
+  let hi = evaluate(steps)
+  if (!hi.ok) return null
+  let lo = 0 // index 0 is the user's own target, known to be below the target probability
+  let hiIndex = steps
+  while (hiIndex - lo > 1) {
+    const mid = Math.floor((lo + hiIndex) / 2)
+    const probe = evaluate(mid)
+    if (probe.ok) { hi = probe; hiIndex = mid } else lo = mid
+  }
+  return {
+    price: hi.candidate.targetPrice,
+    discountPct: hi.candidate.discountPct,
+    probability: hi.moments.chosen.pOverall,
+    date: hi.moments.chosen.date,
+  }
 }
 
 /** Opening/closing prices for a two-step negotiation, only when the opening offer is still credible and sendable. */
@@ -1005,6 +1100,8 @@ function buildWarnings(now) {
   return warnings
 }
 
+const noOfferNeeded = (input, now, message) => ({ ok: true, kind: 'no_offer_needed', input, now, message })
+
 function buildAnalysis(input, now) {
   const moments = pickMoments(input, now)
   const { chosen, nowSlot, sendNow } = moments
@@ -1012,11 +1109,13 @@ function buildAnalysis(input, now) {
   const blockRisk = blockRiskAt(input, chosen.date)
   const blockRiskNow = blockRiskAt(input, nowSlot.date)
   const uncertainty = uncertaintyFor(input)
-  const verdict = buildVerdict(chosen, sendNow, now)
+  const verdict = buildVerdict(chosen, sendNow, now, moments.best)
   const twoStep = twoStepFor(input, chosen)
-  const targetProbability = blockRisk.level === 'high' ? SUGGESTED_PRICE_TARGET_HIGH_BLOCK : SUGGESTED_PRICE_TARGET
+  // The read probability is the one factor a higher price cannot change, so the price target is scaled by it.
+  const targetProbability = (blockRisk.level === 'high' ? SUGGESTED_PRICE_TARGET_HIGH_BLOCK : SUGGESTED_PRICE_TARGET) * readProbability(input)
   const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability) : null
   const ambition = moments.maxAccept < 0.15 ? 'unrealistic' : moments.maxAccept < 0.3 ? 'ambitious' : null
+  const messageBeforeOffer = blockRisk.level === 'high' || input.sellerProfile === 'inactive'
 
   return {
     ok: true,
@@ -1033,22 +1132,25 @@ function buildAnalysis(input, now) {
     blockRisk,
     blockRiskNow,
     optimal: chosen,
+    best: moments.best,
     alsoGood: moments.alsoGood,
     quick: moments.quick,
     alternatives: moments.alternatives,
     nowSlot,
     sendNow,
     timingMatters: moments.timingMatters,
+    timingNote: buildTimingNote(moments, chosen),
     spread: moments.spread,
     horizon: moments.horizon,
     verdict,
-    opening: openingSentence(input),
+    opening: openingSentence(input, moments.timingMatters),
     reasons: buildReasons(input, chosen, attribution),
     factors: attribution,
-    tips: buildTips({ input, moments, blockRisk, twoStep, chosen, now }),
+    tips: buildTips({ input, blockRisk, twoStep, chosen, now, messageBeforeOffer }),
     suggestedPrice,
     twoStep,
-    messages: buildMessages({ ...input, sendAt: chosen.date }),
+    messageBeforeOffer,
+    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer }),
     recommendedTone: recommendedToneFor(input),
     avoid: avoidWindows(),
     avoidToday: avoidWindowsOn(chosen.date),
@@ -1067,28 +1169,28 @@ function analyzeOffer(raw, now = new Date()) {
   const { input } = normalized
 
   if (input.discountPct <= 0) {
-    return {
-      ok: true,
-      kind: 'no_offer_needed',
-      input,
-      now,
-      message: 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.',
-    }
+    return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')
+  }
+  if (input.discountPct < MIN_MEANINGFUL_DISCOUNT_PCT || input.listPrice - input.targetPrice < MIN_MEANINGFUL_GAP_EUR) {
+    return noOfferNeeded(input, now, `Lo sconto richiesto è simbolico (${formatEuro(input.listPrice - input.targetPrice)}): compra a prezzo pieno o chiedi la spedizione inclusa, un'offerta non ha senso.`)
   }
 
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
-    const cappedPrice = Math.ceil(input.listPrice * (1 - VINTED.MAX_DISCOUNT_PCT / 100) * 2) / 2
+    const cappedPrice = Math.ceil(input.listPrice * (1 - VINTED.MAX_DISCOUNT_PCT / 100) * 100) / 100
+    if (input.listPrice - cappedPrice < MIN_MEANINGFUL_GAP_EUR) {
+      return noOfferNeeded(input, now, 'Su un prezzo così basso non esiste un\'offerta inviabile: compra direttamente.')
+    }
     const capped = withPrices(input, input.listPrice, cappedPrice)
     return {
       ...buildAnalysis(capped, now),
       kind: 'over_cap',
       requestedInput: input,
       cappedPrice,
-      message: `Vinted non accetta offerte sotto il ${100 - VINTED.MAX_DISCOUNT_PCT}% del prezzo: il minimo inviabile è ${cappedPrice} €. L'analisi qui sotto vale per quella cifra.`,
+      message: `Vinted non accetta offerte sotto il ${100 - VINTED.MAX_DISCOUNT_PCT}% del prezzo: il minimo inviabile è ${formatEuro(cappedPrice)}. L'analisi qui sotto vale per quella cifra.`,
       capAdvice: [
         'Metti il like e aspetta: lo sconto proposto dal venditore non ha il limite del 40%.',
         'Scrivi un messaggio cordiale spiegando il tuo budget, senza criticare l\'articolo.',
-        `Oppure alza il tuo target almeno a ${cappedPrice} € e invia l'offerta nel momento consigliato.`,
+        `Oppure alza il tuo target almeno a ${formatEuro(cappedPrice)} e invia l'offerta nel momento consigliato.`,
       ],
     }
   }
@@ -1228,8 +1330,8 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
   }, [])
 
   const livePreview = useMemo(() => {
-    const list = Number(String(form.listPrice).replace(',', '.'))
-    const target = Number(String(form.targetPrice).replace(',', '.'))
+    const list = parsePrice(form.listPrice)
+    const target = parsePrice(form.targetPrice)
     if (!(list > 0) || !(target > 0)) return null
     const discountPct = computeDiscountPct(list, target)
     return { discountPct, riskBand: discountPct > 0 ? riskBandFor(discountPct) : null, overCap: discountPct > VINTED.MAX_DISCOUNT_PCT }
@@ -1238,7 +1340,7 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
   /** Quick-select: sets the target price from a discount percentage of the list price. */
   const applyDiscount = useCallback((pct) => {
     setForm((prev) => {
-      const list = Number(String(prev.listPrice).replace(',', '.'))
+      const list = parsePrice(prev.listPrice)
       if (!(list > 0)) return prev
       const raw = list * (1 - pct / 100)
       const target = list >= 20 ? Math.round(raw) : Math.round(raw * 2) / 2
@@ -1450,7 +1552,7 @@ function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSub
     event.preventDefault()
     onSubmit()
   }
-  const hasList = Number(String(form.listPrice).replace(',', '.')) > 0
+  const hasList = parsePrice(form.listPrice) > 0
 
   return (
     <Card eyebrow="Dati dell'offerta" title="Che cosa vuoi comprare?">
@@ -1585,12 +1687,14 @@ function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSub
 
 // ───────────────────────── src/components/ScoreCard.jsx ─────────────────────────
 function ScoreCard({ result }) {
-  const { probability, probabilityRange, uncertainty, components, riskBand, blockRisk, factors, ambition, input } = result
+  const { probability, probabilityRange, uncertainty, components, riskBand, blockRisk, factors, ambition, input, suggestedPrice } = result
   const tone = toneForProbability(probability)
-  const parts = []
-  if (components.pAvailable < 0.995) parts.push(`ancora in vendita ${toPercent(components.pAvailable)}%`)
-  if (components.pRead < 0.995) parts.push(`il venditore la legge ${toPercent(components.pRead)}%`)
   const rows = factors.rows.filter((r) => r.deltaPoints !== 0)
+  const showEquation = components.pAvailable < 0.995 || components.pRead < 0.995 || toPercent(probability) !== factors.totalPct
+  const missing = [
+    input.listingAge.id === 'unknown' && "l'anzianità dell'annuncio",
+    (!input.sellerProfile || input.sellerProfile === 'unknown') && 'il tipo di venditore',
+  ].filter(Boolean).join(' e ')
 
   return (
     <Card eyebrow="Score di fattibilità" title="Quante possibilità hai?" icon={Gauge}>
@@ -1603,7 +1707,7 @@ function ScoreCard({ result }) {
           <p className={cx('mt-2 text-sm', SURFACE.muted)}>
             probabilità complessiva nel momento consigliato
             {uncertainty > 0 && (
-              <span className="block">stima tra {toPercent(probabilityRange[0])}% e {toPercent(probabilityRange[1])}%: indica anzianità e venditore per restringerla</span>
+              <span className="block">stima tra {toPercent(probabilityRange[0])}% e {toPercent(probabilityRange[1])}%: indica {missing} per restringerla</span>
             )}
           </p>
         </div>
@@ -1615,9 +1719,12 @@ function ScoreCard({ result }) {
 
       <Meter value={probability} tone={tone} label="Probabilità complessiva" className="mt-5" />
 
-      {parts.length > 0 && (
-        <p className={cx('mt-3 text-sm', SURFACE.muted)}>
-          Accettazione {toPercent(components.pAccept)}% · {parts.join(' · ')}.
+      {showEquation && (
+        <p className={cx('mt-3 text-sm tabular-nums', SURFACE.muted)}>
+          Accettazione {toPercent(components.pAccept)}%
+          {components.pAvailable < 0.995 && <> × ancora in vendita {toPercent(components.pAvailable)}%</>}
+          {components.pRead < 0.995 && <> × il venditore la legge {toPercent(components.pRead)}%</>}
+          {' '}= {toPercent(probability)}% complessivo
         </p>
       )}
 
@@ -1626,8 +1733,9 @@ function ScoreCard({ result }) {
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p>
             {ambition === 'unrealistic'
-              ? 'Così non passa: anche nel momento perfetto il rifiuto è quasi certo. Usa il prezzo consigliato nella strategia.'
-              : 'Obiettivo molto ambizioso: anche nel momento migliore le probabilità restano basse. Valuta il prezzo consigliato.'}
+              ? 'Così non passa: anche nel momento perfetto il rifiuto è quasi certo.'
+              : 'Obiettivo molto ambizioso: anche nel momento migliore le probabilità restano basse.'}
+            {' '}{suggestedPrice ? 'Usa il prezzo consigliato nella strategia.' : 'Alza il prezzo o scrivi prima al venditore.'}
           </p>
         </div>
       )}
@@ -1690,24 +1798,32 @@ function SlotRow({ slot, now }) {
   )
 }
 
+function SendNowLine({ sendNow, nowInAvoid, blockRiskNow }) {
+  const windowName = sendNow.window.label.toLowerCase()
+  let text
+  if (sendNow.ok) {
+    text = `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : formatPoints(sendNow.deltaPoints)}): ${windowName}.`
+  } else if (nowInAvoid || sendNow.reason === 'avoid_window') {
+    text = `No: sei in una fascia sfavorevole (${windowName}, ${formatPoints(sendNow.deltaPoints)}${blockRiskNow.level !== 'low' ? ', rischio di rifiuto secco più alto' : ''}). Aspetta.`
+  } else {
+    text = `No: ${windowName} (${formatPoints(sendNow.deltaPoints)} rispetto al momento consigliato). Aspetta.`
+  }
+  return (
+    <div className={cx('mb-3 flex items-start gap-2.5 rounded-xl p-3 text-sm', sendNow.ok ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-100 dark:ring-emerald-900' : 'bg-rose-50 text-rose-900 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900')}>
+      {sendNow.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <X className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
+      <p><strong>Adesso?</strong> {text}</p>
+    </div>
+  )
+}
+
 function VerdictCard({ result }) {
-  const { verdict, opening, reasons, optimal, alsoGood, quick, alternatives, now, avoidToday, sendNow, timingMatters, spread } = result
+  const { verdict, opening, reasons, optimal, alsoGood, quick, alternatives, now, avoidToday, sendNow, timingNote, nowInAvoid, blockRiskNow } = result
   const WindowIcon = windowIcon(optimal.score.timeWindow.id)
-  const showSendNow = optimal.kind !== 'now'
+  const alsoGoodSameDay = alsoGood && isSameDay(alsoGood.date, optimal.date)
 
   return (
     <Card eyebrow="Verdetto temporale" title="Quando inviare l'offerta" icon={CalendarClock}>
-      {showSendNow && (
-        <div className={cx('mb-3 flex items-start gap-2.5 rounded-xl p-3 text-sm', sendNow.ok ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-100 dark:ring-emerald-900' : 'bg-rose-50 text-rose-900 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900')}>
-          {sendNow.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <X className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
-          <p>
-            <strong>Adesso?</strong>{' '}
-            {sendNow.ok
-              ? `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : `${formatSignedPoints(sendNow.deltaPoints)} punti`}): ${sendNow.window.label.toLowerCase()}.`
-              : `No: ${sendNow.window.label.toLowerCase()} (${formatSignedPoints(sendNow.deltaPoints)} punti rispetto al momento consigliato). Aspetta.`}
-          </p>
-        </div>
-      )}
+      {optimal.kind !== 'now' && <SendNowLine sendNow={sendNow} nowInAvoid={nowInAvoid} blockRiskNow={blockRiskNow} />}
 
       <div className="rounded-2xl bg-teal-700 p-4 text-white shadow-sm dark:bg-teal-600 sm:p-5">
         <p className="text-xs font-semibold uppercase tracking-wider text-teal-100">{verdict.sublabel}</p>
@@ -1742,10 +1858,10 @@ function VerdictCard({ result }) {
         </ul>
       </div>
 
-      {!timingMatters && (
+      {timingNote && (
         <p className={cx('mt-3 flex items-start gap-2 text-sm', SURFACE.muted)}>
           <Scale className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          Qui il tempismo pesa poco (circa {Math.max(1, Math.round(spread * 100))} punti tra le finestre migliori): la prima buona fascia serale va bene.
+          {timingNote}
         </p>
       )}
 
@@ -1753,7 +1869,9 @@ function VerdictCard({ result }) {
         <div className={cx('mt-4 flex items-start gap-3 rounded-xl p-3 text-sm', SURFACE.cardMuted)}>
           <Scale className="mt-0.5 h-4 w-4 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden="true" />
           <p>
-            <span className="font-semibold">Pari merito:</span> {formatLongDate(alsoGood.date, now)} alle {formatTime(alsoGood.date)} ({formatRelativeDay(alsoGood.date, now)}) vale {toPercent(alsoGood.pOverall)}%. Scegli il giorno più comodo.
+            <span className="font-semibold">{alsoGoodSameDay ? 'Ancora meglio:' : 'Pari merito:'}</span>{' '}
+            {alsoGoodSameDay ? `alle ${formatTime(alsoGood.date)}` : `${formatLongDate(alsoGood.date, now)} alle ${formatTime(alsoGood.date)} (${formatRelativeDay(alsoGood.date, now)})`}
+            {' '}vale {toPercent(alsoGood.pOverall)}%{alsoGoodSameDay ? ', se puoi aspettare.' : '. Scegli il giorno più comodo.'}
           </p>
         </div>
       )}
@@ -1766,7 +1884,10 @@ function VerdictCard({ result }) {
             <p>
               {capitalize(formatLongDate(quick.date, now))} alle {formatTime(quick.date)} ({formatRelativeDay(quick.date, now)}):{' '}
               <strong>{toPercent(quick.pOverall)}%</strong>
-              <span className={SURFACE.muted}> ({formatSignedPoints(toPercent(quick.pOverall) - toPercent(optimal.pOverall))} punti rispetto al momento consigliato, ma nessun rischio che venga venduto prima)</span>
+              <span className={SURFACE.muted}>
+                {' '}({toPercent(quick.pOverall) - toPercent(optimal.pOverall) === 0 ? 'stesse probabilità' : formatPoints(toPercent(quick.pOverall) - toPercent(optimal.pOverall))} rispetto al momento consigliato,
+                {' '}{quick.daysWaited === 0 ? 'con nessun rischio' : 'con meno rischio'} che venga venduto prima)
+              </span>
             </p>
           </div>
         </div>
@@ -1786,10 +1907,10 @@ function VerdictCard({ result }) {
       {avoidToday.length > 0 && (
         <div className="mt-5">
           <h3 className={cx('flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider', SURFACE.muted)}>
-            <Ban className="h-3.5 w-3.5" aria-hidden="true" /> Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : `${formatLongDate(optimal.date, now).split(' ')[0]}`}
+            <Ban className="h-3.5 w-3.5" aria-hidden="true" /> Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : formatLongDate(optimal.date, now).split(' ')[0]}
           </h3>
           <ul className="mt-2 flex flex-wrap gap-2">
-            {avoidToday.slice(0, 4).map((w) => {
+            {avoidToday.map((w) => {
               const Icon = windowIcon(w.id)
               return (
                 <li key={w.id}>
@@ -1851,7 +1972,11 @@ function MessageCard({ result }) {
       <blockquote className={cx('mt-4 select-all rounded-xl p-4 text-sm leading-relaxed', SURFACE.cardMuted)}>
         {current.text}
       </blockquote>
-      <p className={cx('mt-2 text-xs', SURFACE.muted)}>L'offerta si invia dal pulsante di Vinted; il messaggio la accompagna in chat.</p>
+      <p className={cx('mt-2 text-xs', SURFACE.muted)}>
+        {result.messageBeforeOffer
+          ? 'Invia prima questo messaggio in chat; l\'offerta dal pulsante di Vinted parte solo dopo la risposta.'
+          : 'L\'offerta si invia dal pulsante di Vinted; il messaggio la accompagna in chat.'}
+      </p>
 
       <Button variant="secondary" icon={copied ? Check : Copy} onClick={handleCopy} className="mt-3 w-full sm:w-auto" aria-live="polite">
         {copied ? 'Copiato!' : 'Copia il messaggio'}
@@ -1986,7 +2111,7 @@ function VintedOfferAnalyzer({ clock } = {}) {
             <section className="rounded-2xl bg-rose-50 p-4 text-sm text-rose-950 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900 sm:p-5">
               <p className="flex items-start gap-2 font-semibold">
                 <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                Sconto del {Math.round(result.requestedInput.discountPct)}%: oltre il limite di Vinted
+                Sconto {articleFor(result.requestedInput.discountPct)}{Math.round(result.requestedInput.discountPct)}%: oltre il limite di Vinted
               </p>
               <p className="mt-1">{result.message}</p>
               <ul className="mt-2 flex flex-col gap-1">

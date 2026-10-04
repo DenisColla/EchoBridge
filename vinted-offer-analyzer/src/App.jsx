@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Clock, Tag, TriangleAlert } from 'lucide-react'
 import { useOfferAnalysis } from './hooks/useOfferAnalysis.js'
-import { formatLongDate, formatTime } from './core/index.js'
+import { articleFor, formatLongDate, formatTime } from './core/index.js'
 import { SURFACE, cx } from './theme.js'
 import { EmptyState } from './components/EmptyState.jsx'
 import { MessageCard } from './components/MessageCard.jsx'
@@ -69,7 +69,7 @@ export default function VintedOfferAnalyzer({ clock } = {}) {
             <section className="rounded-2xl bg-rose-50 p-4 text-sm text-rose-950 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900 sm:p-5">
               <p className="flex items-start gap-2 font-semibold">
                 <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                Sconto del {Math.round(result.requestedInput.discountPct)}%: oltre il limite di Vinted
+                Sconto {articleFor(result.requestedInput.discountPct)}{Math.round(result.requestedInput.discountPct)}%: oltre il limite di Vinted
               </p>
               <p className="mt-1">{result.message}</p>
               <ul className="mt-2 flex flex-col gap-1">

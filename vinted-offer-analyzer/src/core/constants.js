@@ -106,8 +106,12 @@ export const TIME_WINDOWS = [
   { id: 'pre_lunch', days: WEEKDAYS, from: h(12), to: h(12, 30), weight: -0.25, tier: 'D', label: 'Tarda mattinata', range: '12:00–12:30', why: 'Prima di pranzo la fame e la fretta rendono il venditore poco paziente.' },
   { id: 'lunch', days: WEEKDAYS, from: h(12, 30), to: h(14), weight: -0.35, tier: 'D', label: 'Pausa pranzo infrasettimanale', range: '12:30–14:00', why: 'La pausa pranzo è fretta e stress: il rischio di una reazione irritata è il più alto della giornata.' },
   { id: 'work_afternoon', days: WEEKDAYS, from: h(14), to: h(18), weight: -0.1, tier: 'C', label: 'Pomeriggio lavorativo', range: '14:00–18:00', why: 'Nel pomeriggio lavorativo l\'attenzione è frammentata.' },
-  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.05, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'A cena il telefono c\'è ma l\'attenzione è a tavola.' },
+  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.05, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'Dopo cena il telefono torna in mano, anche se l\'attenzione è ancora dispersa.' },
 ]
+
+/** Italian public holidays are scored as Sundays; these labels replace the Sunday-specific prose on a weekday holiday. */
+export const HOLIDAY_WINDOW_LABELS = { sunday_night: 'Sera di festa', sunday_afternoon: 'Pomeriggio di festa', sunday_morning: 'Mattina di festa' }
+export const HOLIDAY_WINDOW_WHY = 'È un giorno festivo: il venditore è a casa, rilassato e con tempo per valutare l\'offerta con calma, come di domenica.'
 
 export const NEUTRAL_WINDOW = { id: 'neutral', days: ALL_DAYS, from: 0, to: h(24), weight: 0, tier: 'C', label: 'Fascia neutra', range: '', why: 'In questa fascia non c\'è nessun effetto psicologico marcato.' }
 

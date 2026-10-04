@@ -55,3 +55,6 @@ export const toPercent = (p) => Math.round(p * 100)
 
 /** "+5", "−5" (typographic minus) or "±0". */
 export const formatSignedPoints = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : '±0')
+
+/** "+5 punti", "−1 punto", "±0 punti". */
+export const formatPoints = (n) => `${formatSignedPoints(n)} ${Math.abs(n) === 1 ? 'punto' : 'punti'}`

@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   analyzeOffer, articleFor, buildCandidateSlots, buildMessages, computeDiscountPct, easterSunday, formatDayList,
-  formatEuro, formatLongDate, formatRelativeDay, formatTime, isItalianHoliday, monthWindowAt, normalizeInput,
-  riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
+  formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatTime, isItalianHoliday, monthWindowAt, normalizeInput,
+  parsePrice, riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
 } from '../src/core/index.js'
 
 // Sunday 4 October 2026, 16:00 local time.
@@ -285,4 +285,123 @@ test('messages include the price in Italian format and the item title', () => {
   assert.ok(msgs.every((m) => /^Ciao!/.test(m.text)))
   assert.ok(msgs.find((m) => m.tone === 'impegno').text.includes('. Se accetti'))
   assert.equal(formatEuro(45), '45 €')
+})
+
+test('exact 15% / 30% / 40% offers on decimal prices land in the right band (no float drift)', () => {
+  assert.equal(computeDiscountPct(8, 5.6), 30)
+  assert.equal(riskBandFor(computeDiscountPct(8, 5.6)).id, 'medium')
+  assert.equal(riskBandFor(computeDiscountPct(7, 5.95)).id, 'medium')
+  const r = analyzeOffer({ ...base, listPrice: '55,50', targetPrice: '33,30' }, SUNDAY_AFTERNOON)
+  assert.equal(r.kind, 'analysis')
+})
+
+test('prices typed the Italian way are parsed, garbage is rejected', () => {
+  assert.equal(parsePrice('12,50'), 12.5)
+  assert.equal(parsePrice('1.200'), 1200)
+  assert.equal(parsePrice('1.200,50'), 1200.5)
+  assert.equal(parsePrice('45 €'), 45)
+  assert.equal(parsePrice('1.5'), 1.5)
+  assert.ok(Number.isNaN(parsePrice('0x50')))
+  assert.ok(Number.isNaN(parsePrice('abc')))
+  assert.ok(Number.isNaN(parsePrice('')))
+})
+
+test('"Adesso?" is never a yes inside an unfavourable window', () => {
+  const inputs = [
+    { ...base, targetPrice: '85', sellerProfile: 'inactive' },
+    { ...base, category: 'kids', listPrice: '10', targetPrice: '9.5' },
+    { ...base, category: 'collectible', targetPrice: '80', listingAge: 'over_month', sellerProfile: 'inactive', listingSignal: 'fixed_price' },
+    { ...base, targetPrice: '97', listingAge: 'over_month' },
+  ]
+  for (const now of [WEDNESDAY_LUNCH, new Date(2026, 9, 5, 2, 0), new Date(2026, 9, 7, 15, 0), new Date(2026, 9, 26, 13, 0)]) {
+    for (const raw of inputs) {
+      const r = analyzeOffer(raw, now)
+      assert.equal(r.nowInAvoid, true)
+      assert.equal(r.sendNow.ok, false, `${JSON.stringify(raw)} @ ${now}`)
+      assert.equal(r.sendNow.reason, 'avoid_window')
+      assert.ok(r.sendNow.windowEndsAt.getTime() > now.getTime())
+    }
+  }
+})
+
+test('"now" is not recommended in the last minutes of a negative window', () => {
+  const r = analyzeOffer({ ...base, targetPrice: '97' }, new Date(2026, 9, 24, 6, 55)) // Saturday, night window until 07:00
+  assert.notEqual(r.optimal.kind, 'now')
+})
+
+test('quick alternative is never the "now" slot nor on the recommended day; alternatives never repeat shown slots', () => {
+  const cases = [
+    [{ ...base, category: 'collectible', targetPrice: '85', listingAge: 'today', listingSignal: 'fixed_price' }, new Date(2026, 9, 1, 21, 40)],
+    [{ ...base, category: 'collectible', targetPrice: '85', listingAge: 'today', listingSignal: 'fixed_price' }, new Date(2026, 9, 24, 0, 30)],
+    [{ ...base, category: 'fast_fashion', listPrice: '40', targetPrice: '26', listingAge: 'today' }, SUNDAY_AFTERNOON],
+    [{ ...base, category: 'luxury', targetPrice: '92', listingAge: 'today', listingSignal: 'fixed_price' }, new Date(2026, 9, 1, 0, 30)],
+  ]
+  for (const [raw, now] of cases) {
+    const r = analyzeOffer(raw, now)
+    if (r.quick) {
+      assert.notEqual(r.quick.kind, 'now')
+      assert.ok(r.quick.daysWaited < r.optimal.daysWaited)
+    }
+    const shown = [r.optimal, r.alsoGood, r.quick].filter(Boolean).map((s) => s.date.toDateString())
+    for (const a of r.alternatives) assert.ok(!shown.includes(a.date.toDateString()), 'alternative repeats a shown day')
+    for (let i = 1; i < r.alternatives.length; i++) assert.ok(r.alternatives[i].date > r.alternatives[i - 1].date, 'alternatives are chronological')
+  }
+})
+
+test('weekday "fasce da evitare" lead with the lunch break', () => {
+  const r = analyzeOffer({ ...base, targetPrice: '92' }, WEDNESDAY_LUNCH)
+  const weekday = r.avoidToday.length === 6 ? r.avoidToday : analyzeOffer({ ...base, targetPrice: '92' }, new Date(2026, 9, 6, 9, 0)).avoidToday
+  assert.equal(weekday[0].id, 'lunch')
+})
+
+test('inactive sellers get a suggested price scaled on the read probability, quickly', () => {
+  const started = Date.now()
+  const r = analyzeOffer({ ...base, category: 'luxury', listPrice: '500', targetPrice: '300', sellerProfile: 'inactive' }, SUNDAY_AFTERNOON)
+  assert.ok(Date.now() - started < 400)
+  assert.ok(r.suggestedPrice, 'expected a suggested price for an inactive seller')
+  assert.ok(r.suggestedPrice.probability >= 0.55 * 0.5)
+  assert.ok(r.messageBeforeOffer)
+  assert.ok(r.messages.every((m) => !m.text.includes('ho inviato') && !m.text.includes('ho appena inviato')))
+})
+
+test('the "importo preciso" tip never proposes a price below the Vinted cap', () => {
+  for (const raw of [
+    { ...base, listPrice: '50', targetPrice: '30' },
+    { ...base, category: 'electronics', listPrice: '200', targetPrice: '110' },
+    { ...base, listPrice: '100', targetPrice: '60' },
+  ]) {
+    const r = analyzeOffer(raw, SUNDAY_AFTERNOON)
+    const tip = r.tips.find((t) => t.startsWith('Un importo preciso'))
+    if (tip) {
+      const proposed = Number(tip.match(/esempio (\d+) €/)[1])
+      assert.ok(computeDiscountPct(r.input.listPrice, proposed) <= 40, tip)
+    }
+  }
+})
+
+test('over-cap prices are formatted in Italian and tiny prices fall back to "buy it"', () => {
+  const r = analyzeOffer({ ...base, category: 'other', listPrice: '37', targetPrice: '20' }, SUNDAY_AFTERNOON)
+  assert.equal(r.kind, 'over_cap')
+  assert.equal(r.cappedPrice, 22.2)
+  assert.ok(r.message.includes('22,20 €'))
+  assert.ok(r.capAdvice.some((a) => a.includes('22,20 €')))
+  const tiny = analyzeOffer({ ...base, listPrice: '1', targetPrice: '0.5' }, SUNDAY_AFTERNOON)
+  assert.equal(tiny.kind, 'no_offer_needed') // 60% of 1 € leaves a gap under 0,50 €: nothing worth offering
+  const symbolic = analyzeOffer({ ...base, listPrice: '250', targetPrice: '249.9' }, SUNDAY_AFTERNOON)
+  assert.equal(symbolic.kind, 'no_offer_needed')
+})
+
+test('holiday verdicts do not talk about Sunday', () => {
+  const r = analyzeOffer({ ...base, category: 'electronics', listPrice: '300', targetPrice: '200', listingAge: 'weeks_1_2', sellerProfile: 'expert' }, new Date(2026, 11, 24, 21, 10))
+  if (r.verdict.isHoliday && r.optimal.date.getDay() !== 0) {
+    assert.ok(!r.optimal.score.timeWindow.label.toLowerCase().includes('domenica'))
+    assert.ok(!r.reasons.some((s) => s.includes('prima del lunedì')))
+  }
+})
+
+test('plural helpers and articles', () => {
+  assert.equal(formatPoints(1), '+1 punto')
+  assert.equal(formatPoints(-1), '−1 punto')
+  assert.equal(formatPoints(-5), '−5 punti')
+  assert.equal(articleFor(0), 'dello ')
 })

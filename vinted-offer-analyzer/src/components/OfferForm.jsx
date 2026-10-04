@@ -1,5 +1,5 @@
 import { Calculator, RotateCcw } from 'lucide-react'
-import { CATEGORIES, LISTING_AGES, LISTING_SIGNALS, SELLER_PROFILES, VINTED } from '../core/index.js'
+import { CATEGORIES, LISTING_AGES, LISTING_SIGNALS, SELLER_PROFILES, VINTED, parsePrice } from '../core/index.js'
 import { SURFACE, TONE, cx } from '../theme.js'
 import { Button } from './ui/Button.jsx'
 import { Card } from './ui/Card.jsx'
@@ -15,7 +15,7 @@ export function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount
     event.preventDefault()
     onSubmit()
   }
-  const hasList = Number(String(form.listPrice).replace(',', '.')) > 0
+  const hasList = parsePrice(form.listPrice) > 0
 
   return (
     <Card eyebrow="Dati dell'offerta" title="Che cosa vuoi comprare?">

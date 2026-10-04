@@ -1,5 +1,5 @@
 import { Ban, CalendarClock, Check, Hourglass, Scale, X, Zap } from 'lucide-react'
-import { capitalize, formatLongDate, formatRelativeDay, formatSignedPoints, formatTime, toPercent } from '../core/index.js'
+import { capitalize, formatLongDate, formatPoints, formatRelativeDay, formatTime, isSameDay, toPercent } from '../core/index.js'
 import { SURFACE, cx } from '../theme.js'
 import { Badge } from './ui/Badge.jsx'
 import { Card } from './ui/Card.jsx'
@@ -19,24 +19,32 @@ function SlotRow({ slot, now }) {
   )
 }
 
+function SendNowLine({ sendNow, nowInAvoid, blockRiskNow }) {
+  const windowName = sendNow.window.label.toLowerCase()
+  let text
+  if (sendNow.ok) {
+    text = `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : formatPoints(sendNow.deltaPoints)}): ${windowName}.`
+  } else if (nowInAvoid || sendNow.reason === 'avoid_window') {
+    text = `No: sei in una fascia sfavorevole (${windowName}, ${formatPoints(sendNow.deltaPoints)}${blockRiskNow.level !== 'low' ? ', rischio di rifiuto secco più alto' : ''}). Aspetta.`
+  } else {
+    text = `No: ${windowName} (${formatPoints(sendNow.deltaPoints)} rispetto al momento consigliato). Aspetta.`
+  }
+  return (
+    <div className={cx('mb-3 flex items-start gap-2.5 rounded-xl p-3 text-sm', sendNow.ok ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-100 dark:ring-emerald-900' : 'bg-rose-50 text-rose-900 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900')}>
+      {sendNow.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <X className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
+      <p><strong>Adesso?</strong> {text}</p>
+    </div>
+  )
+}
+
 export function VerdictCard({ result }) {
-  const { verdict, opening, reasons, optimal, alsoGood, quick, alternatives, now, avoidToday, sendNow, timingMatters, spread } = result
+  const { verdict, opening, reasons, optimal, alsoGood, quick, alternatives, now, avoidToday, sendNow, timingNote, nowInAvoid, blockRiskNow } = result
   const WindowIcon = windowIcon(optimal.score.timeWindow.id)
-  const showSendNow = optimal.kind !== 'now'
+  const alsoGoodSameDay = alsoGood && isSameDay(alsoGood.date, optimal.date)
 
   return (
     <Card eyebrow="Verdetto temporale" title="Quando inviare l'offerta" icon={CalendarClock}>
-      {showSendNow && (
-        <div className={cx('mb-3 flex items-start gap-2.5 rounded-xl p-3 text-sm', sendNow.ok ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-100 dark:ring-emerald-900' : 'bg-rose-50 text-rose-900 ring-1 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-100 dark:ring-rose-900')}>
-          {sendNow.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <X className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
-          <p>
-            <strong>Adesso?</strong>{' '}
-            {sendNow.ok
-              ? `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : `${formatSignedPoints(sendNow.deltaPoints)} punti`}): ${sendNow.window.label.toLowerCase()}.`
-              : `No: ${sendNow.window.label.toLowerCase()} (${formatSignedPoints(sendNow.deltaPoints)} punti rispetto al momento consigliato). Aspetta.`}
-          </p>
-        </div>
-      )}
+      {optimal.kind !== 'now' && <SendNowLine sendNow={sendNow} nowInAvoid={nowInAvoid} blockRiskNow={blockRiskNow} />}
 
       <div className="rounded-2xl bg-teal-700 p-4 text-white shadow-sm dark:bg-teal-600 sm:p-5">
         <p className="text-xs font-semibold uppercase tracking-wider text-teal-100">{verdict.sublabel}</p>
@@ -71,10 +79,10 @@ export function VerdictCard({ result }) {
         </ul>
       </div>
 
-      {!timingMatters && (
+      {timingNote && (
         <p className={cx('mt-3 flex items-start gap-2 text-sm', SURFACE.muted)}>
           <Scale className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          Qui il tempismo pesa poco (circa {Math.max(1, Math.round(spread * 100))} punti tra le finestre migliori): la prima buona fascia serale va bene.
+          {timingNote}
         </p>
       )}
 
@@ -82,7 +90,9 @@ export function VerdictCard({ result }) {
         <div className={cx('mt-4 flex items-start gap-3 rounded-xl p-3 text-sm', SURFACE.cardMuted)}>
           <Scale className="mt-0.5 h-4 w-4 shrink-0 text-teal-600 dark:text-teal-400" aria-hidden="true" />
           <p>
-            <span className="font-semibold">Pari merito:</span> {formatLongDate(alsoGood.date, now)} alle {formatTime(alsoGood.date)} ({formatRelativeDay(alsoGood.date, now)}) vale {toPercent(alsoGood.pOverall)}%. Scegli il giorno più comodo.
+            <span className="font-semibold">{alsoGoodSameDay ? 'Ancora meglio:' : 'Pari merito:'}</span>{' '}
+            {alsoGoodSameDay ? `alle ${formatTime(alsoGood.date)}` : `${formatLongDate(alsoGood.date, now)} alle ${formatTime(alsoGood.date)} (${formatRelativeDay(alsoGood.date, now)})`}
+            {' '}vale {toPercent(alsoGood.pOverall)}%{alsoGoodSameDay ? ', se puoi aspettare.' : '. Scegli il giorno più comodo.'}
           </p>
         </div>
       )}
@@ -95,7 +105,10 @@ export function VerdictCard({ result }) {
             <p>
               {capitalize(formatLongDate(quick.date, now))} alle {formatTime(quick.date)} ({formatRelativeDay(quick.date, now)}):{' '}
               <strong>{toPercent(quick.pOverall)}%</strong>
-              <span className={SURFACE.muted}> ({formatSignedPoints(toPercent(quick.pOverall) - toPercent(optimal.pOverall))} punti rispetto al momento consigliato, ma nessun rischio che venga venduto prima)</span>
+              <span className={SURFACE.muted}>
+                {' '}({toPercent(quick.pOverall) - toPercent(optimal.pOverall) === 0 ? 'stesse probabilità' : formatPoints(toPercent(quick.pOverall) - toPercent(optimal.pOverall))} rispetto al momento consigliato,
+                {' '}{quick.daysWaited === 0 ? 'con nessun rischio' : 'con meno rischio'} che venga venduto prima)
+              </span>
             </p>
           </div>
         </div>
@@ -115,10 +128,10 @@ export function VerdictCard({ result }) {
       {avoidToday.length > 0 && (
         <div className="mt-5">
           <h3 className={cx('flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider', SURFACE.muted)}>
-            <Ban className="h-3.5 w-3.5" aria-hidden="true" /> Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : `${formatLongDate(optimal.date, now).split(' ')[0]}`}
+            <Ban className="h-3.5 w-3.5" aria-hidden="true" /> Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : formatLongDate(optimal.date, now).split(' ')[0]}
           </h3>
           <ul className="mt-2 flex flex-wrap gap-2">
-            {avoidToday.slice(0, 4).map((w) => {
+            {avoidToday.map((w) => {
               const Icon = windowIcon(w.id)
               return (
                 <li key={w.id}>

@@ -6,12 +6,14 @@ import { Card } from './ui/Card.jsx'
 import { Meter } from './ui/Meter.jsx'
 
 export function ScoreCard({ result }) {
-  const { probability, probabilityRange, uncertainty, components, riskBand, blockRisk, factors, ambition, input } = result
+  const { probability, probabilityRange, uncertainty, components, riskBand, blockRisk, factors, ambition, input, suggestedPrice } = result
   const tone = toneForProbability(probability)
-  const parts = []
-  if (components.pAvailable < 0.995) parts.push(`ancora in vendita ${toPercent(components.pAvailable)}%`)
-  if (components.pRead < 0.995) parts.push(`il venditore la legge ${toPercent(components.pRead)}%`)
   const rows = factors.rows.filter((r) => r.deltaPoints !== 0)
+  const showEquation = components.pAvailable < 0.995 || components.pRead < 0.995 || toPercent(probability) !== factors.totalPct
+  const missing = [
+    input.listingAge.id === 'unknown' && "l'anzianità dell'annuncio",
+    (!input.sellerProfile || input.sellerProfile === 'unknown') && 'il tipo di venditore',
+  ].filter(Boolean).join(' e ')
 
   return (
     <Card eyebrow="Score di fattibilità" title="Quante possibilità hai?" icon={Gauge}>
@@ -24,7 +26,7 @@ export function ScoreCard({ result }) {
           <p className={cx('mt-2 text-sm', SURFACE.muted)}>
             probabilità complessiva nel momento consigliato
             {uncertainty > 0 && (
-              <span className="block">stima tra {toPercent(probabilityRange[0])}% e {toPercent(probabilityRange[1])}%: indica anzianità e venditore per restringerla</span>
+              <span className="block">stima tra {toPercent(probabilityRange[0])}% e {toPercent(probabilityRange[1])}%: indica {missing} per restringerla</span>
             )}
           </p>
         </div>
@@ -36,9 +38,12 @@ export function ScoreCard({ result }) {
 
       <Meter value={probability} tone={tone} label="Probabilità complessiva" className="mt-5" />
 
-      {parts.length > 0 && (
-        <p className={cx('mt-3 text-sm', SURFACE.muted)}>
-          Accettazione {toPercent(components.pAccept)}% · {parts.join(' · ')}.
+      {showEquation && (
+        <p className={cx('mt-3 text-sm tabular-nums', SURFACE.muted)}>
+          Accettazione {toPercent(components.pAccept)}%
+          {components.pAvailable < 0.995 && <> × ancora in vendita {toPercent(components.pAvailable)}%</>}
+          {components.pRead < 0.995 && <> × il venditore la legge {toPercent(components.pRead)}%</>}
+          {' '}= {toPercent(probability)}% complessivo
         </p>
       )}
 
@@ -47,8 +52,9 @@ export function ScoreCard({ result }) {
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
           <p>
             {ambition === 'unrealistic'
-              ? 'Così non passa: anche nel momento perfetto il rifiuto è quasi certo. Usa il prezzo consigliato nella strategia.'
-              : 'Obiettivo molto ambizioso: anche nel momento migliore le probabilità restano basse. Valuta il prezzo consigliato.'}
+              ? 'Così non passa: anche nel momento perfetto il rifiuto è quasi certo.'
+              : 'Obiettivo molto ambizioso: anche nel momento migliore le probabilità restano basse.'}
+            {' '}{suggestedPrice ? 'Usa il prezzo consigliato nella strategia.' : 'Alza il prezzo o scrivi prima al venditore.'}
           </p>
         </div>
       )}

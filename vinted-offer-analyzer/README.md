@@ -45,7 +45,7 @@ Il modello è additivo in spazio logit: `P(accettazione) = squash(base(sconto) +
 
 | Fattore | Effetto (unità logit; 0,4 ≈ 10 punti percentuali a metà scala) |
 | --- | --- |
-| Sconto richiesto | curva base interpolata in logit: 10% → 84%, 25% → 54%, 30% → 43%, 40% → 21% |
+| Sconto richiesto | curva base interpolata in logit e schiacciata in [3%, 97%]: 10% → 82%, 25% → 54%, 30% → 43%, 40% → 23% |
 | Rischio | < 15% basso · 15–30% medio · > 30% alto (serve tempismo perfetto) · > 40% non inviabile (limite Vinted) |
 | Domenica sera 21–23 | **+0,45** (reset settimanale, relax, gratificazione) |
 | Sera lun–gio 21–21:30 / 21:30–22:30 / 22:30–23 | **+0,25 / +0,35 / +0,15** (picco di traffico, difese negoziali al minimo) |
@@ -56,7 +56,7 @@ Il modello è additivo in spazio logit: `P(accettazione) = squash(base(sconto) +
 | Categoria | fast fashion +0,35, bambini +0,40, elettronica −0,20, collezionismo −0,50, lusso −0,60; rampa extra oltre il 25% (lusso/collezionismo −0,40, fast fashion/bambini +0,15) |
 | Differenza in euro | ≤ 3 € +0,20 … ≥ 250 € −0,45 (il venditore ragiona anche in valore assoluto) |
 | Testo dell'annuncio | "prezzo non trattabile" −0,70 · "accetto offerte" +0,30 · "svuoto l'armadio" +0,45 |
-| Anzianità annuncio | caricato oggi −0,40 → oltre un mese +0,45, moltiplicata per la pazienza della categoria; l'attesa viene mostrata come riga separata |
+| Anzianità annuncio | caricato oggi −0,40 → oltre un mese (35 gg) ≈ +0,48, moltiplicata per la pazienza della categoria; l'attesa viene mostrata come riga separata |
 | Venditore | nuovo +0,20 · esperto da +0,15 (sconti piccoli) a −0,35 (sconti alti) con rampe · inattivo: probabilità di lettura 50%, orario quasi irrilevante |
 
 I modificatori positivi sono limitati a +1,2 e quelli negativi a −1,6, così le combinazioni estreme restano plausibili.
@@ -65,9 +65,11 @@ La scomposizione mostrata nella card del punteggio è sequenziale: le righe somm
 Lo scheduler valuta "adesso" più le fasce canoniche dei prossimi 7–21 giorni (orizzonte dipendente dal rischio di
 vendita a terzi, 10 giorni per annunci datati) e massimizza `P(complessiva) × 0,99^giorni di attesa`; tra i momenti quasi
 equivalenti (entro 1,5 punti o il 3%) vince il più vicino, così il verdetto non salta di settimane per rumore. Il risultato
-include: risposta esplicita "posso inviare adesso?", alternativa entro 48 ore quando il momento consigliato è lontano,
-altre finestre valide, fasce da evitare nel giorno scelto, scadenza dell'offerta, prezzo consigliato per superare il 55%
-(60% se il rischio blocco è alto), strategia a due step e quattro template di messaggio nel tono adatto.
+include: risposta esplicita "posso inviare adesso?" (mai "sì" in una fascia sfavorevole), alternativa entro 48 ore quando
+il momento consigliato è lontano, altre finestre valide, fasce da evitare nel giorno scelto, scadenza dell'offerta, prezzo
+consigliato per superare il 55% (60% se il rischio blocco è alto; per venditori inattivi la soglia è scalata sulla
+probabilità di lettura), strategia a due step e quattro template di messaggio nel tono adatto, formulati "prima
+dell'offerta" quando conviene scrivere e aspettare la risposta.
 
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
 offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
@@ -77,8 +79,8 @@ offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
 1. `npx create-expo-app` e copia `src/core`, `src/hooks` e `src/theme.js` così come sono (JavaScript puro).
 2. Installa `nativewind` per usare le stesse classi Tailwind di `theme.js` e `lucide-react-native` per le icone
    (`src/components/icons.js` mappa i nomi già usati in `core/constants.js`).
-3. Riscrivi i componenti in `src/components` con `View`/`Text`/`Pressable`; l'adapter `platform/clipboard.js`
-   diventa `expo-clipboard`.
+3. Riscrivi `src/App.jsx` (lo scroll automatico ai risultati usa il DOM) e i componenti in `src/components` con
+   `View`/`Text`/`Pressable`; l'adapter `platform/clipboard.js` diventa `expo-clipboard`.
 4. `eas build -p android` produce l'APK.
 
 ## Claude Artifacts

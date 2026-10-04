@@ -88,30 +88,35 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
 export function pickMoments(input, now) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
-  // "Now" competes only when the current window is not unfavourable: we never recommend sending at 2 AM.
-  const eligible = evaluated.filter((s) => s.kind !== 'now' || s.score.timeWindow.weight >= 0)
+  // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
+  const nowIsFavourable = timeWindowAt(now).weight >= 0
+  const eligible = evaluated.filter((s) => s.kind !== 'now' || (nowIsFavourable && s.score.timeWindow.weight >= 0))
   const ranking = [...eligible].sort(byUtilityThenDate)
   const best = ranking[0]
   const threshold = best.utility - Math.max(NEAR_TIE_ABS, NEAR_TIE_REL * best.utility)
   const chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
-  const alsoGood = !isSameDay(best.date, chosen.date) && best.utility > chosen.utility ? best : null
+  // A strictly better slot (any day, even later the same evening) is reported alongside the recommendation.
+  const alsoGood = best !== chosen && best.utility > chosen.utility ? best : null
 
   const nowSlot = evaluated.find((s) => s.kind === 'now')
+  const nowEligible = eligible.includes(nowSlot)
+  const closeEnough = nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE
   const sendNow = {
     slot: nowSlot,
-    ok: chosen.kind === 'now' || nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE,
+    ok: chosen.kind === 'now' || (nowEligible && closeEnough),
+    reason: chosen.kind === 'now' ? 'chosen' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
     deltaPoints: Math.round((nowSlot.pOverall - chosen.pOverall) * 100),
     window: nowSlot.score.timeWindow,
-    windowEndsAt: atTime(nowSlot.date, Math.floor(nowSlot.score.timeWindow.to / 60) % 24, nowSlot.score.timeWindow.to % 60),
+    windowEndsAt: addMinutes(startOfDay(nowSlot.date), nowSlot.score.timeWindow.to),
   }
 
   const hoursToChosen = (chosen.date.getTime() - now.getTime()) / 3_600_000
   const quick = hoursToChosen > QUICK_ALTERNATIVE_MIN_HOURS
-    ? [...eligible.filter((s) => s.date.getTime() < chosen.date.getTime() && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
+    ? [...eligible.filter((s) => s.kind !== 'now' && s.daysWaited < chosen.daysWaited && s.date.getTime() - now.getTime() <= 48 * 3_600_000)].sort(byUtilityThenDate)[0] || null
     : null
 
-  // Best slot per distinct day, excluding the chosen day (and "now").
-  const seenDays = new Set([startOfDay(chosen.date).getTime()])
+  // Best slot per distinct day, excluding "now" and the days already shown (chosen, alsoGood, quick); listed chronologically.
+  const seenDays = new Set([chosen, alsoGood, quick].filter(Boolean).map((s) => startOfDay(s.date).getTime()))
   const alternatives = []
   for (const s of ranking) {
     const key = startOfDay(s.date).getTime()
@@ -120,8 +125,9 @@ export function pickMoments(input, now) {
     alternatives.push(s)
     if (alternatives.length >= 3) break
   }
+  alternatives.sort((a, b) => a.date - b.date)
 
-  const topDays = [chosen, ...alternatives].slice(0, 5).map((s) => s.pOverall)
+  const topDays = [chosen, ...(alsoGood ? [alsoGood] : []), ...alternatives].slice(0, 5).map((s) => s.pOverall)
   const spread = Math.max(...topDays) - Math.min(...topDays)
   const maxAccept = Math.max(...evaluated.map((s) => s.score.pAccept))
 
@@ -142,8 +148,8 @@ const describeWindow = (w) => ({
 /** All negative windows, worst first. */
 export const avoidWindows = () => TIME_WINDOWS.filter((w) => w.weight < 0).sort((a, b) => a.weight - b.weight).map(describeWindow)
 
-/** Negative windows that apply on the given day. */
+/** Negative windows that apply on the given day, worst first. */
 export const avoidWindowsOn = (date) => {
   const day = effectiveWeekday(date)
-  return TIME_WINDOWS.filter((w) => w.weight < 0 && w.days.includes(day)).sort((a, b) => a.from - b.from).map(describeWindow)
+  return TIME_WINDOWS.filter((w) => w.weight < 0 && w.days.includes(day)).sort((a, b) => a.weight - b.weight || a.from - b.from).map(describeWindow)
 }

@@ -1,11 +1,13 @@
 import { VINTED } from './constants.js'
-import { calendarDaysBetween, capitalize, formatLongDate, formatRelativeDay, formatTime, isItalianHoliday } from './dates.js'
+import { calendarDaysBetween, capitalize, formatLongDate, formatRelativeDay, formatTime, isItalianHoliday, isSameDay } from './dates.js'
+import { computeDiscountPct } from './scoring.js'
 
 const roundPct = (v) => Math.round(v)
 
-/** Italian partitive article before a number: "dell'8%", "dell'11%", "dell'80%", otherwise "del 25%". */
+/** Italian partitive article before a number: "dell'8%", "dell'11%", "dell'80%", "dello 0%", otherwise "del 25%". */
 export const articleFor = (n) => {
   const r = Math.round(n)
+  if (r === 0) return 'dello '
   return r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89) ? "dell'" : 'del '
 }
 
@@ -21,7 +23,7 @@ const dayPart = (date) => {
  * now → "adesso", today → "stasera/oggi alle ore", tomorrow → "domani sera, lunedì 5 ottobre, alle ore",
  * later → "giovedì 29 ottobre alle ore 21:45" + "tra 5 giorni".
  */
-export function buildVerdict(chosen, sendNow, now) {
+export function buildVerdict(chosen, sendNow, now, best = null) {
   const k = calendarDaysBetween(now, chosen.date)
   const time = formatTime(chosen.date)
   const dateLabel = formatLongDate(chosen.date, now)
@@ -33,9 +35,17 @@ export function buildVerdict(chosen, sendNow, now) {
   let sublabel
   if (chosen.kind === 'now') {
     headline = "Invia l'offerta adesso"
-    sublabel = window.weight > 0
-      ? `Sei nella finestra giusta: dura fino alle ${formatTime(sendNow.windowEndsAt)}`
-      : 'Aspettare non migliorerebbe le probabilità'
+    const gain = best && best !== chosen ? Math.round((best.pOverall - chosen.pOverall) * 100) : 0
+    if (window.weight > 0 && ['S', 'A', 'B'].includes(window.tier)) {
+      sublabel = `Sei nella finestra giusta: dura fino alle ${formatTime(sendNow.windowEndsAt)}`
+    } else if (gain >= 1 && best) {
+      const when = isSameDay(best.date, chosen.date) ? `alle ${formatTime(best.date)}` : `${formatLongDate(best.date, now)} alle ${formatTime(best.date)}`
+      sublabel = `Aspettare ${when} varrebbe al massimo ${gain} ${gain === 1 ? 'punto' : 'punti'} in più: non vale il rischio`
+    } else if (window.weight > 0) {
+      sublabel = 'Fascia accettabile: le finestre migliori sono in tarda serata, ma aspettare cambia poco'
+    } else {
+      sublabel = 'Aspettare non migliorerebbe le probabilità'
+    }
   } else if (k === 0) {
     headline = `Invia l'offerta ${chosen.date.getHours() >= 17 ? 'stasera' : 'oggi'} alle ore ${time}`
     sublabel = capitalize(dateLabel)
@@ -50,13 +60,21 @@ export function buildVerdict(chosen, sendNow, now) {
   return { headline, sublabel, when: formatRelativeDay(chosen.date, now), dateLabel, timeLabel: time, windowLabel, expiresLabel, isHoliday: isItalianHoliday(chosen.date) }
 }
 
-/** Opening sentence keyed by risk band. */
-export function openingSentence(input) {
+/** Opening sentence keyed by risk band (and by whether timing actually moves the needle). */
+export function openingSentence(input, timingMatters = true) {
   const d = roundPct(input.discountPct)
   const art = articleFor(d)
   if (input.riskBand.id === 'low') return `Sconto contenuto ${art}${d}%: quasi ogni fascia serale funziona, quindi conta soprattutto la rapidità.`
   if (input.riskBand.id === 'medium') return `Sconto ${art}${d}%, zona negoziabile: serve un momento in cui il venditore è rilassato e poco difensivo.`
+  if (!timingMatters) return `Sconto aggressivo ${art}${d}%: le probabilità restano basse in qualunque fascia, quindi conta più il prezzo del tempismo.`
   return `Sconto aggressivo ${art}${d}%: serve tempismo perfetto, con la minima resistenza possibile da parte del venditore.`
+}
+
+/** One sentence, built once, for the "timing barely matters" case. */
+export function buildTimingNote(moments, chosen) {
+  if (moments.timingMatters) return null
+  const n = Math.max(1, Math.round(moments.spread * 100))
+  return `Qui il tempismo pesa poco (circa ${n} ${n === 1 ? 'punto' : 'punti'} tra le finestre migliori): ${chosen.kind === 'now' ? 'puoi inviare adesso' : 'la prima buona fascia va bene'}.`
 }
 
 /**
@@ -78,11 +96,13 @@ export function buildReasons(input, chosen, attribution) {
         break
       case 'month':
         if (row.weight > 0) text = chosen.score.monthWindow.why
-        else if (row.weight < 0) text = 'Siamo a inizio mese, quando il venditore è meno pressato: per questo non conviene rinviare oltre.'
+        else if (row.weight < 0) text = k <= 1
+          ? 'Siamo a inizio mese, quando il venditore è meno pressato: per questo non conviene rinviare oltre.'
+          : 'Siamo a inizio mese, quando il venditore è meno pressato: aspettare ancora non cambierebbe il quadro.'
         break
       case 'age':
         if (listingAge.id === 'today') text = 'L\'annuncio è appena stato pubblicato: il venditore è ancora ottimista sul prezzo.'
-        else if (positive) text = `L'annuncio è online ${listingAge.label.toLowerCase().replace(' fa', '')}: il venditore vuole liberarsi dell'invenduto e la finestra ottimale si anticipa.`
+        else if (positive) text = `L'annuncio è online da ${listingAge.label.toLowerCase().replace(' fa', '')}: il venditore vuole liberarsi dell'invenduto e la finestra ottimale si anticipa.`
         else if (row.weight < 0) text = 'L\'annuncio è recente: il venditore non ha ancora motivo di cedere sul prezzo.'
         break
       case 'wait':
@@ -90,7 +110,8 @@ export function buildReasons(input, chosen, attribution) {
         break
       case 'category':
         if (!category) break
-        if (category.disposable) text = `${category.label} è una categoria ad alta rotazione: il venditore vuole liberarsi del capo, ma l'articolo può sparire in fretta.`
+        if (category.id === 'kids') text = 'Nei vestiti per bambini il venditore vuole soprattutto fare spazio e accetta più volentieri.'
+        else if (category.disposable) text = 'Nel fast fashion il venditore vuole liberarsi del capo e accetta più volentieri.'
         else if (category.premium) text = `${category.label}: il venditore conosce il valore di ciò che vende e negozia lentamente.`
         else if (category.id === 'electronics') text = 'Elettronica: il venditore confronta con il prezzo del nuovo e cede poco.'
         break
@@ -123,30 +144,28 @@ export function buildReasons(input, chosen, attribution) {
   return sentences.slice(0, 3)
 }
 
-export function buildTips({ input, moments, blockRisk, twoStep, chosen, now }) {
+export function buildTips({ input, blockRisk, twoStep, chosen, now, messageBeforeOffer }) {
   const tips = []
-  const { riskBand, discountPct, sellerProfile, listingAge, targetPrice } = input
+  const { riskBand, discountPct, sellerProfile, listingAge, targetPrice, listPrice } = input
 
   tips.push(`L'offerta resta valida circa ${VINTED.OFFER_VALIDITY_HOURS} ore e Vinted consente al massimo ${VINTED.OFFERS_PER_DAY} offerte al giorno: usa la prima nel momento giusto.`)
-  if (!moments.timingMatters) {
-    tips.push(`Qui il tempismo pesa poco (circa ${Math.max(1, Math.round(moments.spread * 100))} punti tra le finestre migliori): la prima buona fascia serale va bene.`)
-  }
   if (discountPct < 5) {
     tips.push('Sconto quasi simbolico: valuta di comprare a prezzo pieno o di chiedere la spedizione inclusa invece di un\'offerta.')
   }
   if (twoStep) {
     tips.push(`Strategia a due step: apri a ${twoStep.openingPrice} €, lascia che il venditore controproponga e chiudi intorno a ${Math.round(targetPrice)} €.`)
   }
-  if (blockRisk.level === 'high') {
-    tips.push('Rischio di reazione brusca alto: manda prima un messaggio cordiale, poi l\'offerta.')
-  }
-  if (sellerProfile === 'inactive') {
-    tips.push('Prima dell\'offerta scrivi un messaggio breve: i messaggi non scadono e ti dicono se il venditore è ancora attivo.')
-  } else if (listingAge.days >= 7 && chosen.daysWaited >= 1) {
+  if (messageBeforeOffer) {
+    tips.push(blockRisk.level === 'high'
+      ? 'Rischio di reazione brusca alto: manda prima il messaggio e invia l\'offerta solo dopo la risposta.'
+      : 'Prima dell\'offerta scrivi un messaggio breve: i messaggi non scadono e ti dicono se il venditore è ancora attivo.')
+  } else if (listingAge.days >= 7 && chosen.daysWaited >= 1 && sellerProfile !== 'inactive') {
     tips.push('Metti subito il like: molti venditori inviano uno sconto spontaneo ai follower entro 48–72 ore.')
   }
-  if (targetPrice >= 10 && Number.isInteger(targetPrice) && targetPrice % 5 === 0 && riskBand.id !== 'low') {
-    tips.push(`Un importo preciso (ad esempio ${targetPrice - 1} € invece di ${targetPrice} €) sembra più ragionato e viene contro-rilanciato meno.`)
+  const precise = targetPrice - 1
+  if (targetPrice >= 10 && Number.isInteger(targetPrice) && targetPrice % 5 === 0 && riskBand.id !== 'low'
+    && computeDiscountPct(listPrice, precise) <= VINTED.MAX_DISCOUNT_PCT) {
+    tips.push(`Un importo preciso (ad esempio ${precise} € invece di ${targetPrice} €) sembra più ragionato e viene contro-rilanciato meno.`)
   }
   if (now.getMonth() === 7 && now.getDate() <= 25) {
     tips.push('Siamo in piena estate: controlla che il venditore non sia in modalità vacanza prima di inviare.')

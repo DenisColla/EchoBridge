@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { VINTED, analyzeOffer, computeDiscountPct, riskBandFor } from '../core/index.js'
+import { VINTED, analyzeOffer, computeDiscountPct, parsePrice, riskBandFor } from '../core/index.js'
 
 export const EXAMPLE_FORM = {
   itemTitle: 'Nike Air Force 1 bianche, 42',
@@ -36,8 +36,8 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
   }, [])
 
   const livePreview = useMemo(() => {
-    const list = Number(String(form.listPrice).replace(',', '.'))
-    const target = Number(String(form.targetPrice).replace(',', '.'))
+    const list = parsePrice(form.listPrice)
+    const target = parsePrice(form.targetPrice)
     if (!(list > 0) || !(target > 0)) return null
     const discountPct = computeDiscountPct(list, target)
     return { discountPct, riskBand: discountPct > 0 ? riskBandFor(discountPct) : null, overCap: discountPct > VINTED.MAX_DISCOUNT_PCT }
@@ -46,7 +46,7 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
   /** Quick-select: sets the target price from a discount percentage of the list price. */
   const applyDiscount = useCallback((pct) => {
     setForm((prev) => {
-      const list = Number(String(prev.listPrice).replace(',', '.'))
+      const list = parsePrice(prev.listPrice)
       if (!(list > 0)) return prev
       const raw = list * (1 - pct / 100)
       const target = list >= 20 ? Math.round(raw) : Math.round(raw * 2) / 2

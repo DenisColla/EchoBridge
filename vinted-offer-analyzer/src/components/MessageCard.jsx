@@ -52,7 +52,11 @@ export function MessageCard({ result }) {
       <blockquote className={cx('mt-4 select-all rounded-xl p-4 text-sm leading-relaxed', SURFACE.cardMuted)}>
         {current.text}
       </blockquote>
-      <p className={cx('mt-2 text-xs', SURFACE.muted)}>L'offerta si invia dal pulsante di Vinted; il messaggio la accompagna in chat.</p>
+      <p className={cx('mt-2 text-xs', SURFACE.muted)}>
+        {result.messageBeforeOffer
+          ? 'Invia prima questo messaggio in chat; l\'offerta dal pulsante di Vinted parte solo dopo la risposta.'
+          : 'L\'offerta si invia dal pulsante di Vinted; il messaggio la accompagna in chat.'}
+      </p>
 
       <Button variant="secondary" icon={copied ? Check : Copy} onClick={handleCopy} className="mt-3 w-full sm:w-auto" aria-live="polite">
         {copied ? 'Copiato!' : 'Copia il messaggio'}

@@ -38,10 +38,36 @@ const closing = (sendAt) => {
   return s ? `Grazie e ${s}!` : 'Grazie!'
 }
 
-export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt }) {
+/**
+ * `beforeOffer` = true when the strategy is to write first and send the offer only after a reply
+ * (high block risk or inactive seller): the templates then propose the price instead of announcing a sent offer.
+ */
+export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer = false }) {
   const item = itemTitle && itemTitle.trim() ? `"${itemTitle.trim()}"` : "l'articolo"
+  const Item = item === "l'articolo" ? "L'articolo" : item
   const price = formatEuro(targetPrice)
   const isOld = listingAge && (listingAge.id === 'over_month' || listingAge.id === 'weeks_2_4')
+
+  if (beforeOffer) {
+    return [
+      {
+        tone: 'cordiale',
+        text: `Ciao! Mi piace molto ${item}. Ti andrebbe bene ${price}? Se per te può andare ti invio subito l'offerta e completo l'acquisto. ${closing(sendAt)}`,
+      },
+      {
+        tone: 'diretto',
+        text: `Ciao! Ti propongo ${price} per ${item}. Se per te va bene ti invio subito l'offerta. Grazie!`,
+      },
+      {
+        tone: 'impegno',
+        text: `Ciao! ${isOld ? 'Ho visto che ' + item + ' è online da un po\': ' : ''}ti propongo ${price}. Se accetti ti invio l'offerta e completo subito l'acquisto, così puoi spedire appena ti è comodo. ${closing(sendAt)}`,
+      },
+      {
+        tone: 'motivato',
+        text: `Ciao! ${Item} mi interessa davvero: potrei arrivare a ${price}, che è il massimo del mio budget in questo momento. Se per te può andare ti invio subito l'offerta. ${closing(sendAt)}`,
+      },
+    ]
+  }
 
   return [
     {
@@ -58,7 +84,7 @@ export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt }) {
     },
     {
       tone: 'motivato',
-      text: `Ciao! ${item === "l'articolo" ? "L'articolo" : item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
+      text: `Ciao! ${Item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
     },
   ]
 }
