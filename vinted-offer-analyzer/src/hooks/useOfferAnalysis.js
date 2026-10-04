@@ -1,0 +1,78 @@
+import { useCallback, useMemo, useState } from 'react'
+import { VINTED, analyzeOffer, computeDiscountPct, riskBandFor } from '../core/index.js'
+
+export const EXAMPLE_FORM = {
+  itemTitle: 'Nike Air Force 1 bianche, 42',
+  category: 'sneakers',
+  listPrice: '60',
+  targetPrice: '45',
+  listingAge: 'weeks_1_2',
+  sellerProfile: 'unknown',
+  listingSignal: 'none',
+}
+
+export const EMPTY_FORM = {
+  itemTitle: '',
+  category: '',
+  listPrice: '',
+  targetPrice: '',
+  listingAge: 'unknown',
+  sellerProfile: 'unknown',
+  listingSignal: 'none',
+}
+
+/**
+ * Holds the form state and the last analysis. Pure React (no DOM): reusable in React Native.
+ * `clock` is injectable so tests and the artifact preview can freeze "now".
+ */
+export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date() } = {}) {
+  const [form, setForm] = useState(initialForm)
+  const [result, setResult] = useState(null)
+  const [errors, setErrors] = useState({})
+  const [touched, setTouched] = useState(false)
+
+  const setField = useCallback((name, value) => {
+    setForm((prev) => ({ ...prev, [name]: value }))
+  }, [])
+
+  const livePreview = useMemo(() => {
+    const list = Number(String(form.listPrice).replace(',', '.'))
+    const target = Number(String(form.targetPrice).replace(',', '.'))
+    if (!(list > 0) || !(target > 0)) return null
+    const discountPct = computeDiscountPct(list, target)
+    return { discountPct, riskBand: discountPct > 0 ? riskBandFor(discountPct) : null, overCap: discountPct > VINTED.MAX_DISCOUNT_PCT }
+  }, [form.listPrice, form.targetPrice])
+
+  /** Quick-select: sets the target price from a discount percentage of the list price. */
+  const applyDiscount = useCallback((pct) => {
+    setForm((prev) => {
+      const list = Number(String(prev.listPrice).replace(',', '.'))
+      if (!(list > 0)) return prev
+      const raw = list * (1 - pct / 100)
+      const target = list >= 20 ? Math.round(raw) : Math.round(raw * 2) / 2
+      return { ...prev, targetPrice: String(target).replace('.', ',') }
+    })
+  }, [])
+
+  const analyze = useCallback(() => {
+    setTouched(true)
+    const outcome = analyzeOffer(form, clock())
+    if (!outcome.ok) {
+      setErrors(outcome.errors)
+      setResult(null)
+      return null
+    }
+    setErrors({})
+    setResult(outcome)
+    return outcome
+  }, [form, clock])
+
+  const reset = useCallback(() => {
+    setForm(EMPTY_FORM)
+    setResult(null)
+    setErrors({})
+    setTouched(false)
+  }, [])
+
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset }
+}
