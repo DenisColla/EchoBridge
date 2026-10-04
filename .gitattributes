@@ -1,4 +1,3 @@
-* text=auto
 # Windows scripts are stored with CRLF as-is, so both git clone and the GitHub ZIP download keep them intact
 *.bat -text
 *.ps1 -text
