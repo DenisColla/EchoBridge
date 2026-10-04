@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { loadItems, newId, saveItems } from '../services/storage.js'
 import { cancelReminder, ensureNotificationPermission, scheduleOfferReminder } from '../services/notifications.js'
 import { removeFromDeviceCalendar } from '../services/calendar.js'
+
+/** Links typed without a scheme would not open: default to https. */
+const normalizeLink = (link) => {
+  const trimmed = (link || '').trim()
+  if (!trimmed) return ''
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+}
 
 /**
  * The saved offers ("da comprare" list). Persists to AsyncStorage, owns the
@@ -10,15 +17,20 @@ import { removeFromDeviceCalendar } from '../services/calendar.js'
 export function useWatchlist() {
   const [items, setItems] = useState([])
   const [ready, setReady] = useState(false)
+  const itemsRef = useRef([])
 
   useEffect(() => {
     loadItems().then((loaded) => {
+      itemsRef.current = loaded
       setItems(loaded)
       setReady(true)
     })
   }, [])
 
-  const persist = useCallback(async (next) => {
+  /** Applies `updater` to the LATEST list (not the one captured at render time) and saves it. */
+  const persist = useCallback(async (updater) => {
+    const next = typeof updater === 'function' ? updater(itemsRef.current) : updater
+    itemsRef.current = next
     setItems(next)
     await saveItems(next)
   }, [])
@@ -31,7 +43,7 @@ export function useWatchlist() {
       id: newId(),
       createdAt: new Date().toISOString(),
       title: input.itemTitle || '',
-      link: (link || '').trim(),
+      link: normalizeLink(link),
       platform: 'vinted',
       category: input.category.id,
       listPrice: input.listPrice,
@@ -61,32 +73,32 @@ export function useWatchlist() {
     } else {
       reminder = 'denied'
     }
-    await persist([item, ...items])
+    await persist((prev) => [item, ...prev])
     return { item, reminder }
-  }, [items, persist])
+  }, [persist])
 
   const update = useCallback(async (id, patch) => {
-    await persist(items.map((it) => (it.id === id ? { ...it, ...patch } : it)))
-  }, [items, persist])
+    await persist((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)))
+  }, [persist])
 
   const setStatus = useCallback(async (id, status) => {
     const patch = { status, outcomeAt: status === 'planned' ? null : new Date().toISOString() }
-    const target = items.find((it) => it.id === id)
+    const target = itemsRef.current.find((it) => it.id === id)
     if (target && status !== 'planned' && target.notificationId) {
       await cancelReminder(target.notificationId)
       patch.notificationId = null
     }
     await update(id, patch)
-  }, [items, update])
+  }, [update])
 
   const remove = useCallback(async (id) => {
-    const target = items.find((it) => it.id === id)
+    const target = itemsRef.current.find((it) => it.id === id)
     if (target) {
       await cancelReminder(target.notificationId)
       await removeFromDeviceCalendar(target.calendarEventId)
     }
-    await persist(items.filter((it) => it.id !== id))
-  }, [items, persist])
+    await persist((prev) => prev.filter((it) => it.id !== id))
+  }, [persist])
 
   const stats = useMemo(() => {
     const count = (status) => items.filter((it) => it.status === status).length

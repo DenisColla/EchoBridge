@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { analyzeOffer } from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
 import { ResultView } from './src/components/ResultView.js'
@@ -20,7 +21,16 @@ const TABS = [
 const EXAMPLE_FORM = { ...EMPTY_FORM, itemTitle: 'Nike Air Force 1 bianche, 42', category: 'sneakers', listPrice: '60', targetPrice: '45', listingAge: 'weeks_1_2' }
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <Main />
+    </SafeAreaProvider>
+  )
+}
+
+function Main() {
   const t = useTheme()
+  const insets = useSafeAreaInsets()
   const [tab, setTab] = useState('calcola')
   const [form, setForm] = useState(EXAMPLE_FORM)
   const [errors, setErrors] = useState({})
@@ -91,18 +101,23 @@ export default function App() {
   })
 
   const addCalendar = async (source, itemId) => {
-    const outcome = await addToDeviceCalendar(calendarPayload(source))
-    if (outcome.ok) {
-      if (itemId) await watchlist.update(itemId, { calendarEventId: outcome.eventId })
-      showToast(`Evento aggiunto al calendario${outcome.calendarName ? ` "${outcome.calendarName}"` : ''}.`)
-    } else if (outcome.reason === 'permission') {
-      showToast('Permesso calendario negato: usa "Apri Google Calendar".')
-    } else {
+    try {
+      const outcome = await addToDeviceCalendar(calendarPayload(source))
+      if (outcome.ok) {
+        if (itemId) await watchlist.update(itemId, { calendarEventId: outcome.eventId })
+        showToast(`Evento aggiunto al calendario${outcome.calendarName ? ` "${outcome.calendarName}"` : ''}.`)
+      } else if (outcome.reason === 'permission') {
+        showToast('Permesso calendario negato: usa "Apri Google Calendar".')
+      } else {
+        showToast('Non sono riuscito a creare l\'evento: usa "Apri Google Calendar".')
+      }
+    } catch {
       showToast('Non sono riuscito a creare l\'evento: usa "Apri Google Calendar".')
     }
   }
 
-  const topInset = Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44
+  const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
+  const bottomInset = Math.max(insets.bottom, 8)
 
   return (
     <View style={[styles.root, { backgroundColor: t.bg, paddingTop: topInset }]}>
@@ -148,10 +163,10 @@ export default function App() {
       </KeyboardAvoidingView>
 
       {toast && (
-        <View style={[styles.toast, { backgroundColor: t.ink }]}><Text style={{ color: t.bg, fontSize: 14 }}>{toast}</Text></View>
+        <View style={[styles.toast, { backgroundColor: t.ink, bottom: 72 + bottomInset }]}><Text style={{ color: t.bg, fontSize: 14 }}>{toast}</Text></View>
       )}
 
-      <View style={[styles.tabBar, { backgroundColor: t.card, borderTopColor: t.line }]}>
+      <View style={[styles.tabBar, { backgroundColor: t.card, borderTopColor: t.line, paddingBottom: bottomInset }]}>
         {TABS.map((item) => {
           const active = tab === item.id
           const count = item.id === 'lista' ? watchlist.stats.planned : 0
@@ -176,8 +191,8 @@ const styles = StyleSheet.create({
   appName: { fontSize: 17, fontWeight: '700' },
   appTagline: { fontSize: 12 },
   content: { padding: space.lg, paddingBottom: 96, gap: space.lg },
-  toast: { position: 'absolute', left: space.lg, right: space.lg, bottom: 72, borderRadius: 12, padding: space.md },
-  tabBar: { flexDirection: 'row', borderTopWidth: 1, paddingBottom: Platform.OS === 'ios' ? 20 : 8 },
+  toast: { position: 'absolute', left: space.lg, right: space.lg, borderRadius: 12, padding: space.md },
+  tabBar: { flexDirection: 'row', borderTopWidth: 1 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
   tabLabel: { fontSize: 14 },
 })

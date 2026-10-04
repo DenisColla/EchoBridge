@@ -38,6 +38,7 @@ function Winget-Install($id, $label) {
   if (-not (Has-Command 'winget')) { throw "$label non trovato e winget non disponibile. Installa $label a mano e rilancia start.bat." }
   Write-Host "    installo $label con winget (puo' chiedere conferma UAC)..."
   & winget install --id $id --exact --silent --accept-package-agreements --accept-source-agreements | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "winget non e' riuscito a installare $label (codice $LASTEXITCODE). Installalo a mano e rilancia start.bat." }
   Refresh-Path
 }
 
@@ -75,8 +76,10 @@ try {
       }
     }
     foreach ($c in $candidates) {
-      $out = & (Join-Path $c 'bin\java.exe') -version 2>&1 | Out-String
-      if ($out -match '"(17|21)\.') { return $c }
+      # Read the JDK "release" file instead of running java -version (which prints on stderr and would
+      # become a terminating error under $ErrorActionPreference = 'Stop').
+      $rel = Join-Path $c 'release'
+      if ((Test-Path $rel) -and ((Get-Content $rel -Raw) -match 'JAVA_VERSION="(17|21)[."]')) { return $c }
     }
     return $null
   }
@@ -112,6 +115,7 @@ try {
     if (Test-Path $latest) { Remove-Item $latest -Recurse -Force }
     Move-Item (Join-Path $tmpDir 'cmdline-tools') $latest
     Remove-Item $zip -Force
+    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
   }
   $env:ANDROID_HOME = $sdk
   $env:ANDROID_SDK_ROOT = $sdk
@@ -119,7 +123,9 @@ try {
   Write-Host "    accetto le licenze e installo platform-tools, platform 36 e build-tools 36 (solo la prima volta)..."
   $yes = ("y`n" * 40)
   $yes | & $sdkManager --sdk_root="$sdk" --licenses | Out-Null
-  & $sdkManager --sdk_root="$sdk" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "sdkmanager --licenses non riuscito (codice $LASTEXITCODE). Controlla Java e la connessione." }
+  & $sdkManager --sdk_root="$sdk" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "sdkmanager non e' riuscito a installare i componenti Android (codice $LASTEXITCODE)." }
   Write-Ok "ANDROID_HOME = $sdk"
 
   # ---------- 4. Dipendenze ----------
@@ -163,7 +169,7 @@ try {
   Write-Host ""
   Write-Host "Prossimo passo: copia l'APK sul telefono e aprilo (consenti 'app da origini sconosciute'),"
   Write-Host "oppure collega il telefono via USB con Debug USB attivo e lancia install-on-phone.bat."
-  try { Start-Process explorer.exe (Join-Path $ProjectDir 'dist') } catch {}
+  try { Invoke-Item (Join-Path $ProjectDir 'dist') } catch {}
   Stop-Transcript | Out-Null
   exit 0
 } catch {

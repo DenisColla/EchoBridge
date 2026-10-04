@@ -8,7 +8,7 @@ import { Badge, Body, Button, Card, Chip, Note, Row, SectionLabel, Title } from 
 
 const hostOf = (link) => {
   try {
-    return new URL(link).hostname.replace(/^www\./, '')
+    return new URL(link).hostname.replace(/^www\./, '') || link
   } catch {
     return link
   }

@@ -1,4 +1,5 @@
-import * as Calendar from 'expo-calendar'
+// The root export of expo-calendar 57 is the new object API; the function API lives under /legacy.
+import * as Calendar from 'expo-calendar/legacy'
 import { Linking } from 'react-native'
 
 const pad = (n) => String(n).padStart(2, '0')
@@ -23,17 +24,17 @@ export const eventNotesFor = ({ link, targetPrice, probability, message }) => [
 
 /** Adds a 30-minute event with a 10-minute alarm to the device's main writable calendar. */
 export async function addToDeviceCalendar({ title, link, sendAt, notes }) {
-  const { granted } = await Calendar.requestCalendarPermissionsAsync()
-  if (!granted) return { ok: false, reason: 'permission' }
-  const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT)
-  const writable = calendars.filter((c) => c.allowsModifications)
-  const preferred = writable.find((c) => c.isPrimary)
-    || writable.find((c) => c.source && /google/i.test(c.source.type || c.source.name || ''))
-    || writable[0]
-  if (!preferred) return { ok: false, reason: 'no_calendar' }
   const start = new Date(sendAt)
   const end = new Date(start.getTime() + 30 * 60_000)
   try {
+    const { granted } = await Calendar.requestCalendarPermissionsAsync()
+    if (!granted) return { ok: false, reason: 'permission' }
+    const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT)
+    const writable = calendars.filter((c) => c.allowsModifications)
+    const preferred = writable.find((c) => c.isPrimary)
+      || writable.find((c) => c.source && /google/i.test(c.source.type || c.source.name || ''))
+      || writable[0]
+    if (!preferred) return { ok: false, reason: 'no_calendar' }
     const eventId = await Calendar.createEventAsync(preferred.id, {
       title: eventTitleFor(title),
       startDate: start,

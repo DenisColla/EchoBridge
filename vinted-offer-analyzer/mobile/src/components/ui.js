@@ -20,9 +20,9 @@ export function Title({ children, style }) {
   return <Text style={[styles.title, { color: t.ink }, style]}>{children}</Text>
 }
 
-export function Body({ children, muted = false, style, small = false }) {
+export function Body({ children, muted = false, style, small = false, ...rest }) {
   const t = useTheme()
-  return <Text style={[small ? styles.small : styles.body, { color: muted ? t.ink3 : t.ink }, style]}>{children}</Text>
+  return <Text style={[small ? styles.small : styles.body, { color: muted ? t.ink3 : t.ink }, style]} {...rest}>{children}</Text>
 }
 
 export function Badge({ tone = 'neutral', children }) {

@@ -8,6 +8,7 @@ echo.
 where node >nul 2>nul || (echo  Installa prima Node.js LTS da https://nodejs.org & pause & exit /b 1)
 call npm install --no-audit --no-fund || (pause & exit /b 1)
 call node scripts\sync-core.mjs
+set EAS_NO_VCS=1
 call npx eas-cli@latest build --platform android --profile apk
 echo.
 echo  Al termine EAS mostra un link: da li' scarichi l'APK sul telefono.
