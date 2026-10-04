@@ -36,6 +36,8 @@ src/
 test/              test del motore con node:test
 scripts/           bundler per il file singolo da incollare negli Artifacts di Claude
 artifact/          output generato: componente singolo e pagina HTML standalone
+mobile/            app Android (Expo): start.bat crea l'APK con notifiche, calendario e lista da comprare
+docs/              specifica dell'algoritmo (v1 e v2 rivista dai critici)
 ```
 
 ## Come funziona l'algoritmo
@@ -74,14 +76,12 @@ dell'offerta" quando conviene scrivere e aspettare la risposta.
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
 offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
 
-## Portare l'app su Android (React Native / Expo)
+## App Android (APK)
 
-1. `npx create-expo-app` e copia `src/core`, `src/hooks` e `src/theme.js` così come sono (JavaScript puro).
-2. Installa `nativewind` per usare le stesse classi Tailwind di `theme.js` e `lucide-react-native` per le icone
-   (`src/components/icons.js` mappa i nomi già usati in `core/constants.js`).
-3. Riscrivi `src/App.jsx` (lo scroll automatico ai risultati usa il DOM) e i componenti in `src/components` con
-   `View`/`Text`/`Pressable`; l'adapter `platform/clipboard.js` diventa `expo-clipboard`.
-4. `eas build -p android` produce l'APK.
+La cartella `mobile/` contiene l'app Expo / React Native pronta: stesso motore (copiato in `mobile/core` da
+`npm run sync-core`), lista "da comprare" con link, notifiche locali 10 minuti prima della finestra consigliata,
+evento in calendario, registro degli esiti. Su Windows basta `mobile\start.bat`: installa i prerequisiti, compila e
+lascia l'APK in `mobile\dist\OffertaVintedTiming.apk`. Istruzioni complete in `mobile/README.md`.
 
 ## Claude Artifacts
 
