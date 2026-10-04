@@ -9,6 +9,13 @@ App Android (Expo / React Native) dell'analizzatore di offerte Vinted. Usa lo **
 - **Esiti**: segna accettata / controproposta / rifiutata / nessuna risposta; la scheda Info confronta l'accettazione reale con la stima media ed esporta i dati in JSON.
 - Tutto resta sul telefono: nessun server, nessun account.
 
+## Installare subito: APK precompilato
+
+In `dist/OffertaVintedTiming-arm64.apk` c'è un APK già compilato (26 MB, architettura arm64, cioè qualsiasi telefono
+Android degli ultimi anni). Scaricalo sul telefono, aprilo dal gestore file e consenti l'installazione da origini
+sconosciute quando Android lo chiede. Niente da installare sul PC. Per rigenerarlo, o per la versione universale con
+tutte le architetture, usa `start.bat` qui sotto.
+
 ## Creare l'APK su Windows: `start.bat`
 
 1. Scarica il repository (GitHub → Code → Download ZIP) ed estrai la cartella `vinted-offer-analyzer\mobile` in un percorso corto, per esempio `C:\OffertaVinted`.

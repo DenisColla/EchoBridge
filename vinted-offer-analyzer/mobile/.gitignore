@@ -4,5 +4,6 @@ ios/
 .expo/
 .export-check/
 dist/*.apk
+!dist/OffertaVintedTiming-arm64.apk
 *.log
 .DS_Store
