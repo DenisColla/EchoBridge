@@ -1166,7 +1166,7 @@ const cx = (...parts) => parts.filter(Boolean).join(' ')
  * Platform adapter for the clipboard. On React Native replace the body with
  * `expo-clipboard` (Clipboard.setStringAsync). Returns true when the copy worked.
  */
-export async function copyText(text) {
+async function copyText(text) {
   try {
     if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text)

@@ -78,8 +78,11 @@ for (const file of ORDER) {
       continue
     }
     if (/^export \* from/.test(line)) { i++; continue }
-    line = line.replace(/^export default function /, 'function ').replace(/^export (const|function|let|class) /, '$1 ')
-    const decl = line.match(/^(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/)
+    if (/^export\b/.test(line) && !/^export (default function|async function|const|function|let|class) /.test(line)) {
+      throw new Error(`Unsupported export form in ${file}: ${line}`)
+    }
+    line = line.replace(/^export default function /, 'function ').replace(/^export (async function|const|function|let|class) /, '$1 ')
+    const decl = line.match(/^(?:async function|const|let|function|class)\s+([A-Za-z_$][\w$]*)/)
     if (decl) {
       if (declared.has(decl[1])) throw new Error(`Top-level '${decl[1]}' declared in both ${declared.get(decl[1])} and ${file}: rename it, the artifact is a single scope`)
       declared.set(decl[1], file)
