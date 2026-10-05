@@ -7,3 +7,4 @@ dist/*.apk
 !dist/OffertaVintedTiming-arm64.apk
 *.log
 .DS_Store
+.web-check/

@@ -25,7 +25,8 @@ src/
     scheduler.js   disponibilità nel tempo, orizzonte, candidati ("adesso" incluso), scelta con regola dei quasi-pari
     reasoning.js   grammatica del verdetto, motivazioni in frasi complete, consigli
     messages.js    quattro template di messaggio (cordiale / diretto / impegno all'acquisto / motivato)
-    analyze.js     analyzeOffer(form, now): punto d'ingresso unico (analisi, nessuna offerta, oltre il tetto Vinted)
+    analyze.js     analyzeOffer(form, now, { preferredSendAt }): punto d'ingresso unico (analisi, nessuna offerta, oltre il tetto)
+    optimize.js    optimizeOffer: come arrivare a una probabilità obiettivo (aspetta / alza / entrambe)
     dates.js       formattazione italiana senza Intl, festivi, fuso Europe/Rome, aritmetica DST-safe
     math.js        logit, sigmoide, interpolazione, hash deterministico
   hooks/useOfferAnalysis.js   stato del form e dell'analisi (React puro)
@@ -72,6 +73,11 @@ il momento consigliato è lontano, altre finestre valide, fasce da evitare nel g
 consigliato per superare il 55% (60% se il rischio blocco è alto; per venditori inattivi la soglia è scalata sulla
 probabilità di lettura), strategia a due step e quattro template di messaggio nel tono adatto, formulati "prima
 dell'offerta" quando conviene scrivere e aspettare la risposta.
+
+**Ottimizzatore.** Scelto un obiettivo (50–90%), `optimizeOffer` cerca il modo più economico per raggiungerlo: solo
+aspettare il momento migliore nell'orizzonte, solo alzare l'offerta tenendo il momento consigliato (bisezione sulla
+griglia dei prezzi), oppure la combinazione più economica; riporta anche il massimo raggiungibile senza pagare il
+prezzo pieno. "Applica" fissa il momento scelto (`analyzeOffer(form, now, { preferredSendAt })`).
 
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
 offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.

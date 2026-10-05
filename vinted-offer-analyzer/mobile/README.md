@@ -6,6 +6,7 @@ App Android (Expo / React Native) dell'analizzatore di offerte Vinted. Usa lo **
 - **Lista "da comprare"**: ogni analisi si salva con titolo, link all'annuncio, prezzi, momento consigliato e messaggio pronto.
 - **Notifica** 10 minuti prima della finestra consigliata; toccandola si apre la lista sull'articolo, con "Apri annuncio" e "Copia messaggio".
 - **Calendario**: evento di 30 minuti con allarme nel calendario del telefono, oppure "Apri Google Calendar" senza permessi.
+- **Obiettivo**: scegli la probabilità che vorresti (50–90%) e "Portami al N%" elenca i modi più economici per arrivarci: aspettare il momento migliore, alzare di poco l'offerta, o entrambe le cose. "Applica questa scelta" aggiorna prezzo e momento con un tocco.
 - **Esiti**: segna accettata / controproposta / rifiutata / nessuna risposta; la scheda Info confronta l'accettazione reale con la stima media ed esporta i dati in JSON.
 - Tutto resta sul telefono: nessun server, nessun account.
 
@@ -52,6 +53,7 @@ cd vinted-offer-analyzer/mobile
 npm install
 npm run sync-core          # ricopia ../src/core in ./core dopo ogni modifica al motore
 npx expo start             # anteprima con Expo Go (le notifiche programmate richiedono la build nativa)
+npx expo export --platform web --output-dir .web-check   # anteprima nel browser per controllare il layout
 npx expo run:android       # build di sviluppo su emulatore o telefono collegato
 ```
 
