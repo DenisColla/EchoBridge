@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { VINTED, analyzeOffer, computeDiscountPct, parsePrice, riskBandFor } from '../core/index.js'
+import { VINTED, analyzeOffer, computeDiscountPct, nextGoalFor, optimizeOffer, parsePrice, riskBandFor } from '../core/index.js'
 
 export const EXAMPLE_FORM = {
   itemTitle: 'Nike Air Force 1 bianche, 42',
@@ -30,6 +30,8 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
   const [result, setResult] = useState(null)
   const [errors, setErrors] = useState({})
   const [touched, setTouched] = useState(false)
+  const [goal, setGoal] = useState(0.7)
+  const [plan, setPlan] = useState(null)
 
   const setField = useCallback((name, value) => {
     setForm((prev) => ({ ...prev, [name]: value }))
@@ -54,9 +56,9 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     })
   }, [])
 
-  const analyze = useCallback(() => {
+  const run = useCallback((nextForm, preferredSendAt) => {
     setTouched(true)
-    const outcome = analyzeOffer(form, clock())
+    const outcome = analyzeOffer(nextForm, clock(), preferredSendAt ? { preferredSendAt } : {})
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
@@ -64,15 +66,37 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     }
     setErrors({})
     setResult(outcome)
+    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability))
     return outcome
-  }, [form, clock])
+  }, [clock])
+
+  const analyze = useCallback(() => {
+    setPlan(null)
+    return run(form, null)
+  }, [form, run])
+
+  /** Finds the cheapest changes (wait, raise the offer, both) that reach `goal`. */
+  const optimize = useCallback(() => {
+    const next = optimizeOffer(form, clock(), { targetProbability: goal })
+    setPlan(next)
+    return next
+  }, [form, clock, goal])
+
+  /** Applies one optimizer option: sets the price in the form and pins the chosen moment. */
+  const applyOption = useCallback((option) => {
+    const nextForm = { ...form, targetPrice: String(option.apply.targetPrice).replace('.', ',') }
+    setForm(nextForm)
+    setPlan(null)
+    return run(nextForm, option.apply.preferredSendAt)
+  }, [form, run])
 
   const reset = useCallback(() => {
     setForm(EMPTY_FORM)
     setResult(null)
     setErrors({})
     setTouched(false)
+    setPlan(null)
   }, [])
 
-  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset }
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption }
 }

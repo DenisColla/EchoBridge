@@ -657,7 +657,7 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
  * Chooses the moment to recommend. Among near-ties (within 1.5pp or 3% of the
  * best utility) the earliest wins, so the verdict does not flip by weeks on noise.
  */
-function pickMoments(input, now) {
+function pickMoments(input, now, { preferredSendAt = null } = {}) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
   // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
@@ -666,7 +666,17 @@ function pickMoments(input, now) {
   const ranking = [...eligible].sort(byUtilityThenDate)
   const best = ranking[0]
   const threshold = best.utility - Math.max(NEAR_TIE_ABS, NEAR_TIE_REL * best.utility)
-  const chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
+  let chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
+  // The caller (e.g. the optimizer's "Applica") may pin a specific moment: use the nearest candidate within 3 hours.
+  let pinned = false
+  if (preferredSendAt) {
+    const wanted = new Date(preferredSendAt).getTime()
+    const nearest = [...eligible].sort((a, b) => Math.abs(a.date.getTime() - wanted) - Math.abs(b.date.getTime() - wanted))[0]
+    if (nearest && Math.abs(nearest.date.getTime() - wanted) <= 3 * 3_600_000) {
+      chosen = nearest
+      pinned = true
+    }
+  }
   // A strictly better slot (any day, even later the same evening) is reported alongside the recommendation.
   const alsoGood = best !== chosen && best.utility > chosen.utility ? best : null
 
@@ -703,7 +713,7 @@ function pickMoments(input, now) {
   const spread = Math.max(...topDays) - Math.min(...topDays)
   const maxAccept = Math.max(...evaluated.map((s) => s.score.pAccept))
 
-  return { horizon, chosen, best, alsoGood, quick, alternatives, nowSlot, sendNow, ranking, spread, timingMatters: spread >= TIMING_MATTERS_SPREAD, maxAccept }
+  return { horizon, chosen, best, alsoGood, quick, alternatives, nowSlot, sendNow, ranking, eligible, spread, timingMatters: spread >= TIMING_MATTERS_SPREAD, maxAccept, pinned }
 }
 
 /* ───────── windows to avoid ───────── */
@@ -1102,8 +1112,8 @@ function buildWarnings(now) {
 
 const noOfferNeeded = (input, now, message) => ({ ok: true, kind: 'no_offer_needed', input, now, message })
 
-function buildAnalysis(input, now) {
-  const moments = pickMoments(input, now)
+function buildAnalysis(input, now, options = {}) {
+  const moments = pickMoments(input, now, options)
   const { chosen, nowSlot, sendNow } = moments
   const attribution = attributeFactors(chosen.score)
   const blockRisk = blockRiskAt(input, chosen.date)
@@ -1138,6 +1148,7 @@ function buildAnalysis(input, now) {
     alternatives: moments.alternatives,
     nowSlot,
     sendNow,
+    pinned: moments.pinned,
     timingMatters: moments.timingMatters,
     timingNote: buildTimingNote(moments, chosen),
     spread: moments.spread,
@@ -1163,7 +1174,7 @@ function buildAnalysis(input, now) {
  * Entry point: raw form values + current date → full analysis for the UI.
  * kinds: 'analysis' | 'no_offer_needed' | 'over_cap' (discount above Vinted's 40% limit).
  */
-function analyzeOffer(raw, now = new Date()) {
+function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
   const { input } = normalized
@@ -1182,7 +1193,7 @@ function analyzeOffer(raw, now = new Date()) {
     }
     const capped = withPrices(input, input.listPrice, cappedPrice)
     return {
-      ...buildAnalysis(capped, now),
+      ...buildAnalysis(capped, now, options),
       kind: 'over_cap',
       requestedInput: input,
       cappedPrice,
@@ -1195,7 +1206,7 @@ function analyzeOffer(raw, now = new Date()) {
     }
   }
 
-  return buildAnalysis(input, now)
+  return buildAnalysis(input, now, options)
 }
 
 // ───────────────────────── src/theme.js ─────────────────────────
@@ -1324,6 +1335,8 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
   const [result, setResult] = useState(null)
   const [errors, setErrors] = useState({})
   const [touched, setTouched] = useState(false)
+  const [goal, setGoal] = useState(0.7)
+  const [plan, setPlan] = useState(null)
 
   const setField = useCallback((name, value) => {
     setForm((prev) => ({ ...prev, [name]: value }))
@@ -1348,9 +1361,9 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
     })
   }, [])
 
-  const analyze = useCallback(() => {
+  const run = useCallback((nextForm, preferredSendAt) => {
     setTouched(true)
-    const outcome = analyzeOffer(form, clock())
+    const outcome = analyzeOffer(nextForm, clock(), preferredSendAt ? { preferredSendAt } : {})
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
@@ -1358,17 +1371,39 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
     }
     setErrors({})
     setResult(outcome)
+    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability))
     return outcome
-  }, [form, clock])
+  }, [clock])
+
+  const analyze = useCallback(() => {
+    setPlan(null)
+    return run(form, null)
+  }, [form, run])
+
+  /** Finds the cheapest changes (wait, raise the offer, both) that reach `goal`. */
+  const optimize = useCallback(() => {
+    const next = optimizeOffer(form, clock(), { targetProbability: goal })
+    setPlan(next)
+    return next
+  }, [form, clock, goal])
+
+  /** Applies one optimizer option: sets the price in the form and pins the chosen moment. */
+  const applyOption = useCallback((option) => {
+    const nextForm = { ...form, targetPrice: String(option.apply.targetPrice).replace('.', ',') }
+    setForm(nextForm)
+    setPlan(null)
+    return run(nextForm, option.apply.preferredSendAt)
+  }, [form, run])
 
   const reset = useCallback(() => {
     setForm(EMPTY_FORM)
     setResult(null)
     setErrors({})
     setTouched(false)
+    setPlan(null)
   }, [])
 
-  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset }
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption }
 }
 
 // ───────────────────────── src/components/icons.js ─────────────────────────
@@ -2058,7 +2093,7 @@ function EmptyState() {
  * components are presentational: port to React Native by swapping ./components.
  */
 function VintedOfferAnalyzer({ clock } = {}) {
-  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset } = useOfferAnalysis({ clock })
+  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption } = useOfferAnalysis({ clock })
   const resultsRef = useRef(null)
 
   useEffect(() => {
@@ -2123,7 +2158,11 @@ function VintedOfferAnalyzer({ clock } = {}) {
           )}
           {result && (result.kind === 'analysis' || result.kind === 'over_cap') && (
             <>
+              {result.pinned && (
+                <p className={cx('rounded-xl p-3 text-sm', SURFACE.cardMuted)}>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</p>
+              )}
               <ScoreCard result={result} />
+              <OptimizeCard result={result} goal={goal} onGoal={setGoal} plan={plan} onOptimize={optimize} onApply={applyOption} />
               <VerdictCard result={result} />
               <StrategyCard result={result} />
               <MessageCard key={result.now.getTime()} result={result} />

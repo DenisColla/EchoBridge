@@ -4,6 +4,7 @@ import {
   analyzeOffer, articleFor, buildCandidateSlots, buildMessages, computeDiscountPct, easterSunday, formatDayList,
   formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatTime, isItalianHoliday, monthWindowAt, normalizeInput,
   parsePrice, riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
+  nextGoalFor, optimizeOffer,
 } from '../src/core/index.js'
 
 // Sunday 4 October 2026, 16:00 local time.
@@ -404,4 +405,36 @@ test('plural helpers and articles', () => {
   assert.equal(formatPoints(-1), '−1 punto')
   assert.equal(formatPoints(-5), '−5 punti')
   assert.equal(articleFor(0), 'dello ')
+})
+
+test('optimizer: goal steps, reachable options and applying an option raises the probability', () => {
+  assert.equal(nextGoalFor(0.63), 0.7)
+  assert.equal(nextGoalFor(0.68), 0.8)
+  assert.equal(nextGoalFor(0.92), 0.95)
+  const raw = { ...base, category: 'sneakers', listPrice: '100', targetPrice: '70', listingAge: 'weeks_1_2' }
+  const before = analyzeOffer(raw, WEDNESDAY_LUNCH)
+  const plan = optimizeOffer(raw, WEDNESDAY_LUNCH, { targetProbability: 0.7 })
+  assert.equal(plan.ok, true)
+  assert.equal(plan.target, 0.7)
+  assert.ok(plan.maxAchievable.probability >= plan.current.probability)
+  assert.ok(Math.abs(plan.current.probability - before.probability) < 1e-9)
+  for (const o of plan.options) {
+    assert.ok(o.probability >= 0.7, o.id)
+    assert.ok(o.price >= 70 && o.price < 100)
+    assert.ok(o.apply.targetPrice === o.price)
+    const applied = analyzeOffer({ ...raw, targetPrice: String(o.price) }, WEDNESDAY_LUNCH, { preferredSendAt: o.apply.preferredSendAt })
+    assert.ok(applied.pinned || applied.optimal.date.getTime() === new Date(o.apply.preferredSendAt).getTime(), 'slot pinned')
+    assert.ok(Math.abs(applied.probability - o.probability) < 0.011, `${o.id}: ${applied.probability} vs ${o.probability}`)
+  }
+  if (plan.recommended) assert.ok(plan.recommended.priceIncrease <= plan.options[plan.options.length - 1].priceIncrease)
+})
+
+test('optimizer: unreachable goals report the ceiling, over-cap inputs are optimised from the capped price', () => {
+  const plan = optimizeOffer({ ...base, category: 'luxury', listPrice: '500', targetPrice: '300', sellerProfile: 'expert' }, SUNDAY_AFTERNOON, { targetProbability: 0.99 })
+  assert.equal(plan.reachable, false)
+  assert.ok(plan.maxAchievable.probability < 0.99)
+  assert.ok(plan.maxAchievable.slot.date instanceof Date)
+  const capped = optimizeOffer({ ...base, category: 'electronics', listPrice: '200', targetPrice: '110' }, SUNDAY_AFTERNOON, { targetProbability: 0.5 })
+  assert.equal(capped.capped, true)
+  assert.equal(capped.current.price, 120)
 })

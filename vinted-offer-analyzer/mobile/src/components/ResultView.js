@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
-  TONES, articleFor, capitalize, formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatSignedPoints, formatTime,
+  GOAL_CHOICES, TONES, articleFor, capitalize, formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatSignedPoints, formatTime,
   isSameDay, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneColors, toneForLevel, toneForProbability, useTheme } from '../theme.js'
-import { Badge, Body, Button, Card, Chip, Meter, Note, Row, SectionLabel, Title } from './ui.js'
+import { Badge, Body, Button, ButtonRow, Card, Chip, Meter, Note, Row, SectionLabel, Title } from './ui.js'
 
 function ScoreCard({ result }) {
   const t = useTheme()
@@ -50,25 +50,25 @@ function ScoreCard({ result }) {
       )}
       <View style={{ gap: 6 }}>
         <SectionLabel>Che cosa pesa sul risultato</SectionLabel>
-        <Row style={styles.factorRow}>
-          <Body style={{ flex: 1 }}>Sconto {articleFor(input.discountPct)}{Math.round(input.discountPct)}%: punto di partenza</Body>
+        <View style={styles.factorRow}>
+          <Body style={styles.factorLabel}>Sconto {articleFor(input.discountPct)}{Math.round(input.discountPct)}%: punto di partenza</Body>
           <Text style={[styles.factorValue, { color: t.ink }]}>{factors.basePct}%</Text>
-        </Row>
+        </View>
         {rows.map((f) => (
           <View key={f.id} style={{ gap: 3 }}>
-            <Row style={styles.factorRow}>
-              <Body style={{ flex: 1 }} numberOfLines={1}>{f.label}</Body>
+            <View style={styles.factorRow}>
+              <Body style={styles.factorLabel} numberOfLines={1}>{f.label}</Body>
               <Text style={[styles.factorValue, { color: f.deltaPoints > 0 ? t.good : t.bad }]}>{formatSignedPoints(f.deltaPoints)} pt</Text>
-            </Row>
+            </View>
             <View style={[styles.miniTrack, { backgroundColor: t.cardMuted }]}>
               <View style={[styles.miniFill, { backgroundColor: f.deltaPoints > 0 ? t.good : t.bad, width: `${Math.min(100, Math.abs(f.deltaPoints) * 5)}%` }]} />
             </View>
           </View>
         ))}
-        <Row style={[styles.factorRow, { borderTopWidth: 1, borderTopColor: t.line, paddingTop: 6 }]}>
-          <Body style={{ flex: 1, fontWeight: '600' }}>Accettazione nel momento consigliato</Body>
+        <View style={[styles.factorRow, { borderTopWidth: 1, borderTopColor: t.line, paddingTop: 6 }]}>
+          <Body style={[styles.factorLabel, { fontWeight: '600' }]}>Accettazione nel momento consigliato</Body>
           <Text style={[styles.factorValue, { color: t.ink }]}>{factors.totalPct}%</Text>
-        </Row>
+        </View>
       </View>
       {blockRisk.reasons.length > 0 && (
         <View style={{ gap: 6 }}>
@@ -129,10 +129,10 @@ function VerdictCard({ result }) {
         <View style={{ gap: 4 }}>
           <SectionLabel>Altre finestre valide</SectionLabel>
           {alternatives.map((s) => (
-            <Row key={s.date.getTime()} style={styles.factorRow}>
-              <Body style={{ flex: 1 }}>{capitalize(formatLongDate(s.date, now))} · {formatTime(s.date)} · {formatRelativeDay(s.date, now)}</Body>
+            <View key={s.date.getTime()} style={styles.factorRow}>
+              <Body style={styles.factorLabel}>{capitalize(formatLongDate(s.date, now))} · {formatTime(s.date)} · {formatRelativeDay(s.date, now)}</Body>
               <Text style={[styles.factorValue, { color: t.ink }]}>{toPercent(s.pOverall)}%</Text>
-            </Row>
+            </View>
           ))}
         </View>
       )}
@@ -185,9 +185,7 @@ function MessageCard({ result }) {
       <Title>Che cosa scrivere al venditore</Title>
       <Row>
         {TONES.map((x) => (
-          <View key={x.id} style={{ flexGrow: 0, flexBasis: 'auto' }}>
-            <Chip label={`${x.id === recommendedTone ? '★ ' : ''}${x.label}`} active={x.id === tone} onPress={() => { setTone(x.id); setCopied(false) }} />
-          </View>
+          <Chip key={x.id} compact label={`${x.id === recommendedTone ? '★ ' : ''}${x.label}`} active={x.id === tone} onPress={() => { setTone(x.id); setCopied(false) }} />
         ))}
       </Row>
       <Body muted small>{meta ? meta.hint : ''}{tone === recommendedTone ? ' · consigliato per questo livello di rischio' : ''}</Body>
@@ -202,7 +200,51 @@ function MessageCard({ result }) {
   )
 }
 
-export function ResultView({ result, onSave, saveState, onCalendar, onGoogleCalendar }) {
+function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply, busy }) {
+  const t = useTheme()
+  const currentPct = toPercent(result.probability)
+  return (
+    <Card>
+      <SectionLabel>Obiettivo</SectionLabel>
+      <Title>Quante probabilità vorresti?</Title>
+      <Row>
+        {GOAL_CHOICES.map((g) => (
+          <Chip key={g} compact label={`${Math.round(g * 100)}%`} active={Math.abs(goal - g) < 0.001} onPress={() => onGoal(g)} />
+        ))}
+      </Row>
+      <Body muted small>
+        Oggi sei al {currentPct}%. Con un tocco cerco il modo più economico per arrivare al {Math.round(goal * 100)}%: aspettare un momento migliore, alzare di poco l'offerta, o entrambe le cose.
+      </Body>
+      <Button label={busy ? 'Calcolo…' : `Portami al ${Math.round(goal * 100)}%`} onPress={onOptimize} disabled={busy || currentPct >= Math.round(goal * 100)} />
+      {currentPct >= Math.round(goal * 100) && <Body muted small>Sei già oltre questo obiettivo: scegli una percentuale più alta.</Body>}
+      {plan && !plan.ok && <Note tone="warn">Non posso ottimizzare questa offerta: {plan.reason === 'no_offer_needed' ? 'non serve nessuna offerta.' : 'controlla i dati inseriti.'}</Note>}
+      {plan && plan.ok && (
+        <View style={{ gap: space.md }}>
+          {plan.options.length === 0 && (
+            <Note tone="warn">
+              Il {Math.round(plan.target * 100)}% non è raggiungibile senza pagare quasi il prezzo pieno. Il massimo è {toPercent(plan.maxAchievable.probability)}%: {plan.maxAchievable.changes.join(' e ').toLowerCase()}.
+            </Note>
+          )}
+          {plan.options.map((o, index) => (
+            <View key={o.id} style={[styles.optionBox, { borderColor: index === 0 ? t.accent : t.line, backgroundColor: t.cardMuted }]}>
+              <View style={styles.factorRow}>
+                <Body style={[styles.factorLabel, { fontWeight: '700' }]}>{index === 0 ? '★ ' : ''}{o.label}</Body>
+                <Text style={[styles.factorValue, { color: t.good }]}>{toPercent(o.probability)}% ({formatPoints(o.deltaPoints)})</Text>
+              </View>
+              {o.changes.map((c) => <Body key={c} small>• {c}</Body>)}
+              <Button label="Applica questa scelta" variant={index === 0 ? 'primary' : 'secondary'} small onPress={() => onApply(o)} />
+            </View>
+          ))}
+          {plan.options.length > 0 && plan.maxAchievable.probability > plan.options[0].probability + 0.05 && (
+            <Body muted small>Massimo raggiungibile: {toPercent(plan.maxAchievable.probability)}% ({plan.maxAchievable.changes.join(', ').toLowerCase()}).</Body>
+          )}
+        </View>
+      )}
+    </Card>
+  )
+}
+
+export function ResultView({ result, onSave, saveState, onCalendar, goal, onGoal, plan, onOptimize, onApply, optimizing }) {
   const t = useTheme()
   if (result.kind === 'no_offer_needed') {
     return (
@@ -221,19 +263,20 @@ export function ResultView({ result, onSave, saveState, onCalendar, onGoogleCale
           {result.message}{'\n'}{result.capAdvice.map((a) => `• ${a}`).join('\n')}
         </Note>
       )}
+      {result.pinned && <Note>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</Note>}
       <Card style={{ borderColor: t.accent }}>
         <SectionLabel>Promemoria</SectionLabel>
         <Title>Salva e ricordamelo</Title>
         <Body muted small>
-          Salva l'articolo nella lista, ricevi una notifica 10 minuti prima della finestra consigliata e, se vuoi, aggiungi l'evento al calendario del telefono.
+          L'articolo finisce nella lista con link e messaggio; ricevi una notifica 10 minuti prima della finestra consigliata.
         </Body>
         {saveState && saveState.message ? <Note tone={saveState.tone}>{saveState.message}</Note> : null}
-        <Button label={saveState && saveState.saved ? 'Salvato nella lista' : 'Salva e ricordamelo'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
-        <Row>
-          <View style={{ flex: 1, minWidth: 150 }}><Button label="Aggiungi al calendario" variant="secondary" onPress={onCalendar} /></View>
-          <View style={{ flex: 1, minWidth: 150 }}><Button label="Apri Google Calendar" variant="secondary" onPress={onGoogleCalendar} /></View>
-        </Row>
+        <ButtonRow>
+          <Button label={saveState && saveState.saved ? 'Salvato nella lista' : 'Salva e ricordamelo'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
+          <Button label="Metti in calendario" variant="secondary" onPress={onCalendar} />
+        </ButtonRow>
       </Card>
+      <OptimizeCard result={result} goal={goal} onGoal={onGoal} plan={plan} onOptimize={onOptimize} onApply={onApply} busy={optimizing} />
       <ScoreCard result={result} />
       <VerdictCard result={result} />
       <StrategyCard result={result} />
@@ -245,8 +288,10 @@ export function ResultView({ result, onSave, saveState, onCalendar, onGoogleCale
 const styles = StyleSheet.create({
   hero: { fontSize: 60, fontWeight: '700', letterSpacing: -1, lineHeight: 64 },
   heroPct: { fontSize: 28, fontWeight: '500' },
-  factorRow: { justifyContent: 'space-between', flexWrap: 'nowrap' },
-  factorValue: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  factorRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.sm },
+  factorLabel: { flex: 1, flexShrink: 1, minWidth: 0 },
+  factorValue: { fontSize: 15, fontWeight: '700', fontVariant: ['tabular-nums'], flexShrink: 0 },
+  optionBox: { borderWidth: 1, borderRadius: radius.lg, padding: space.md, gap: 6 },
   miniTrack: { height: 6, borderRadius: radius.pill, overflow: 'hidden' },
   miniFill: { height: '100%', borderRadius: radius.pill },
   heroBox: { borderRadius: radius.lg, padding: space.lg, gap: 6 },

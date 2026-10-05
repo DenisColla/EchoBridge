@@ -85,7 +85,7 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
  * Chooses the moment to recommend. Among near-ties (within 1.5pp or 3% of the
  * best utility) the earliest wins, so the verdict does not flip by weeks on noise.
  */
-export function pickMoments(input, now) {
+export function pickMoments(input, now, { preferredSendAt = null } = {}) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
   // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
@@ -94,7 +94,17 @@ export function pickMoments(input, now) {
   const ranking = [...eligible].sort(byUtilityThenDate)
   const best = ranking[0]
   const threshold = best.utility - Math.max(NEAR_TIE_ABS, NEAR_TIE_REL * best.utility)
-  const chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
+  let chosen = [...eligible.filter((s) => s.utility >= threshold)].sort((a, b) => a.date - b.date)[0]
+  // The caller (e.g. the optimizer's "Applica") may pin a specific moment: use the nearest candidate within 3 hours.
+  let pinned = false
+  if (preferredSendAt) {
+    const wanted = new Date(preferredSendAt).getTime()
+    const nearest = [...eligible].sort((a, b) => Math.abs(a.date.getTime() - wanted) - Math.abs(b.date.getTime() - wanted))[0]
+    if (nearest && Math.abs(nearest.date.getTime() - wanted) <= 3 * 3_600_000) {
+      chosen = nearest
+      pinned = true
+    }
+  }
   // A strictly better slot (any day, even later the same evening) is reported alongside the recommendation.
   const alsoGood = best !== chosen && best.utility > chosen.utility ? best : null
 
@@ -131,7 +141,7 @@ export function pickMoments(input, now) {
   const spread = Math.max(...topDays) - Math.min(...topDays)
   const maxAccept = Math.max(...evaluated.map((s) => s.score.pAccept))
 
-  return { horizon, chosen, best, alsoGood, quick, alternatives, nowSlot, sendNow, ranking, spread, timingMatters: spread >= TIMING_MATTERS_SPREAD, maxAccept }
+  return { horizon, chosen, best, alsoGood, quick, alternatives, nowSlot, sendNow, ranking, eligible, spread, timingMatters: spread >= TIMING_MATTERS_SPREAD, maxAccept, pinned }
 }
 
 /* ───────── windows to avoid ───────── */

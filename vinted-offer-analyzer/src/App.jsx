@@ -6,6 +6,7 @@ import { SURFACE, cx } from './theme.js'
 import { EmptyState } from './components/EmptyState.jsx'
 import { MessageCard } from './components/MessageCard.jsx'
 import { OfferForm } from './components/OfferForm.jsx'
+import { OptimizeCard } from './components/OptimizeCard.jsx'
 import { ScoreCard } from './components/ScoreCard.jsx'
 import { StrategyCard } from './components/StrategyCard.jsx'
 import { VerdictCard } from './components/VerdictCard.jsx'
@@ -16,7 +17,7 @@ import { VerdictCard } from './components/VerdictCard.jsx'
  * components are presentational: port to React Native by swapping ./components.
  */
 export default function VintedOfferAnalyzer({ clock } = {}) {
-  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset } = useOfferAnalysis({ clock })
+  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption } = useOfferAnalysis({ clock })
   const resultsRef = useRef(null)
 
   useEffect(() => {
@@ -81,7 +82,11 @@ export default function VintedOfferAnalyzer({ clock } = {}) {
           )}
           {result && (result.kind === 'analysis' || result.kind === 'over_cap') && (
             <>
+              {result.pinned && (
+                <p className={cx('rounded-xl p-3 text-sm', SURFACE.cardMuted)}>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</p>
+              )}
               <ScoreCard result={result} />
+              <OptimizeCard result={result} goal={goal} onGoal={setGoal} plan={plan} onOptimize={optimize} onApply={applyOption} />
               <VerdictCard result={result} />
               <StrategyCard result={result} />
               <MessageCard key={result.now.getTime()} result={result} />

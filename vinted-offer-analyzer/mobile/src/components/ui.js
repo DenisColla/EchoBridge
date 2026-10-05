@@ -46,32 +46,52 @@ export function Meter({ value, tone = 'accent' }) {
   )
 }
 
-export function Button({ label, onPress, variant = 'primary', disabled = false, style }) {
+/**
+ * variant: primary (filled accent), secondary (outlined), ghost (text only, for low-priority actions),
+ * danger (soft red). `small` lowers the height for action rows.
+ */
+export function Button({ label, onPress, variant = 'primary', disabled = false, style, small = false }) {
   const t = useTheme()
-  const bg = variant === 'primary' ? t.accent : variant === 'danger' ? t.badSoft : t.card
-  const fg = variant === 'primary' ? t.onAccent : variant === 'danger' ? t.bad : t.ink
+  const ghost = variant === 'ghost' || variant === 'ghostDanger'
+  const bg = variant === 'primary' ? t.accent : variant === 'danger' ? t.badSoft : ghost ? 'transparent' : t.card
+  const fg = variant === 'primary' ? t.onAccent : variant === 'danger' || variant === 'ghostDanger' ? t.bad : variant === 'ghost' ? t.accentInk : t.ink
+  const border = variant === 'secondary' ? t.line : ghost ? 'transparent' : bg
   return (
     <Pressable
       onPress={onPress}
       disabled={disabled}
       accessibilityRole="button"
-      style={({ pressed }) => [styles.button, { backgroundColor: bg, borderColor: variant === 'secondary' ? t.line : bg, opacity: disabled ? 0.5 : pressed ? 0.85 : 1 }, style]}
+      hitSlop={small ? 6 : 0}
+      style={({ pressed }) => [styles.button, small && styles.buttonSmall, { backgroundColor: bg, borderColor: border, opacity: disabled ? 0.5 : pressed ? 0.85 : 1 }, style]}
     >
-      <Text style={[styles.buttonText, { color: fg }]}>{label}</Text>
+      <Text style={[styles.buttonText, small && styles.buttonTextSmall, { color: fg }]} numberOfLines={1}>{label}</Text>
     </Pressable>
   )
 }
 
-export function Chip({ label, hint, active, onPress }) {
+/** A row of equally wide buttons that never overlap: each child is wrapped in a flexible cell that wraps to a new row when narrow. */
+export function ButtonRow({ children }) {
+  const cells = Array.isArray(children) ? children : [children]
+  return (
+    <View style={styles.buttonRow}>
+      {cells.filter(Boolean).map((child, index) => (
+        <View key={index} style={styles.buttonCell}>{child}</View>
+      ))}
+    </View>
+  )
+}
+
+/** compact = sized to its label (toggles, tones, percentages); default chips fill a two-column grid. */
+export function Chip({ label, hint, active, onPress, compact = false }) {
   const t = useTheme()
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="radio"
       accessibilityState={{ checked: active }}
-      style={({ pressed }) => [styles.chip, { backgroundColor: active ? t.accent : t.card, borderColor: active ? t.accent : t.line, opacity: pressed ? 0.85 : 1 }]}
+      style={({ pressed }) => [compact ? styles.chipCompact : styles.chip, { backgroundColor: active ? t.accent : t.card, borderColor: active ? t.accent : t.line, opacity: pressed ? 0.85 : 1 }]}
     >
-      <Text style={[styles.chipLabel, { color: active ? t.onAccent : t.ink }]}>{label}</Text>
+      <Text style={[styles.chipLabel, { color: active ? t.onAccent : t.ink }]} numberOfLines={compact ? 1 : 2}>{label}</Text>
       {hint ? <Text style={[styles.chipHint, { color: active ? t.onAccent : t.ink3 }]} numberOfLines={2}>{hint}</Text> : null}
     </Pressable>
   )
@@ -144,17 +164,22 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 12, fontWeight: '700' },
   meterTrack: { height: 10, borderRadius: radius.pill, overflow: 'hidden' },
   meterFill: { height: '100%', borderRadius: radius.pill },
-  button: { minHeight: 48, borderRadius: radius.md, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.lg, paddingVertical: space.md },
+  button: { minHeight: 50, borderRadius: radius.md, borderWidth: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.md, paddingVertical: space.md },
+  buttonSmall: { minHeight: 42, paddingVertical: 8, paddingHorizontal: space.sm },
   buttonText: { fontSize: 15, fontWeight: '700' },
-  chip: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, minHeight: 44, flexGrow: 1, flexBasis: '45%', justifyContent: 'center' },
+  buttonTextSmall: { fontSize: 14 },
+  buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  buttonCell: { flexGrow: 1, flexBasis: 150, minWidth: 0 },
+  chip: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, minHeight: 48, flexGrow: 1, flexBasis: '46%', justifyContent: 'center' },
+  chipCompact: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 9, minHeight: 40, justifyContent: 'center', flexGrow: 0, flexShrink: 0 },
   chipLabel: { fontSize: 14, fontWeight: '600' },
   chipHint: { fontSize: 11, marginTop: 2 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
   field: { gap: 6 },
   fieldLabel: { fontSize: 14, fontWeight: '600' },
-  inputWrap: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 12 },
-  input: { flex: 1, fontSize: 16, paddingVertical: 10 },
-  suffix: { fontSize: 14, marginLeft: 6 },
+  inputWrap: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 12, overflow: 'hidden' },
+  input: { flex: 1, flexShrink: 1, minWidth: 0, fontSize: 16, paddingVertical: 10 },
+  suffix: { fontSize: 14, marginLeft: 6, flexShrink: 0 },
   error: { fontSize: 12, fontWeight: '600' },
   row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   note: { borderRadius: radius.md, padding: space.md },

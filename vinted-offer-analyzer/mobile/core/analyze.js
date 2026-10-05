@@ -119,8 +119,8 @@ export function buildWarnings(now) {
 
 const noOfferNeeded = (input, now, message) => ({ ok: true, kind: 'no_offer_needed', input, now, message })
 
-function buildAnalysis(input, now) {
-  const moments = pickMoments(input, now)
+function buildAnalysis(input, now, options = {}) {
+  const moments = pickMoments(input, now, options)
   const { chosen, nowSlot, sendNow } = moments
   const attribution = attributeFactors(chosen.score)
   const blockRisk = blockRiskAt(input, chosen.date)
@@ -155,6 +155,7 @@ function buildAnalysis(input, now) {
     alternatives: moments.alternatives,
     nowSlot,
     sendNow,
+    pinned: moments.pinned,
     timingMatters: moments.timingMatters,
     timingNote: buildTimingNote(moments, chosen),
     spread: moments.spread,
@@ -180,7 +181,7 @@ function buildAnalysis(input, now) {
  * Entry point: raw form values + current date → full analysis for the UI.
  * kinds: 'analysis' | 'no_offer_needed' | 'over_cap' (discount above Vinted's 40% limit).
  */
-export function analyzeOffer(raw, now = new Date()) {
+export function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
   const { input } = normalized
@@ -199,7 +200,7 @@ export function analyzeOffer(raw, now = new Date()) {
     }
     const capped = withPrices(input, input.listPrice, cappedPrice)
     return {
-      ...buildAnalysis(capped, now),
+      ...buildAnalysis(capped, now, options),
       kind: 'over_cap',
       requestedInput: input,
       cappedPrice,
@@ -212,5 +213,5 @@ export function analyzeOffer(raw, now = new Date()) {
     }
   }
 
-  return buildAnalysis(input, now)
+  return buildAnalysis(input, now, options)
 }

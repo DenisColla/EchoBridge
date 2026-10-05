@@ -4,7 +4,7 @@ import { capitalize, formatEuro, formatLongDate, formatRelativeDay, formatTime, 
 import { copyText } from '../services/clipboard.js'
 import { STATUSES, statusMeta } from '../services/storage.js'
 import { space, useTheme } from '../theme.js'
-import { Badge, Body, Button, Card, Chip, Note, Row, SectionLabel, Title } from './ui.js'
+import { Badge, Body, Button, ButtonRow, Card, Chip, Note, Row, SectionLabel, Title } from './ui.js'
 
 const hostOf = (link) => {
   try {
@@ -14,7 +14,7 @@ const hostOf = (link) => {
   }
 }
 
-function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onGoogleCalendar, now }) {
+function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, now }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const [showOutcome, setShowOutcome] = useState(false)
@@ -45,34 +45,31 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onGoogleC
       {item.status === 'planned' && past && <Note tone="warn">La finestra consigliata è passata: ricalcola l'offerta o segna l'esito.</Note>}
       {item.notificationId ? <Body muted small>Promemoria impostato 10 minuti prima.</Body> : item.status === 'planned' ? <Body muted small>Nessun promemoria attivo (troppo vicino o permesso negato).</Body> : null}
       {item.link ? <Body muted small numberOfLines={1}>{hostOf(item.link)}</Body> : null}
-      <Row>
-        {item.link ? <View style={styles.btn}><Button label="Apri annuncio" onPress={() => Linking.openURL(item.link).catch(() => {})} /></View> : null}
-        <View style={styles.btn}><Button label={copied ? 'Copiato!' : 'Copia messaggio'} variant="secondary" onPress={copyMessage} /></View>
-      </Row>
-      <Row>
-        <View style={styles.btn}><Button label={item.calendarEventId ? 'In calendario' : 'Calendario'} variant="secondary" disabled={Boolean(item.calendarEventId)} onPress={() => onCalendar(item)} /></View>
-        <View style={styles.btn}><Button label="Google Calendar" variant="secondary" onPress={() => onGoogleCalendar(item)} /></View>
-      </Row>
-      <Button label={showOutcome ? 'Chiudi' : 'Segna esito'} variant="secondary" onPress={() => setShowOutcome((v) => !v)} />
+      <ButtonRow>
+        {item.link ? <Button label="Apri annuncio" onPress={() => Linking.openURL(item.link).catch(() => {})} /> : null}
+        <Button label={copied ? 'Copiato!' : 'Copia messaggio'} variant={item.link ? 'secondary' : 'primary'} onPress={copyMessage} />
+      </ButtonRow>
+      <View style={styles.actions}>
+        <Button label={item.calendarEventId ? 'In calendario ✓' : 'Calendario'} variant="ghost" small disabled={Boolean(item.calendarEventId)} onPress={() => onCalendar(item)} />
+        <Button label={showOutcome ? 'Chiudi esito' : 'Segna esito'} variant="ghost" small onPress={() => setShowOutcome((v) => !v)} />
+        <Button label="Elimina" variant="ghostDanger" small onPress={() => onRemove(item.id)} />
+      </View>
       {showOutcome && (
         <View style={{ gap: space.sm }}>
           <SectionLabel>Com'è andata?</SectionLabel>
           <Row>
             {STATUSES.map((s) => (
-              <View key={s.id} style={{ flexGrow: 0, flexBasis: 'auto' }}>
-                <Chip label={s.label} active={item.status === s.id} onPress={() => { onStatus(item.id, s.id); setShowOutcome(false) }} />
-              </View>
+              <Chip key={s.id} compact label={s.label} active={item.status === s.id} onPress={() => { onStatus(item.id, s.id); setShowOutcome(false) }} />
             ))}
           </Row>
           <Body muted small>Gli esiti restano sul telefono e servono a misurare quanto sono affidabili le stime.</Body>
         </View>
       )}
-      <Button label="Elimina" variant="danger" onPress={() => onRemove(item.id)} />
     </Card>
   )
 }
 
-export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, onCalendar, onGoogleCalendar, now }) {
+export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, onCalendar, now }) {
   if (!ready) return <Card><Body muted>Carico la lista…</Body></Card>
   if (items.length === 0) {
     return (
@@ -90,12 +87,12 @@ export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, o
   return (
     <View style={{ gap: space.lg }}>
       {sorted.map((item) => (
-        <ItemCard key={item.id} item={item} highlighted={item.id === highlightId} onStatus={onStatus} onRemove={onRemove} onCalendar={onCalendar} onGoogleCalendar={onGoogleCalendar} now={now} />
+        <ItemCard key={item.id} item={item} highlighted={item.id === highlightId} onStatus={onStatus} onRemove={onRemove} onCalendar={onCalendar} now={now} />
       ))}
     </View>
   )
 }
 
 const styles = StyleSheet.create({
-  btn: { flex: 1, minWidth: 140 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: space.xs },
 })

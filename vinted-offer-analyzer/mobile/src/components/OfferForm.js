@@ -54,14 +54,14 @@ export function OfferForm({ form, errors, onChange, onSubmit, onReset }) {
         </View>
       </Row>
 
-      <Row>
+      <View style={{ gap: 6 }}>
         <Text style={{ color: t.ink3, fontSize: 12 }}>Sconto rapido</Text>
-        {QUICK_DISCOUNTS.map((pct) => (
-          <View key={pct} style={styles.quick}>
-            <Chip label={`−${pct}%`} active={preview ? Math.round(preview.d) === pct : false} onPress={() => applyDiscount(pct)} />
-          </View>
-        ))}
-      </Row>
+        <Row>
+          {QUICK_DISCOUNTS.map((pct) => (
+            <Chip key={pct} compact label={`−${pct}%`} active={preview ? Math.round(preview.d) === pct : false} onPress={() => applyDiscount(pct)} />
+          ))}
+        </Row>
+      </View>
       {preview && (
         <Text style={{ color: t.ink3, fontSize: 14 }}>
           {preview.d > 0 ? (
@@ -80,7 +80,7 @@ export function OfferForm({ form, errors, onChange, onSubmit, onReset }) {
 
       <View style={{ gap: space.sm }}>
         <Button label="Calcola momento ottimale" onPress={onSubmit} />
-        <Button label="Azzera" variant="secondary" onPress={onReset} />
+        <Button label="Azzera il modulo" variant="ghost" small onPress={onReset} />
       </View>
     </Card>
   )
@@ -88,5 +88,4 @@ export function OfferForm({ form, errors, onChange, onSubmit, onReset }) {
 
 const styles = StyleSheet.create({
   half: { flex: 1, minWidth: 140 },
-  quick: { flexGrow: 0, flexBasis: 'auto' },
 })

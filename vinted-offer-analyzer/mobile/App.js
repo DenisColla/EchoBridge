@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { analyzeOffer } from './core/index.js'
+import { analyzeOffer, nextGoalFor, optimizeOffer } from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
 import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
@@ -36,6 +36,10 @@ function Main() {
   const [errors, setErrors] = useState({})
   const [result, setResult] = useState(null)
   const [saveState, setSaveState] = useState(null)
+  const [goal, setGoal] = useState(0.7)
+  const [plan, setPlan] = useState(null)
+  const [optimizing, setOptimizing] = useState(false)
+  const [pinnedSendAt, setPinnedSendAt] = useState(null)
   const [highlightId, setHighlightId] = useState(null)
   const [toast, setToast] = useState(null)
   const scrollRef = useRef(null)
@@ -56,17 +60,45 @@ function Main() {
 
   const setField = (name, value) => setForm((prev) => ({ ...prev, [name]: value }))
 
-  const analyze = () => {
-    const outcome = analyzeOffer(form, new Date())
+  const runAnalysis = (nextForm, preferredSendAt) => {
+    const outcome = analyzeOffer(nextForm, new Date(), preferredSendAt ? { preferredSendAt } : {})
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
-      return
+      return null
     }
     setErrors({})
     setResult(outcome)
     setSaveState(null)
+    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability))
     setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
+    return outcome
+  }
+
+  const analyze = () => {
+    setPlan(null)
+    setPinnedSendAt(null)
+    runAnalysis(form, null)
+  }
+
+  /** Re-runs the analysis keeping the moment chosen through the optimizer (used after edits). */
+  const recalcKeepingPin = () => runAnalysis(form, pinnedSendAt)
+
+  const optimize = () => {
+    setOptimizing(true)
+    setTimeout(() => {
+      setPlan(optimizeOffer(form, new Date(), { targetProbability: goal }))
+      setOptimizing(false)
+    }, 20)
+  }
+
+  const applyOption = (option) => {
+    const nextForm = { ...form, targetPrice: String(option.apply.targetPrice).replace('.', ',') }
+    setForm(nextForm)
+    setPinnedSendAt(option.apply.preferredSendAt)
+    setPlan(null)
+    const outcome = runAnalysis(nextForm, option.apply.preferredSendAt)
+    if (outcome) showToast(`Applicato: ${option.label.toLowerCase()} → ${Math.round(outcome.probability * 100)}%`)
   }
 
   const reset = () => {
@@ -74,6 +106,8 @@ function Main() {
     setErrors({})
     setResult(null)
     setSaveState(null)
+    setPlan(null)
+    setPinnedSendAt(null)
   }
 
   const saveCurrent = async () => {
@@ -100,20 +134,21 @@ function Main() {
     }),
   })
 
+  /** One action: device calendar first; if it is refused or fails, open Google Calendar pre-filled instead. */
   const addCalendar = async (source, itemId) => {
+    const payload = calendarPayload(source)
     try {
-      const outcome = await addToDeviceCalendar(calendarPayload(source))
+      const outcome = await addToDeviceCalendar(payload)
       if (outcome.ok) {
         if (itemId) await watchlist.update(itemId, { calendarEventId: outcome.eventId })
         showToast(`Evento aggiunto al calendario${outcome.calendarName ? ` "${outcome.calendarName}"` : ''}.`)
-      } else if (outcome.reason === 'permission') {
-        showToast('Permesso calendario negato: usa "Apri Google Calendar".')
-      } else {
-        showToast('Non sono riuscito a creare l\'evento: usa "Apri Google Calendar".')
+        return
       }
+      showToast(outcome.reason === 'permission' ? 'Permesso negato: apro Google Calendar.' : 'Calendario del telefono non disponibile: apro Google Calendar.')
     } catch {
-      showToast('Non sono riuscito a creare l\'evento: usa "Apri Google Calendar".')
+      showToast('Calendario del telefono non disponibile: apro Google Calendar.')
     }
+    openGoogleCalendar(payload).catch(() => showToast('Impossibile aprire Google Calendar.'))
   }
 
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
@@ -125,8 +160,8 @@ function Main() {
       <View style={[styles.header, { borderBottomColor: t.line }]}>
         <View style={[styles.logo, { backgroundColor: t.accent }]}><Text style={[styles.logoText, { color: t.onAccent }]}>€</Text></View>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.appName, { color: t.ink }]}>Offerta Vinted Timing</Text>
-          <Text style={[styles.appTagline, { color: t.ink3 }]}>Il momento giusto per proporre il tuo prezzo</Text>
+          <Text style={[styles.appName, { color: t.ink }]} numberOfLines={1}>Offerta Vinted Timing</Text>
+          <Text style={[styles.appTagline, { color: t.ink3 }]} numberOfLines={1}>Il momento giusto per proporre il tuo prezzo</Text>
         </View>
       </View>
 
@@ -140,7 +175,13 @@ function Main() {
                   saveState={saveState}
                   onSave={saveCurrent}
                   onCalendar={() => addCalendar(result, saveState && saveState.itemId)}
-                  onGoogleCalendar={() => openGoogleCalendar(calendarPayload(result)).catch(() => showToast('Impossibile aprire Google Calendar.'))}
+                  goal={goal}
+                  onGoal={setGoal}
+                  plan={plan}
+                  onOptimize={optimize}
+                  onApply={applyOption}
+                  optimizing={optimizing}
+                  onRecalc={recalcKeepingPin}
                 />
               )}
               <OfferForm form={form} errors={errors} onChange={setField} onSubmit={analyze} onReset={reset} />
@@ -155,7 +196,6 @@ function Main() {
               onStatus={watchlist.setStatus}
               onRemove={watchlist.remove}
               onCalendar={(item) => addCalendar(item, item.id)}
-              onGoogleCalendar={(item) => openGoogleCalendar(calendarPayload(item)).catch(() => showToast('Impossibile aprire Google Calendar.'))}
             />
           )}
           {tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.items} />}
