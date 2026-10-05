@@ -301,12 +301,12 @@ export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy
         <SectionLabel>Promemoria</SectionLabel>
         <Title>Salva e ricordamelo</Title>
         <Body muted small>
-          L'articolo finisce nella lista con link e messaggio; ricevi una notifica 10 minuti prima della finestra consigliata.
+          L'articolo finisce nella lista con link e messaggio; ricevi una notifica 10 minuti prima della finestra consigliata. "Metti in calendario" apre l'app Calendario con l'evento già compilato: tu tocchi Salva.
         </Body>
         {saveState && saveState.message ? <Note tone={saveState.tone}>{saveState.message}</Note> : null}
         <ButtonRow>
           <Button label={saveState && saveState.saved ? 'Salvato nella lista' : 'Salva e ricordamelo'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
-          <Button label={calendarBusy ? 'Aggiungo…' : 'Metti in calendario'} variant="secondary" onPress={onCalendar} disabled={calendarBusy} />
+          <Button label={calendarBusy ? 'Apro il calendario…' : 'Metti in calendario'} variant="secondary" onPress={onCalendar} disabled={calendarBusy} />
         </ButtonRow>
       </Card>
       <OptimizeCard result={result} goal={goal} onGoal={onGoal} plan={plan} onOptimize={onOptimize} onApply={onApply} busy={optimizing} />

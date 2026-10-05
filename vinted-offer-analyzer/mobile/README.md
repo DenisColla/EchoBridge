@@ -66,11 +66,11 @@ Struttura:
 App.js                 shell con tre schede (Calcola, Lista, Info), toast, gestione del tocco sulla notifica
 core/                  motore condiviso (copia di ../src/core, non modificare qui)
 src/theme.js           token colore chiaro/scuro
-src/services/          storage (AsyncStorage), notifications (expo-notifications), calendar (expo-calendar), clipboard
+src/services/          storage (AsyncStorage), notifications (expo-notifications), calendar (expo-intent-launcher + expo-sharing, senza permessi), clipboard
 src/hooks/useWatchlist.js   lista salvata, promemoria, statistiche degli esiti
 src/components/        ui.js (primitive), OfferForm, ResultView, WatchlistView, InfoView
 tools/build-apk.ps1    script PowerShell eseguito da start.bat
 assets/                icona, icona adattiva, splash (generate da scripts, teal #0f766e)
 ```
 
-Permessi Android dichiarati: notifiche, lettura/scrittura calendario, allarmi esatti. Il canale di notifica si chiama "Promemoria offerte".
+Permessi Android dichiarati: notifiche, allarmi esatti. Il canale di notifica si chiama "Promemoria offerte".

@@ -56,6 +56,7 @@ export async function openCalendarInsert({ title, link, sendAt, notes }) {
   try {
     const result = await IntentLauncher.startActivityAsync('android.intent.action.INSERT', {
       data: 'content://com.android.calendar/events',
+      type: 'vnd.android.cursor.dir/event',
       extra: {
         title: eventTitleFor(title),
         description: notes || (link ? `Annuncio: ${link}` : ''),
@@ -93,7 +94,7 @@ export async function openGoogleCalendar({ title, sendAt, notes }) {
   }
 }
 
-const icsEscape = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
+const icsEscape = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
 
 /** Builds a standard .ics (iCalendar) text for the reminder event, with a 10-minute alarm. */
 export function buildIcs({ title, sendAt, notes, uid }) {
@@ -122,13 +123,26 @@ export function buildIcs({ title, sendAt, notes, uid }) {
   ].join('\r\n')
 }
 
-/** Path 3: hand the event to any calendar app through the share sheet as a .ics file. */
+/**
+ * Path 3: a .ics file. Calendar apps register ACTION_VIEW for text/calendar (import), so that is tried first
+ * through a content URI; the share sheet (ACTION_SEND) is the last resort for apps that answer neither.
+ */
 export async function shareIcs(payload) {
   try {
     const dir = FileSystem.cacheDirectory
     if (!dir) return { ok: false, reason: 'no_fs' }
     const uri = `${dir}offerta-vinted-${Date.now()}.ics`
     await FileSystem.writeAsStringAsync(uri, buildIcs(payload), { encoding: FileSystem.EncodingType.UTF8 })
+    if (Platform.OS === 'android') {
+      try {
+        const contentUri = await FileSystem.getContentUriAsync(uri)
+        await IntentLauncher.startActivityAsync('android.intent.action.VIEW', { data: contentUri, type: 'text/calendar', flags: 1 /* FLAG_GRANT_READ_URI_PERMISSION */ })
+        note({ step: 'ics-view', uri })
+        return { ok: true, via: 'ics_view' }
+      } catch (error) {
+        note({ step: 'ics-view-error', error: errorText(error) })
+      }
+    }
     if (!(await Sharing.isAvailableAsync())) return { ok: false, reason: 'no_share' }
     await Sharing.shareAsync(uri, { mimeType: 'text/calendar', dialogTitle: 'Apri con il calendario', UTI: 'public.calendar-event' })
     note({ step: 'ics-shared', uri })
@@ -141,7 +155,7 @@ export async function shareIcs(payload) {
 
 /**
  * The one entry point behind "Metti in calendario": tries the three paths in order and returns the first
- * that opened something, as { ok, via: 'intent' | 'google' | 'ics' } or { ok: false, errors: [...] }.
+ * that opened something, as { ok, via: 'intent' | 'google' | 'ics_view' | 'ics' } or { ok: false, errors: [...] }.
  */
 export async function openCalendarWithEvent(payload) {
   const errors = []
@@ -154,10 +168,12 @@ export async function openCalendarWithEvent(payload) {
   return { ok: false, errors }
 }
 
+/** Shown when the user is back in the app (the intent resolves on return, so the wording must hold after the fact). */
 export const VIA_LABEL = {
-  intent: 'Calendario aperto con l\'evento compilato: controlla e tocca Salva.',
+  intent: 'Se hai toccato Salva, l\'evento è nel tuo calendario.',
   google: 'Google Calendar aperto con l\'evento compilato: tocca Salva.',
-  ics: 'Scegli l\'app calendario nella finestra di condivisione per salvare l\'evento.',
+  ics_view: 'File evento aperto nel calendario: conferma l\'importazione.',
+  ics: 'Scegli un\'app calendario nella finestra di condivisione per importare l\'evento.',
 }
 
 export const openAppSettings = () => Linking.openSettings().catch(() => {})

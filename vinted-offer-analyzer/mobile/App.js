@@ -65,9 +65,11 @@ function Main() {
   const watchlist = useWatchlist()
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const showToast = useCallback((message) => {
+  const toastTimer = useRef(null)
+  const showToast = useCallback((message, ms = 2500) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current)
     setToast(message)
-    setTimeout(() => setToast(null), 2500)
+    toastTimer.current = setTimeout(() => setToast(null), ms)
   }, [])
 
   useEffect(() => listenToReminderTaps((data) => {
@@ -255,12 +257,12 @@ function Main() {
     if (calendarBusy) return
     const payload = calendarPayload(source)
     setCalendarBusy(true)
-    showToast('Apro il calendario con l\'evento già compilato: controlla e tocca Salva.')
+    showToast('Apro il calendario con l\'evento già compilato: controlla e tocca Salva.', 4000)
     try {
       const outcome = await openCalendarWithEvent(payload)
       if (outcome.ok) {
         if (itemId) await watchlist.update(itemId, { calendarOpenedAt: new Date().toISOString() })
-        showToast(VIA_LABEL[outcome.via] || VIA_LABEL.intent)
+        showToast(VIA_LABEL[outcome.via] || VIA_LABEL.intent, 4000)
       } else {
         showToast(`Nessuna app calendario ha risposto: ${outcome.errors[0] || 'errore sconosciuto'}. Dettagli nella scheda Info.`)
       }

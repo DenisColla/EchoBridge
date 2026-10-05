@@ -31,7 +31,7 @@ function CalendarSection() {
         sendAt,
         notes: eventNotesFor({ link: 'https://www.vinted.it/', targetPrice: '10', probability: 0.5, message: 'Ciao! Ti ho inviato un\'offerta.' }),
       })
-      setOutcome(result.ok ? { tone: 'good', text: VIA_LABEL[result.via] } : { tone: 'bad', text: `Nessuna app calendario ha risposto: ${result.errors.join(' · ')}` })
+      setOutcome(result.ok ? { tone: 'good', text: `Via "${result.via}": ${VIA_LABEL[result.via]}` } : { tone: 'bad', text: `Nessuna app calendario ha risposto: ${result.errors.join(' · ')}` })
     } finally {
       setBusy(false)
     }
