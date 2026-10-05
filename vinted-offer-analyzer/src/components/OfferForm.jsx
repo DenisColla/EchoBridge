@@ -1,4 +1,5 @@
-import { Calculator, RotateCcw } from 'lucide-react'
+import { Calculator, ClipboardPaste, RotateCcw } from 'lucide-react'
+import { useState } from 'react'
 import { CATEGORIES, LISTING_AGES, LISTING_SIGNALS, SELLER_PROFILES, VINTED, parsePrice } from '../core/index.js'
 import { SURFACE, TONE, cx } from '../theme.js'
 import { Button } from './ui/Button.jsx'
@@ -10,7 +11,9 @@ import { iconByName } from './icons.js'
 const categoryOptions = CATEGORIES.map((c) => ({ id: c.id, label: c.label, hint: c.hint, icon: iconByName(c.icon) }))
 const QUICK_DISCOUNTS = [10, 15, 20, 25, 30]
 
-export function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSubmit, onReset }) {
+export function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSubmit, onReset, onListingText }) {
+  const [pasted, setPasted] = useState('')
+  const [pasteNote, setPasteNote] = useState(null)
   const handleSubmit = (event) => {
     event.preventDefault()
     onSubmit()
@@ -134,6 +137,28 @@ export function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount
           onChange={(v) => onChange('listingSignal', v)}
           columns="grid-cols-2"
         />
+
+        <Field id="listingText" label="Incolla il testo dell'annuncio" hint="(facoltativo: leggo da solo segnali e prezzo)">
+          <textarea
+            id="listingText"
+            name="listingText"
+            value={pasted}
+            onChange={(e) => setPasted(e.target.value)}
+            rows={3}
+            placeholder="Copia la descrizione da Vinted e incollala qui"
+            className={cx('w-full rounded-xl px-3.5 py-3 text-sm outline-none transition-shadow', SURFACE.input)}
+          />
+        </Field>
+        <div className="-mt-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+          <Button variant="secondary" icon={ClipboardPaste} onClick={() => { const r = onListingText(pasted); setPasteNote(r) }} disabled={!pasted.trim()} className="w-full sm:w-auto">
+            Leggi segnali dal testo
+          </Button>
+          {pasteNote && (
+            <p className={cx('text-xs', SURFACE.muted)}>
+              {pasteNote.signal.reason}{pasteNote.price ? ` · prezzo trovato ${String(pasteNote.price).replace('.', ',')} €` : ''}. Nell'app Android basta incollare il link.
+            </p>
+          )}
+        </div>
 
         <div className="flex flex-col gap-2 pt-1 sm:flex-row">
           <Button type="submit" icon={Calculator} className="w-full sm:flex-1">

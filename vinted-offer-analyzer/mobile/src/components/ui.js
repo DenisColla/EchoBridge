@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { radius, space, toneColors, useTheme } from '../theme.js'
 
@@ -140,6 +141,27 @@ export function Field({ label, hint, error, value, onChangeText, placeholder, ke
   )
 }
 
+/**
+ * Secondary detail that stays folded until asked for: a tappable header with a chevron and an optional summary
+ * shown while closed. Keeps the result page short on a phone without hiding anything.
+ */
+export function Collapsible({ title, summary, children, initiallyOpen = false }) {
+  const t = useTheme()
+  const [open, setOpen] = useState(initiallyOpen)
+  return (
+    <View style={[styles.collapsible, { borderColor: t.line }]}>
+      <Pressable onPress={() => setOpen((v) => !v)} accessibilityRole="button" accessibilityState={{ expanded: open }} style={({ pressed }) => [styles.collapsibleHeader, { opacity: pressed ? 0.7 : 1 }]}>
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          <Text style={[styles.collapsibleTitle, { color: t.ink }]} numberOfLines={1}>{title}</Text>
+          {!open && summary ? <Text style={[styles.small, { color: t.ink3 }]} numberOfLines={2}>{summary}</Text> : null}
+        </View>
+        <Text style={[styles.chevron, { color: t.ink3 }]}>{open ? '▴' : '▾'}</Text>
+      </Pressable>
+      {open ? <View style={styles.collapsibleBody}>{children}</View> : null}
+    </View>
+  )
+}
+
 export function Row({ children, style }) {
   return <View style={[styles.row, style]}>{children}</View>
 }
@@ -183,4 +205,9 @@ const styles = StyleSheet.create({
   error: { fontSize: 12, fontWeight: '600' },
   row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   note: { borderRadius: radius.md, padding: space.md },
+  collapsible: { borderWidth: 1, borderRadius: radius.md, overflow: 'hidden' },
+  collapsibleHeader: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.md, paddingVertical: 10, minHeight: 48 },
+  collapsibleTitle: { fontSize: 14, fontWeight: '700' },
+  collapsibleBody: { paddingHorizontal: space.md, paddingBottom: space.md, gap: space.sm },
+  chevron: { fontSize: 16, flexShrink: 0 },
 })

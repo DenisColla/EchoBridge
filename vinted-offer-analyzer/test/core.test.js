@@ -4,8 +4,12 @@ import {
   analyzeOffer, articleFor, buildCandidateSlots, buildMessages, computeDiscountPct, easterSunday, formatDayList,
   formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatTime, isItalianHoliday, monthWindowAt, normalizeInput,
   parsePrice, riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
-  nextGoalFor, optimizeOffer,
+  nextGoalFor, optimizeOffer, parseVintedItemHtml, parseRelativeItalian, buildFormFromExtraction, categoryGuess, signalFromText, cleanTitle,
+  sellerProfileGuess, listingAgeGuess, findPriceInText,
 } from '../src/core/index.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Sunday 4 October 2026, 16:00 local time.
 const SUNDAY_AFTERNOON = new Date(2026, 9, 4, 16, 0)
@@ -437,4 +441,83 @@ test('optimizer: unreachable goals report the ceiling, over-cap inputs are optim
   const capped = optimizeOffer({ ...base, category: 'electronics', listPrice: '200', targetPrice: '110' }, SUNDAY_AFTERNOON, { targetProbability: 0.5 })
   assert.equal(capped.capped, true)
   assert.equal(capped.current.price, 120)
+})
+
+const FIXTURE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'vinted-item-sample.html'), 'utf8')
+
+test('extractor: a real Vinted item page yields title, price, brand, upload age and seller activity', () => {
+  const ex = parseVintedItemHtml(FIXTURE)
+  assert.ok(ex.title && ex.title.includes('Abitino'))
+  assert.equal(ex.listPrice, 8.9)
+  assert.equal(ex.currency, 'EUR')
+  assert.equal(ex.brand, 'H&M')
+  assert.equal(ex.condition, 'usato')
+  assert.ok(ex.categoryText.startsWith('Donna'))
+  assert.equal(ex.uploadedText, 'un minuto fa')
+  assert.ok(ex.uploadedDays !== null && ex.uploadedDays < 0.01)
+  assert.equal(ex.sellerUsername, 'venditore_demo')
+  assert.equal(ex.sellerRating, 5)
+  assert.equal(ex.sellerFeedbackCount, 1626)
+  assert.equal(ex.sellerBusiness, false)
+  assert.deepEqual(ex.sellerBadges, ['ACTIVE_LISTER', 'SPEEDY_SHIPPING'])
+  assert.ok(ex.sellerLastSeenText.includes('26 min'))
+  assert.ok(ex.sellerLastSeenDays < 0.05)
+  assert.ok(ex.found.includes('prezzo') && ex.found.includes('data di caricamento'))
+})
+
+test('extractor: relative Italian times', () => {
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} ≠ ${b}`)
+  near(parseRelativeItalian('Ultima visita 26 min fa') * 1440, 26)
+  near(parseRelativeItalian("un'ora fa") * 24, 1)
+  near(parseRelativeItalian('2 ore fa') * 24, 2)
+  assert.equal(parseRelativeItalian('ieri'), 1)
+  assert.equal(parseRelativeItalian('3 giorni fa'), 3)
+  assert.equal(parseRelativeItalian('una settimana fa'), 7)
+  assert.equal(parseRelativeItalian('2 settimane fa'), 14)
+  assert.equal(parseRelativeItalian('un mese fa'), 30)
+  assert.equal(parseRelativeItalian('3 mesi fa'), 90)
+  assert.equal(parseRelativeItalian('un anno fa'), 365)
+  assert.equal(parseRelativeItalian('boh'), null)
+})
+
+test('extractor: mapping onto the form, with a default −20% target', () => {
+  const ex = parseVintedItemHtml(FIXTURE)
+  const { form, summary } = buildFormFromExtraction(ex, { link: 'https://www.vinted.it/items/10255420870', previousForm: { listingSignal: 'none' } })
+  assert.equal(form.category, 'fast_fashion')
+  assert.equal(form.listingAge, 'today')
+  assert.equal(form.listPrice, '8,9')
+  assert.equal(form.targetPrice, '7')
+  assert.equal(form.listingSignal, 'none')
+  assert.equal(form.sellerProfile, 'expert')
+  assert.ok(!/[🎀]/u.test(form.itemTitle) && form.itemTitle.startsWith('Strepitoso Abitino'), form.itemTitle)
+  assert.equal(cleanTitle('🎀Strepitoso🎀 Abitino cut out velour nero elasticizzato ed avvolgente H&M divided tg. XS', 40), 'Strepitoso Abitino cut out velour nero')
+  assert.equal(cleanTitle('  Giacca   Zara  '), 'Giacca Zara')
+  assert.ok(summary.found.some((f) => f.includes('1626 recensioni') && f.includes('spedisce in fretta')))
+  assert.ok(summary.found.length >= 3)
+  assert.ok(summary.guessed.some((g) => g.startsWith('Categoria')))
+  const r = analyzeOffer(form, SUNDAY_AFTERNOON)
+  assert.equal(r.kind, 'analysis')
+})
+
+test('extractor: category, seller and signal heuristics', () => {
+  assert.equal(categoryGuess({ categoryText: 'Bambini Scarpe', brand: 'Nike' }).id, 'kids')
+  assert.equal(categoryGuess({ categoryText: 'Donna Borse', brand: 'Gucci', listPrice: 450 }).id, 'luxury')
+  assert.equal(categoryGuess({ categoryText: 'Uomo Scarpe Sneakers', brand: 'Nike', title: 'Nike Air Force 1' }).id, 'sneakers')
+  assert.equal(categoryGuess({ categoryText: 'Elettronica Console', brand: 'Nintendo', title: 'Nintendo Switch' }).id, 'electronics')
+  assert.equal(categoryGuess({ categoryText: 'Collezionismo Carte', title: 'Carta Pokémon Charizard' }).id, 'collectible')
+  assert.equal(categoryGuess({ categoryText: 'Donna Jeans', brand: 'Zara' }).id, 'fast_fashion')
+  assert.equal(categoryGuess({ categoryText: 'Donna Jeans', brand: "Levi's" }).id, 'other')
+  assert.equal(sellerProfileGuess({ lastSeenDays: 20 }).id, 'inactive')
+  assert.equal(sellerProfileGuess({ feedbackCount: 2, rating: 5 }).id, 'new_seller')
+  assert.equal(sellerProfileGuess({ feedbackCount: 120, rating: 4.9 }).id, 'expert')
+  assert.equal(sellerProfileGuess({ feedbackCount: null, rating: 5, lastSeenDays: 0.1 }).id, 'unknown')
+  assert.equal(listingAgeGuess(0.2), 'today')
+  assert.equal(listingAgeGuess(10), 'weeks_1_2')
+  assert.equal(listingAgeGuess(45), 'over_month')
+  assert.equal(signalFromText('Bellissima giacca, prezzo non trattabile').id, 'fixed_price')
+  assert.equal(signalFromText('Svuoto l\'armadio, vendo tutto!').id, 'clearing_out')
+  assert.equal(signalFromText('Accetto offerte ragionevoli').id, 'open_to_offers')
+  assert.equal(signalFromText('Giacca in ottime condizioni').id, 'none')
+  assert.equal(findPriceInText('Vendo a 12,50 € spedizione esclusa'), 12.5)
+  assert.equal(findPriceInText('nessun prezzo'), null)
 })

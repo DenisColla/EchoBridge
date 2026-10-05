@@ -17,7 +17,7 @@ import { VerdictCard } from './components/VerdictCard.jsx'
  * components are presentational: port to React Native by swapping ./components.
  */
 export default function VintedOfferAnalyzer({ clock } = {}) {
-  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption } = useOfferAnalysis({ clock })
+  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText } = useOfferAnalysis({ clock })
   const resultsRef = useRef(null)
 
   useEffect(() => {
@@ -49,7 +49,7 @@ export default function VintedOfferAnalyzer({ clock } = {}) {
 
       <main className="mx-auto grid max-w-6xl gap-5 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-8">
         <div className="lg:sticky lg:top-6 lg:self-start">
-          <OfferForm form={form} errors={errors} livePreview={livePreview} onChange={setField} onApplyDiscount={applyDiscount} onSubmit={analyze} onReset={reset} />
+          <OfferForm form={form} errors={errors} livePreview={livePreview} onChange={setField} onApplyDiscount={applyDiscount} onSubmit={analyze} onReset={reset} onListingText={applyListingText} />
         </div>
 
         <div ref={resultsRef} className="flex min-w-0 flex-col gap-5 scroll-mt-4">

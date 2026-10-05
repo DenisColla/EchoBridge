@@ -6,7 +6,29 @@ import {
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneColors, toneForLevel, toneForProbability, useTheme } from '../theme.js'
-import { Badge, Body, Button, ButtonRow, Card, Chip, Meter, Note, Row, SectionLabel, Title } from './ui.js'
+import { Badge, Body, Button, ButtonRow, Card, Chip, Collapsible, Meter, Note, Row, SectionLabel, Title } from './ui.js'
+
+/** What the extractor read from the listing, what it guessed and what it could not find: the user sees the basis of the numbers. */
+function SourceCard({ extraction, onEdit }) {
+  const { summary } = extraction
+  const guessed = summary.guessed.filter((g) => !/\(nessun indizio|non lo so/i.test(g))
+  return (
+    <Card>
+      <SectionLabel>Letto dall'annuncio</SectionLabel>
+      <Title>Su che cosa si basa il calcolo</Title>
+      {summary.found.map((f) => <Body key={f} small>✓ {f}</Body>)}
+      {summary.condition || summary.brand ? <Body muted small>{[summary.brand && `Marca ${summary.brand}`, summary.condition && `condizioni: ${summary.condition}`].filter(Boolean).join(' · ')}</Body> : null}
+      {guessed.length > 0 && (
+        <View style={{ gap: 2 }}>
+          <Body small style={{ fontWeight: '700' }}>Stimati, da controllare:</Body>
+          {guessed.map((g) => <Body key={g} small>• {g}</Body>)}
+        </View>
+      )}
+      {summary.missing.length > 0 && <Body muted small>Non trovati: {summary.missing.join(', ')}. Puoi indicarli a mano nel modulo.</Body>}
+      <Button label="Modifica i dati" variant="secondary" small onPress={onEdit} />
+    </Card>
+  )
+}
 
 function ScoreCard({ result }) {
   const t = useTheme()
@@ -14,6 +36,8 @@ function ScoreCard({ result }) {
   const tone = toneForProbability(probability)
   const c = toneColors(t, tone)
   const rows = factors.rows.filter((r) => r.deltaPoints !== 0)
+  const strongest = [...rows].sort((a, b) => Math.abs(b.deltaPoints) - Math.abs(a.deltaPoints)).slice(0, 2)
+  const factorSummary = [`sconto ${Math.round(input.discountPct)}% → ${factors.basePct}%`, ...strongest.map((f) => `${f.label.toLowerCase()} ${formatSignedPoints(f.deltaPoints)}`)].join(' · ')
   const showEquation = components.pAvailable < 0.995 || components.pRead < 0.995 || toPercent(probability) !== factors.totalPct
   const missing = [
     input.listingAge.id === 'unknown' && "l'anzianità dell'annuncio",
@@ -48,8 +72,7 @@ function ScoreCard({ result }) {
           {' '}{suggestedPrice ? 'Usa il prezzo consigliato nella strategia.' : 'Alza il prezzo o scrivi prima al venditore.'}
         </Note>
       )}
-      <View style={{ gap: 6 }}>
-        <SectionLabel>Che cosa pesa sul risultato</SectionLabel>
+      <Collapsible title="Che cosa pesa sul risultato" summary={factorSummary}>
         <View style={styles.factorRow}>
           <Body style={styles.factorLabel}>Sconto {articleFor(input.discountPct)}{Math.round(input.discountPct)}%: punto di partenza</Body>
           <Text style={[styles.factorValue, { color: t.ink }]}>{factors.basePct}%</Text>
@@ -69,13 +92,13 @@ function ScoreCard({ result }) {
           <Body style={[styles.factorLabel, { fontWeight: '600' }]}>Accettazione nel momento consigliato</Body>
           <Text style={[styles.factorValue, { color: t.ink }]}>{factors.totalPct}%</Text>
         </View>
-      </View>
-      {blockRisk.reasons.length > 0 && (
-        <View style={{ gap: 6 }}>
-          <SectionLabel>Perché il rischio di rifiuto secco è {blockRisk.label.toLowerCase()}</SectionLabel>
-          <Row>{blockRisk.reasons.map((r) => <Badge key={r} tone={toneForLevel(blockRisk.level)}>{r}</Badge>)}</Row>
-        </View>
-      )}
+        {blockRisk.reasons.length > 0 && (
+          <View style={{ gap: 6, paddingTop: 4 }}>
+            <SectionLabel>Perché il rischio di rifiuto secco è {blockRisk.label.toLowerCase()}</SectionLabel>
+            <Row>{blockRisk.reasons.map((r) => <Badge key={r} tone={toneForLevel(blockRisk.level)}>{r}</Badge>)}</Row>
+          </View>
+        )}
+      </Collapsible>
     </Card>
   )
 }
@@ -125,22 +148,29 @@ function VerdictCard({ result }) {
           {' '}({toPercent(quick.pOverall) - toPercent(optimal.pOverall) === 0 ? 'stesse probabilità' : formatPoints(toPercent(quick.pOverall) - toPercent(optimal.pOverall))} rispetto al momento consigliato, {quick.daysWaited === 0 ? 'con nessun rischio' : 'con meno rischio'} che venga venduto prima).
         </Note>
       )}
-      {alternatives.length > 0 && (
-        <View style={{ gap: 4 }}>
-          <SectionLabel>Altre finestre valide</SectionLabel>
-          {alternatives.map((s) => (
-            <View key={s.date.getTime()} style={styles.factorRow}>
-              <Body style={styles.factorLabel}>{capitalize(formatLongDate(s.date, now))} · {formatTime(s.date)} · {formatRelativeDay(s.date, now)}</Body>
-              <Text style={[styles.factorValue, { color: t.ink }]}>{toPercent(s.pOverall)}%</Text>
+      {(alternatives.length > 0 || avoidToday.length > 0) && (
+        <Collapsible
+          title="Altre finestre e fasce da evitare"
+          summary={[alternatives.length ? `${alternatives.length} altre finestre valide` : null, avoidToday.length ? `evita: ${avoidToday.map((w) => w.label.toLowerCase()).join(', ')}` : null].filter(Boolean).join(' · ')}
+        >
+          {alternatives.length > 0 && (
+            <View style={{ gap: 4 }}>
+              <SectionLabel>Altre finestre valide</SectionLabel>
+              {alternatives.map((s) => (
+                <View key={s.date.getTime()} style={styles.factorRow}>
+                  <Body style={styles.factorLabel} numberOfLines={1}>{capitalize(formatLongDate(s.date, now))} · {formatTime(s.date)} · {formatRelativeDay(s.date, now)}</Body>
+                  <Text style={[styles.factorValue, { color: t.ink }]}>{toPercent(s.pOverall)}%</Text>
+                </View>
+              ))}
             </View>
-          ))}
-        </View>
-      )}
-      {avoidToday.length > 0 && (
-        <View style={{ gap: 6 }}>
-          <SectionLabel>Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : formatLongDate(optimal.date, now).split(' ')[0]}</SectionLabel>
-          <Row>{avoidToday.map((w) => <Badge key={w.id} tone="bad">{w.label} · {w.rangeLabel}</Badge>)}</Row>
-        </View>
+          )}
+          {avoidToday.length > 0 && (
+            <View style={{ gap: 6 }}>
+              <SectionLabel>Fasce da evitare {optimal.daysWaited === 0 ? 'oggi' : formatLongDate(optimal.date, now).split(' ')[0]}</SectionLabel>
+              <Row>{avoidToday.map((w) => <Badge key={w.id} tone="bad">{w.label} · {w.rangeLabel}</Badge>)}</Row>
+            </View>
+          )}
+        </Collapsible>
       )}
     </Card>
   )
@@ -244,7 +274,7 @@ function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply, busy })
   )
 }
 
-export function ResultView({ result, onSave, saveState, onCalendar, goal, onGoal, plan, onOptimize, onApply, optimizing }) {
+export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData }) {
   const t = useTheme()
   if (result.kind === 'no_offer_needed') {
     return (
@@ -264,6 +294,9 @@ export function ResultView({ result, onSave, saveState, onCalendar, goal, onGoal
         </Note>
       )}
       {result.pinned && <Note>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</Note>}
+      <ScoreCard result={result} />
+      <VerdictCard result={result} />
+      {extraction && extraction.ok && <SourceCard extraction={extraction} onEdit={onEditData} />}
       <Card style={{ borderColor: t.accent }}>
         <SectionLabel>Promemoria</SectionLabel>
         <Title>Salva e ricordamelo</Title>
@@ -273,12 +306,10 @@ export function ResultView({ result, onSave, saveState, onCalendar, goal, onGoal
         {saveState && saveState.message ? <Note tone={saveState.tone}>{saveState.message}</Note> : null}
         <ButtonRow>
           <Button label={saveState && saveState.saved ? 'Salvato nella lista' : 'Salva e ricordamelo'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
-          <Button label="Metti in calendario" variant="secondary" onPress={onCalendar} />
+          <Button label={calendarBusy ? 'Aggiungo…' : 'Metti in calendario'} variant="secondary" onPress={onCalendar} disabled={calendarBusy} />
         </ButtonRow>
       </Card>
       <OptimizeCard result={result} goal={goal} onGoal={onGoal} plan={plan} onOptimize={onOptimize} onApply={onApply} busy={optimizing} />
-      <ScoreCard result={result} />
-      <VerdictCard result={result} />
       <StrategyCard result={result} />
       <MessageCard key={result.now.getTime()} result={result} />
     </View>

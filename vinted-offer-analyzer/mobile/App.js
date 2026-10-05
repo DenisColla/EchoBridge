@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
+import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { analyzeOffer, nextGoalFor, optimizeOffer } from './core/index.js'
+import { analyzeOffer, buildFormFromExtraction, nextGoalFor, optimizeOffer, parseVintedItemHtml } from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
 import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
-import { addToDeviceCalendar, eventNotesFor, openGoogleCalendar } from './src/services/calendar.js'
+import { addToDeviceCalendar, eventNotesFor, openAppSettings, openCalendarEditor, openGoogleCalendar, shareIcs } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
+import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 
 const TABS = [
@@ -19,6 +20,17 @@ const TABS = [
 ]
 
 const EXAMPLE_FORM = { ...EMPTY_FORM, itemTitle: 'Nike Air Force 1 bianche, 42', category: 'sneakers', listPrice: '60', targetPrice: '45', listingAge: 'weeks_1_2' }
+
+/** Default ask when the price comes from the listing: −20% sits in the "medium risk" band, the usual starting point on Vinted. */
+const DEFAULT_TARGET_DISCOUNT = 20
+
+const EXTRACT_ERRORS = {
+  not_a_vinted_link: 'Serve un link a un articolo Vinted, del tipo vinted.it/items/… .',
+  timeout: 'Vinted non ha risposto in tempo. Controlla la connessione e riprova.',
+  network: 'Nessuna connessione: non riesco a scaricare l\'annuncio. Puoi compilare i dati a mano.',
+  blocked: 'Vinted ha bloccato la lettura automatica di questa pagina. Compila i dati a mano: il link resta salvato per il promemoria.',
+  empty: 'Pagina scaricata ma senza i dati dell\'annuncio: forse è stato venduto o riservato. Compila i dati a mano.',
+}
 
 export default function App() {
   return (
@@ -42,7 +54,14 @@ function Main() {
   const [pinnedSendAt, setPinnedSendAt] = useState(null)
   const [highlightId, setHighlightId] = useState(null)
   const [toast, setToast] = useState(null)
+  const [extracting, setExtracting] = useState(false)
+  const [extraction, setExtraction] = useState(null)
+  const [clipboardLink, setClipboardLink] = useState(null)
   const scrollRef = useRef(null)
+  const formYRef = useRef(0)
+  const formViewRef = useRef(null)
+  const formRef = useRef(form)
+  const offeredLinkRef = useRef(null)
   const watchlist = useWatchlist()
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -108,7 +127,99 @@ function Main() {
     setSaveState(null)
     setPlan(null)
     setPinnedSendAt(null)
+    setExtraction(null)
   }
+
+  useEffect(() => { formRef.current = form }, [form])
+
+  /** Measures the form at tap time (its offset moves when sections above fold or unfold), with the last layout as fallback. */
+  const scrollToForm = () => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const go = (y) => scroller.scrollTo({ y: Math.max(0, y - 8), animated: true })
+    const node = formViewRef.current
+    const inner = scroller.getInnerViewRef ? scroller.getInnerViewRef() : (scroller.getInnerViewNode ? scroller.getInnerViewNode() : null)
+    if (node && inner && typeof node.measureLayout === 'function') {
+      try {
+        node.measureLayout(inner, (x, y) => go(y), () => go(formYRef.current))
+        return
+      } catch {
+        // fall through to the last known layout
+      }
+    }
+    go(formYRef.current)
+  }
+
+  /**
+   * The one-tap path: download the public listing page, read title, price, upload age and seller activity,
+   * map them onto the form (target = list price −20%) and run the analysis. Every failure ends in a message,
+   * never in a silent no-op, and the link stays in the form so the manual path still works.
+   */
+  const extractFromLink = async (rawLink) => {
+    const link = normalizeVintedLink(rawLink)
+    offeredLinkRef.current = link || rawLink
+    setClipboardLink(null)
+    if (!link) {
+      setExtraction({ ok: false, message: EXTRACT_ERRORS.not_a_vinted_link })
+      return
+    }
+    if (extracting) return
+    setExtracting(true)
+    setExtraction(null)
+    setField('link', link)
+    try {
+      const page = await fetchVintedItemPage(link)
+      if (!page.ok) {
+        const message = page.reason === 'http'
+          ? (page.status === 404 ? 'L\'annuncio non esiste più o è stato rimosso.' : `Vinted ha risposto con un errore (${page.status}). Riprova tra poco o compila i dati a mano.`)
+          : EXTRACT_ERRORS[page.reason] || EXTRACT_ERRORS.network
+        setExtraction({ ok: false, message })
+        return
+      }
+      const ex = parseVintedItemHtml(page.html)
+      if (!ex.title && !ex.listPrice) {
+        setExtraction({ ok: false, message: EXTRACT_ERRORS.empty })
+        return
+      }
+      const built = buildFormFromExtraction(ex, { link, targetDiscountPct: DEFAULT_TARGET_DISCOUNT, previousForm: { ...EMPTY_FORM, link } })
+      setForm(built.form)
+      setPlan(null)
+      setPinnedSendAt(null)
+      const outcome = runAnalysis(built.form, null)
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now() })
+      if (!outcome) {
+        showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
+        setTimeout(scrollToForm, 80)
+      }
+    } catch (error) {
+      setExtraction({ ok: false, message: `Errore inatteso durante la lettura: ${String(error && error.message ? error.message : error)}` })
+    } finally {
+      setExtracting(false)
+    }
+  }
+
+  const pasteLink = async () => {
+    const link = await readVintedLinkFromClipboard()
+    if (!link) {
+      showToast('Negli appunti non c\'è un link a un articolo Vinted.')
+      return
+    }
+    await extractFromLink(link)
+  }
+
+  /** When the app comes back to the foreground with a Vinted link copied, offer the one-tap path. */
+  const checkClipboard = useCallback(async () => {
+    const link = await readVintedLinkFromClipboard()
+    if (!link) return
+    if (link === offeredLinkRef.current || link === normalizeVintedLink(formRef.current.link)) return
+    setClipboardLink(link)
+  }, [])
+
+  useEffect(() => {
+    checkClipboard()
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') checkClipboard() })
+    return () => sub.remove()
+  }, [checkClipboard])
 
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
@@ -134,21 +245,43 @@ function Main() {
     }),
   })
 
-  /** One action: device calendar first; if it is refused or fails, open Google Calendar pre-filled instead. */
+  const [calendarBusy, setCalendarBusy] = useState(false)
+  const [calendarFallback, setCalendarFallback] = useState(null)
+
+  /**
+   * One action, three paths: the device calendar (needs permission); if refused or failing,
+   * the user chooses between a .ics file for any calendar app and Google Calendar pre-filled.
+   */
   const addCalendar = async (source, itemId) => {
+    if (calendarBusy) return
     const payload = calendarPayload(source)
+    setCalendarBusy(true)
+    setCalendarFallback(null)
     try {
       const outcome = await addToDeviceCalendar(payload)
       if (outcome.ok) {
         if (itemId) await watchlist.update(itemId, { calendarEventId: outcome.eventId })
-        showToast(`Evento aggiunto al calendario${outcome.calendarName ? ` "${outcome.calendarName}"` : ''}.`)
+        showToast(`Evento aggiunto al calendario "${outcome.calendarName}" con avviso 10 minuti prima.`)
         return
       }
-      showToast(outcome.reason === 'permission' ? 'Permesso negato: apro Google Calendar.' : 'Calendario del telefono non disponibile: apro Google Calendar.')
-    } catch {
-      showToast('Calendario del telefono non disponibile: apro Google Calendar.')
+      // Direct insertion failed: hand over to the calendar app's own editor, pre-filled (needs no permission).
+      const editor = await openCalendarEditor(payload)
+      if (editor.ok) {
+        if (editor.action === 'canceled') showToast('Evento non salvato.')
+        else showToast('Controlla il calendario: l\'evento è stato proposto all\'app calendario, con avviso 10 minuti prima.')
+        return
+      }
+      const why = outcome.reason === 'permission_blocked'
+        ? 'Permesso calendario bloccato nelle impostazioni di Android.'
+        : outcome.reason === 'permission'
+          ? 'Permesso calendario non concesso.'
+          : outcome.reason === 'no_calendar'
+            ? 'Nessun calendario modificabile trovato sul telefono.'
+            : `Il calendario del telefono ha risposto con un errore: ${outcome.error || 'sconosciuto'}.`
+      setCalendarFallback({ payload, why, blocked: outcome.reason === 'permission_blocked' })
+    } finally {
+      setCalendarBusy(false)
     }
-    openGoogleCalendar(payload).catch(() => showToast('Impossibile aprire Google Calendar.'))
   }
 
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
@@ -169,12 +302,22 @@ function Main() {
         <ScrollView ref={scrollRef} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
+              {clipboardLink && (
+                <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
+                  <Text style={{ color: t.accentInk, fontSize: 14, flex: 1, minWidth: 0 }} numberOfLines={2}>Hai copiato un link Vinted: lo leggo e calcolo subito?</Text>
+                  <View style={{ flexDirection: 'row', gap: space.sm }}>
+                    <Pressable onPress={() => extractFromLink(clipboardLink)} style={[styles.bannerButton, { backgroundColor: t.accent }]} accessibilityRole="button"><Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 14 }}>Estrai e calcola</Text></Pressable>
+                    <Pressable onPress={() => { offeredLinkRef.current = clipboardLink; setClipboardLink(null) }} style={styles.bannerButton} accessibilityRole="button"><Text style={{ color: t.accentInk, fontWeight: '700', fontSize: 14 }}>Ignora</Text></Pressable>
+                  </View>
+                </View>
+              )}
               {result && (
                 <ResultView
                   result={result}
                   saveState={saveState}
                   onSave={saveCurrent}
                   onCalendar={() => addCalendar(result, saveState && saveState.itemId)}
+                  calendarBusy={calendarBusy}
                   goal={goal}
                   onGoal={setGoal}
                   plan={plan}
@@ -182,9 +325,23 @@ function Main() {
                   onApply={applyOption}
                   optimizing={optimizing}
                   onRecalc={recalcKeepingPin}
+                  extraction={extraction}
+                  onEditData={scrollToForm}
                 />
               )}
-              <OfferForm form={form} errors={errors} onChange={setField} onSubmit={analyze} onReset={reset} />
+              <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
+                <OfferForm
+                  form={form}
+                  errors={errors}
+                  onChange={setField}
+                  onSubmit={analyze}
+                  onReset={reset}
+                  onExtract={extractFromLink}
+                  onPasteLink={pasteLink}
+                  extracting={extracting}
+                  extraction={extraction}
+                />
+              </View>
             </View>
           )}
           {tab === 'lista' && (
@@ -219,6 +376,29 @@ function Main() {
           )
         })}
       </View>
+
+      {calendarFallback && (
+        <View style={[styles.sheetBackdrop]}>
+          <View style={[styles.sheet, { backgroundColor: t.card, borderColor: t.line, paddingBottom: bottomInset + space.md }]}>
+            <Text style={[styles.sheetTitle, { color: t.ink }]}>Calendario del telefono non disponibile</Text>
+            <Text style={{ color: t.ink2, fontSize: 14, lineHeight: 20 }}>{calendarFallback.why} Scegli un'alternativa:</Text>
+            <Pressable style={[styles.sheetButton, { backgroundColor: t.accent }]} onPress={async () => { const r = await shareIcs(calendarFallback.payload); setCalendarFallback(null); showToast(r.ok ? 'Scegli l\'app calendario nella finestra di condivisione.' : 'Condivisione non disponibile su questo telefono.') }}>
+              <Text style={[styles.sheetButtonText, { color: t.onAccent }]}>Apri con un'app calendario (.ics)</Text>
+            </Pressable>
+            <Pressable style={[styles.sheetButton, { borderColor: t.line, borderWidth: 1 }]} onPress={() => { const p = calendarFallback.payload; setCalendarFallback(null); openGoogleCalendar(p).catch(() => showToast('Impossibile aprire Google Calendar.')) }}>
+              <Text style={[styles.sheetButtonText, { color: t.ink }]}>Apri Google Calendar precompilato</Text>
+            </Pressable>
+            {calendarFallback.blocked && (
+              <Pressable style={[styles.sheetButton, { borderColor: t.line, borderWidth: 1 }]} onPress={() => { setCalendarFallback(null); openAppSettings() }}>
+                <Text style={[styles.sheetButtonText, { color: t.ink }]}>Apri le impostazioni dell'app</Text>
+              </Pressable>
+            )}
+            <Pressable style={styles.sheetButton} onPress={() => setCalendarFallback(null)}>
+              <Text style={[styles.sheetButtonText, { color: t.ink3 }]}>Annulla</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
     </View>
   )
 }
@@ -232,6 +412,13 @@ const styles = StyleSheet.create({
   appTagline: { fontSize: 12 },
   content: { padding: space.lg, paddingBottom: 96, gap: space.lg },
   toast: { position: 'absolute', left: space.lg, right: space.lg, borderRadius: 12, padding: space.md },
+  banner: { borderWidth: 1, borderRadius: 12, padding: space.md, gap: space.sm },
+  bannerButton: { minHeight: 40, borderRadius: 10, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  sheetBackdrop: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(2, 6, 23, 0.45)', justifyContent: 'flex-end' },
+  sheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: space.lg, gap: space.sm },
+  sheetTitle: { fontSize: 17, fontWeight: '700' },
+  sheetButton: { minHeight: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.md },
+  sheetButtonText: { fontSize: 15, fontWeight: '700' },
   tabBar: { flexDirection: 'row', borderTopWidth: 1 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
   tabLabel: { fontSize: 14 },

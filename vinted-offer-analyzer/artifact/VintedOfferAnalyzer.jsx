@@ -4,7 +4,7 @@
  * Requires: react, lucide-react, Tailwind CSS classes.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Baby, BadgeEuro, Ban, Briefcase, Calculator, CalendarClock, Check, Clock, Coffee, Copy, Crown, Footprints, Gauge, Gem, Hourglass, Lightbulb, MessageSquare, Moon, Package, Repeat, RotateCcw, Scale, ShieldAlert, Shirt, Smartphone, Sparkles, Star, Sun, Tag, TriangleAlert, Utensils, X, Zap } from 'lucide-react'
+import { Baby, BadgeEuro, Ban, Briefcase, Calculator, CalendarClock, Check, ClipboardPaste, Clock, Coffee, Copy, Crown, Footprints, Gauge, Gem, Hourglass, Lightbulb, MessageSquare, Moon, Package, Repeat, RotateCcw, Scale, ShieldAlert, Shirt, Smartphone, Sparkles, Star, Sun, Tag, TriangleAlert, Utensils, X, Zap } from 'lucide-react'
 
 // ───────────────────────── src/core/math.js ─────────────────────────
 /**
@@ -1395,6 +1395,18 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
     return run(nextForm, option.apply.preferredSendAt)
   }, [form, run])
 
+  /** Reads negotiation signals (and a price, when the form has none) from pasted listing text. */
+  const applyListingText = useCallback((text) => {
+    const signal = signalFromText(text)
+    const price = findPriceInText(text)
+    setForm((prev) => ({
+      ...prev,
+      listingSignal: signal.id,
+      listPrice: prev.listPrice || (price ? String(price).replace('.', ',') : prev.listPrice),
+    }))
+    return { signal, price }
+  }, [])
+
   const reset = useCallback(() => {
     setForm(EMPTY_FORM)
     setResult(null)
@@ -1403,7 +1415,7 @@ function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new Date()
     setPlan(null)
   }, [])
 
-  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption }
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText }
 }
 
 // ───────────────────────── src/components/icons.js ─────────────────────────
@@ -1582,7 +1594,9 @@ function ChipGroup({ id, label, hint, options, value, onChange, error, columns =
 const categoryOptions = CATEGORIES.map((c) => ({ id: c.id, label: c.label, hint: c.hint, icon: iconByName(c.icon) }))
 const QUICK_DISCOUNTS = [10, 15, 20, 25, 30]
 
-function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSubmit, onReset }) {
+function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSubmit, onReset, onListingText }) {
+  const [pasted, setPasted] = useState('')
+  const [pasteNote, setPasteNote] = useState(null)
   const handleSubmit = (event) => {
     event.preventDefault()
     onSubmit()
@@ -1706,6 +1720,28 @@ function OfferForm({ form, errors, livePreview, onChange, onApplyDiscount, onSub
           onChange={(v) => onChange('listingSignal', v)}
           columns="grid-cols-2"
         />
+
+        <Field id="listingText" label="Incolla il testo dell'annuncio" hint="(facoltativo: leggo da solo segnali e prezzo)">
+          <textarea
+            id="listingText"
+            name="listingText"
+            value={pasted}
+            onChange={(e) => setPasted(e.target.value)}
+            rows={3}
+            placeholder="Copia la descrizione da Vinted e incollala qui"
+            className={cx('w-full rounded-xl px-3.5 py-3 text-sm outline-none transition-shadow', SURFACE.input)}
+          />
+        </Field>
+        <div className="-mt-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+          <Button variant="secondary" icon={ClipboardPaste} onClick={() => { const r = onListingText(pasted); setPasteNote(r) }} disabled={!pasted.trim()} className="w-full sm:w-auto">
+            Leggi segnali dal testo
+          </Button>
+          {pasteNote && (
+            <p className={cx('text-xs', SURFACE.muted)}>
+              {pasteNote.signal.reason}{pasteNote.price ? ` · prezzo trovato ${String(pasteNote.price).replace('.', ',')} €` : ''}. Nell'app Android basta incollare il link.
+            </p>
+          )}
+        </div>
 
         <div className="flex flex-col gap-2 pt-1 sm:flex-row">
           <Button type="submit" icon={Calculator} className="w-full sm:flex-1">
@@ -2093,7 +2129,7 @@ function EmptyState() {
  * components are presentational: port to React Native by swapping ./components.
  */
 function VintedOfferAnalyzer({ clock } = {}) {
-  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption } = useOfferAnalysis({ clock })
+  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText } = useOfferAnalysis({ clock })
   const resultsRef = useRef(null)
 
   useEffect(() => {
@@ -2125,7 +2161,7 @@ function VintedOfferAnalyzer({ clock } = {}) {
 
       <main className="mx-auto grid max-w-6xl gap-5 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-8">
         <div className="lg:sticky lg:top-6 lg:self-start">
-          <OfferForm form={form} errors={errors} livePreview={livePreview} onChange={setField} onApplyDiscount={applyDiscount} onSubmit={analyze} onReset={reset} />
+          <OfferForm form={form} errors={errors} livePreview={livePreview} onChange={setField} onApplyDiscount={applyDiscount} onSubmit={analyze} onReset={reset} onListingText={applyListingText} />
         </div>
 
         <div ref={resultsRef} className="flex min-w-0 flex-col gap-5 scroll-mt-4">

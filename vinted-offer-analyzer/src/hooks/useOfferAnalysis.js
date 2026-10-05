@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { VINTED, analyzeOffer, computeDiscountPct, nextGoalFor, optimizeOffer, parsePrice, riskBandFor } from '../core/index.js'
+import { VINTED, analyzeOffer, computeDiscountPct, findPriceInText, nextGoalFor, optimizeOffer, parsePrice, riskBandFor, signalFromText } from '../core/index.js'
 
 export const EXAMPLE_FORM = {
   itemTitle: 'Nike Air Force 1 bianche, 42',
@@ -90,6 +90,18 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     return run(nextForm, option.apply.preferredSendAt)
   }, [form, run])
 
+  /** Reads negotiation signals (and a price, when the form has none) from pasted listing text. */
+  const applyListingText = useCallback((text) => {
+    const signal = signalFromText(text)
+    const price = findPriceInText(text)
+    setForm((prev) => ({
+      ...prev,
+      listingSignal: signal.id,
+      listPrice: prev.listPrice || (price ? String(price).replace('.', ',') : prev.listPrice),
+    }))
+    return { signal, price }
+  }, [])
+
   const reset = useCallback(() => {
     setForm(EMPTY_FORM)
     setResult(null)
@@ -98,5 +110,5 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     setPlan(null)
   }, [])
 
-  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption }
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText }
 }

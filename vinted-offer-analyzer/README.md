@@ -27,6 +27,7 @@ src/
     messages.js    quattro template di messaggio (cordiale / diretto / impegno all'acquisto / motivato)
     analyze.js     analyzeOffer(form, now, { preferredSendAt }): punto d'ingresso unico (analisi, nessuna offerta, oltre il tetto)
     optimize.js    optimizeOffer: come arrivare a una probabilità obiettivo (aspetta / alza / entrambe)
+    extract.js     parseVintedItemHtml + buildFormFromExtraction: dalla pagina pubblica di un annuncio al modulo compilato
     dates.js       formattazione italiana senza Intl, festivi, fuso Europe/Rome, aritmetica DST-safe
     math.js        logit, sigmoide, interpolazione, hash deterministico
   hooks/useOfferAnalysis.js   stato del form e dell'analisi (React puro)
@@ -82,11 +83,21 @@ prezzo pieno. "Applica" fissa il momento scelto (`analyzeOffer(form, now, { pref
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
 offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
 
+## Lettura dell'annuncio
+
+Il motore include un estrattore (`src/core/extract.js`) che legge la pagina pubblica di un annuncio Vinted (JSON-LD
+e frammenti server-side: titolo, prezzo, marca, condizioni, categoria, "caricato … fa", "ultima visita … fa",
+stelle, numero di recensioni, distintivi del venditore) e compila il modulo da solo, con un target al −20%.
+L'app Android lo usa da "Estrai e calcola": basta il link. Nel browser le pagine di Vinted non sono leggibili per
+via del CORS, quindi la versione web offre "Leggi segnali dal testo": incolla il testo dell'annuncio e ricava
+prezzo e segnali ("prezzo fisso", "accetto offerte", "svuoto l'armadio").
+
 ## App Android (APK)
 
 La cartella `mobile/` contiene l'app Expo / React Native pronta: stesso motore (copiato in `mobile/core` da
-`npm run sync-core`), lista "da comprare" con link, notifiche locali 10 minuti prima della finestra consigliata,
-evento in calendario, registro degli esiti. Un APK già compilato è in `mobile/dist/OffertaVintedTiming-arm64.apk`:
+`npm run sync-core`), "Estrai e calcola" dal link, lista "da comprare" con link, notifiche locali 10 minuti prima
+della finestra consigliata, evento in calendario (con editor di sistema, .ics e Google Calendar come alternative),
+registro degli esiti. Un APK già compilato è in `mobile/dist/OffertaVintedTiming-arm64.apk`:
 basta copiarlo sul telefono e aprirlo. Su Windows `mobile\start.bat` installa i prerequisiti, compila e lascia la
 versione universale in `mobile\dist\OffertaVintedTiming.apk`. Istruzioni complete in `mobile/README.md`.
 

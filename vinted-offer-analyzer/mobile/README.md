@@ -3,9 +3,10 @@
 App Android (Expo / React Native) dell'analizzatore di offerte Vinted. Usa lo **stesso motore** della versione web
 (`../src/core`, copiato in `core/`) e aggiunge quello che serve per agire al momento giusto:
 
+- **Dal link al verdetto in un tocco**: incolla il link dell'annuncio (o tocca "Incolla dagli appunti", o accetta il banner che compare quando torni nell'app con un link Vinted copiato) e "Estrai e calcola" legge titolo, prezzo, marca, condizioni, categoria, data di caricamento, ultima attività del venditore, stelle, numero di recensioni e distintivi dalla pagina pubblica, propone un target al −20% e calcola subito. La scheda "Letto dall'annuncio" mostra che cosa è stato trovato, che cosa è stato stimato e che cosa manca; "Modifica i dati" porta al modulo per correggere.
 - **Lista "da comprare"**: ogni analisi si salva con titolo, link all'annuncio, prezzi, momento consigliato e messaggio pronto.
 - **Notifica** 10 minuti prima della finestra consigliata; toccandola si apre la lista sull'articolo, con "Apri annuncio" e "Copia messaggio".
-- **Calendario**: evento di 30 minuti con allarme nel calendario del telefono, oppure "Apri Google Calendar" senza permessi.
+- **Calendario**, in tre vie che si provano in ordine: evento di 30 minuti con allarme scritto direttamente nel calendario scelto (scheda Info → "Calendario in cui salvare"); se il permesso manca o il telefono risponde con un errore, si apre la schermata "nuovo evento" dell'app calendario già compilata (senza permessi); in ultima istanza un foglio propone il file .ics da aprire con qualsiasi calendario o Google Calendar precompilato. L'esito dell'ultima operazione è leggibile nella scheda Info.
 - **Obiettivo**: scegli la probabilità che vorresti (50–90%) e "Portami al N%" elenca i modi più economici per arrivarci: aspettare il momento migliore, alzare di poco l'offerta, o entrambe le cose. "Applica questa scelta" aggiorna prezzo e momento con un tocco.
 - **Esiti**: segna accettata / controproposta / rifiutata / nessuna risposta; la scheda Info confronta l'accettazione reale con la stima media ed esporta i dati in JSON.
 - Tutto resta sul telefono: nessun server, nessun account.
@@ -45,6 +46,8 @@ L'APK è firmato con la chiave di debug generata da Expo: si installa su qualsia
 | Errori di Gradle su nomi file o percorsi | Sposta la cartella in `C:\OffertaVinted` (percorso corto, senza spazi né accenti). |
 | Download interrotti | Rilancia `start.bat`: riprende da dove si era fermato. |
 | Non vuoi installare nulla sul PC | `build-cloud.bat`: compila sui server di Expo (account gratuito su expo.dev), poi scarichi l'APK dal link. |
+| "Metti in calendario" non fa nulla | Apri la scheda Info: la riga "Ultima operazione" dice a che passo si è fermata (permesso, lettura dei calendari, creazione). Se il permesso è bloccato, "Apri le impostazioni dell'app" → Autorizzazioni → Calendario. Senza permesso l'app apre comunque l'editor del calendario già compilato. |
+| "Estrai e calcola" dice che Vinted ha bloccato la pagina | Succede se Vinted mostra una verifica anti-bot: apri l'annuncio nel browser una volta e riprova, oppure compila i dati a mano (il link resta per il promemoria). |
 
 ## Sviluppo
 
