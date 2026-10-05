@@ -262,9 +262,18 @@ function Main() {
       const outcome = await openCalendarWithEvent(payload)
       if (outcome.ok) {
         if (itemId) await watchlist.update(itemId, { calendarOpenedAt: new Date().toISOString() })
-        showToast(VIA_LABEL[outcome.via] || VIA_LABEL.intent, 4000)
+        if (outcome.via === 'google') {
+          // Linking.openURL resolves before the app switch: show the return message once the app is active again.
+          const sub = AppState.addEventListener('change', (state) => {
+            if (state !== 'active') return
+            sub.remove()
+            showToast(VIA_LABEL.google, 4000)
+          })
+        } else {
+          showToast(VIA_LABEL[outcome.via] || VIA_LABEL.intent, 4000)
+        }
       } else {
-        showToast(`Nessuna app calendario ha risposto: ${outcome.errors[0] || 'errore sconosciuto'}. Dettagli nella scheda Info.`)
+        showToast('Nessuna app calendario ha risposto. Dettagli nella scheda Info.', 4000)
       }
     } finally {
       setCalendarBusy(false)

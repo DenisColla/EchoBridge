@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Share, View } from 'react-native'
 import { VINTED } from '../../core/index.js'
 import { ensureNotificationPermission, getNotificationStatus } from '../services/notifications.js'
-import { VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
+import { STEP_LABEL, VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
 import { space } from '../theme.js'
 import { Body, Button, Card, Note, SectionLabel, Title } from './ui.js'
 
@@ -31,7 +31,7 @@ function CalendarSection() {
         sendAt,
         notes: eventNotesFor({ link: 'https://www.vinted.it/', targetPrice: '10', probability: 0.5, message: 'Ciao! Ti ho inviato un\'offerta.' }),
       })
-      setOutcome(result.ok ? { tone: 'good', text: `Via "${result.via}": ${VIA_LABEL[result.via]}` } : { tone: 'bad', text: `Nessuna app calendario ha risposto: ${result.errors.join(' · ')}` })
+      setOutcome(result.ok ? { tone: 'good', text: VIA_LABEL[result.via] || VIA_LABEL.intent } : { tone: 'bad', text: `Nessuna app calendario ha risposto: ${result.errors.join(' · ')}` })
     } finally {
       setBusy(false)
     }
@@ -42,12 +42,12 @@ function CalendarSection() {
       <SectionLabel>Calendario</SectionLabel>
       <Title>Si apre l'app Calendario, tu tocchi Salva</Title>
       <Body muted small>
-        "Metti in calendario" apre la schermata "nuovo evento" del calendario del telefono (Samsung o Google) con titolo, orario e note già compilati; non serve nessun permesso. Se nessuna app calendario risponde, prova Google Calendar e poi un file .ics.
+        "Metti in calendario" apre la schermata "nuovo evento" del calendario del telefono (Samsung o Google) con titolo, orario e note già compilati; non serve nessun permesso. Se nessuna app calendario risponde, l'app prova da sola Google Calendar e poi un file .ics.
       </Body>
       {outcome && <Note tone={outcome.tone}>{outcome.text}</Note>}
       {last && (
         <Body muted small>
-          Ultima operazione: {last.step}{last.resultCode !== undefined ? ` (codice ${last.resultCode})` : ''}{last.error ? ` · errore: ${last.error}` : ''}.
+          Ultima operazione: {STEP_LABEL[last.step] || last.step}{last.error ? ` · errore: ${last.error}` : ''}{last.fallbackFrom ? ` · vie precedenti fallite: ${last.fallbackFrom.join('; ')}` : ''}.
         </Body>
       )}
       <Button label={busy ? 'Apro il calendario…' : 'Prova con un evento di test'} variant="secondary" onPress={tryNow} disabled={busy} />

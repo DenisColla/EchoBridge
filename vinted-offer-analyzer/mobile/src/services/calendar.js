@@ -12,6 +12,7 @@ import * as IntentLauncher from 'expo-intent-launcher'
 import * as FileSystem from 'expo-file-system/legacy'
 import * as Sharing from 'expo-sharing'
 import { Linking, Platform } from 'react-native'
+import { formatEuro } from '../../core/index.js'
 
 const EVENT_MINUTES = 30
 const pad = (n) => String(n).padStart(2, '0')
@@ -34,7 +35,7 @@ const deviceTimeZone = () => {
 export const eventTitleFor = (title) => `Invia l'offerta: ${title && title.trim() ? title.trim() : 'articolo Vinted'}`
 
 export const eventNotesFor = ({ link, targetPrice, probability, message }) => [
-  targetPrice ? `Offerta: ${targetPrice} €` : null,
+  targetPrice && Number.isFinite(Number(String(targetPrice).replace(',', '.'))) ? `Offerta: ${formatEuro(Number(String(targetPrice).replace(',', '.')))}` : null,
   probability ? `Probabilità stimata: ${Math.round(probability * 100)}%` : null,
   link ? `Annuncio: ${link}` : null,
   message ? `\nMessaggio da incollare:\n${message}` : null,
@@ -159,10 +160,15 @@ export async function shareIcs(payload) {
  */
 export async function openCalendarWithEvent(payload) {
   const errors = []
-  for (const step of [openCalendarInsert, openGoogleCalendar, shareIcs]) {
+  // Explicit names: function .name is minified in release bundles.
+  const steps = [['app Calendario', openCalendarInsert], ['Google Calendar', openGoogleCalendar], ['file .ics', shareIcs]]
+  for (const [name, step] of steps) {
     const outcome = await step(payload)
-    if (outcome.ok) return outcome
-    errors.push(`${step.name}: ${outcome.error || outcome.reason}`)
+    if (outcome.ok) {
+      if (errors.length && calendarDiagnostics.last) calendarDiagnostics.last = { ...calendarDiagnostics.last, fallbackFrom: errors }
+      return outcome
+    }
+    errors.push(`${name}: ${outcome.error || outcome.reason}`)
   }
   note({ step: 'all-failed', error: errors.join(' | ') })
   return { ok: false, errors }
@@ -171,9 +177,22 @@ export async function openCalendarWithEvent(payload) {
 /** Shown when the user is back in the app (the intent resolves on return, so the wording must hold after the fact). */
 export const VIA_LABEL = {
   intent: 'Se hai toccato Salva, l\'evento è nel tuo calendario.',
-  google: 'Google Calendar aperto con l\'evento compilato: tocca Salva.',
+  google: 'Se hai toccato Salva in Google Calendar, l\'evento è nel tuo calendario.',
   ics_view: 'File evento aperto nel calendario: conferma l\'importazione.',
   ics: 'Scegli un\'app calendario nella finestra di condivisione per importare l\'evento.',
+}
+
+/** Italian names for the diagnostics steps shown in the Info tab. */
+export const STEP_LABEL = {
+  'insert-intent': 'app Calendario aperta (nuovo evento)',
+  'insert-intent-error': 'app Calendario non disponibile',
+  'google-calendar': 'Google Calendar aperto',
+  'google-calendar-error': 'Google Calendar non apribile',
+  'ics-view': 'file .ics aperto nel calendario',
+  'ics-view-error': 'file .ics non apribile',
+  'ics-shared': 'file .ics condiviso',
+  'ics-error': 'file .ics non creato',
+  'all-failed': 'nessuna via ha risposto',
 }
 
 export const openAppSettings = () => Linking.openSettings().catch(() => {})
