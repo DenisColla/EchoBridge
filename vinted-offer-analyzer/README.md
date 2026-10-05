@@ -96,8 +96,8 @@ prezzo e segnali ("prezzo fisso", "accetto offerte", "svuoto l'armadio").
 
 La cartella `mobile/` contiene l'app Expo / React Native pronta: stesso motore (copiato in `mobile/core` da
 `npm run sync-core`), "Estrai e calcola" dal link, lista "da comprare" con link, notifiche locali 10 minuti prima
-della finestra consigliata, evento in calendario (con editor di sistema, .ics e Google Calendar come alternative),
-registro degli esiti. Un APK già compilato è in `mobile/dist/OffertaVintedTiming-arm64.apk`:
+della finestra consigliata, evento in calendario aperto già compilato nell'app Calendario del telefono (senza permessi;
+Google Calendar e file .ics come alternative automatiche), registro degli esiti. Un APK già compilato è in `mobile/dist/OffertaVintedTiming-arm64.apk`:
 basta copiarlo sul telefono e aprirlo. Su Windows `mobile\start.bat` installa i prerequisiti, compila e lascia la
 versione universale in `mobile\dist\OffertaVintedTiming.apk`. Istruzioni complete in `mobile/README.md`.
 

@@ -20,8 +20,6 @@
       },
       "permissions": [
         "android.permission.POST_NOTIFICATIONS",
-        "android.permission.READ_CALENDAR",
-        "android.permission.WRITE_CALENDAR",
         "android.permission.SCHEDULE_EXACT_ALARM",
         "android.permission.USE_EXACT_ALARM"
       ]
@@ -32,12 +30,6 @@
         {
           "icon": "./assets/notification-icon.png",
           "color": "#0f766e"
-        }
-      ],
-      [
-        "expo-calendar",
-        {
-          "calendarPermission": "L'app aggiunge al calendario il promemoria per inviare l'offerta al momento giusto."
         }
       ],
       [

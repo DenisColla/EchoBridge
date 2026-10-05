@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { Share, View } from 'react-native'
 import { VINTED } from '../../core/index.js'
 import { ensureNotificationPermission, getNotificationStatus } from '../services/notifications.js'
-import { calendarDiagnostics, getCalendarPermissionStatus, getPreferredCalendarId, listWritableCalendars, openAppSettings, setPreferredCalendarId } from '../services/calendar.js'
-import { Chip, Row } from './ui.js'
+import { VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
 import { space } from '../theme.js'
 import { Body, Button, Card, Note, SectionLabel, Title } from './ui.js'
 
@@ -14,59 +13,44 @@ const STATUS_LABEL = {
   unavailable: 'Notifiche non disponibili su questo dispositivo',
 }
 
-const CAL_STATUS_LABEL = {
-  granted: 'Permesso calendario concesso',
-  undetermined: 'Permesso calendario non ancora richiesto',
-  denied: 'Permesso calendario bloccato: abilitalo dalle impostazioni',
-  unavailable: 'Calendario non disponibile su questo dispositivo',
-}
-
+/** The calendar needs no permission: this card explains the behaviour and lets the user try it with a test event. */
 function CalendarSection() {
-  const [status, setStatus] = useState('undetermined')
-  const [calendars, setCalendars] = useState([])
-  const [preferred, setPreferred] = useState(null)
-  const [loadError, setLoadError] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState(null)
+  const last = calendarDiagnostics.last
 
-  const refresh = async () => {
-    const s = await getCalendarPermissionStatus()
-    setStatus(s)
-    setPreferred(await getPreferredCalendarId())
-    if (s === 'granted') {
-      try {
-        setCalendars(await listWritableCalendars())
-        setLoadError(null)
-      } catch (error) {
-        setLoadError(String(error && error.message ? error.message : error))
-      }
+  const tryNow = async () => {
+    setBusy(true)
+    try {
+      const sendAt = new Date()
+      sendAt.setDate(sendAt.getDate() + 1)
+      sendAt.setHours(21, 30, 0, 0)
+      const result = await openCalendarWithEvent({
+        title: 'evento di prova (puoi annullare)',
+        link: 'https://www.vinted.it/',
+        sendAt,
+        notes: eventNotesFor({ link: 'https://www.vinted.it/', targetPrice: '10', probability: 0.5, message: 'Ciao! Ti ho inviato un\'offerta.' }),
+      })
+      setOutcome(result.ok ? { tone: 'good', text: VIA_LABEL[result.via] } : { tone: 'bad', text: `Nessuna app calendario ha risposto: ${result.errors.join(' · ')}` })
+    } finally {
+      setBusy(false)
     }
   }
-  useEffect(() => { refresh() }, [])
 
-  const last = calendarDiagnostics.last
   return (
     <Card>
       <SectionLabel>Calendario</SectionLabel>
-      <Title>{CAL_STATUS_LABEL[status] || CAL_STATUS_LABEL.undetermined}</Title>
-      {status === 'granted' && calendars.length > 0 && (
-        <View style={{ gap: 6 }}>
-          <Body muted small>Calendario in cui salvare gli eventi:</Body>
-          <Row>
-            {calendars.map((c) => (
-              <Chip key={c.id} compact label={`${c.title}${c.source ? ` · ${c.source}` : ''}`} active={preferred ? preferred === c.id : c.isPrimary} onPress={async () => { await setPreferredCalendarId(c.id); setPreferred(c.id) }} />
-            ))}
-          </Row>
-        </View>
-      )}
-      {status === 'granted' && calendars.length === 0 && !loadError && <Body muted small>Nessun calendario modificabile trovato: aggiungi un account Google o Samsung nel telefono.</Body>}
-      {loadError && <Note tone="bad">Errore nel leggere i calendari: {loadError}</Note>}
-      {status === 'denied' && <Button label="Apri le impostazioni dell'app" variant="secondary" onPress={openAppSettings} />}
-      {status === 'undetermined' && <Body muted small>Il permesso viene richiesto la prima volta che tocchi "Metti in calendario".</Body>}
+      <Title>Si apre l'app Calendario, tu tocchi Salva</Title>
+      <Body muted small>
+        "Metti in calendario" apre la schermata "nuovo evento" del calendario del telefono (Samsung o Google) con titolo, orario e note già compilati; non serve nessun permesso. Se nessuna app calendario risponde, prova Google Calendar e poi un file .ics.
+      </Body>
+      {outcome && <Note tone={outcome.tone}>{outcome.text}</Note>}
       {last && (
         <Body muted small>
-          Ultima operazione: {last.step}{last.calendar ? ` in "${last.calendar}"` : ''}{last.count !== undefined ? ` (${last.count} calendari: ${(last.names || []).join(', ')})` : ''}{last.error ? ` · errore: ${last.error}` : ''}.
+          Ultima operazione: {last.step}{last.resultCode !== undefined ? ` (codice ${last.resultCode})` : ''}{last.error ? ` · errore: ${last.error}` : ''}.
         </Body>
       )}
-      <Button label="Aggiorna" variant="ghost" small onPress={refresh} />
+      <Button label={busy ? 'Apro il calendario…' : 'Prova con un evento di test'} variant="secondary" onPress={tryNow} disabled={busy} />
     </Card>
   )
 }
@@ -116,7 +100,7 @@ export function InfoView({ stats, items }) {
         <Title>Che cosa legge l'app da un annuncio</Title>
         <Body>• Dalla pagina pubblica dell'annuncio: titolo, prezzo, marca, condizioni, categoria, data di caricamento e ultima attività del venditore (es. "Ultima visita 26 min fa"), più la valutazione in stelle.</Body>
         <Body>• Da questi dati stima categoria e tipo di venditore e propone un target al −{20}%: controlla sempre i campi stimati prima di salvare.</Body>
-        <Body>• Il numero di recensioni non è sempre presente nella pagina; se manca, il venditore con tante stelle è considerato "esperto" solo quando l'ultima visita è recente.</Body>
+        <Body>• Il numero di recensioni e i distintivi del venditore vengono letti quando la pagina li contiene; se mancano, il tipo di venditore resta "Non lo so" e puoi impostarlo a mano.</Body>
         <Body muted small>La lettura usa solo la pagina pubblica, senza login. Se Vinted blocca la richiesta, l'app te lo dice e puoi compilare i dati a mano.</Body>
       </Card>
 

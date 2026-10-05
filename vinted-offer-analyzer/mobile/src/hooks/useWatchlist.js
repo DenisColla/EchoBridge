@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { loadItems, newId, saveItems } from '../services/storage.js'
 import { cancelReminder, ensureNotificationPermission, scheduleOfferReminder } from '../services/notifications.js'
-import { removeFromDeviceCalendar } from '../services/calendar.js'
 
 /** Links typed without a scheme would not open: default to https. */
 const normalizeLink = (link) => {
@@ -57,7 +56,7 @@ export function useWatchlist() {
       message,
       status: 'planned',
       notificationId: null,
-      calendarEventId: null,
+      calendarOpenedAt: null,
       outcomeAt: null,
     }
     let reminder = 'skipped'
@@ -95,7 +94,6 @@ export function useWatchlist() {
     const target = itemsRef.current.find((it) => it.id === id)
     if (target) {
       await cancelReminder(target.notificationId)
-      await removeFromDeviceCalendar(target.calendarEventId)
     }
     await persist((prev) => prev.filter((it) => it.id !== id))
   }, [persist])

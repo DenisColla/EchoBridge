@@ -1,11 +1,19 @@
-// The root export of expo-calendar 57 is the new object API; the function API lives under /legacy.
-import * as Calendar from 'expo-calendar/legacy'
+/**
+ * Calendar without permissions: "Metti in calendario" opens the phone's calendar app on its own
+ * "new event" screen, already filled in (title, start, end, notes). The user checks and taps Save.
+ *
+ * Paths, tried in order until one opens something:
+ *  1. Android ACTION_INSERT on the calendar provider (Samsung Calendar, Google Calendar, any calendar app).
+ *  2. Google Calendar pre-filled link (the Google Calendar app claims it; otherwise the browser).
+ *  3. A .ics file handed to the share sheet, for calendar apps that answer neither.
+ * Nothing here asks for the READ/WRITE_CALENDAR permission.
+ */
+import * as IntentLauncher from 'expo-intent-launcher'
 import * as FileSystem from 'expo-file-system/legacy'
 import * as Sharing from 'expo-sharing'
-import AsyncStorage from '@react-native-async-storage/async-storage'
-import { Linking } from 'react-native'
+import { Linking, Platform } from 'react-native'
 
-const PREFERRED_KEY = 'offerta-vinted.calendar.preferred.v1'
+const EVENT_MINUTES = 30
 const pad = (n) => String(n).padStart(2, '0')
 const localStamp = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`
 const utcStamp = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`
@@ -13,6 +21,7 @@ const utcStamp = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d
 /** Last outcome of a calendar operation, shown in the Info tab so a silent failure can be reported. */
 export const calendarDiagnostics = { last: null }
 const note = (entry) => { calendarDiagnostics.last = { at: new Date().toISOString(), ...entry } }
+const errorText = (error) => String(error && error.message ? error.message : error)
 
 const deviceTimeZone = () => {
   try {
@@ -31,135 +40,64 @@ export const eventNotesFor = ({ link, targetPrice, probability, message }) => [
   message ? `\nMessaggio da incollare:\n${message}` : null,
 ].filter(Boolean).join('\n')
 
-export async function getCalendarPermissionStatus() {
-  try {
-    const p = await Calendar.getCalendarPermissionsAsync()
-    return p.granted ? 'granted' : p.canAskAgain === false ? 'denied' : 'undetermined'
-  } catch (error) {
-    note({ step: 'permission-status', error: String(error && error.message ? error.message : error) })
-    return 'unavailable'
-  }
-}
-
-/** Writable calendars on the device, as { id, title, source, isPrimary }. Requires permission. */
-export async function listWritableCalendars() {
-  const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT)
-  return calendars
-    .filter((c) => c.allowsModifications)
-    .map((c) => ({ id: String(c.id), title: c.title || c.name || 'Calendario', source: (c.source && (c.source.name || c.source.type)) || '', isPrimary: Boolean(c.isPrimary), color: c.color }))
-}
-
-export async function getPreferredCalendarId() {
-  try {
-    return await AsyncStorage.getItem(PREFERRED_KEY)
-  } catch {
-    return null
-  }
-}
-
-export async function setPreferredCalendarId(id) {
-  try {
-    if (id) await AsyncStorage.setItem(PREFERRED_KEY, String(id))
-    else await AsyncStorage.removeItem(PREFERRED_KEY)
-  } catch {
-    // storage unavailable: the choice simply does not persist
-  }
-}
-
-const pickCalendar = (writable, preferredId) =>
-  writable.find((c) => c.id === preferredId)
-  || writable.find((c) => c.isPrimary)
-  || writable.find((c) => /google|gmail/i.test(c.source))
-  || writable.find((c) => /samsung|local|phone|telefono/i.test(c.source))
-  || writable[0]
-
-/**
- * Adds a 30-minute event with a 10-minute alarm to the preferred (or primary) writable calendar.
- * Never throws: returns { ok, reason, error?, eventId?, calendarName? } and records diagnostics.
- */
-export async function addToDeviceCalendar({ title, link, sendAt, notes }) {
+const eventWindow = (sendAt) => {
   const start = new Date(sendAt)
-  const end = new Date(start.getTime() + 30 * 60_000)
-  try {
-    const permission = await Calendar.requestCalendarPermissionsAsync()
-    if (!permission.granted) {
-      note({ step: 'permission', granted: false, canAskAgain: permission.canAskAgain })
-      return { ok: false, reason: permission.canAskAgain === false ? 'permission_blocked' : 'permission' }
-    }
-    const writable = await listWritableCalendars()
-    note({ step: 'calendars', count: writable.length, names: writable.map((c) => c.title).slice(0, 6) })
-    if (writable.length === 0) return { ok: false, reason: 'no_calendar' }
-    const preferred = pickCalendar(writable, await getPreferredCalendarId())
-    const eventId = await Calendar.createEventAsync(preferred.id, {
-      title: eventTitleFor(title),
-      startDate: start,
-      endDate: end,
-      notes: notes || (link ? `Annuncio: ${link}` : ''),
-      timeZone: deviceTimeZone(),
-      alarms: [{ relativeOffset: -10 }],
-    })
-    note({ step: 'created', eventId: String(eventId), calendar: preferred.title })
-    return { ok: true, eventId: String(eventId), calendarName: preferred.title }
-  } catch (error) {
-    const message = String(error && error.message ? error.message : error)
-    note({ step: 'error', error: message })
-    return { ok: false, reason: 'error', error: message }
-  }
+  const end = new Date(start.getTime() + EVENT_MINUTES * 60_000)
+  return { start, end }
 }
 
 /**
- * Second path, no permission needed: the calendar app's own "new event" screen, pre-filled (Android ACTION_INSERT).
- * Android cannot tell whether the user saved or cancelled, so the result is just { ok, action }.
+ * Path 1: the calendar app's own "new event" screen (Android ACTION_INSERT, no permission).
+ * Resolves when the user comes back from the calendar app; Android does not say whether they saved.
  */
-export async function openCalendarEditor({ title, link, sendAt, notes }) {
-  const start = new Date(sendAt)
-  const end = new Date(start.getTime() + 30 * 60_000)
+export async function openCalendarInsert({ title, link, sendAt, notes }) {
+  if (Platform.OS !== 'android') return { ok: false, reason: 'not_android' }
+  const { start, end } = eventWindow(sendAt)
   try {
-    const result = await Calendar.createEventInCalendarAsync({
-      title: eventTitleFor(title),
-      startDate: start,
-      endDate: end,
-      notes: notes || (link ? `Annuncio: ${link}` : ''),
-      timeZone: deviceTimeZone(),
-      alarms: [{ relativeOffset: -10 }],
+    const result = await IntentLauncher.startActivityAsync('android.intent.action.INSERT', {
+      data: 'content://com.android.calendar/events',
+      extra: {
+        title: eventTitleFor(title),
+        description: notes || (link ? `Annuncio: ${link}` : ''),
+        beginTime: start.getTime(),
+        endTime: end.getTime(),
+        allDay: false,
+        eventTimezone: deviceTimeZone(),
+      },
     })
-    note({ step: 'editor', action: result && result.action })
-    return { ok: true, action: result && result.action ? result.action : 'done', eventId: result && result.id ? String(result.id) : null }
+    note({ step: 'insert-intent', resultCode: result && result.resultCode })
+    return { ok: true, via: 'intent', resultCode: result && result.resultCode }
   } catch (error) {
-    const message = String(error && error.message ? error.message : error)
-    note({ step: 'editor-error', error: message })
-    return { ok: false, reason: 'error', error: message }
+    note({ step: 'insert-intent-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
   }
 }
 
-export async function removeFromDeviceCalendar(eventId) {
-  if (!eventId) return
-  try {
-    await Calendar.deleteEventAsync(String(eventId))
-  } catch {
-    // already removed by the user
-  }
-}
-
-/** Fallback that needs no permission: opens Google Calendar with the event pre-filled. */
-export function openGoogleCalendar({ title, sendAt, notes }) {
-  const start = new Date(sendAt)
-  const end = new Date(start.getTime() + 30 * 60_000)
+/** Path 2: Google Calendar with the event pre-filled (the app claims the link when installed). */
+export async function openGoogleCalendar({ title, sendAt, notes }) {
+  const { start, end } = eventWindow(sendAt)
   const params = new URLSearchParams({
     action: 'TEMPLATE',
     text: eventTitleFor(title),
     dates: `${localStamp(start)}/${localStamp(end)}`,
     details: notes || '',
+    ctz: deviceTimeZone(),
   })
-  return Linking.openURL(`https://calendar.google.com/calendar/render?${params.toString()}`)
+  try {
+    await Linking.openURL(`https://calendar.google.com/calendar/render?${params.toString()}`)
+    note({ step: 'google-calendar' })
+    return { ok: true, via: 'google' }
+  } catch (error) {
+    note({ step: 'google-calendar-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
+  }
 }
 
 const icsEscape = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
 
-/** Builds a standard .ics (iCalendar) text for the reminder event. */
+/** Builds a standard .ics (iCalendar) text for the reminder event, with a 10-minute alarm. */
 export function buildIcs({ title, sendAt, notes, uid }) {
-  const start = new Date(sendAt)
-  const end = new Date(start.getTime() + 30 * 60_000)
+  const { start, end } = eventWindow(sendAt)
   return [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -184,7 +122,7 @@ export function buildIcs({ title, sendAt, notes, uid }) {
   ].join('\r\n')
 }
 
-/** Third path: hand the event to any calendar app through the share sheet as a .ics file. */
+/** Path 3: hand the event to any calendar app through the share sheet as a .ics file. */
 export async function shareIcs(payload) {
   try {
     const dir = FileSystem.cacheDirectory
@@ -194,12 +132,32 @@ export async function shareIcs(payload) {
     if (!(await Sharing.isAvailableAsync())) return { ok: false, reason: 'no_share' }
     await Sharing.shareAsync(uri, { mimeType: 'text/calendar', dialogTitle: 'Apri con il calendario', UTI: 'public.calendar-event' })
     note({ step: 'ics-shared', uri })
-    return { ok: true }
+    return { ok: true, via: 'ics' }
   } catch (error) {
-    const message = String(error && error.message ? error.message : error)
-    note({ step: 'ics-error', error: message })
-    return { ok: false, reason: 'error', error: message }
+    note({ step: 'ics-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
   }
+}
+
+/**
+ * The one entry point behind "Metti in calendario": tries the three paths in order and returns the first
+ * that opened something, as { ok, via: 'intent' | 'google' | 'ics' } or { ok: false, errors: [...] }.
+ */
+export async function openCalendarWithEvent(payload) {
+  const errors = []
+  for (const step of [openCalendarInsert, openGoogleCalendar, shareIcs]) {
+    const outcome = await step(payload)
+    if (outcome.ok) return outcome
+    errors.push(`${step.name}: ${outcome.error || outcome.reason}`)
+  }
+  note({ step: 'all-failed', error: errors.join(' | ') })
+  return { ok: false, errors }
+}
+
+export const VIA_LABEL = {
+  intent: 'Calendario aperto con l\'evento compilato: controlla e tocca Salva.',
+  google: 'Google Calendar aperto con l\'evento compilato: tocca Salva.',
+  ics: 'Scegli l\'app calendario nella finestra di condivisione per salvare l\'evento.',
 }
 
 export const openAppSettings = () => Linking.openSettings().catch(() => {})

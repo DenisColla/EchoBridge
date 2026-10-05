@@ -50,7 +50,7 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, now }) {
         <Button label={copied ? 'Copiato!' : 'Copia messaggio'} variant={item.link ? 'secondary' : 'primary'} onPress={copyMessage} />
       </ButtonRow>
       <View style={styles.actions}>
-        <Button label={item.calendarEventId ? 'In calendario ✓' : 'Calendario'} variant="ghost" small disabled={Boolean(item.calendarEventId)} onPress={() => onCalendar(item)} />
+        <Button label={item.calendarOpenedAt ? 'Calendario ✓' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} />
         <Button label={showOutcome ? 'Chiudi esito' : 'Segna esito'} variant="ghost" small onPress={() => setShowOutcome((v) => !v)} />
         <Button label="Elimina" variant="ghostDanger" small onPress={() => onRemove(item.id)} />
       </View>

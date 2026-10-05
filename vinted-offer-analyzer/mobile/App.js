@@ -8,7 +8,7 @@ import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
-import { addToDeviceCalendar, eventNotesFor, openAppSettings, openCalendarEditor, openGoogleCalendar, shareIcs } from './src/services/calendar.js'
+import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
@@ -246,39 +246,24 @@ function Main() {
   })
 
   const [calendarBusy, setCalendarBusy] = useState(false)
-  const [calendarFallback, setCalendarFallback] = useState(null)
 
   /**
-   * One action, three paths: the device calendar (needs permission); if refused or failing,
-   * the user chooses between a .ics file for any calendar app and Google Calendar pre-filled.
+   * "Metti in calendario": opens the phone's calendar app on a pre-filled "new event" screen (no permission);
+   * the user taps Save there. Falls back to Google Calendar and to a .ics file on its own; every outcome is a toast.
    */
   const addCalendar = async (source, itemId) => {
     if (calendarBusy) return
     const payload = calendarPayload(source)
     setCalendarBusy(true)
-    setCalendarFallback(null)
+    showToast('Apro il calendario con l\'evento già compilato: controlla e tocca Salva.')
     try {
-      const outcome = await addToDeviceCalendar(payload)
+      const outcome = await openCalendarWithEvent(payload)
       if (outcome.ok) {
-        if (itemId) await watchlist.update(itemId, { calendarEventId: outcome.eventId })
-        showToast(`Evento aggiunto al calendario "${outcome.calendarName}" con avviso 10 minuti prima.`)
-        return
+        if (itemId) await watchlist.update(itemId, { calendarOpenedAt: new Date().toISOString() })
+        showToast(VIA_LABEL[outcome.via] || VIA_LABEL.intent)
+      } else {
+        showToast(`Nessuna app calendario ha risposto: ${outcome.errors[0] || 'errore sconosciuto'}. Dettagli nella scheda Info.`)
       }
-      // Direct insertion failed: hand over to the calendar app's own editor, pre-filled (needs no permission).
-      const editor = await openCalendarEditor(payload)
-      if (editor.ok) {
-        if (editor.action === 'canceled') showToast('Evento non salvato.')
-        else showToast('Controlla il calendario: l\'evento è stato proposto all\'app calendario, con avviso 10 minuti prima.')
-        return
-      }
-      const why = outcome.reason === 'permission_blocked'
-        ? 'Permesso calendario bloccato nelle impostazioni di Android.'
-        : outcome.reason === 'permission'
-          ? 'Permesso calendario non concesso.'
-          : outcome.reason === 'no_calendar'
-            ? 'Nessun calendario modificabile trovato sul telefono.'
-            : `Il calendario del telefono ha risposto con un errore: ${outcome.error || 'sconosciuto'}.`
-      setCalendarFallback({ payload, why, blocked: outcome.reason === 'permission_blocked' })
     } finally {
       setCalendarBusy(false)
     }
@@ -376,29 +361,6 @@ function Main() {
           )
         })}
       </View>
-
-      {calendarFallback && (
-        <View style={[styles.sheetBackdrop]}>
-          <View style={[styles.sheet, { backgroundColor: t.card, borderColor: t.line, paddingBottom: bottomInset + space.md }]}>
-            <Text style={[styles.sheetTitle, { color: t.ink }]}>Calendario del telefono non disponibile</Text>
-            <Text style={{ color: t.ink2, fontSize: 14, lineHeight: 20 }}>{calendarFallback.why} Scegli un'alternativa:</Text>
-            <Pressable style={[styles.sheetButton, { backgroundColor: t.accent }]} onPress={async () => { const r = await shareIcs(calendarFallback.payload); setCalendarFallback(null); showToast(r.ok ? 'Scegli l\'app calendario nella finestra di condivisione.' : 'Condivisione non disponibile su questo telefono.') }}>
-              <Text style={[styles.sheetButtonText, { color: t.onAccent }]}>Apri con un'app calendario (.ics)</Text>
-            </Pressable>
-            <Pressable style={[styles.sheetButton, { borderColor: t.line, borderWidth: 1 }]} onPress={() => { const p = calendarFallback.payload; setCalendarFallback(null); openGoogleCalendar(p).catch(() => showToast('Impossibile aprire Google Calendar.')) }}>
-              <Text style={[styles.sheetButtonText, { color: t.ink }]}>Apri Google Calendar precompilato</Text>
-            </Pressable>
-            {calendarFallback.blocked && (
-              <Pressable style={[styles.sheetButton, { borderColor: t.line, borderWidth: 1 }]} onPress={() => { setCalendarFallback(null); openAppSettings() }}>
-                <Text style={[styles.sheetButtonText, { color: t.ink }]}>Apri le impostazioni dell'app</Text>
-              </Pressable>
-            )}
-            <Pressable style={styles.sheetButton} onPress={() => setCalendarFallback(null)}>
-              <Text style={[styles.sheetButtonText, { color: t.ink3 }]}>Annulla</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
     </View>
   )
 }
@@ -414,11 +376,6 @@ const styles = StyleSheet.create({
   toast: { position: 'absolute', left: space.lg, right: space.lg, borderRadius: 12, padding: space.md },
   banner: { borderWidth: 1, borderRadius: 12, padding: space.md, gap: space.sm },
   bannerButton: { minHeight: 40, borderRadius: 10, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
-  sheetBackdrop: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(2, 6, 23, 0.45)', justifyContent: 'flex-end' },
-  sheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, padding: space.lg, gap: space.sm },
-  sheetTitle: { fontSize: 17, fontWeight: '700' },
-  sheetButton: { minHeight: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.md },
-  sheetButtonText: { fontSize: 15, fontWeight: '700' },
   tabBar: { flexDirection: 'row', borderTopWidth: 1 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
   tabLabel: { fontSize: 14 },
