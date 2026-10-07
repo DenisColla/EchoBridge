@@ -3,7 +3,7 @@ import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, Status
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
-  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationArmFor, explorationKey, exploreOffer, failureRiskFor, formatEuro, monthKeyOf,
+  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationBudget, explorationKey, explorationPlan, failureRiskFor, formatEuro, monthKeyOf,
   nextGoalFor, optimizeOffer, parseVintedItemHtml,
 } from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
@@ -123,8 +123,8 @@ function Main() {
     let outcome = analyzeOffer(nextForm, at, options)
     if (outcome.ok && explore && learning.exploration) {
       const key = explorationKey(nextForm)
-      const arm = skipExploreRef.current.has(key) ? null : explorationArmFor(key, monthKeyOf(at))
-      const varied = arm ? exploreOffer(nextForm, outcome, arm, at, options) : null
+      const month = monthKeyOf(at)
+      const varied = skipExploreRef.current.has(key) ? null : explorationPlan(nextForm, outcome, at, { key, month, options, budget: explorationBudget(watchlist.allItems, month) })
       if (varied) outcome = varied.result
     }
     if (!outcome.ok) {
@@ -407,7 +407,7 @@ function Main() {
   }
 
   /** Failure risk of the offer on screen, calibrated on the user's outcomes when there are any. */
-  const risk = useMemo(() => (result && result.ok && result.kind !== 'no_offer_needed' ? failureRiskFor(result, { profile: learning.engineProfile, records: learning.records }) : null), [result, learning.engineProfile, learning.records])
+  const risk = useMemo(() => (result && result.ok && result.kind !== 'no_offer_needed' ? failureRiskFor(result, { profile: learning.engineProfile, records: learning.records, now: result.now }) : null), [result, learning.engineProfile, learning.records])
 
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
   const bottomInset = Math.max(insets.bottom, 8)

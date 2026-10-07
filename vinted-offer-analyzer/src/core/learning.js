@@ -4,22 +4,29 @@
  *   dataset      every first offer and every counter with its outcome, re-scored by the current engine at the moment
  *                it was really sent (so the fit always measures the engine the user is running);
  *   fit          Bayesian logistic correction of the engine (MAP + Laplace) with priors centred on "no change",
- *                older months down-weighted by a half-life;
- *   profile      the correction actually applied next month: each value moves toward the fit only with enough data
- *                and by a bounded step, so a handful of offers a month never swings the engine;
- *   discount     the default starting discount that maximises the expected saving under the corrected engine;
- *   exploration  a deterministic, flagged ±1 h / ±2 points variation on about 1 offer in 5 (the data a fit needs);
- *   failure risk the probability that an offer fails even at the recommended moment and price, with reasons;
+ *                older months down-weighted by a half-life; general shift first, then centred time and discount
+ *                offsets, each family admitted only when leave-one-out says it predicts better;
+ *   profile      the correction actually applied next month: each value moves toward the fit only with enough data,
+ *                beyond half a posterior sd and by a bounded step; a profile that predicts worse than its parent
+ *                (prequential log Bayes factor < −2) is rolled back;
+ *   discount     the default starting discount, moved only by what the data change in the expected-saving optimum;
+ *   counters     seller concession share and reply time (Kaplan–Meier), fed to the counter engine with gates;
+ *   exploration  a deterministic, flagged ±1 h / ±2 points variation on about 1 offer in 5, drawn from the safe
+ *                variations with logged propensity and a monthly cost budget;
+ *   failure risk the probability that an offer fails even at the recommended moment and price, why, and the chance
+ *                the negotiation still closes;
  *   report       the month's numbers and the workbook (.xlsx) the app exports.
  *
  * No Math.random, no clock reads: every function takes `now`. Same inputs → same output.
  */
-import { ENGINE_VERSION, LEARNING, LEARNING_BANDS, LEARNING_TIME_GROUPS, VINTED } from './constants.js'
+import { COUNTER, ENGINE_VERSION, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, VINTED } from './constants.js'
 import { analyzeOffer, normalizeInput, priceStepFor, withPrices } from './analyze.js'
 import { MONTHS_IT, WEEKDAYS_IT, calendarDaysBetween, minutesOfDay, pad2 } from './dates.js'
 import { clamp, formatSignedPoints, hashString, squash } from './math.js'
 import { formatEuro } from './messages.js'
-import { DEFAULT_PROFILE, bandOf, normalizeProfile, timeGroupOf } from './profile.js'
+import {
+  DEFAULT_PROFILE, discKnotOf, discKnotWeights, discOffset, monotoneDisc, normalizeProfile, profileIsActive, profileParams, timeGroupOf,
+} from './profile.js'
 import { availabilityAfter, readProbability } from './scheduler.js'
 import { scoreAt, timeWindowAt } from './scoring.js'
 import { buildXlsx } from './xlsx.js'
@@ -102,7 +109,7 @@ export function decisionSnapshot(result, { now, profile = null, exploration = nu
     price: input.targetPrice,
     listPrice: input.listPrice,
     discountPct: input.discountPct,
-    band: bandOf(input.discountPct),
+    knot: discKnotOf(input.discountPct),
     recommendedAt: lrnIso(optimal.date),
     slotKind: optimal.kind,
     daysWaited: optimal.daysWaited,
@@ -265,7 +272,8 @@ export function learningRecord(item, now) {
     listPrice,
     price,
     discountPct,
-    band: bandOf(discountPct),
+    knot: discKnotOf(discountPct),
+    discW: discKnotWeights(discountPct),
     sentAt,
     sentKnown,
     sentAtSource: item.sentAtSource || (sentKnown ? 'tap' : 'unknown'),
@@ -311,7 +319,8 @@ export function buildDataset(items, now) {
     const r = learningRecord(item, now)
     if (r) records.push(r)
   }
-  return records.sort((a, b) => b.sentAt - a.sentAt)
+  // Ties broken by id: the same items in any order give the same dataset (and the same fit).
+  return records.sort((a, b) => b.sentAt - a.sentAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 /** Half-life weight of an observation `date` seen from `now`. */
@@ -363,128 +372,245 @@ const lrnFeature = (key, r) => {
   if (key === 'slope') return r.rawLogit
   const [kind, id] = key.split('.')
   if (kind === 'time') return r.timeGroup === id ? 1 : 0
-  if (kind === 'band') return r.band === id ? 1 : 0
+  if (kind === 'disc') return (r.discW && r.discW[id]) || 0
   return 0
 }
 const lrnPriorSd = (key) => LEARNING.PRIOR_SD[key.split('.')[0]] || 0.35
 
-/**
- * MAP fit of  p = k · squash(rawLogit + Σ θ_j x_j)  with independent normal priors θ_j ~ N(0, sd_j²), by Fisher scoring.
- * Returns { theta: {key: value}, cov, keys, iterations } (cov = inverse Fisher information at the optimum).
- */
-export function fitCorrection(records, keys, weights) {
+/** p, dp/dz of one record at correction vector `theta` over `keys`. */
+function lrnPoint(r, keys, theta) {
+  const x = keys.map((key) => lrnFeature(key, r))
+  const z = r.rawLogit + x.reduce((s, v, j) => s + v * theta[j], 0)
+  const s = lrnSigma(z)
+  return { x, p: lrnClip(r.k * (0.03 + 0.94 * s)), dp: r.k * 0.94 * s * (1 - s) }
+}
+
+/** Gradient and Fisher information of the weighted log posterior (priors N(0, sd²)), skipping record `skip`. */
+function lrnScore(records, keys, theta, weights, skip = -1) {
   const m = keys.length
-  const theta = new Array(m).fill(0)
   const precision = keys.map((key) => 1 / lrnPriorSd(key) ** 2)
+  const g = theta.map((t, j) => -precision[j] * t)
+  const H = keys.map((_, i) => keys.map((__, j) => (i === j ? precision[i] : 0)))
+  for (let idx = 0; idx < records.length; idx++) {
+    const w = weights[idx]
+    if (idx === skip || !(w > 0)) continue
+    const r = records[idx]
+    const { x, p, dp } = lrnPoint(r, keys, theta)
+    const info = (dp * dp) / (p * (1 - p))
+    const resid = ((r.y - p) / (p * (1 - p))) * dp
+    for (let i = 0; i < m; i++) {
+      if (x[i] === 0) continue
+      g[i] += w * resid * x[i]
+      for (let j = 0; j < m; j++) if (x[j] !== 0) H[i][j] += w * info * x[i] * x[j]
+    }
+  }
+  return { g, H }
+}
+
+/**
+ * MAP fit of  p = k · squash(rawLogit + Σ θ_j x_j)  with independent normal priors θ_j ~ N(0, sd_j²), by damped Fisher
+ * scoring. Returns { theta: {key: value}, vector, cov, keys, iterations } (cov = inverse Fisher information).
+ * `start` warm-starts (leave-one-out refits), `maxIter` caps the iterations, `skip` leaves one record out.
+ */
+export function fitCorrection(records, keys, weights, { start = null, maxIter = 60, skip = -1 } = {}) {
+  const m = keys.length
+  const theta = start ? [...start] : new Array(m).fill(0)
   let H = null
   let iterations = 0
-  for (; iterations < 60; iterations++) {
-    const g = theta.map((t, j) => -precision[j] * t)
-    H = keys.map((_, i) => keys.map((__, j) => (i === j ? precision[i] : 0)))
-    records.forEach((r, idx) => {
-      const w = weights[idx]
-      if (!(w > 0)) return
-      const x = keys.map((key) => lrnFeature(key, r))
-      const z = r.rawLogit + x.reduce((s, v, j) => s + v * theta[j], 0)
-      const s = lrnSigma(z)
-      const p = lrnClip(r.k * (0.03 + 0.94 * s))
-      const dp = r.k * 0.94 * s * (1 - s)
-      const info = (dp * dp) / (p * (1 - p))
-      const resid = ((r.y - p) / (p * (1 - p))) * dp
-      for (let i = 0; i < m; i++) {
-        if (x[i] === 0) continue
-        g[i] += w * resid * x[i]
-        for (let j = 0; j < m; j++) if (x[j] !== 0) H[i][j] += w * info * x[i] * x[j]
-      }
-    })
-    const delta = lrnSolve(H, g)
+  for (; iterations < maxIter; iterations++) {
+    const step = lrnScore(records, keys, theta, weights, skip)
+    H = step.H
+    const delta = lrnSolve(H, step.g)
     if (!delta) break
     const biggest = Math.max(...delta.map(Math.abs))
     const scale = biggest > 1 ? 1 / biggest : 1 // damped steps: separable data must not explode
     for (let j = 0; j < m; j++) theta[j] += scale * delta[j]
     if (biggest < 1e-8) break
   }
-  const cov = H ? lrnInverse(H) : null
-  return { theta: Object.fromEntries(keys.map((k, j) => [k, theta[j]])), cov, keys, iterations }
+  if (!H || iterations === maxIter) H = lrnScore(records, keys, theta, weights, skip).H
+  return { theta: Object.fromEntries(keys.map((k, j) => [k, theta[j]])), vector: theta, cov: lrnInverse(H), keys, iterations }
+}
+
+/**
+ * Leave-one-out log predictive density by one Newton step from the full fit, with the information matrix downdated by
+ * Sherman–Morrison (θ₋ᵢ = θ̂ − rᵢ·H⁻¹xᵢ / (1 − cᵢ·xᵢᵀH⁻¹xᵢ)): O(n·m²), no pass over the data per left-out offer.
+ * Returns the weighted pointwise values (Σ = elpd).
+ */
+function lrnLoo(records, keys, weights, full) {
+  const m = keys.length
+  const Hinv = m ? lrnInverse(lrnScore(records, keys, full, weights).H) : null
+  return records.map((r, i) => {
+    const w = weights[i]
+    if (!(w > 0)) return 0
+    let theta = full
+    if (m && Hinv) {
+      const { x, p, dp } = lrnPoint(r, keys, full)
+      const c = (w * dp * dp) / (p * (1 - p))
+      const resid = ((w * (r.y - p)) / (p * (1 - p))) * dp
+      const u = Hinv.map((row) => row.reduce((acc, h, j) => acc + h * x[j], 0))
+      const xu = u.reduce((acc, v, j) => acc + v * x[j], 0)
+      const denom = 1 - c * xu
+      theta = denom > 1e-6 ? full.map((t, j) => t - (resid * u[j]) / denom) : fitCorrection(records, keys, weights, { start: full, maxIter: 3, skip: i }).vector
+    }
+    const { p } = lrnPoint(r, keys, theta)
+    return w * (r.y ? Math.log(p) : Math.log(1 - p))
+  })
+}
+
+/** Gain of model B over model A in leave-one-out elpd, with its standard error (Vehtari 2017). */
+const lrnGain = (a, b) => {
+  const d = b.map((v, i) => v - a[i])
+  const n = d.length
+  const gain = d.reduce((s, x) => s + x, 0)
+  const mean = n ? gain / n : 0
+  const se = n > 1 ? Math.sqrt(n * (d.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1))) : Infinity
+  return { gain, se, admitted: gain >= LEARNING.LADDER_MIN_ELPD_GAIN && gain >= se }
 }
 
 /** Predicted probability of record `r` under a profile (or the raw engine with profile = null). */
 export function predictWith(profile, r) {
   if (!profile) return lrnClip(r.k * squash(r.rawLogit))
   const P = normalizeProfile(profile)
-  const z = P.slope * r.rawLogit + P.intercept + (P.time[r.timeGroup] || 0) + (P.band[r.band] || 0)
+  const z = P.slope * r.rawLogit + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, r.discountPct)
   return lrnClip(r.k * squash(z))
 }
 
 export const logLoss = (pairs) => (pairs.length ? -pairs.reduce((s, [p, y]) => s + (y ? Math.log(lrnClip(p)) : Math.log(1 - lrnClip(p))), 0) / pairs.length : null)
 export const brierScore = (pairs) => (pairs.length ? pairs.reduce((s, [p, y]) => s + (p - y) ** 2, 0) / pairs.length : null)
 
-/** Reliability table: predicted vs observed per probability bin. */
-export function reliabilityTable(pairs) {
-  const edges = LEARNING.RELIABILITY_BINS
-  const bins = []
-  for (let i = 0; i < edges.length - 1; i++) {
-    const inBin = pairs.filter(([p]) => p >= edges[i] && p < edges[i + 1])
-    bins.push({
-      from: edges[i],
-      to: Math.min(1, edges[i + 1]),
-      n: inBin.length,
-      predicted: inBin.length ? lrnMean(inBin.map(([p]) => p)) : null,
-      observed: inBin.length ? inBin.filter(([, y]) => y).length / inBin.length : null,
-    })
-  }
-  const n = pairs.length
-  const ece = n ? bins.reduce((s, b) => s + (b.n ? (b.n / n) * Math.abs(b.predicted - b.observed) : 0), 0) : null
-  return { bins, ece }
+/** Wilson 90% interval of k successes in n. */
+const lrnWilson = (k, n, z = 1.645) => {
+  if (!n) return [null, null]
+  const p = k / n
+  const d = 1 + (z * z) / n
+  const c = (p + (z * z) / (2 * n)) / d
+  const h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d
+  return [Math.max(0, c - h), Math.min(1, c + h)]
 }
 
 /**
- * Fits the first-offer correction on every decided first offer (weighted by recency), in two stages:
- *   1. intercept (and slope, only with enough data): the general shift between the engine and this user's sellers;
- *   2. time-group and discount-band offsets on what stage 1 leaves unexplained, centred (weighted by data) so that
- *      they only express differences BETWEEN groups.
- * Fitting them jointly would let a general shift leak into the groups that happen to hold the data (most offers go
- * out in the best evenings), making untried windows look better and moving the schedule for no reason.
- * The covariance is block-diagonal (stage 1, stage 2): enough for the failure-risk interval.
+ * Calibration of [p, y] pairs: log loss and Brier with standard errors, calibration-in-the-large (observed vs
+ * expected, with z), Spiegelhalter's Z (no binning), and an equal-mass reliability table with Wilson intervals
+ * (fixed-width bins overstate the error at small n). ECE is for display only.
  */
-export function fitFirstOffers(records, now) {
-  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit))
-  const weights = decided.map((r) => recencyWeight(r.sentAt, now))
-  const total = weights.reduce((s, w) => s + w, 0)
-  const keys1 = ['intercept']
-  if (total >= LEARNING.MIN_EFFECTIVE.slope) keys1.push('slope')
-  const keys2 = [...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_BANDS.map((b) => `band.${b.id}`)]
-  const keys = [...keys1, ...keys2]
-  const nEff = Object.fromEntries(keys.map((key) => [key, decided.reduce((s, r, i) => s + weights[i] * (key === 'intercept' || key === 'slope' ? 1 : lrnFeature(key, r)), 0)]))
-  if (!decided.length) return { theta: Object.fromEntries(keys.map((k) => [k, 0])), cov: null, keys, iterations: 0, nEff, n: 0, weightTotal: 0, decided, weights }
-  const s1 = fitCorrection(decided, keys1, weights)
-  const shifted = decided.map((r) => ({ ...r, rawLogit: r.rawLogit * (1 + (s1.theta.slope || 0)) + s1.theta.intercept }))
-  const s2 = fitCorrection(shifted, keys2, weights)
-  // Sum-to-zero (weighted by data) within time groups and within bands: only contrasts between groups survive.
-  for (const prefix of ['time.', 'band.']) {
-    const ks = keys2.filter((k) => k.startsWith(prefix) && nEff[k] > 0)
-    const wsum = ks.reduce((acc, k) => acc + nEff[k], 0)
-    if (!wsum) continue
-    const mean = ks.reduce((acc, k) => acc + nEff[k] * s2.theta[k], 0) / wsum
-    for (const k of ks) s2.theta[k] -= mean
+export function calibrationMetrics(pairs) {
+  const n = pairs.length
+  if (!n) return { n: 0, logLoss: null, logLossSe: null, brier: null, brierSe: null, observed: 0, expected: 0, oeRatio: null, oeZ: null, spiegelhalterZ: null, bins: [], ece: null }
+  const ll = pairs.map(([p, y]) => -(y ? Math.log(lrnClip(p)) : Math.log(1 - lrnClip(p))))
+  const br = pairs.map(([p, y]) => (p - y) ** 2)
+  const se = (xs) => {
+    const m = xs.reduce((s, x) => s + x, 0) / xs.length
+    return xs.length > 1 ? Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1) / xs.length) : null
   }
-  const m = keys.length
-  const cov = s1.cov && s2.cov ? keys.map((_, i) => keys.map((__, j) => {
-    if (i < keys1.length && j < keys1.length) return s1.cov[i][j]
-    if (i >= keys1.length && j >= keys1.length) return s2.cov[i - keys1.length][j - keys1.length]
-    return 0
-  })) : null
-  return { theta: { ...s1.theta, ...s2.theta }, cov: cov && cov.length === m ? cov : null, keys, iterations: s1.iterations + s2.iterations, nEff, n: decided.length, weightTotal: total, decided, weights }
+  const O = pairs.reduce((s, [, y]) => s + y, 0)
+  const E = pairs.reduce((s, [p]) => s + p, 0)
+  const V = pairs.reduce((s, [p]) => s + p * (1 - p), 0)
+  const sNum = pairs.reduce((s, [p, y]) => s + (y - p) * (1 - 2 * p), 0)
+  const sDen = Math.sqrt(pairs.reduce((s, [p]) => s + (1 - 2 * p) ** 2 * p * (1 - p), 0))
+  const k = n >= 2 ? clamp(Math.round(Math.cbrt(n)), 2, LEARNING.RELIABILITY_MAX_BINS) : 1
+  const sorted = [...pairs].sort((a, b) => a[0] - b[0])
+  const bins = []
+  for (let b = 0; b < k; b++) {
+    const chunk = sorted.slice(Math.round((b * n) / k), Math.round(((b + 1) * n) / k))
+    if (!chunk.length) continue
+    const hits = chunk.filter(([, y]) => y).length
+    const [lo, hi] = lrnWilson(hits, chunk.length)
+    bins.push({ from: chunk[0][0], to: chunk[chunk.length - 1][0], n: chunk.length, predicted: lrnMean(chunk.map(([p]) => p)), observed: hits / chunk.length, low: lo, high: hi })
+  }
+  return {
+    n,
+    logLoss: lrnMean(ll),
+    logLossSe: se(ll),
+    brier: lrnMean(br),
+    brierSe: se(br),
+    observed: O,
+    expected: E,
+    oeRatio: E > 0 ? O / E : null,
+    oeZ: V > 0 ? (O - E) / Math.sqrt(V) : null,
+    spiegelhalterZ: sDen > 0 ? sNum / sDen : null,
+    bins,
+    ece: bins.reduce((s, b) => s + (b.n / n) * Math.abs(b.predicted - b.observed), 0),
+  }
 }
 
-/** One-parameter fit of the counter correction (time-group offsets taken from the first-offer profile). */
+/** First offers old enough for a verdict: a fixed horizon, so fast answers do not dominate the fit. */
+const lrnMature = (r, now) => now.getTime() - r.sentAt.getTime() >= LEARNING.NO_REPLY_AFTER_DAYS * DAY_MS
+
+/**
+ * Fits the first-offer correction on every decided, mature first offer (weighted by recency), as a ladder where each
+ * step must beat the simpler model by ≥ 1 nat and ≥ 1 se of leave-one-out log score (Vergouwe 2017):
+ *   1. intercept: the general shift between the engine and this user's sellers;
+ *      + slope, only with ≥ 40 weighted outcomes;
+ *   2. time-group and discount-knot offsets on what stage 1 leaves unexplained, admitted as a family only with the
+ *      same leave-one-out test, centred (weighted by data) so they express differences BETWEEN groups, and with the
+ *      discount curve projected to stay monotone.
+ * The covariance is the full joint inverse Fisher information at the final values.
+ */
+export function fitFirstOffers(records, now) {
+  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && lrnMature(r, now))
+  const weights = decided.map((r) => recencyWeight(r.sentAt, now))
+  const total = weights.reduce((s, w) => s + w, 0)
+  const offsetKeys = [...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`)]
+  const allKeys = ['intercept', 'slope', ...offsetKeys]
+  const nEff = Object.fromEntries(allKeys.map((key) => [key, decided.reduce((s, r, i) => s + weights[i] * (key === 'intercept' || key === 'slope' ? 1 : lrnFeature(key, r)), 0)]))
+  const empty = { theta: Object.fromEntries(allKeys.map((k) => [k, 0])), cov: null, keys: ['intercept'], nEff, n: 0, weightTotal: 0, decided, weights, ladder: { intercept: null, slope: null, offsets: null }, df: 0 }
+  if (!decided.length) return empty
+
+  // Stage 1: intercept, then the slope, each only if it earns its place against the simpler model.
+  const base = fitCorrection(decided, ['intercept'], weights)
+  const intercept = lrnGain(lrnLoo(decided, [], weights, []), lrnLoo(decided, ['intercept'], weights, base.vector))
+  let stage1 = base
+  let slope = null
+  if (total >= LEARNING.MIN_EFFECTIVE.slope) {
+    const withSlope = fitCorrection(decided, ['intercept', 'slope'], weights)
+    slope = lrnGain(lrnLoo(decided, ['intercept'], weights, base.vector), lrnLoo(decided, ['intercept', 'slope'], weights, withSlope.vector))
+    if (slope.admitted) stage1 = withSlope
+  }
+  const shiftOf = (r) => r.rawLogit * (1 + (stage1.theta.slope || 0)) + stage1.theta.intercept
+  const shifted = decided.map((r) => ({ ...r, rawLogit: shiftOf(r) }))
+
+  // Stage 2: offsets as a family, centred, monotone discount curve.
+  const s2 = fitCorrection(shifted, offsetKeys, weights)
+  const offsets = lrnGain(lrnLoo(shifted, [], weights, []), lrnLoo(shifted, offsetKeys, weights, s2.vector))
+  const theta2 = { ...s2.theta }
+  for (const prefix of ['time.', 'disc.']) {
+    const ks = offsetKeys.filter((k) => k.startsWith(prefix) && nEff[k] > 0)
+    const wsum = ks.reduce((acc, k) => acc + nEff[k], 0)
+    if (!wsum) continue
+    const mean = ks.reduce((acc, k) => acc + nEff[k] * theta2[k], 0) / wsum
+    for (const k of ks) theta2[k] -= mean
+  }
+  const projected = monotoneDisc(Object.fromEntries(LEARNING_DISCOUNT_KNOTS.map((k) => [k.id, theta2[`disc.${k.id}`]])), 1 + (stage1.theta.slope || 0))
+  for (const k of LEARNING_DISCOUNT_KNOTS) theta2[`disc.${k.id}`] = projected[k.id]
+
+  const keys = [...stage1.keys, ...offsetKeys]
+  const theta = { slope: 0, ...stage1.theta, ...theta2 }
+  // Posterior sd for the evidence gate, from the stage that estimated each parameter: the joint matrix is right for
+  // predictions (x'Σx) but its marginals are inflated by the intercept/offset collinearity the centring removes.
+  const sd = {}
+  stage1.keys.forEach((k, j) => { sd[k] = stage1.cov ? Math.sqrt(Math.max(0, stage1.cov[j][j])) : null })
+  offsetKeys.forEach((k, j) => { sd[k] = s2.cov ? Math.sqrt(Math.max(0, s2.cov[j][j])) : null })
+  const vector = keys.map((k) => theta[k])
+  // Joint covariance at the final values (stage 1 and 2 together): honest intervals for the failure risk.
+  const H = lrnScore(decided, keys, vector, weights).H
+  const cov = lrnInverse(H)
+  const df = cov ? keys.reduce((s, k, j) => s + (1 - cov[j][j] / lrnPriorSd(k) ** 2), 0) : 0
+  return { theta, cov, sd, keys, nEff, n: decided.length, weightTotal: total, decided, weights, ladder: { intercept, slope, offsets }, df }
+}
+
+/**
+ * One-parameter fit of the counter correction (time-group offsets taken from the current profile). Rounds of the same
+ * negotiation are weighted 1/√m, replies need a fixed 4-day horizon unless their outcome is already known.
+ */
 export function fitCounters(records, now, timeOffsets = {}) {
   const rows = []
   for (const r of records) {
-    for (const round of r.rounds) {
-      if (round.replyAccepted == null || !Number.isFinite(round.replyRawLogit)) continue
+    const usable = r.rounds.filter((x) => x.replyAccepted != null && Number.isFinite(x.replyRawLogit)
+      && (x.replyAccepted === true || !x.replyAt || now.getTime() - new Date(x.replyAt).getTime() >= LEARNING.COUNTER_NO_REPLY_AFTER_DAYS * DAY_MS || r.closed || r.lost))
+    const m = usable.length
+    for (const round of usable) {
       const at = lrnDate(round.replyAt) || r.sentAt
-      rows.push({ y: round.replyAccepted ? 1 : 0, z: round.replyRawLogit + (timeOffsets[round.replyTimeGroup] || 0), k: round.replyPRead, w: recencyWeight(at, now) })
+      rows.push({ y: round.replyAccepted ? 1 : 0, z: round.replyRawLogit + (timeOffsets[round.replyTimeGroup] || 0), k: round.replyPRead, w: recencyWeight(at, now) / Math.sqrt(m) })
     }
   }
   const sd = LEARNING.PRIOR_SD.counter
@@ -504,7 +630,79 @@ export function fitCounters(records, now, timeOffsets = {}) {
     c += step
     if (Math.abs(step) < 1e-8) break
   }
-  return { theta: c, sd: Math.sqrt(1 / info), n: rows.length, nEff: rows.reduce((s, r) => s + r.w, 0) }
+  const expected = rows.reduce((s, row) => s + lrnClip(row.k * squash(row.z)), 0)
+  return { theta: c, sd: Math.sqrt(1 / info), n: rows.length, nEff: rows.reduce((s, r) => s + r.w, 0), observed: rows.filter((r) => r.y).length, expected }
+}
+
+/** Kaplan–Meier survival S(t) = P(no answer yet after t hours) from [{ t, event }]. */
+export function kaplanMeier(samples, hours = LEARNING.KM_HOURS) {
+  const data = samples.filter((s) => Number.isFinite(s.t) && s.t >= 0).sort((a, b) => a.t - b.t)
+  const times = [...new Set(data.filter((s) => s.event).map((s) => s.t))]
+  let S = 1
+  const curve = []
+  for (const t of times) {
+    const atRisk = data.filter((s) => s.t >= t).length
+    const d = data.filter((s) => s.t === t && s.event).length
+    if (atRisk > 0) S *= 1 - d / atRisk
+    curve.push({ t, S })
+  }
+  const at = (h) => {
+    let v = 1
+    for (const c of curve) if (c.t <= h) v = c.S
+    return v
+  }
+  const median = (curve.find((c) => c.S <= 0.5) || {}).t ?? null
+  return { events: data.filter((s) => s.event).length, censored: data.filter((s) => !s.event).length, median, table: hours.map((h) => ({ hours: h, survival: at(h), atRisk: data.filter((s) => s.t >= h).length })) }
+}
+
+/**
+ * What the user's sellers do with counters: the share of the gap they concede (posterior toward eBay's 0,42), how often
+ * they hold, how much their counter sits above our offer, how many rounds deals take, and how fast they answer.
+ */
+export function counterAnalytics(records, now) {
+  const rounds = []
+  for (const r of records) {
+    const m = r.rounds.length
+    for (const x of r.rounds) rounds.push({ ...x, w: recencyWeight(lrnDate(x.receivedAt) || r.sentAt, now) / Math.sqrt(Math.max(1, m)), recordId: r.id, closed: r.closed })
+  }
+  const shares = rounds.filter((x) => Number.isFinite(x.sellerGapShare))
+  const W0 = LEARNING.SELLER_SHARE_PRIOR_WEIGHT
+  const wsum = shares.reduce((s, x) => s + x.w, 0)
+  const posterior = (W0 * LEARNING.SELLER_SHARE_PRIOR + shares.reduce((s, x) => s + x.w * x.sellerGapShare, 0)) / (W0 + wsum)
+  const shareSd = Math.sqrt(Math.max(1e-6, posterior * (1 - posterior)) / (W0 + wsum))
+  const byRound = [1, 2, 3].map((idx) => {
+    const xs = rounds.filter((x) => (idx < 3 ? x.index === idx : x.index >= 3)).map((x) => x.sellerRaisePct).filter(Number.isFinite).sort((a, b) => a - b)
+    const q = (f) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor(f * (xs.length - 1) + 0.5))] : null)
+    return { round: idx, n: xs.length, mean: lrnMean(xs), median: lrnMedian(xs), q1: q(0.25), q3: q(0.75) }
+  })
+  const closed = records.filter((r) => r.closed)
+  const roundsToClose = [0, 1, 2, 3].map((k) => ({ rounds: k, deals: closed.filter((r) => (k < 3 ? r.rounds.length === k : r.rounds.length >= 3)).length }))
+  // Reply times from the seller's counters (the user says when each arrived); silences are censored. Acceptances and
+  // refusals are left out: their only timestamp is when the user marked them, often hours later than the answer.
+  const samples = []
+  for (const r of records) {
+    if (!r.sentKnown) continue
+    if (r.first === 'no_reply' || r.implicit) samples.push({ t: LEARNING.NO_REPLY_AFTER_DAYS * 24, event: false })
+    else if (r.pending && r.first == null) samples.push({ t: (now.getTime() - r.sentAt.getTime()) / 3_600_000, event: false })
+  }
+  for (const x of rounds) {
+    if (x.latencyH != null) samples.push({ t: x.latencyH, event: true })
+    if (x.replyAt && x.replyAccepted === false && x.replyImplicit) samples.push({ t: LEARNING.COUNTER_NO_REPLY_AFTER_DAYS * 24, event: false })
+  }
+  const latency = kaplanMeier(samples)
+  return {
+    rounds: rounds.length,
+    shareN: shares.length,
+    shareEff: wsum,
+    shareObserved: shares.length ? lrnMean(shares.map((x) => x.sellerGapShare)) : null,
+    sharePosterior: posterior,
+    shareMultiplier: posterior / LEARNING.SELLER_SHARE_PRIOR,
+    shareMultiplierSd: shareSd / LEARNING.SELLER_SHARE_PRIOR,
+    holdRate: shares.length ? shares.filter((x) => x.sellerGapShare <= 0.02).length / shares.length : null,
+    byRound,
+    roundsToClose,
+    latency,
+  }
 }
 
 /**
@@ -512,7 +710,7 @@ export function fitCounters(records, now, timeOffsets = {}) {
  * own items, under the corrected engine:
  *   ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS]
  * p(d) = corrected acceptance at discount d (same item, same moment); q = share of failed first offers that still
- * closed; ρ = their saving relative to the first discount; both smoothed with priors (LEARNING).
+ * closed; ρ = their saving relative to the first discount; both smoothed with priors (LEARNING). Grid of 0,5 points.
  */
 export function optimalDiscount(records, profile, now, { priorsOnly = false } = {}) {
   const P = normalizeProfile(profile)
@@ -528,7 +726,7 @@ export function optimalDiscount(records, profile, now, { priorsOnly = false } = 
   const [rampFrom, rampTo] = LEARNING.AGGRESSIVE_RAMP_PCT
   const [lo, hi] = LEARNING.BOUNDS.discountPct
   const curve = []
-  for (let d = lo; d <= hi; d++) {
+  for (let d = lo; d <= hi + 1e-9; d += 0.5) {
     const qd = q * (1 - 0.5 * clamp((d - rampFrom) / (rampTo - rampFrom), 0, 1))
     const share = d / 100
     let es = 0
@@ -537,7 +735,7 @@ export function optimalDiscount(records, profile, now, { priorsOnly = false } = 
       const price = Math.round(r.listPrice * (1 - share) * 100) / 100
       const input = withPrices(r.input, r.listPrice, price)
       const z0 = scoreAt(input, r.sentAt, r.daysWaited).logit
-      const z = P.slope * z0 + P.intercept + (P.time[r.timeGroup] || 0) + (P.band[bandOf(d)] || 0)
+      const z = P.slope * z0 + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d)
       const p = r.k * squash(z)
       es += weights[i] * (p * share + (1 - p) * (qd * rho * share - (1 - qd) * LEARNING.LOSS_COST_SHARE))
       pSum += weights[i] * p
@@ -554,85 +752,110 @@ const PARAM_LABELS = {
   intercept: 'Correzione generale della probabilità',
   slope: 'Fiducia nelle differenze tra offerte',
   counter: 'Correzione delle tue controproposte',
+  counterShare: 'Quanto scendono i tuoi venditori',
+  sellerReplyHours: 'Tempo di risposta dei venditori',
   discountPct: 'Sconto di partenza suggerito',
 }
-const paramLabel = (key) => {
+export const paramLabel = (key) => {
   if (PARAM_LABELS[key]) return PARAM_LABELS[key]
   const [kind, id] = key.split('.')
   if (kind === 'time') return `Fascia: ${(LEARNING_TIME_GROUPS.find((g) => g.id === id) || { label: id }).label}`
-  if (kind === 'band') return `${(LEARNING_BANDS.find((b) => b.id === id) || { label: id }).label}`
+  if (kind === 'disc') return `${(LEARNING_DISCOUNT_KNOTS.find((k) => k.id === id) || { label: id }).label}`
   return key
 }
+const SCALARS = new Set(['intercept', 'slope', 'counter', 'counterShare', 'sellerReplyHours', 'discountPct'])
 const getParam = (P, key) => {
-  if (key === 'intercept' || key === 'slope' || key === 'counter' || key === 'discountPct') return P[key]
+  if (SCALARS.has(key)) return P[key]
   const [kind, id] = key.split('.')
   return P[kind][id]
 }
 const setParam = (P, key, value) => {
-  if (key === 'intercept' || key === 'slope' || key === 'counter' || key === 'discountPct') P[key] = value
+  if (SCALARS.has(key)) P[key] = value
   else {
     const [kind, id] = key.split('.')
     P[kind] = { ...P[kind], [id]: value }
   }
 }
+/** Parameter family of a key (what a rollback freezes). */
+const familyOf = (key) => ({ intercept: 'intercept', slope: 'slope', counter: 'counter', counterShare: 'share', sellerReplyHours: 'latency', discountPct: 'discount' })[key] || key.split('.')[0]
 
 /**
- * Next month's profile. Each parameter moves from its current value toward the fit's target only when it has enough
- * weighted outcomes, when the gap exceeds half a posterior sd, by at most MAX_STEP, inside BOUNDS; tiny moves are
- * skipped. If the active profile predicted last month worse than the plain engine, every learned value is first
- * halved (cautious rollback).
- * Returns { profile, changes: [{ key, label, from, to, target, nEff, minEffective, status, reason }], rollback }.
+ * Next month's profile.
+ *  - Rollback: the prequential log Bayes factor of the active profile against its parent, summed over the months it
+ *    was active, below −2 → the parent's values come back and the families that had changed are frozen for a month.
+ *  - Each parameter then moves from its current value toward the fit's target only when it has enough weighted
+ *    outcomes, its family passed the leave-one-out ladder, the gap exceeds half a posterior sd, by at most MAX_STEP,
+ *    inside BOUNDS; tiny moves are skipped.
+ * Returns { profile, changes: [{ key, label, from, to, target, nEff, minEffective, status, reason }], rollback, … }.
  */
-export function proposeProfile({ previous, firstFit, counterFit, records = [], month, now, lastMonthRecords = [] }) {
+export function proposeProfile({ previous, firstFit, counterFit = null, counterStats = null, records = [], month, now, lastMonthRecords = [] }) {
   const prev = normalizeProfile(previous)
-  const next = normalizeProfile({ ...prev, time: { ...prev.time }, band: { ...prev.band } })
-  // Rollback check on last month's decided first offers.
-  const pairsActive = lastMonthRecords.filter((r) => r.y != null && Number.isFinite(r.rawLogit)).map((r) => [predictWith(prev, r), r.y])
-  const pairsDefault = lastMonthRecords.filter((r) => r.y != null && Number.isFinite(r.rawLogit)).map((r) => [predictWith(null, r), r.y])
-  const llActive = logLoss(pairsActive)
-  const llDefault = logLoss(pairsDefault)
-  const rollback = pairsActive.length >= 6 && llActive != null && llDefault != null && llActive > llDefault + 0.05
-  if (rollback) {
-    next.intercept /= 2
-    next.slope = 1 + (next.slope - 1) / 2
-    next.counter /= 2
-    for (const g of Object.keys(next.time)) next.time[g] /= 2
-    for (const b of Object.keys(next.band)) next.band[b] /= 2
-  }
+  const parent = prev.parent ? normalizeProfile(prev.parent) : null
+  const pairs = lastMonthRecords.filter((r) => r.y != null && Number.isFinite(r.rawLogit))
+  const logBF = pairs.reduce((s, r) => {
+    const pa = predictWith(prev, r)
+    const pp = predictWith(parent, r)
+    return s + (r.y ? Math.log(pa) - Math.log(pp) : Math.log(1 - pa) - Math.log(1 - pp))
+  }, 0)
+  const score = prev.score + logBF
+  const rollback = profileIsActive(prev) && score < LEARNING.ROLLBACK_LOG_BF
+  const frozen = Object.fromEntries(Object.entries(prev.frozen || {}).filter(([, until]) => until > month))
+  if (rollback) for (const c of prev.changes || []) frozen[familyOf(c.key)] = shiftMonth(month, LEARNING.FREEZE_MONTHS)
+  const start = rollback ? normalizeProfile({ ...prev, ...profileParams(parent || DEFAULT_PROFILE) }) : prev
+  const next = normalizeProfile({ ...start, time: { ...start.time }, disc: { ...start.disc } })
 
   const changes = []
   const sdOf = (key) => {
+    if (firstFit.sd && firstFit.sd[key] != null) return firstFit.sd[key]
     const i = firstFit.keys.indexOf(key)
     return i >= 0 && firstFit.cov && firstFit.cov[i] ? Math.sqrt(Math.max(0, firstFit.cov[i][i])) : null
   }
-  const consider = (key, target, nEff, kind, sd = null) => {
+  const consider = (key, target, nEff, kind, { sd = null, eligible = true, notEligible = '' } = {}) => {
     const from = getParam(next, key)
     const minEffective = LEARNING.MIN_EFFECTIVE[kind]
     const maxStep = kind === 'discount' ? LEARNING.MAX_STEP.discountPct : LEARNING.MAX_STEP[kind]
     const bounds = kind === 'discount' ? LEARNING.BOUNDS.discountPct : LEARNING.BOUNDS[kind]
     const minChange = kind === 'discount' ? LEARNING.MIN_CHANGE_DISCOUNT_PCT : LEARNING.MIN_CHANGE
-    const base = { key, label: paramLabel(key), from: lrnR4(from), target: target == null ? null : lrnR4(target), nEff: lrnR2(nEff || 0), minEffective }
-    if ((nEff || 0) < minEffective) {
-      return changes.push({ ...base, to: lrnR4(from), status: 'waiting_data', reason: `Servono almeno ${minEffective} esiti pesati (ne hai ${String(lrnR2(nEff || 0)).replace('.', ',')}).` })
+    const base = { key, label: paramLabel(key), from: from == null ? null : lrnR4(from), target: target == null || !Number.isFinite(target) ? null : lrnR4(target), nEff: lrnR2(nEff || 0), minEffective }
+    const keep = (status, reason) => changes.push({ ...base, to: base.from, status, reason })
+    if (frozen[familyOf(key)]) return keep('frozen', `Bloccata fino a ${monthLabel(frozen[familyOf(key)])} dopo il ritorno ai valori precedenti.`)
+    if ((nEff || 0) < minEffective) return keep('waiting_data', `Servono almeno ${minEffective} esiti pesati (ne hai ${String(lrnR2(nEff || 0)).replace('.', ',')}).`)
+    if (!eligible) return keep('waiting_data', notEligible || 'Con questi dati non migliora le previsioni: resta com\'è.')
+    if (target == null || !Number.isFinite(target)) return keep('waiting_data', 'Nessun esito utile.')
+    if (kind === 'latency') {
+      // Multiplicative: at most ×1,5 or ÷1,5 a month, from the engine default when nothing was learned yet.
+      const current = from == null ? COUNTER.SELLER_REPLY_HOURS : from
+      const wanted = clamp(target, bounds[0], bounds[1])
+      const to = lrnR2(clamp(wanted, current / maxStep, current * maxStep))
+      if (Math.abs(Math.log(to / current)) < 0.05) return keep('unchanged', 'Già allineato ai tuoi esiti.')
+      setParam(next, key, to)
+      const capped = Math.abs(to - wanted) > 0.01
+      return changes.push({ ...base, from: lrnR2(current), to, status: capped ? 'capped' : 'applied', reason: capped ? 'Spostato del massimo consentito in un mese.' : 'Allineato ai tuoi esiti.' })
     }
-    if (target == null || !Number.isFinite(target)) return changes.push({ ...base, to: lrnR4(from), status: 'waiting_data', reason: 'Nessun esito utile.' })
     const wanted = clamp(target, bounds[0], bounds[1])
-    // Evidence gate: no move while the current value sits within half a posterior sd of the target (noise).
-    if (sd != null && Math.abs(wanted - from) < 0.5 * sd) {
-      return changes.push({ ...base, to: lrnR4(from), status: 'unchanged', reason: 'Differenza dentro il margine di incertezza: resta com\'è.' })
-    }
+    if (sd != null && Math.abs(wanted - from) < LEARNING.EVIDENCE_GATE_SD * sd) return keep('unchanged', 'Differenza dentro il margine di incertezza: resta com\'è.')
     const step = clamp(wanted - from, -maxStep, maxStep)
     const to = kind === 'discount' ? Math.round((from + step) * 2) / 2 : lrnR4(from + step)
-    if (Math.abs(to - from) < minChange) return changes.push({ ...base, to: lrnR4(from), status: 'unchanged', reason: 'Già allineato ai tuoi esiti.' })
+    if (Math.abs(to - from) < minChange) return keep('unchanged', 'Già allineato ai tuoi esiti.')
     setParam(next, key, to)
-    return changes.push({ ...base, to, status: Math.abs(wanted - from) > maxStep + 1e-9 ? 'capped' : 'applied', reason: Math.abs(wanted - from) > maxStep + 1e-9 ? `Spostato del massimo consentito in un mese; il resto il mese prossimo se i dati lo confermano.` : 'Allineato ai tuoi esiti.' })
+    const capped = Math.abs(wanted - from) > maxStep + 1e-9
+    return changes.push({ ...base, to, status: capped ? 'capped' : 'applied', reason: capped ? 'Spostato del massimo consentito in un mese; il resto il mese prossimo se i dati lo confermano.' : 'Allineato ai tuoi esiti.' })
   }
 
-  consider('intercept', firstFit.theta.intercept, firstFit.nEff.intercept, 'intercept', sdOf('intercept'))
-  consider('slope', firstFit.keys.includes('slope') ? 1 + firstFit.theta.slope : null, firstFit.nEff.slope ?? firstFit.weightTotal, 'slope', sdOf('slope'))
-  for (const g of LEARNING_TIME_GROUPS) consider(`time.${g.id}`, firstFit.theta[`time.${g.id}`], firstFit.nEff[`time.${g.id}`], 'time', sdOf(`time.${g.id}`))
-  for (const b of LEARNING_BANDS) consider(`band.${b.id}`, firstFit.theta[`band.${b.id}`], firstFit.nEff[`band.${b.id}`], 'band', sdOf(`band.${b.id}`))
-  consider('counter', counterFit ? counterFit.theta : null, counterFit ? counterFit.nEff : 0, 'counter', counterFit ? counterFit.sd : null)
+  const ladder = firstFit.ladder || {}
+  // Without a ladder verdict (hand-built fits) the intercept is judged by the gates alone.
+  consider('intercept', firstFit.theta.intercept, firstFit.nEff.intercept, 'intercept', { sd: sdOf('intercept'), eligible: !ladder.intercept || ladder.intercept.admitted })
+  consider('slope', firstFit.keys.includes('slope') ? 1 + firstFit.theta.slope : null, firstFit.nEff.slope ?? firstFit.weightTotal, 'slope', {
+    sd: sdOf('slope'), eligible: Boolean(ladder.slope && ladder.slope.admitted), notEligible: 'Con questi dati non migliora le previsioni: resta com\'è.',
+  })
+  const offsetsOk = Boolean(ladder.offsets && ladder.offsets.admitted)
+  for (const g of LEARNING_TIME_GROUPS) consider(`time.${g.id}`, firstFit.theta[`time.${g.id}`], firstFit.nEff[`time.${g.id}`], 'time', { sd: sdOf(`time.${g.id}`), eligible: offsetsOk })
+  for (const k of LEARNING_DISCOUNT_KNOTS) consider(`disc.${k.id}`, firstFit.theta[`disc.${k.id}`], firstFit.nEff[`disc.${k.id}`], 'disc', { sd: sdOf(`disc.${k.id}`), eligible: offsetsOk })
+  // Stepwise moves could bend the discount curve upward: project it back to monotone.
+  next.disc = monotoneDisc(next.disc, next.slope)
+  consider('counter', counterFit ? counterFit.theta : null, counterFit ? counterFit.nEff : 0, 'counter', { sd: counterFit ? counterFit.sd : null })
+  consider('counterShare', counterStats ? counterStats.shareMultiplier : null, counterStats ? counterStats.shareEff : 0, 'share', { sd: counterStats ? counterStats.shareMultiplierSd : null })
+  consider('sellerReplyHours', counterStats && counterStats.latency.median != null ? counterStats.latency.median : null, counterStats ? counterStats.latency.events : 0, 'latency')
   // Starting discount, with next month's corrections in place. Only what the data change moves it: the optimum under
   // the corrected engine and the observed continuation, minus the optimum under the plain engine and the priors
   // (the engine's own curve already produced the default; it must not drift by construction).
@@ -643,15 +866,30 @@ export function proposeProfile({ previous, firstFit, counterFit, records = [], m
   const discountFit = { ...withData, priorsOnlyTarget: priorsOnly.target, learnedTarget: discountTarget }
 
   const moved = changes.filter((c) => c.status === 'applied' || c.status === 'capped')
+  const renewed = moved.length > 0 || rollback
   next.version = DEFAULT_PROFILE.version
-  next.id = moved.length || rollback ? `${month}` : prev.id
-  next.month = moved.length || rollback ? month : prev.month
-  next.createdAt = moved.length || rollback ? lrnIso(now) : prev.createdAt
-  next.changes = moved
+  next.frozen = frozen
+  if (renewed) {
+    next.id = prev.id === month ? `${month}.2` : month
+    next.parentId = prev.id
+    next.parent = profileParams(prev)
+    next.month = month
+    next.createdAt = lrnIso(now)
+    next.changes = moved
+    next.score = 0
+    next.scoreMonths = 0
+  } else {
+    next.id = prev.id
+    next.parentId = prev.parentId
+    next.parent = prev.parent
+    next.changes = prev.changes
+    next.score = score
+    next.scoreMonths = prev.scoreMonths + (pairs.length ? 1 : 0)
+  }
   next.basedOn = firstFit.n
   next.paramKeys = firstFit.keys
   next.cov = firstFit.cov ? firstFit.cov.map((row) => row.map(lrnR4)) : null
-  return { profile: next, changes, rollback, logLossActive: llActive, logLossDefault: llDefault, discountFit }
+  return { profile: next, changes, rollback, logBF, score, discountFit }
 }
 
 /* ───────── exploration (flagged variations that make the fit possible) ───────── */
@@ -669,102 +907,131 @@ export const explorationKey = (raw) => {
   return link || [raw && raw.itemTitle, raw && raw.listPrice, raw && raw.category].map((v) => String(v || '').trim().toLowerCase()).join('|')
 }
 
-/** Deterministic: the same offer in the same month always gets the same answer (no flip-flop on re-analysis). */
-export function explorationArmFor(key, month, { enabled = true, share = LEARNING.EXPLORE_SHARE } = {}) {
-  if (!enabled || !key || !month) return null
-  const u = (hashString(`${key}|${month}|explore`) % 10000) / 10000
-  if (u >= share) return null
-  return EXPLORATION_ARMS[hashString(`${key}|${month}|arm`) % EXPLORATION_ARMS.length]
-}
+const lrnUnit = (key, month, purpose) => (hashString(`${key}|${month}|${purpose}`) % 100000) / 100000
 
 const lrnQuiet = (date) => {
   const m = minutesOfDay(date)
   return m >= 23 * 60 || m < 7 * 60
 }
 
-/** One try of an arm; null when it is not safe or not meaningful. */
+/** Expected saving share of an offer at acceptance p and discount d (%), with the prior continuation values. */
+const lrnExpectedSaving = (p, discountPct) => {
+  const d = discountPct / 100
+  const q = LEARNING.CLOSE_AFTER_FAIL_PRIOR
+  return p * d + (1 - p) * (q * LEARNING.CONTINUATION_RATIO_PRIOR * d - (1 - q) * LEARNING.LOSS_COST_SHARE)
+}
+
+/** One arm evaluated against every guard; null when it is not safe or not meaningful. */
 function lrnTryArm(raw, base, arm, now, options) {
+  let result
+  let price = base.input.targetPrice
+  let at
   if (arm.kind === 'time') {
-    const at = new Date(base.optimal.date.getTime() + arm.minutes * 60000)
+    at = new Date(base.optimal.date.getTime() + arm.minutes * 60000)
     if (at.getTime() < now.getTime() + 10 * 60000) return null
-    if (lrnQuiet(at) && !lrnQuiet(base.optimal.date)) return null
-    const result = analyzeOffer(raw, now, { ...options, exactSendAt: at, preferredSendAt: null })
+    if (lrnQuiet(at)) return null
+    result = analyzeOffer(raw, now, { ...options, exactSendAt: at, preferredSendAt: null })
     if (!result.ok || result.kind !== base.kind) return null
-    const cost = base.probability - result.probability
-    if (cost > LEARNING.EXPLORE_MAX_COST + 1e-9) return null
-    return { result, cost, price: base.input.targetPrice, at }
+  } else {
+    const L = base.input.listPrice
+    const step = priceStepFor(L)
+    const wantedPct = base.input.discountPct + arm.points
+    if (wantedPct < 5 || wantedPct > VINTED.MAX_DISCOUNT_PCT - 0.01) return null
+    price = Math.round(Math.round((L * (1 - wantedPct / 100)) / step) * step * 100) / 100
+    // At least one price step in the arm's direction.
+    if (arm.points > 0 && price > base.input.targetPrice - step + 1e-9) price = Math.round((base.input.targetPrice - step) * 100) / 100
+    if (arm.points < 0 && price < base.input.targetPrice + step - 1e-9) price = Math.round((base.input.targetPrice + step) * 100) / 100
+    if (!(price > 0) || price >= L || ((L - price) / L) * 100 > VINTED.MAX_DISCOUNT_PCT) return null
+    result = analyzeOffer({ ...raw, targetPrice: String(price).replace('.', ',') }, now, { ...options, preferredSendAt: base.optimal.date })
+    if (!result.ok || result.kind !== 'analysis') return null
+    at = result.optimal.date
+    if (lrnQuiet(at) && !lrnQuiet(base.optimal.date)) return null
   }
-  const L = base.input.listPrice
-  const step = priceStepFor(L)
-  const wantedPct = base.input.discountPct + arm.points
-  if (wantedPct < 5 || wantedPct > VINTED.MAX_DISCOUNT_PCT - 0.01) return null
-  let price = Math.round((L * (1 - wantedPct / 100)) / step) * step
-  price = Math.round(price * 100) / 100
-  // At least one price step in the arm's direction.
-  if (arm.points > 0 && price > base.input.targetPrice - step + 1e-9) price = Math.round((base.input.targetPrice - step) * 100) / 100
-  if (arm.points < 0 && price < base.input.targetPrice + step - 1e-9) price = Math.round((base.input.targetPrice + step) * 100) / 100
-  if (!(price > 0) || price >= L) return null
-  if (((L - price) / L) * 100 > VINTED.MAX_DISCOUNT_PCT) return null
-  const raw2 = { ...raw, targetPrice: String(price).replace('.', ',') }
-  const result = analyzeOffer(raw2, now, { ...options, preferredSendAt: base.optimal.date })
-  if (!result.ok || result.kind !== 'analysis') return null
   const cost = base.probability - result.probability
-  if (cost > LEARNING.EXPLORE_MAX_COST + 1e-9) return null
-  return { result, cost, price, at: result.optimal.date }
+  const savingCost = lrnExpectedSaving(base.probability, base.input.discountPct) - lrnExpectedSaving(result.probability, result.input.discountPct)
+  if (cost > LEARNING.EXPLORE_MAX_COST + 1e-9 || savingCost > LEARNING.EXPLORE_MAX_SAVING_COST + 1e-9) return null
+  return { arm, result, cost, savingCost, price, at }
+}
+
+/** The month's exploration spend so far, from the decision snapshots of the saved offers. */
+export function explorationBudget(items, month) {
+  let baseTotal = 0
+  let spent = 0
+  for (const it of items || []) {
+    const d = it && it.decision
+    if (!d || monthKeyOf(d.at) !== month) continue
+    const ex = d.exploration
+    const pBase = ex && ex.base && Number.isFinite(ex.base.probability) ? ex.base.probability : d.probability
+    if (Number.isFinite(pBase)) baseTotal += pBase
+    if (ex && ex.base && Number.isFinite(d.probability)) spent += Math.max(0, ex.base.probability - d.probability)
+  }
+  return { baseTotal, spent }
 }
 
 /**
- * Applies the offer's exploration arm to a fresh analysis. Tries the arm, then the opposite arm of the same kind,
- * then the time arms. Returns { result, exploration } or null (no variation this time).
+ * The offer's exploration, decided in two deterministic draws from its key and the month:
+ *   1. explore with probability EXPLORE_SHARE (about 1 offer in 5);
+ *   2. one arm drawn uniformly from the SAFE arms (cost ≤ 6 points of acceptance and ≤ 1% of list price in expected
+ *      saving, no sending at night, at least 10 minutes away, within Vinted's cap, within the monthly budget).
+ * The propensity ε/|safe| is logged so the report can weigh the arms fairly. Returns { result, exploration } or null.
  */
-export function exploreOffer(raw, base, arm, now, options = {}) {
-  if (!arm || !base || !base.ok || base.kind !== 'analysis' || !base.optimal) return null
-  const opposite = EXPLORATION_ARMS.find((a) => a.kind === arm.kind && a.id !== arm.id)
-  const order = [arm, opposite, ...EXPLORATION_ARMS.filter((a) => a.kind === 'time' && a.id !== arm.id && a !== opposite)].filter(Boolean)
-  for (const a of order) {
-    const tried = lrnTryArm(raw, base, a, now, options)
-    if (!tried) continue
-    const exploration = {
-      arm: a.id,
-      kind: a.kind,
-      label: a.label,
-      requestedArm: arm.id,
-      base: { price: base.input.targetPrice, at: lrnIso(base.optimal.date), probability: base.probability },
-      price: tried.price,
-      at: lrnIso(tried.at),
-      costPoints: Math.round(tried.cost * 100),
-    }
-    return { result: { ...tried.result, exploration }, exploration }
+export function explorationPlan(raw, base, now, { key = null, month = null, enabled = true, options = {}, budget = null, share = LEARNING.EXPLORE_SHARE } = {}) {
+  if (!enabled || !base || !base.ok || base.kind !== 'analysis' || !base.optimal) return null
+  if (base.input.listPrice < LEARNING.EXPLORE_MIN_LIST_PRICE) return null
+  const k = key || explorationKey(raw)
+  const m = month || monthKeyOf(now)
+  if (lrnUnit(k, m, 'explore') >= share) return null
+  let safe = EXPLORATION_ARMS.map((arm) => lrnTryArm(raw, base, arm, now, options)).filter(Boolean)
+  if (budget) {
+    const allowed = LEARNING.EXPLORE_BUDGET_SHARE * ((budget.baseTotal || 0) + base.probability) - (budget.spent || 0)
+    safe = safe.filter((s) => s.cost <= allowed + 1e-9)
   }
-  return null
+  if (!safe.length) return null
+  const pick = safe[Math.min(safe.length - 1, Math.floor(lrnUnit(k, m, 'arm') * safe.length))]
+  const exploration = {
+    arm: pick.arm.id,
+    kind: pick.arm.kind,
+    label: pick.arm.label,
+    propensity: share / safe.length,
+    safe: safe.map((s) => s.arm.id),
+    base: { price: base.input.targetPrice, at: lrnIso(base.optimal.date), probability: base.probability },
+    price: pick.price,
+    at: lrnIso(pick.at),
+    costPoints: Math.round(pick.cost * 100),
+    savingCostPct: Math.round(pick.savingCost * 1000) / 10,
+  }
+  return { result: { ...pick.result, exploration }, exploration }
 }
 
 /* ───────── failure risk ───────── */
 
 const lrnLevel = (pFail) => (pFail >= 0.6 ? 'high' : pFail >= 0.35 ? 'medium' : 'low')
+const REASON_LABELS = { countered: 'Controproposta', declined: 'Rifiuto', no_reply: 'Nessuna risposta', sold_other: 'Venduto ad altri' }
 
 /**
- * Probability that this offer fails even at the recommended moment and price, a 90% range, the reasons and what the
- * user's own history says. `records` = buildDataset(...) (optional).
+ * Probability that this offer fails even at the recommended moment and price, a 90% range, why (engine factors), how
+ * failures split by kind (engine shares smoothed with the user's own mix) and the chance the negotiation still closes
+ * (each kind of failure has its own chance of a deal later). `records` = buildDataset(...) (optional).
  */
-export function failureRiskFor(result, { profile = null, records = null } = {}) {
+export function failureRiskFor(result, { profile = null, records = null, now = null } = {}) {
   if (!result || !result.ok || !result.optimal || result.kind === 'no_offer_needed') return null
   const { optimal, input } = result
   const p = result.probability
-  const k = optimal.pAvailable * optimal.pRead
+  const A = optimal.pAvailable
+  const R = optimal.pRead
   const z = optimal.score.logit
   let lo = result.probabilityRange ? result.probabilityRange[0] : p
   let hi = result.probabilityRange ? result.probabilityRange[1] : p
   const P = profile ? normalizeProfile(profile) : null
   let basis = 'engine'
   if (P && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
-    const r = { rawLogit: optimal.score.rawLogit ?? z, timeGroup: timeGroupOf(optimal.score.timeWindow.id), band: bandOf(input.discountPct) }
+    const r = { rawLogit: optimal.score.rawLogit ?? z, timeGroup: timeGroupOf(optimal.score.timeWindow.id), discW: discKnotWeights(input.discountPct) }
     const x = P.paramKeys.map((key) => lrnFeature(key, r))
     let v = 0
-    for (let i = 0; i < x.length; i++) for (let j = 0; j < x.length; j++) v += x[i] * P.cov[i][j] * x[j]
+    for (let i = 0; i < x.length; i++) for (let j = 0; j < x.length; j++) v += x[i] * (P.cov[i][j] || 0) * x[j]
     const sd = Math.sqrt(Math.max(0, v))
-    lo = Math.min(lo, k * squash(z - 1.645 * sd))
-    hi = Math.max(hi, k * squash(z + 1.645 * sd))
+    lo = Math.min(lo, A * R * squash(z - 1.645 * sd))
+    hi = Math.max(hi, A * R * squash(z + 1.645 * sd))
     basis = 'history'
   } else {
     // Without outcomes the engine's weights are still unvalidated for this user's sellers: say so with a wide range.
@@ -775,24 +1042,43 @@ export function failureRiskFor(result, { profile = null, records = null } = {}) 
   const negatives = (result.factors && result.factors.rows ? result.factors.rows : []).filter((f) => f.deltaPoints < 0).sort((a, b) => a.deltaPoints - b.deltaPoints)
   if (input.discountPct >= 15) reasons.push({ id: 'discount', text: `Sconto del ${Math.round(input.discountPct)}%: parte da ${result.factors.basePct}% di accettazione` })
   for (const f of negatives.slice(0, 3)) reasons.push({ id: f.id, text: `${f.label}: ${formatSignedPoints(f.deltaPoints)} punti` })
-  if (optimal.pAvailable < 0.9) reasons.push({ id: 'available', text: `Può essere venduto ad altri prima: resta disponibile al ${Math.round(optimal.pAvailable * 100)}%` })
-  if (optimal.pRead < 0.99) reasons.push({ id: 'read', text: `Venditore inattivo: potrebbe non leggere l'offerta (${Math.round(optimal.pRead * 100)}%)` })
+  if (A < 0.9) reasons.push({ id: 'available', text: `Può essere venduto ad altri prima: resta disponibile al ${Math.round(A * 100)}%` })
+  if (R < 0.99) reasons.push({ id: 'read', text: `Venditore inattivo: potrebbe non leggere l'offerta (${Math.round(R * 100)}%)` })
   if (result.blockRisk && result.blockRisk.level !== 'low') reasons.push({ id: 'block', text: `Rischio di rifiuto secco ${result.blockRisk.label.toLowerCase()}` })
 
+  // How a failure happens: engine shares for this offer, smoothed with the user's own mix of failed first offers.
+  const pAccRead = squash(z)
+  const raw = { sold_other: 1 - A, no_reply: A * (1 - R) + A * R * (1 - pAccRead) * LEARNING.REASON_PRIOR_SPLIT.no_reply, countered: A * R * (1 - pAccRead) * LEARNING.REASON_PRIOR_SPLIT.countered, declined: A * R * (1 - pAccRead) * LEARNING.REASON_PRIOR_SPLIT.declined }
+  const rawSum = Object.values(raw).reduce((s, v) => s + v, 0) || 1
+  const ref = now || (records && records.length ? new Date(Math.max(...records.map((r) => r.sentAt.getTime()))) : new Date(0))
+  const failed = Array.isArray(records) ? records.filter((r) => r.y === 0 && r.first && REASON_LABELS[r.first]) : []
+  const fw = failed.map((r) => recencyWeight(r.sentAt, ref))
+  const W0 = LEARNING.REASON_PRIOR_WEIGHT
+  const fwSum = fw.reduce((s, w) => s + w, 0)
+  const mix = Object.keys(REASON_LABELS).map((id) => {
+    const share = (W0 * (raw[id] / rawSum) + failed.reduce((s, r, i) => s + (r.first === id ? fw[i] : 0), 0)) / (W0 + fwSum)
+    const done = failed.filter((r) => r.first === id && (r.closed || r.lost))
+    const dw = done.map((r) => recencyWeight(r.sentAt, ref))
+    const W1 = LEARNING.CLOSE_AFTER_REASON_WEIGHT
+    const prior = LEARNING.CLOSE_AFTER_REASON_PRIOR[id]
+    const closeAfter = (W1 * prior + done.reduce((s, r, i) => s + (r.closed ? dw[i] : 0), 0)) / (W1 + dw.reduce((s, w) => s + w, 0))
+    return { id, label: REASON_LABELS[id], share, closeAfter }
+  }).sort((a, b) => b.share - a.share)
+  const rescue = mix.reduce((s, m) => s + m.share * m.closeAfter, 0)
+  const pClose = p + (1 - p) * rescue
+
   let similar = null
-  let closeAfterFail = null
   if (Array.isArray(records) && records.length) {
-    const band = bandOf(input.discountPct)
-    const same = records.filter((r) => r.y != null && r.band === band)
-    if (same.length >= 3) similar = { n: same.length, successes: same.filter((r) => r.y === 1).length, band }
-    const failed = records.filter((r) => r.y === 0 && (r.closed || r.lost))
-    if (failed.length >= 3) closeAfterFail = { n: failed.length, closed: failed.filter((r) => r.closed).length }
+    const knot = discKnotOf(input.discountPct)
+    const same = records.filter((r) => r.y != null && r.knot === knot)
+    if (same.length >= 3) similar = { n: same.length, successes: same.filter((r) => r.y === 1).length, knot }
   }
   const pFail = 1 - p
   const plan = []
-  if (pFail >= 0.35) plan.push('Se arriva una controproposta, non accettarla subito: usa «Ha fatto una controproposta» per la tua mossa.')
+  if (pFail >= 0.35 && mix[0].id === 'countered') plan.push('Il fallimento più probabile è una controproposta: non accettarla subito, usa «Ha fatto una controproposta» per la tua mossa.')
+  else if (pFail >= 0.35) plan.push('Se arriva una controproposta, non accettarla subito: usa «Ha fatto una controproposta» per la tua mossa.')
   if (pFail >= 0.5 && input.discountPct > 20) plan.push('Se rifiuta, riprova tra qualche giorno con 2–3 punti di sconto in meno.')
-  if (optimal.pRead < 0.99) plan.push('Con un venditore inattivo scrivi prima un messaggio: l\'offerta da sola rischia di scadere senza risposta.')
+  if (R < 0.99) plan.push('Con un venditore inattivo scrivi prima un messaggio: l\'offerta da sola rischia di scadere senza risposta.')
   return {
     pSuccess: p,
     pFail,
@@ -800,8 +1086,10 @@ export function failureRiskFor(result, { profile = null, records = null } = {}) 
     level: lrnLevel(pFail),
     basis,
     reasons: reasons.slice(0, 5),
+    failureMix: mix,
+    pClose,
+    pCloseRange: [lo + (1 - lo) * rescue, hi + (1 - hi) * rescue],
     similar,
-    closeAfterFail,
     plan,
   }
 }
@@ -837,7 +1125,8 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
 
   const firstFit = fitFirstOffers(records, now)
   const counterFit = fitCounters(records, now, prev.time)
-  const proposal = proposeProfile({ previous: prev, firstFit, counterFit, records, month, now, lastMonthRecords: inMonth })
+  const counterStats = counterAnalytics(records, now)
+  const proposal = proposeProfile({ previous: prev, firstFit, counterFit, counterStats, records, month, now, lastMonthRecords: inMonth })
   const next = proposal.profile
   const discountFit = proposal.discountFit
 
@@ -881,26 +1170,27 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     avgFirstDiscountPct: inMonth.length ? lrnMean(inMonth.map((r) => r.discountPct)) / 100 : null,
     onTimeShare: inMonth.filter((r) => r.onTime != null).length ? inMonth.filter((r) => r.onTime).length / inMonth.filter((r) => r.onTime != null).length : null,
     explored: inMonth.filter((r) => r.exploration).length,
+    // Reward per offer sent (share of list price): saving if closed, minus the cost of a lost item (research §4).
+    rewardPerOffer: (closed.length + lost.length) ? (closed.reduce((s, r) => s + r.savingShare, 0) - lost.filter((r) => r.status !== 'abandoned').length * LEARNING.LOSS_COST_SHARE) / (closed.length + lost.length) : null,
   }
 
   const calibration = {
-    n: decided.length,
-    brierShown: brierScore(pairsShown),
-    logLossShown: logLoss(pairsShown),
-    brierEngine: brierScore(pairsRaw),
-    logLossEngine: logLoss(pairsRaw),
-    brierNext: brierScore(pairsNext),
-    logLossNext: logLoss(pairsNext),
-    reliability: reliabilityTable(pairsShown.length ? pairsShown : pairsRaw),
+    shown: calibrationMetrics(pairsShown),
+    engine: calibrationMetrics(pairsRaw),
+    next: calibrationMetrics(pairsNext),
     allTime: {
       n: firstFit.n,
-      logLossEngine: logLoss(firstFit.decided.map((r) => [predictWith(null, r), r.y])),
-      logLossNext: logLoss(firstFit.decided.map((r) => [predictWith(next, r), r.y])),
+      engine: calibrationMetrics(firstFit.decided.map((r) => [predictWith(null, r), r.y])),
+      next: calibrationMetrics(firstFit.decided.map((r) => [predictWith(next, r), r.y])),
     },
+    df: firstFit.df,
+    ladder: firstFit.ladder,
+    logBF: proposal.logBF,
+    score: proposal.score,
   }
 
   const byTimeGroup = groupStats(records, (r) => r.timeGroup, LEARNING_TIME_GROUPS, prev, next, 'time')
-  const byBand = groupStats(records, (r) => r.band, LEARNING_BANDS, prev, next, 'band')
+  const byKnot = groupStats(records, (r) => r.knot, LEARNING_DISCOUNT_KNOTS, prev, next, 'disc')
   const exploration = [{ id: 'none', label: 'Nessuna variante' }, ...EXPLORATION_ARMS].map((arm) => {
     const rs = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && (arm.id === 'none' ? !r.exploration : r.exploration && r.exploration.arm === arm.id))
     const expected = rs.reduce((s, r) => s + predictWith(prev, r), 0)
@@ -913,8 +1203,10 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
   if (!records.length) notes.push('Nessuna offerta inviata finora: segna «Inviata» e l\'esito di ogni offerta, il motore impara solo dai tuoi esiti.')
   else if (firstFit.n < LEARNING.MIN_EFFECTIVE.intercept) notes.push(`Esiti ancora pochi (${firstFit.n}): il motore resta quello di base finché non ne raccoglie almeno ${LEARNING.MIN_EFFECTIVE.intercept}.`)
   if (summary.pending) notes.push(`${summary.pending} ${summary.pending === 1 ? 'trattativa è ancora aperta' : 'trattative sono ancora aperte'}: gli esiti che arriveranno entrano nel calcolo del mese prossimo.`)
+  const young = inMonth.filter((r) => r.y != null && !lrnMature(r, now)).length
+  if (young) notes.push(`${young} ${young === 1 ? 'offerta inviata negli ultimi 7 giorni entra' : 'offerte inviate negli ultimi 7 giorni entrano'} nella correzione del mese prossimo (orizzonte fisso, per non contare solo le risposte veloci).`)
   if (summary.noReplyImplicit) notes.push(`${summary.noReplyImplicit} ${summary.noReplyImplicit === 1 ? 'offerta senza esito da oltre 7 giorni è contata' : 'offerte senza esito da oltre 7 giorni sono contate'} come «nessuna risposta».`)
-  if (proposal.rollback) notes.push('Il mese scorso le correzioni hanno stimato peggio del motore di base: le ho dimezzate prima di ricalcolarle.')
+  if (proposal.rollback) notes.push('Le correzioni in uso prevedevano peggio di quelle di prima: sono tornato ai valori precedenti e le ho bloccate per un mese.')
   if (!explorationEnabled) notes.push('Le varianti di test sono spente: il motore impara più lentamente sugli orari e sugli sconti.')
 
   return {
@@ -925,11 +1217,12 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     summary,
     calibration,
     byTimeGroup,
-    byBand,
+    byKnot,
     exploration,
     discount: discountFit,
     counterFit,
-    firstFit: { keys: firstFit.keys, theta: firstFit.theta, nEff: firstFit.nEff, n: firstFit.n },
+    counterStats,
+    firstFit: { keys: firstFit.keys, theta: firstFit.theta, nEff: firstFit.nEff, n: firstFit.n, ladder: firstFit.ladder, df: firstFit.df },
     changes: proposal.changes,
     rollback: proposal.rollback,
     previousProfile: prev,
@@ -973,7 +1266,7 @@ export function reportHeadline(report) {
   const moved = report.changes.filter((c) => c.status === 'applied' || c.status === 'capped')
   const parts = [`${s.offersSent} ${s.offersSent === 1 ? 'offerta' : 'offerte'}`]
   if (s.closedDeals) parts.push(`${s.closedDeals} ${s.closedDeals === 1 ? 'affare' : 'affari'} (${formatEuro(s.totalSavedEur)} risparmiati)`)
-  parts.push(moved.length ? `${moved.length} ${moved.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato')
+  parts.push(report.rollback ? 'tornato alle correzioni precedenti' : moved.length ? `${moved.length} ${moved.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato')
   return parts.join(' · ')
 }
 
@@ -981,49 +1274,56 @@ export function reportHeadline(report) {
 
 const pctOrNull = (x) => (x == null || !Number.isFinite(x) ? null : x)
 const yesNo = (b) => (b == null ? '' : b ? 'Sì' : 'No')
+/** A value with an explicit cell format (the writer reads { value, format } objects). */
+const lrnTyped = (value, format) => (value == null || format == null || format === 'text' ? value : { value, format })
+const num4 = (x) => (x == null || !Number.isFinite(x) ? null : lrnR4(x))
+const pm = (v, se) => (v == null ? null : `${String(lrnR4(v)).replace('.', ',')}${se != null ? ` ± ${String(lrnR4(se)).replace('.', ',')}` : ''}`)
+const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata' }
 
-/** The month's .xlsx: summary, offers, negotiations, time and discount groups, calibration, tests, engine changes, trend. */
+/** The month's .xlsx: summary, offers, negotiations, counter analysis, time and discount groups, calibration, tests, engine changes, trend, notes. */
 export function reportWorkbook(report) {
   const s = report.summary
   const c = report.calibration
+  const cs = report.counterStats
   const summaryRows = [
-    ['Offerte inviate nel mese', s.offersSent, 'num'],
-    ['Prime offerte con esito', s.decidedFirst, 'num'],
-    ['Accettate subito', s.accepted, 'num'],
-    ['Controproposte ricevute alla prima offerta', s.countered, 'num'],
-    ['Rifiutate', s.declined, 'num'],
+    ['Offerte inviate nel mese', s.offersSent, 'int'],
+    ['Prime offerte con esito', s.decidedFirst, 'int'],
+    ['Accettate subito', s.accepted, 'int'],
+    ['Controproposte ricevute alla prima offerta', s.countered, 'int'],
+    ['Rifiutate', s.declined, 'int'],
     ['Nessuna risposta (di cui presunte)', `${s.noReply} (${s.noReplyImplicit})`, 'text'],
-    ['Vendute ad altri', s.soldOther, 'num'],
-    ['Trattative ancora aperte', s.pending, 'num'],
-    ['Affari conclusi', s.closedDeals, 'num'],
-    ['Affari persi', s.lostDeals, 'num'],
+    ['Vendute ad altri', s.soldOther, 'int'],
+    ['Trattative ancora aperte', s.pending, 'int'],
+    ['Affari conclusi', s.closedDeals, 'int'],
+    ['Affari persi', s.lostDeals, 'int'],
     ['Tasso di chiusura (conclusi / decisi)', pctOrNull(s.closeRate), 'pct'],
     ['Accettazione reale della prima offerta', pctOrNull(s.firstAcceptRate), 'pct'],
     ['Accettazione stimata dal motore', pctOrNull(s.predictedFirstAccept), 'pct'],
     ['Quota di prime offerte con controproposta', pctOrNull(s.counterRate), 'pct'],
-    ['Controproposte del venditore (tutti i giri)', s.sellerCounters, 'num'],
+    ['Controproposte del venditore (tutti i giri)', s.sellerCounters, 'int'],
     ['Salita media della controproposta sulla tua offerta', pctOrNull(s.avgSellerRaisePct == null ? null : s.avgSellerRaisePct / 100), 'pct'],
     ['Quota media della distanza concessa dal venditore', pctOrNull(s.avgSellerGapShare), 'pct'],
-    ['Tue controproposte inviate', s.ourCounters, 'num'],
-    ['Tue controproposte accettate', s.ourCountersAccepted, 'num'],
+    ['Tue controproposte inviate', s.ourCounters, 'int'],
+    ['Tue controproposte accettate', s.ourCountersAccepted, 'int'],
     ['Tua salita media nelle controproposte', pctOrNull(s.avgOurRaisePct == null ? null : s.avgOurRaisePct / 100), 'pct'],
-    ['Giri medi negli affari conclusi', s.avgRoundsClosed, 'num'],
+    ['Giri medi di controproposta negli affari conclusi', s.avgRoundsClosed == null ? null : lrnR2(s.avgRoundsClosed), 'num'],
     ['Tempo di risposta mediano (ore)', s.medianLatencyH == null ? null : lrnR2(s.medianLatencyH), 'num'],
     ['Sconto medio della prima offerta', pctOrNull(s.avgFirstDiscountPct), 'pct'],
     ['Risparmio medio sugli affari conclusi', pctOrNull(s.avgSavingPct), 'pct'],
     ['Risparmio medio per affare', s.avgSavingEur, 'eur'],
     ['Risparmio totale', s.totalSavedEur, 'eur'],
+    ['Resa per offerta (risparmio − costo degli affari persi, % del listino)', pctOrNull(s.rewardPerOffer), 'pct'],
     ['Offerte inviate in orario (±60 min)', pctOrNull(s.onTimeShare), 'pct'],
-    ['Offerte con variante di test', s.explored, 'num'],
-    ['Errore delle stime (Brier, più basso è meglio)', c.brierShown == null ? null : lrnR4(c.brierShown), 'num'],
-    ['Errore delle stime con le nuove correzioni (Brier)', c.brierNext == null ? null : lrnR4(c.brierNext), 'num'],
+    ['Offerte con variante di test', s.explored, 'int'],
+    ['Errore delle stime (Brier, più basso è meglio)', num4(c.shown.brier), 'num'],
+    ['Errore delle stime con le nuove correzioni (Brier)', num4(c.next.brier), 'num'],
   ]
   const sheets = [
     {
       name: 'Riepilogo',
       title: `Offerte Vinted · ${report.label}`,
       note: `Generato il ${String(report.generatedAt).slice(0, 10)} · motore ${report.engine} · ${reportHeadline(report)}`,
-      columns: [{ header: 'Voce', width: 52 }, { header: 'Valore', width: 18 }],
+      columns: [{ header: 'Voce', width: 60 }, { header: 'Valore', width: 18 }],
       rows: summaryRows.map((r) => [r[0], lrnTyped(r[1], r[2])]),
     },
     {
@@ -1035,7 +1335,7 @@ export function reportWorkbook(report) {
         { header: 'Stima motore oggi', format: 'pct' }, { header: 'Stima corretta', format: 'pct' }, { header: 'Prima risposta', width: 18 }, { header: 'Ore alla risposta', format: 'num' },
         { header: 'Controproposte', format: 'int' }, { header: 'Prima controproposta', format: 'eur' }, { header: 'Salita controproposta', format: 'pct' },
         { header: 'Prezzo finale', format: 'eur' }, { header: 'Risparmio', format: 'eur' }, { header: 'Risparmio %', format: 'pct' }, { header: 'Esito', width: 30 },
-        { header: 'Variante di test', width: 24 }, { header: 'Venditore', width: 12 }, { header: 'Link', width: 40 },
+        { header: 'Variante di test', width: 26 }, { header: 'Propensione', format: 'pct' }, { header: 'Venditore', width: 12 }, { header: 'Link', width: 40 },
       ],
       rows: report.inMonth.map((r) => {
         const firstRound = r.rounds[0]
@@ -1045,7 +1345,7 @@ export function reportWorkbook(report) {
           group ? group.label : r.timeGroup, r.pShown, Number.isFinite(r.rawLogit) ? predictWith(null, r) : null, Number.isFinite(r.rawLogit) ? predictWith(report.nextProfile, r) : null,
           r.first ? `${OUTCOME_LABELS[r.first] || r.first}${r.implicit ? ' (presunta)' : ''}` : 'In attesa', r.latencyFirstH == null ? null : lrnR2(r.latencyFirstH),
           r.rounds.length, firstRound ? firstRound.sellerPrice : null, firstRound && Number.isFinite(firstRound.sellerRaisePct) ? firstRound.sellerRaisePct / 100 : null,
-          r.finalPrice, r.savingEur, r.savingShare, finalLabel(r), r.exploration ? r.exploration.label : '', r.sellerProfile, r.link,
+          r.finalPrice, r.savingEur, r.savingShare, finalLabel(r), r.exploration ? r.exploration.label : '', r.exploration && Number.isFinite(r.exploration.propensity) ? r.exploration.propensity : null, r.sellerProfile, r.link,
         ]
       }),
     },
@@ -1055,66 +1355,102 @@ export function reportWorkbook(report) {
         { header: 'Articolo', width: 34 }, { header: 'Giro', format: 'int' }, { header: 'Tua offerta', format: 'eur' }, { header: 'Sua controproposta', format: 'eur' },
         { header: 'Salita sulla tua offerta', format: 'pct' }, { header: 'Distanza concessa', format: 'pct' }, { header: 'Ore alla sua risposta', format: 'num' },
         { header: 'Ricevuta', format: 'datetime', width: 17 }, { header: 'Tua risposta', format: 'eur' }, { header: 'Tua salita', format: 'pct' }, { header: 'Quota della distanza', format: 'pct' },
-        { header: 'Metà strada', width: 12 }, { header: 'Ultima offerta', width: 14 }, { header: 'Stima accettazione', format: 'pct' }, { header: 'Accettata', width: 12 }, { header: 'Inviata', format: 'datetime', width: 17 },
+        { header: 'Metà strada', width: 12 }, { header: 'Ultima offerta', width: 14 }, { header: 'Stima accettazione', format: 'pct' }, { header: 'Accettata', width: 22 }, { header: 'Inviata', format: 'datetime', width: 17 },
       ],
       rows: report.inMonth.flatMap((r) => r.rounds.map((x) => [
         r.title || 'Senza titolo', x.index, x.buyerPrice, x.sellerPrice, Number.isFinite(x.sellerRaisePct) ? x.sellerRaisePct / 100 : null, x.sellerGapShare, x.latencyH == null ? null : lrnR2(x.latencyH),
         x.receivedAt ? new Date(x.receivedAt) : null, x.replyPrice, Number.isFinite(x.replyRaisePct) ? x.replyRaisePct / 100 : null, x.replyGapShare, yesNo(x.replyIsSplit), yesNo(x.replyIsFinal),
-        x.replyPAccept, x.replyAccepted == null ? 'In attesa' : x.replyAccepted ? 'Sì' : x.replyImplicit ? 'No (nessuna risposta)' : 'No', x.replyAt ? new Date(x.replyAt) : null,
+        x.replyPAccept, x.replyAccepted == null ? (x.replyPrice == null ? '' : 'In attesa') : x.replyAccepted ? 'Sì' : x.replyImplicit ? 'No (nessuna risposta)' : 'No', x.replyAt ? new Date(x.replyAt) : null,
       ])),
     },
     {
+      name: 'Controproposte',
+      title: 'Come rispondono i tuoi venditori',
+      note: 'Tutto lo storico, i mesi vecchi pesano meno e i giri della stessa trattativa contano meno di trattative diverse.',
+      columns: [{ header: 'Voce', width: 56 }, { header: 'Valore', width: 16 }, { header: 'Dettaglio', width: 16 }, { header: 'Dettaglio 2', width: 16 }, { header: 'Dettaglio 3', width: 16 }],
+      rows: [
+        ['Controproposte del venditore analizzate', lrnTyped(cs.rounds, 'int')],
+        ['Quota media della distanza concessa (osservata)', lrnTyped(cs.shareObserved, 'pct')],
+        ['Quota stimata per i tuoi venditori (verso lo 0,42 di eBay)', lrnTyped(cs.sharePosterior, 'pct')],
+        ['Moltiplicatore usato dal motore: prima → dopo', lrnTyped(report.previousProfile.counterShare, 'num'), lrnTyped(report.nextProfile.counterShare, 'num')],
+        ['Venditori fermi sul prezzo (quota ≤ 2%)', lrnTyped(cs.holdRate, 'pct')],
+        ['Tue controproposte: accettate / attese dal motore', lrnTyped(report.counterFit.observed, 'int'), lrnTyped(lrnR2(report.counterFit.expected), 'num')],
+        [],
+        ['Salita della sua controproposta sulla tua offerta', 'Casi', 'Media', 'Mediana', 'Q1 – Q3'],
+        ...cs.byRound.map((b) => [b.round < 3 ? `Giro ${b.round}` : 'Giro 3 e oltre', lrnTyped(b.n, 'int'), lrnTyped(b.mean == null ? null : b.mean / 100, 'pct'), lrnTyped(b.median == null ? null : b.median / 100, 'pct'),
+          b.q1 == null ? null : `${Math.round(b.q1)}% – ${Math.round(b.q3)}%`]),
+        [],
+        ['Affari conclusi per numero di giri', 'Affari'],
+        ...cs.roundsToClose.map((x) => [x.rounds < 3 ? `${x.rounds} ${x.rounds === 1 ? 'giro' : 'giri'} di controproposta` : '3 giri o più', lrnTyped(x.deals, 'int')]),
+        [],
+        ['Tempo di risposta con una controproposta (Kaplan–Meier; i silenzi contano come attese)', 'Ancora senza risposta', 'Offerte in attesa'],
+        ...cs.latency.table.map((t) => [`Dopo ${t.hours} ${t.hours === 1 ? 'ora' : 'ore'}`, lrnTyped(t.survival, 'pct'), lrnTyped(t.atRisk, 'int')]),
+        ['Mediana (ore)', cs.latency.median == null ? 'oltre il periodo osservato' : lrnTyped(lrnR2(cs.latency.median), 'num')],
+        ['Risposte osservate / silenzi', lrnTyped(cs.latency.events, 'int'), lrnTyped(cs.latency.censored, 'int')],
+        ['Ore di attesa usate dal motore: prima → dopo', lrnTyped(report.previousProfile.sellerReplyHours ?? COUNTER.SELLER_REPLY_HOURS, 'num'), lrnTyped(report.nextProfile.sellerReplyHours ?? COUNTER.SELLER_REPLY_HOURS, 'num')],
+      ],
+    },
+    {
       name: 'Fasce orarie',
-      note: 'Tutto lo storico, i mesi vecchi pesano meno. Osservate − attese > 0: la fascia rende più di quanto il motore stimava.',
       title: 'Fasce orarie',
+      note: 'Tutto lo storico, i mesi vecchi pesano meno. Osservate − attese > 0: la fascia rende più di quanto il motore stimava.',
       columns: [{ header: 'Fascia', width: 44 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' },
         { header: 'Tasso reale', format: 'pct' }, { header: 'Tasso stimato', format: 'pct' }, { header: 'Correzione prima', format: 'num' }, { header: 'Correzione ora', format: 'num' }],
-      rows: report.byTimeGroup.map((g) => [g.label, g.n, g.successes, g.expected, g.oe, g.observedRate, g.expectedRate, g.before, g.after]),
+      rows: report.byTimeGroup.map((g) => [g.label, g.n, g.successes, g.expected, g.oe, g.observedRate, g.expectedRate, num4(g.before), num4(g.after)]),
     },
     {
       name: 'Sconti',
-      title: 'Fasce di sconto e sconto di partenza',
+      title: 'Sconti e sconto di partenza',
       note: `Sconto di partenza: ${report.previousProfile.discountPct}% → ${report.nextProfile.discountPct}%. Risparmio atteso = probabilità × sconto + (1 − probabilità) × (affari chiusi dopo un primo no: ${Math.round(report.discount.closeAfterFail * 100)}%, con il ${Math.round(report.discount.continuationRatio * 100)}% del risparmio iniziale; un affare perso costa il ${Math.round(LEARNING.LOSS_COST_SHARE * 100)}%).`,
       columns: [{ header: 'Voce', width: 28 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' },
         { header: 'Correzione prima', format: 'num' }, { header: 'Correzione ora', format: 'num' }],
       rows: [
-        ...report.byBand.map((b) => [b.label, b.n, b.successes, b.expected, b.oe, b.before, b.after]),
+        ...report.byKnot.map((b) => [b.label, b.n, b.successes, b.expected, b.oe, num4(b.before), num4(b.after)]),
         [],
         ['Sconto di partenza', 'Accettazione stimata', 'Risparmio atteso'],
-        ...report.discount.curve.map((p) => [`${p.discountPct}%`, p.pAccept, p.expectedSavingShare]),
+        ...report.discount.curve.filter((p) => Number.isInteger(p.discountPct)).map((p) => [`${p.discountPct}%`, lrnTyped(p.pAccept, 'pct'), lrnTyped(p.expectedSavingShare, 'pct')]),
       ],
-      rowFormats: { afterRow: report.byBand.length + 1, formats: ['text', 'pct', 'pct'] },
     },
     {
       name: 'Calibrazione',
       title: 'Quanto sono affidabili le stime',
-      note: 'Per fascia di probabilità stimata: quante offerte e quante accettate davvero. Più le colonne si somigliano, più il motore è calibrato.',
-      columns: [{ header: 'Stima da', format: 'pct' }, { header: 'Stima a', format: 'pct' }, { header: 'Offerte', format: 'int' }, { header: 'Stima media', format: 'pct' }, { header: 'Accettate davvero', format: 'pct' }],
+      note: 'Offerte del mese ordinate per stima e divise in gruppi di pari numerosità: stima media contro accettate davvero, con l\'intervallo al 90%.',
+      columns: [{ header: 'Stima da', format: 'pct' }, { header: 'Stima a', format: 'pct' }, { header: 'Offerte', format: 'int' }, { header: 'Stima media', format: 'pct' },
+        { header: 'Accettate davvero', format: 'pct' }, { header: 'Intervallo 90% da', format: 'pct' }, { header: 'Intervallo 90% a', format: 'pct' }],
       rows: [
-        ...c.reliability.bins.map((b) => [b.from, b.to, b.n, b.predicted, b.observed]),
+        ...c.shown.bins.map((b) => [b.from, b.to, b.n, b.predicted, b.observed, b.low, b.high]),
         [],
-        ['Errore di calibrazione medio (ECE)', null, null, c.reliability.ece],
-        ['Log loss stime mostrate (più basso è meglio)', null, null, lrnTyped(c.logLossShown == null ? null : lrnR4(c.logLossShown), 'num')],
-        ['Log loss motore di base', null, null, lrnTyped(c.logLossEngine == null ? null : lrnR4(c.logLossEngine), 'num')],
-        ['Log loss con le nuove correzioni', null, null, lrnTyped(c.logLossNext == null ? null : lrnR4(c.logLossNext), 'num')],
+        ['Indicatore', null, null, 'Valore'],
+        ['Accettate / attese (mese)', null, null, c.shown.oeRatio == null ? null : `${c.shown.observed} / ${String(lrnR2(c.shown.expected)).replace('.', ',')}`],
+        ['Scarto standardizzato (O − A), |z| > 2 = scarto reale', null, null, lrnTyped(num4(c.shown.oeZ), 'num')],
+        ['Z di Spiegelhalter (|Z| > 2 = stime non calibrate)', null, null, lrnTyped(num4(c.shown.spiegelhalterZ), 'num')],
+        ['Log loss stime mostrate (più basso è meglio)', null, null, pm(c.shown.logLoss, c.shown.logLossSe)],
+        ['Log loss motore di base', null, null, pm(c.engine.logLoss, c.engine.logLossSe)],
+        ['Log loss con le nuove correzioni', null, null, pm(c.next.logLoss, c.next.logLossSe)],
+        ['Brier stime mostrate', null, null, pm(c.shown.brier, c.shown.brierSe)],
         ['Tutto lo storico: offerte con esito', null, null, lrnTyped(c.allTime.n, 'int')],
-        ['Tutto lo storico: log loss base → corretto', null, null, c.allTime.logLossEngine == null ? null : `${lrnR4(c.allTime.logLossEngine)} → ${lrnR4(c.allTime.logLossNext)}`],
+        ['Tutto lo storico: log loss base → corretto', null, null, c.allTime.engine.logLoss == null ? null : `${String(lrnR4(c.allTime.engine.logLoss)).replace('.', ',')} → ${String(lrnR4(c.allTime.next.logLoss)).replace('.', ',')}`],
+        ['Correzioni effettivamente stimate (gradi di libertà)', null, null, lrnTyped(num4(c.df), 'num')],
+        ['Correzione generale: guadagno leave-one-out (nat, serve ≥ 1)', null, null, c.ladder && c.ladder.intercept ? pm(c.ladder.intercept.gain, c.ladder.intercept.se) : null],
+        ['Pendenza: guadagno leave-one-out (nat)', null, null, c.ladder && c.ladder.slope ? pm(c.ladder.slope.gain, c.ladder.slope.se) : 'non valutata (meno di 40 esiti)'],
+        ['Fasce e sconti: guadagno leave-one-out (nat)', null, null, c.ladder && c.ladder.offsets ? pm(c.ladder.offsets.gain, c.ladder.offsets.se) : null],
+        ['Correzioni in uso contro le precedenti (log Bayes factor)', null, null, lrnTyped(num4(c.score), 'num')],
       ],
     },
     {
       name: 'Varianti di test',
       title: 'Varianti di test (1 offerta su 5)',
-      note: 'Osservate − attese confronta ogni variante con la stima del motore per le stesse offerte: con pochi casi è solo un indizio.',
+      note: 'Osservate − attese confronta ogni variante con la stima del motore per le stesse offerte. Con poche offerte è solo un indizio: le varianti servono a coprire fasce e sconti poco provati.',
       columns: [{ header: 'Variante', width: 36 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' }, { header: 'Risparmio medio', format: 'pct' }],
       rows: report.exploration.map((a) => [a.label, a.n, a.successes, a.expected, a.oe, a.avgSavingPct]),
     },
     {
       name: 'Modifiche motore',
       title: `Correzioni per ${monthLabel(shiftMonth(report.month, 1))}`,
-      note: report.rollback ? 'Rollback prudente: le correzioni del mese scorso sono state dimezzate.' : 'Ogni valore si muove solo con abbastanza esiti e al massimo di un passo al mese.',
+      note: report.rollback ? 'Ritorno ai valori precedenti: le correzioni in uso prevedevano peggio. Le famiglie toccate restano bloccate per un mese.' : 'Ogni valore si muove solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al mese.',
       columns: [{ header: 'Parametro', width: 46 }, { header: 'Prima', format: 'num' }, { header: 'Dopo', format: 'num' }, { header: 'Obiettivo dai dati', format: 'num' }, { header: 'Esiti pesati', format: 'num' },
-        { header: 'Minimo richiesto', format: 'int' }, { header: 'Stato', width: 16 }, { header: 'Motivo', width: 60 }],
-      rows: report.changes.map((x) => [x.label, x.from, x.to, x.target, x.nEff, x.minEffective, { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati' }[x.status] || x.status, x.reason]),
+        { header: 'Minimo richiesto', format: 'int' }, { header: 'Stato', width: 18 }, { header: 'Motivo', width: 64 }],
+      rows: report.changes.map((x) => [x.label, x.from, x.to, x.target, x.nEff, x.minEffective, STATUS_LABELS[x.status] || x.status, x.reason]),
     },
     {
       name: 'Andamento',
@@ -1125,23 +1461,11 @@ export function reportWorkbook(report) {
     },
     {
       name: 'Note',
-      columns: [{ header: 'Nota', width: 110 }],
+      columns: [{ header: 'Nota', width: 120 }],
       rows: report.notes.length ? report.notes.map((n) => [n]) : [['Nessuna nota.']],
     },
   ]
-  return buildXlsx(sheets.map(lrnApplyRowFormats), { title: `Offerte Vinted ${report.label}`, creator: 'Offerta Vinted Timing', date: lrnDate(report.generatedAt) || new Date(0) })
+  return buildXlsx(sheets, { title: `Offerte Vinted ${report.label}`, creator: 'Offerta Vinted Timing', date: lrnDate(report.generatedAt) || new Date(0) })
 }
-
-/** Rows after `rowFormats.afterRow` (the discount curve under the band table) get their own per-column formats. */
-function lrnApplyRowFormats(sheet) {
-  if (sheet.rowFormats) {
-    const { afterRow, formats } = sheet.rowFormats
-    return { ...sheet, rows: sheet.rows.map((row, i) => (i >= afterRow + 1 ? row.map((v, j) => lrnTyped(v, formats[j])) : row)) }
-  }
-  return sheet
-}
-
-/** A value with an explicit cell format (the writer reads { value, format } objects). */
-const lrnTyped = (value, format) => (value == null || format == null || format === 'text' ? value : { value, format })
 
 export const reportFileName = (report) => `Offerte-Vinted-${report.month}.xlsx`

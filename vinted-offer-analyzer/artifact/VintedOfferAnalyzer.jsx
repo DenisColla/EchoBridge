@@ -499,30 +499,46 @@ const LEARNING_TIME_GROUPS = [
   { id: 'night', label: 'Notte (0–7)', windows: ['night'] },
 ]
 
-const LEARNING_BANDS = [
-  { id: 'low', label: 'Sconto sotto il 15%' },
-  { id: 'medium', label: 'Sconto 15–30%' },
-  { id: 'high', label: 'Sconto oltre il 30%' },
+/**
+ * Discount correction as a piecewise-linear curve through three knots (flat outside 10–30%): a step per risk band
+ * would make the corrected acceptance jump UP when an offer crosses 15% or 30%, which the price search would exploit.
+ */
+const LEARNING_DISCOUNT_KNOTS = [
+  { id: 'd10', pct: 10, label: 'Sconto intorno al 10%' },
+  { id: 'd20', pct: 20, label: 'Sconto intorno al 20%' },
+  { id: 'd30', pct: 30, label: 'Sconto dal 30% in su' },
 ]
 
 /**
- * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted: they are tuned for
- * a buyer with fewer than 15 offers a month, so every learned value starts at the engine default and moves slowly.
- * Logit units unless noted. The fit uses all history, older months weighted by a half-life.
+ * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted, tuned for a buyer
+ * with fewer than 15 offers a month: every learned value starts at the engine default and moves slowly. Logit units
+ * unless noted. Sources for the statistical choices: priors and Laplace (Gelman 2008), recalibration before revision
+ * at small n (Steyerberg 2004, Vergouwe 2017), prequential rollback (Dawid 1984, Kass & Raftery 1995), conservative
+ * batched exploration (Wu 2016, Perchet 2016), counter priors from eBay field data (Backus 2020, Cotet 2025).
  */
 const LEARNING = {
   HALF_LIFE_MONTHS: 6,
-  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, band: 0.35, counter: 0.5 },
+  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, disc: 0.35, counter: 0.5 },
   /** Weighted outcomes a parameter needs before it may move at all. */
-  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, band: 6, counter: 6, discount: 10 },
-  /** Largest change applied in one month (the fit may want more: the rest waits for next month). */
-  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, band: 0.2, counter: 0.3, discountPct: 1 },
-  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], band: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30] },
+  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, disc: 6, counter: 6, discount: 10, share: 8, latency: 8 },
+  /** Largest change applied in one month (latency: multiplicative factor). */
+  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, disc: 0.2, counter: 0.3, discountPct: 1, share: 0.1, latency: 1.5 },
+  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], share: [0.7, 1.3], latency: [0.5, 12] },
+  /** No move while the current value is within this many posterior sd of the target (noise). */
+  EVIDENCE_GATE_SD: 0.5,
+  /** The slope and the group offsets join only when leave-one-out says they predict better (nats, and ≥ 1 se). */
+  LADDER_MIN_ELPD_GAIN: 1,
+  /** Corrected acceptance must keep falling with the discount: engine slope ≥ 0,088 logit per point, 80% margin. */
+  DISC_MIN_ENGINE_SLOPE: 0.088,
+  DISC_MONOTONE_MARGIN: 0.8,
   /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
   MIN_CHANGE: 0.02,
   MIN_CHANGE_DISCOUNT_PCT: 0.5,
   DEFAULT_DISCOUNT_PCT: 20,
-  /** An offer sent with no outcome after this many days counts as "no reply" (Vinted offers lapse well before). */
+  /** Prequential log Bayes factor of the active profile against its parent below which the parent comes back. */
+  ROLLBACK_LOG_BF: -2,
+  FREEZE_MONTHS: 1,
+  /** An offer sent with no outcome after this many days counts as "no reply"; younger offers wait for the next fit. */
   NO_REPLY_AFTER_DAYS: 7,
   /** A counter of ours with no outcome after this many days counts as not accepted. */
   COUNTER_NO_REPLY_AFTER_DAYS: 4,
@@ -530,10 +546,15 @@ const LEARNING = {
   EXPLORE_SHARE: 0.2,
   EXPLORE_TIME_MINUTES: 60,
   EXPLORE_DISCOUNT_PTS: 2,
-  /** A variation is skipped when it would cost more than this in estimated acceptance (probability points). */
+  /** A variation is unsafe when it costs more than this in acceptance (probability points)… */
   EXPLORE_MAX_COST: 0.06,
-  /** Reliability table bins for the calibration sheet. */
-  RELIABILITY_BINS: [0, 0.2, 0.4, 0.6, 0.8, 1.0001],
+  /** …or in expected saving (share of list price). */
+  EXPLORE_MAX_SAVING_COST: 0.01,
+  /** Monthly budget: total acceptance given up by variations ≤ this share of the month's total base acceptance. */
+  EXPLORE_BUDGET_SHARE: 0.03,
+  EXPLORE_MIN_LIST_PRICE: 10,
+  /** Reliability table: equal-mass bins, between 2 and this many. */
+  RELIABILITY_MAX_BINS: 5,
   /** Months of reports caught up at once when the app was not opened for a while. */
   MAX_CATCH_UP_MONTHS: 6,
   /**
@@ -547,64 +568,157 @@ const LEARNING = {
   CONTINUATION_PRIOR_WEIGHT: 4,
   LOSS_COST_SHARE: 0.05,
   AGGRESSIVE_RAMP_PCT: [27, 33],
+  /** Failure reasons: engine split of "read but not accepted" (Backus 2020 replies), smoothed with the user's mix. */
+  REASON_PRIOR_SPLIT: { countered: 0.45, declined: 0.35, no_reply: 0.2 },
+  REASON_PRIOR_WEIGHT: 6,
+  /** Chance a negotiation still closes after each kind of failed first offer (prior means, weight in outcomes). */
+  CLOSE_AFTER_REASON_PRIOR: { countered: 0.6, declined: 0.1, no_reply: 0.1, sold_other: 0 },
+  CLOSE_AFTER_REASON_WEIGHT: 4,
+  /** Seller concession share in his first counter (Backus 2020 Table 4: 0,42–0,45), prior weight in rounds. */
+  SELLER_SHARE_PRIOR: 0.42,
+  SELLER_SHARE_PRIOR_WEIGHT: 8,
+  /** Survival table of the seller's reply time (hours). */
+  KM_HOURS: [1, 3, 6, 12, 24, 48],
 }
 
 // ───────────────────────── src/core/profile.js ─────────────────────────
 /**
  * The learned profile: small corrections, fitted every month on the user's own outcomes, that the engine adds to its
- * acceptance logits. Without a profile (web app, tests, first month) the engine is unchanged.
+ * acceptance logits, plus two counter-engine parameters. Without a profile (web app, tests, first month) the engine
+ * is unchanged.
  *
- *   logit' = slope × logit + intercept + time[group of the send window] + band[discount band]      (first offer)
+ *   logit' = slope × logit + intercept + time[group of the send window] + disc(discount)          (first offer)
  *   logit' = logit + counter + time[group of the send window]                                       (our counter)
+ *   counterShare     how much this user's sellers concede in a counter, relative to eBay's 0,42 (stance reading)
+ *   sellerReplyHours how long they take to answer (availability during the wait), null = engine default
+ *
+ * disc(d) is piecewise linear through the knots at 10/20/30% and flat outside: never a step at a band edge.
  */
+const ZERO_TIME = Object.freeze(Object.fromEntries(LEARNING_TIME_GROUPS.map((g) => [g.id, 0])))
+const ZERO_DISC = Object.freeze(Object.fromEntries(LEARNING_DISCOUNT_KNOTS.map((k) => [k.id, 0])))
+
 const DEFAULT_PROFILE = Object.freeze({
-  version: 1,
+  version: 2,
   id: 'default',
+  parentId: null,
+  /** Parameters of the profile this one replaced (for the prequential rollback). */
+  parent: null,
   month: null,
   createdAt: null,
   intercept: 0,
   slope: 1,
-  time: Object.freeze(Object.fromEntries(LEARNING_TIME_GROUPS.map((g) => [g.id, 0]))),
-  band: Object.freeze(Object.fromEntries(LEARNING_BANDS.map((b) => [b.id, 0]))),
+  time: ZERO_TIME,
+  disc: ZERO_DISC,
   counter: 0,
+  counterShare: 1,
+  sellerReplyHours: null,
   discountPct: LEARNING.DEFAULT_DISCOUNT_PCT,
-  /** Posterior covariance of the first-offer parameters (keys of `profileParamKeys`), for failure-risk intervals. */
+  /** Posterior covariance of the first-offer parameters (keys in `paramKeys`), for failure-risk intervals. */
   cov: null,
   paramKeys: null,
   changes: [],
   basedOn: 0,
+  /** Prequential log Bayes factor against the parent, summed over the months this profile was active. */
+  score: 0,
+  scoreMonths: 0,
+  /** Parameter families that may not move until the given month (after a rollback). */
+  frozen: {},
 })
 
 const finite = (v, fallback) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : fallback)
 const clampTo = (v, [lo, hi]) => Math.min(hi, Math.max(lo, v))
 
+/** Hat weights of a discount on the three knots (sum to 1; flat below 10% and above 30%). */
+function discKnotWeights(discountPct) {
+  const d = finite(discountPct, 20)
+  const ks = LEARNING_DISCOUNT_KNOTS
+  const w = Object.fromEntries(ks.map((k) => [k.id, 0]))
+  if (d <= ks[0].pct) w[ks[0].id] = 1
+  else if (d >= ks[ks.length - 1].pct) w[ks[ks.length - 1].id] = 1
+  else {
+    for (let i = 0; i < ks.length - 1; i++) {
+      if (d >= ks[i].pct && d <= ks[i + 1].pct) {
+        const t = (d - ks[i].pct) / (ks[i + 1].pct - ks[i].pct)
+        w[ks[i].id] = 1 - t
+        w[ks[i + 1].id] = t
+        break
+      }
+    }
+  }
+  return w
+}
+
+/** Nearest knot (for report tables). */
+const discKnotOf = (discountPct) => {
+  const d = finite(discountPct, 20)
+  return d < 15 ? 'd10' : d < 25 ? 'd20' : 'd30'
+}
+
+const discOffset = (profile, discountPct) => {
+  const w = discKnotWeights(discountPct)
+  return Object.keys(w).reduce((s, id) => s + w[id] * finite(profile && profile.disc && profile.disc[id], 0), 0)
+}
+
+/**
+ * Keeps the corrected acceptance non-increasing in the discount: between two knots the correction may rise by at most
+ * 80% of what the engine's own curve falls over the same 10 points (scaled by the slope). Returns new knot values.
+ */
+function monotoneDisc(disc, slope = 1) {
+  const ks = LEARNING_DISCOUNT_KNOTS
+  const values = ks.map((k) => finite(disc && disc[k.id], 0))
+  let worst = 0
+  for (let i = 0; i < ks.length - 1; i++) {
+    const limit = LEARNING.DISC_MONOTONE_MARGIN * (ks[i + 1].pct - ks[i].pct) * Math.max(0.1, slope) * LEARNING.DISC_MIN_ENGINE_SLOPE
+    worst = Math.max(worst, (values[i + 1] - values[i]) / limit)
+  }
+  const scale = worst > 1 ? 1 / worst : 1
+  return Object.fromEntries(ks.map((k, i) => [k.id, values[i] * scale]))
+}
+
 /** A stored profile (any version, possibly partial or tampered with) → a complete, bounded profile. */
 function normalizeProfile(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_PROFILE }
   const B = LEARNING.BOUNDS
+  const slope = clampTo(finite(raw.slope, 1), B.slope)
+  const disc = monotoneDisc(Object.fromEntries(LEARNING_DISCOUNT_KNOTS.map((k) => [k.id, clampTo(finite(raw.disc && raw.disc[k.id], 0), B.disc)])), slope)
+  const hours = raw.sellerReplyHours == null ? null : finite(raw.sellerReplyHours, null)
   return {
     ...DEFAULT_PROFILE,
     ...raw,
+    version: 2,
     intercept: clampTo(finite(raw.intercept, 0), B.intercept),
-    slope: clampTo(finite(raw.slope, 1), B.slope),
+    slope,
     time: Object.fromEntries(LEARNING_TIME_GROUPS.map((g) => [g.id, clampTo(finite(raw.time && raw.time[g.id], 0), B.time)])),
-    band: Object.fromEntries(LEARNING_BANDS.map((b) => [b.id, clampTo(finite(raw.band && raw.band[b.id], 0), B.band)])),
+    disc,
     counter: clampTo(finite(raw.counter, 0), B.counter),
+    counterShare: clampTo(finite(raw.counterShare, 1), B.share),
+    sellerReplyHours: hours == null ? null : clampTo(hours, B.latency),
     discountPct: clampTo(finite(raw.discountPct, LEARNING.DEFAULT_DISCOUNT_PCT), B.discountPct),
     changes: Array.isArray(raw.changes) ? raw.changes : [],
+    frozen: raw.frozen && typeof raw.frozen === 'object' ? raw.frozen : {},
+    score: finite(raw.score, 0),
+    scoreMonths: finite(raw.scoreMonths, 0),
+  }
+}
+
+/** The tunable parameters only (what a rollback restores). */
+const profileParams = (profile) => {
+  const P = normalizeProfile(profile)
+  return {
+    intercept: P.intercept, slope: P.slope, time: { ...P.time }, disc: { ...P.disc }, counter: P.counter,
+    counterShare: P.counterShare, sellerReplyHours: P.sellerReplyHours, discountPct: P.discountPct,
   }
 }
 
 const timeGroupOf = (windowId) => (LEARNING_TIME_GROUPS.find((g) => g.windows.includes(windowId)) || LEARNING_TIME_GROUPS[2]).id
 
-/** Same edges as riskBandFor (scoring.js), repeated here to keep this module free of engine imports. */
-const bandOf = (discountPct) => (discountPct < 15 ? 'low' : discountPct <= 30 ? 'medium' : 'high')
-
 /** True when the profile changes at least one estimate (a default or empty profile is a no-op). */
 function profileIsActive(profile) {
   if (!profile) return false
-  if (Math.abs(finite(profile.intercept, 0)) > 1e-9 || Math.abs(finite(profile.slope, 1) - 1) > 1e-9 || Math.abs(finite(profile.counter, 0)) > 1e-9) return true
-  return Object.values(profile.time || {}).some((v) => Math.abs(finite(v, 0)) > 1e-9) || Object.values(profile.band || {}).some((v) => Math.abs(finite(v, 0)) > 1e-9)
+  const off = (v, base = 0) => Math.abs(finite(v, base) - base) > 1e-9
+  if (off(profile.intercept) || off(profile.slope, 1) || off(profile.counter) || off(profile.counterShare, 1)) return true
+  if (profile.sellerReplyHours != null && Number.isFinite(Number(profile.sellerReplyHours))) return true
+  return Object.values(profile.time || {}).some((v) => off(v)) || Object.values(profile.disc || {}).some((v) => off(v))
 }
 
 /**
@@ -614,10 +728,10 @@ function profileIsActive(profile) {
 function learnedOfferRow(profile, { logit, windowId, discountPct }) {
   if (!profileIsActive(profile)) return null
   const time = finite(profile.time && profile.time[timeGroupOf(windowId)], 0)
-  const band = finite(profile.band && profile.band[bandOf(discountPct)], 0)
-  const weight = (finite(profile.slope, 1) - 1) * logit + finite(profile.intercept, 0) + time + band
+  const disc = discOffset(profile, discountPct)
+  const weight = (finite(profile.slope, 1) - 1) * logit + finite(profile.intercept, 0) + time + disc
   if (Math.abs(weight) < 1e-9) return null
-  return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, band, intercept: finite(profile.intercept, 0), slope: finite(profile.slope, 1) } }
+  return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, disc, intercept: finite(profile.intercept, 0), slope: finite(profile.slope, 1) } }
 }
 
 /** The extra factor row for our counter (seller accepts our number), or null. `windowId` is null for the lookahead. */
@@ -628,6 +742,14 @@ function learnedCounterRow(profile, { windowId }) {
   if (Math.abs(weight) < 1e-9) return null
   return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, counter: finite(profile.counter, 0) } }
 }
+
+/** How much this user's sellers concede relative to the eBay mean (1 = as the engine assumes). */
+const counterShareOf = (profile) => (profile ? clampTo(finite(profile.counterShare, 1), LEARNING.BOUNDS.share) : 1)
+
+/** Hours the seller takes to answer, learned or the engine default. */
+const sellerReplyHoursOf = (profile) => (profile && profile.sellerReplyHours != null && Number.isFinite(Number(profile.sellerReplyHours))
+  ? clampTo(Number(profile.sellerReplyHours), LEARNING.BOUNDS.latency)
+  : COUNTER.SELLER_REPLY_HOURS)
 
 /** Default target discount for a listing read from a link: the learned one, else the engine default (−20%). */
 const defaultDiscountFor = (profile) => Math.round(clampTo(finite(profile && profile.discountPct, LEARNING.DEFAULT_DISCOUNT_PCT), LEARNING.BOUNDS.discountPct))
@@ -1830,9 +1952,13 @@ const sellerStanceOf = (share) => {
 }
 
 /** Sellers concede less in later rounds (Keniston: 0,42 then 0,23): rescale to the first-round scale. */
-const ctrNormShare = (share, roundIdx) => {
+/**
+ * The seller's concession relative to a typical first-round one. `mult` (learned, default 1) says how much this
+ * user's sellers concede compared with eBay's mean: conceding 42% of the gap is "average" only where 42% is average.
+ */
+const ctrNormShare = (share, roundIdx, mult = 1) => {
   const means = COUNTER.ROUND_MEAN_SHARE
-  return Math.min(0.9, share * (means[0] / means[Math.min(roundIdx, means.length - 1)]))
+  return Math.min(0.9, (share * (means[0] / means[Math.min(roundIdx, means.length - 1)])) / mult)
 }
 
 /* ───────── input ───────── */
@@ -1916,7 +2042,7 @@ function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const sigma = ctrR2(Sprev - S)
   const denominator = Sprev - B
   const share = denominator > CTR_EPS ? Math.max(0, sigma) / denominator : 1
-  const shareNorm = ctrNormShare(share, k - 1)
+  const shareNorm = ctrNormShare(share, k - 1, counterShareOf(options.profile))
   const stance = sellerStanceOf(shareNorm)
 
   // Times: history wins (saved items), then an explicit date, then the "quando l'hai ricevuta?" chip.
@@ -2140,7 +2266,7 @@ function ctrNode(state, st, depthLeft) {
   const move = nextCounterMove(state, st)
   if (!move) return accept
   const share = st.Sprev - st.cPrev > CTR_EPS ? Math.max(0, st.Sprev - st.S) / (st.Sprev - st.cPrev) : 1
-  const shareNorm = ctrNormShare(share, st.roundIdx)
+  const shareNorm = ctrNormShare(share, st.roundIdx, counterShareOf(state.input.profile))
   const stance = sellerStanceOf(shareNorm)
   const score = counterAcceptance(state, { B: st.cPrev, S: st.S, shareNorm }, move.price, null)
   const A = ctrAvailability(state, 24)
@@ -2156,7 +2282,7 @@ function evaluateCounter(state, price, sendDate, { isFinal = false, depth = 1 } 
   const score = counterAcceptance(state, { B: state.B, S: state.S, shareNorm: state.shareNorm }, price, sendDate)
   const pRead = state.inactive ? COUNTER.INACTIVE_READ_FLOOR + (1 - COUNTER.INACTIVE_READ_FLOOR) * Math.exp(-score.hoursAfter / COUNTER.INACTIVE_READ_TAU_HOURS) : 1
   const pAccept = score.pAccept * pRead
-  const pAvailable = ctrAvailability(state, ctrHours(state.now, sendDate) + COUNTER.SELLER_REPLY_HOURS)
+  const pAvailable = ctrAvailability(state, ctrHours(state.now, sendDate) + sellerReplyHoursOf(state.input.profile))
   // The continuation does not depend on the send moment (the lookahead uses a typical window): memoise per price.
   if (!state.cache) state.cache = new Map()
   const key = `${price}|${isFinal ? 1 : 0}|${depth}`
@@ -2711,7 +2837,7 @@ function ctrReasons(ctx) {
   const out = []
   const now = state.now
   const sharePct = Math.round(state.share * 100)
-  const typical = Math.round(COUNTER.ROUND_MEAN_SHARE[Math.min(state.k - 1, COUNTER.ROUND_MEAN_SHARE.length - 1)] * 20) * 5
+  const typical = Math.round(COUNTER.ROUND_MEAN_SHARE[Math.min(state.k - 1, COUNTER.ROUND_MEAN_SHARE.length - 1)] * counterShareOf(state.input.profile) * 20) * 5
   const sigma = formatEuro(state.sigma)
   const share = `${ctrIl(sharePct)}${sharePct}% della distanza`
   if (acceptWins) {

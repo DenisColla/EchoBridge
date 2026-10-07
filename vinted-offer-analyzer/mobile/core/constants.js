@@ -293,30 +293,46 @@ export const LEARNING_TIME_GROUPS = [
   { id: 'night', label: 'Notte (0–7)', windows: ['night'] },
 ]
 
-export const LEARNING_BANDS = [
-  { id: 'low', label: 'Sconto sotto il 15%' },
-  { id: 'medium', label: 'Sconto 15–30%' },
-  { id: 'high', label: 'Sconto oltre il 30%' },
+/**
+ * Discount correction as a piecewise-linear curve through three knots (flat outside 10–30%): a step per risk band
+ * would make the corrected acceptance jump UP when an offer crosses 15% or 30%, which the price search would exploit.
+ */
+export const LEARNING_DISCOUNT_KNOTS = [
+  { id: 'd10', pct: 10, label: 'Sconto intorno al 10%' },
+  { id: 'd20', pct: 20, label: 'Sconto intorno al 20%' },
+  { id: 'd30', pct: 30, label: 'Sconto dal 30% in su' },
 ]
 
 /**
- * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted: they are tuned for
- * a buyer with fewer than 15 offers a month, so every learned value starts at the engine default and moves slowly.
- * Logit units unless noted. The fit uses all history, older months weighted by a half-life.
+ * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted, tuned for a buyer
+ * with fewer than 15 offers a month: every learned value starts at the engine default and moves slowly. Logit units
+ * unless noted. Sources for the statistical choices: priors and Laplace (Gelman 2008), recalibration before revision
+ * at small n (Steyerberg 2004, Vergouwe 2017), prequential rollback (Dawid 1984, Kass & Raftery 1995), conservative
+ * batched exploration (Wu 2016, Perchet 2016), counter priors from eBay field data (Backus 2020, Cotet 2025).
  */
 export const LEARNING = {
   HALF_LIFE_MONTHS: 6,
-  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, band: 0.35, counter: 0.5 },
+  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, disc: 0.35, counter: 0.5 },
   /** Weighted outcomes a parameter needs before it may move at all. */
-  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, band: 6, counter: 6, discount: 10 },
-  /** Largest change applied in one month (the fit may want more: the rest waits for next month). */
-  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, band: 0.2, counter: 0.3, discountPct: 1 },
-  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], band: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30] },
+  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, disc: 6, counter: 6, discount: 10, share: 8, latency: 8 },
+  /** Largest change applied in one month (latency: multiplicative factor). */
+  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, disc: 0.2, counter: 0.3, discountPct: 1, share: 0.1, latency: 1.5 },
+  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], share: [0.7, 1.3], latency: [0.5, 12] },
+  /** No move while the current value is within this many posterior sd of the target (noise). */
+  EVIDENCE_GATE_SD: 0.5,
+  /** The slope and the group offsets join only when leave-one-out says they predict better (nats, and ≥ 1 se). */
+  LADDER_MIN_ELPD_GAIN: 1,
+  /** Corrected acceptance must keep falling with the discount: engine slope ≥ 0,088 logit per point, 80% margin. */
+  DISC_MIN_ENGINE_SLOPE: 0.088,
+  DISC_MONOTONE_MARGIN: 0.8,
   /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
   MIN_CHANGE: 0.02,
   MIN_CHANGE_DISCOUNT_PCT: 0.5,
   DEFAULT_DISCOUNT_PCT: 20,
-  /** An offer sent with no outcome after this many days counts as "no reply" (Vinted offers lapse well before). */
+  /** Prequential log Bayes factor of the active profile against its parent below which the parent comes back. */
+  ROLLBACK_LOG_BF: -2,
+  FREEZE_MONTHS: 1,
+  /** An offer sent with no outcome after this many days counts as "no reply"; younger offers wait for the next fit. */
   NO_REPLY_AFTER_DAYS: 7,
   /** A counter of ours with no outcome after this many days counts as not accepted. */
   COUNTER_NO_REPLY_AFTER_DAYS: 4,
@@ -324,10 +340,15 @@ export const LEARNING = {
   EXPLORE_SHARE: 0.2,
   EXPLORE_TIME_MINUTES: 60,
   EXPLORE_DISCOUNT_PTS: 2,
-  /** A variation is skipped when it would cost more than this in estimated acceptance (probability points). */
+  /** A variation is unsafe when it costs more than this in acceptance (probability points)… */
   EXPLORE_MAX_COST: 0.06,
-  /** Reliability table bins for the calibration sheet. */
-  RELIABILITY_BINS: [0, 0.2, 0.4, 0.6, 0.8, 1.0001],
+  /** …or in expected saving (share of list price). */
+  EXPLORE_MAX_SAVING_COST: 0.01,
+  /** Monthly budget: total acceptance given up by variations ≤ this share of the month's total base acceptance. */
+  EXPLORE_BUDGET_SHARE: 0.03,
+  EXPLORE_MIN_LIST_PRICE: 10,
+  /** Reliability table: equal-mass bins, between 2 and this many. */
+  RELIABILITY_MAX_BINS: 5,
   /** Months of reports caught up at once when the app was not opened for a while. */
   MAX_CATCH_UP_MONTHS: 6,
   /**
@@ -341,4 +362,15 @@ export const LEARNING = {
   CONTINUATION_PRIOR_WEIGHT: 4,
   LOSS_COST_SHARE: 0.05,
   AGGRESSIVE_RAMP_PCT: [27, 33],
+  /** Failure reasons: engine split of "read but not accepted" (Backus 2020 replies), smoothed with the user's mix. */
+  REASON_PRIOR_SPLIT: { countered: 0.45, declined: 0.35, no_reply: 0.2 },
+  REASON_PRIOR_WEIGHT: 6,
+  /** Chance a negotiation still closes after each kind of failed first offer (prior means, weight in outcomes). */
+  CLOSE_AFTER_REASON_PRIOR: { countered: 0.6, declined: 0.1, no_reply: 0.1, sold_other: 0 },
+  CLOSE_AFTER_REASON_WEIGHT: 4,
+  /** Seller concession share in his first counter (Backus 2020 Table 4: 0,42–0,45), prior weight in rounds. */
+  SELLER_SHARE_PRIOR: 0.42,
+  SELLER_SHARE_PRIOR_WEIGHT: 8,
+  /** Survival table of the seller's reply time (hours). */
+  KM_HOURS: [1, 3, 6, 12, 24, 48],
 }

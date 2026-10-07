@@ -296,11 +296,19 @@ function RiskCard({ risk }) {
           {risk.reasons.map((r) => <Body key={r.id} small>• {r.text}</Body>)}
         </View>
       )}
+      {risk.failureMix && risk.failureMix.length > 0 && (
+        <View style={{ gap: 2 }}>
+          <Body small style={{ fontWeight: '700' }}>Se non passa, di solito è</Body>
+          {risk.failureMix.filter((m) => m.share >= 0.05).map((m) => (
+            <Body key={m.id} small>• {m.label}: {pct(m.share)}% dei casi{m.closeAfter >= 0.05 ? `, poi l'affare si chiude comunque nel ${pct(m.closeAfter)}%` : ''}</Body>
+          ))}
+        </View>
+      )}
+      <Note tone={risk.pClose >= 0.6 ? 'good' : 'neutral'}>
+        Probabilità di chiudere l'affare, anche dopo controproposte: {pct(risk.pClose)}% (tra {pct(risk.pCloseRange[0])} e {pct(risk.pCloseRange[1])}%).
+      </Note>
       {risk.similar ? (
         <Body muted small>Nel tuo storico, con uno sconto simile: {risk.similar.successes} accettate su {risk.similar.n} offerte.</Body>
-      ) : null}
-      {risk.closeAfterFail ? (
-        <Body muted small>Quando la prima offerta non passa, hai chiuso comunque {risk.closeAfterFail.closed} trattative su {risk.closeAfterFail.n}.</Body>
       ) : null}
       {risk.plan.map((p) => <Note key={p}>{p}</Note>)}
     </Card>

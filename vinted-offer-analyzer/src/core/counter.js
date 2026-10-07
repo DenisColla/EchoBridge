@@ -23,7 +23,7 @@ import { buildVerdict } from './reasoning.js'
 import { avoidWindowsOn } from './scheduler.js'
 import { ageCurve, attributeFactors, effectiveWeekday, monthWindowAt, sellerWeight, timeWeight, timeWindowAt, uncertaintyFor } from './scoring.js'
 import { buildWarnings, normalizeInput, parsePrice, priceStepFor } from './analyze.js'
-import { learnedCounterRow } from './profile.js'
+import { counterShareOf, learnedCounterRow, sellerReplyHoursOf } from './profile.js'
 
 const CTR_EPS = 1e-9
 const ctrR2 = (v) => Math.round(v * 100) / 100
@@ -121,9 +121,13 @@ export const sellerStanceOf = (share) => {
 }
 
 /** Sellers concede less in later rounds (Keniston: 0,42 then 0,23): rescale to the first-round scale. */
-const ctrNormShare = (share, roundIdx) => {
+/**
+ * The seller's concession relative to a typical first-round one. `mult` (learned, default 1) says how much this
+ * user's sellers concede compared with eBay's mean: conceding 42% of the gap is "average" only where 42% is average.
+ */
+const ctrNormShare = (share, roundIdx, mult = 1) => {
   const means = COUNTER.ROUND_MEAN_SHARE
-  return Math.min(0.9, share * (means[0] / means[Math.min(roundIdx, means.length - 1)]))
+  return Math.min(0.9, (share * (means[0] / means[Math.min(roundIdx, means.length - 1)])) / mult)
 }
 
 /* ───────── input ───────── */
@@ -207,7 +211,7 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const sigma = ctrR2(Sprev - S)
   const denominator = Sprev - B
   const share = denominator > CTR_EPS ? Math.max(0, sigma) / denominator : 1
-  const shareNorm = ctrNormShare(share, k - 1)
+  const shareNorm = ctrNormShare(share, k - 1, counterShareOf(options.profile))
   const stance = sellerStanceOf(shareNorm)
 
   // Times: history wins (saved items), then an explicit date, then the "quando l'hai ricevuta?" chip.
@@ -431,7 +435,7 @@ function ctrNode(state, st, depthLeft) {
   const move = nextCounterMove(state, st)
   if (!move) return accept
   const share = st.Sprev - st.cPrev > CTR_EPS ? Math.max(0, st.Sprev - st.S) / (st.Sprev - st.cPrev) : 1
-  const shareNorm = ctrNormShare(share, st.roundIdx)
+  const shareNorm = ctrNormShare(share, st.roundIdx, counterShareOf(state.input.profile))
   const stance = sellerStanceOf(shareNorm)
   const score = counterAcceptance(state, { B: st.cPrev, S: st.S, shareNorm }, move.price, null)
   const A = ctrAvailability(state, 24)
@@ -447,7 +451,7 @@ export function evaluateCounter(state, price, sendDate, { isFinal = false, depth
   const score = counterAcceptance(state, { B: state.B, S: state.S, shareNorm: state.shareNorm }, price, sendDate)
   const pRead = state.inactive ? COUNTER.INACTIVE_READ_FLOOR + (1 - COUNTER.INACTIVE_READ_FLOOR) * Math.exp(-score.hoursAfter / COUNTER.INACTIVE_READ_TAU_HOURS) : 1
   const pAccept = score.pAccept * pRead
-  const pAvailable = ctrAvailability(state, ctrHours(state.now, sendDate) + COUNTER.SELLER_REPLY_HOURS)
+  const pAvailable = ctrAvailability(state, ctrHours(state.now, sendDate) + sellerReplyHoursOf(state.input.profile))
   // The continuation does not depend on the send moment (the lookahead uses a typical window): memoise per price.
   if (!state.cache) state.cache = new Map()
   const key = `${price}|${isFinal ? 1 : 0}|${depth}`
@@ -1002,7 +1006,7 @@ function ctrReasons(ctx) {
   const out = []
   const now = state.now
   const sharePct = Math.round(state.share * 100)
-  const typical = Math.round(COUNTER.ROUND_MEAN_SHARE[Math.min(state.k - 1, COUNTER.ROUND_MEAN_SHARE.length - 1)] * 20) * 5
+  const typical = Math.round(COUNTER.ROUND_MEAN_SHARE[Math.min(state.k - 1, COUNTER.ROUND_MEAN_SHARE.length - 1)] * counterShareOf(state.input.profile) * 20) * 5
   const sigma = formatEuro(state.sigma)
   const share = `${ctrIl(sharePct)}${sharePct}% della distanza`
   if (acceptWins) {

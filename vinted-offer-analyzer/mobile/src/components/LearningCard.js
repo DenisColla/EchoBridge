@@ -12,8 +12,10 @@ const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
 
 /** One applied change in words the user can check: points of probability, percent, or a factor. */
 export function describeChange(c) {
-  if (c.key === 'discountPct') return `${c.label}: ${c.from}% → ${c.to}%`
-  if (c.key === 'slope') return `${c.label}: ×${String(c.from).replace('.', ',')} → ×${String(c.to).replace('.', ',')}`
+  const dec = (v) => String(v).replace('.', ',')
+  if (c.key === 'discountPct') return `${c.label}: ${dec(c.from)}% → ${dec(c.to)}%`
+  if (c.key === 'slope' || c.key === 'counterShare') return `${c.label}: ×${dec(c.from)} → ×${dec(c.to)}`
+  if (c.key === 'sellerReplyHours') return `${c.label}: ${dec(c.from)} → ${dec(c.to)} ore`
   const pts = (v) => signed(Math.round(v * POINTS_PER_LOGIT))
   return `${c.label}: ${pts(c.from)} → ${pts(c.to)} punti`
 }
@@ -91,6 +93,7 @@ export function LearningCard({ learning, onToast }) {
           </Body>
           <Body muted small>{(SAVED_TO[last.savedTo] || SAVED_TO.none)(folder)}</Body>
           {last.error ? <Note tone="warn">{last.error}</Note> : null}
+          {last.rollback ? <Note tone="warn">Le correzioni del mese prima prevedevano peggio di quelle precedenti: sono tornato ai valori di prima.</Note> : null}
           {last.changes.length > 0 ? (
             <View style={{ gap: 2 }}>
               <Body small style={{ fontWeight: '700' }}>{last.reverted ? 'Correzioni annullate:' : 'Correzioni applicate:'}</Body>

@@ -104,6 +104,8 @@ export function useLearning({ items, ready }) {
       let undo = s.undo
       let lastError = null
       for (let i = 0; i < months.length; i++) {
+        // Let the screen draw (and the toast appear) before each month's calculation.
+        await new Promise((resolve) => setTimeout(resolve, 0))
         const month = months[i]
         const isLast = i === months.length - 1
         const report = monthlyReport({ items: itemsRef.current, month, now, previous: current, profileHistory: history, explorationEnabled: s.exploration !== false })
