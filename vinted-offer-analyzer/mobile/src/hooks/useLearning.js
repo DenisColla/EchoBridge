@@ -113,7 +113,7 @@ export function useLearning({ items, ready }) {
         const file = await writeReport({ bytes: reportWorkbook(report), fileName, folderUri: s.folder ? s.folder.uri : null })
         if (file.error) lastError = file.error
         // Catch-up after months away: one profile step only (the newest month), older months are reported as they were.
-        const applied = isLast ? report.changes.filter((c) => c.status === 'applied' || c.status === 'capped') : []
+        const applied = isLast ? report.changes.filter((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback') : []
         produced.push({
           month, label: report.label, generatedAt: report.generatedAt, fileName, savedTo: file.savedTo, localUri: file.localUri, folderUri: file.folderUri, error: file.error,
           headline: reportHeadline(report), summary: pickSummary(report.summary), changes: applied, rollback: Boolean(isLast && report.rollback), notes: report.notes, reverted: false,

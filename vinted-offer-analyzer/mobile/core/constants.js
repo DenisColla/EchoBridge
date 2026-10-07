@@ -327,8 +327,13 @@ export const LEARNING = {
   DISC_MONOTONE_MARGIN: 0.8,
   /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
   MIN_CHANGE: 0.02,
-  MIN_CHANGE_DISCOUNT_PCT: 0.5,
+  MIN_CHANGE_DISCOUNT_PCT: 1,
   DEFAULT_DISCOUNT_PCT: 20,
+  /**
+   * The slope scales the engine's logit around this value (a typical offer's logit), so a pure level shift lands in
+   * the intercept and the two are nearly uncorrelated (a raw-logit slope absorbed part of every shift).
+   */
+  SLOPE_CENTER: 1,
   /** Prequential log Bayes factor of the active profile against its parent below which the parent comes back. */
   ROLLBACK_LOG_BF: -2,
   FREEZE_MONTHS: 1,
@@ -352,7 +357,11 @@ export const LEARNING = {
   /** Months of reports caught up at once when the app was not opened for a while. */
   MAX_CATCH_UP_MONTHS: 6,
   /**
-   * Starting-discount objective (share of list price): ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS].
+   * Starting discount: iso-acceptance. The learned default is the deepest discount whose corrected acceptance, averaged
+   * over the user's own items, is still at least what the plain engine gives at −20%: as far as these sellers allow,
+   * at the same chance of success. The expected-saving curve below is reported, not used (its optimum sits on the
+   * aggressive-offer knee, so it would not respond smoothly to the data).
+   * Expected saving (share of list price): ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS].
    * q = chance a failed first offer still ends in a deal, ρ = saving of those deals relative to the first discount,
    * LOSS = cost of losing the item (buying elsewhere at list price + 5%, as COUNTER.LOSS_PREMIUM). Priors with weight.
    * Aggressive openers (27–33%) halve q: an irritated seller rarely keeps negotiating (blockRiskAt's ramp).

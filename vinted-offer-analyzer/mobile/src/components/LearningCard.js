@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { View } from 'react-native'
-import { LEARNING, MONTHS_IT, formatEuro, monthLabel } from '../../core/index.js'
+import { LEARNING, MONTHS_IT, formatEuro, monthLabel, profileIsActive } from '../../core/index.js'
 import { openReport, shareReport } from '../services/reports.js'
 import { space } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title, Toggle } from './ui.js'
@@ -36,7 +36,7 @@ export function LearningCard({ learning, onToast }) {
   if (!learning || !learning.ready) return null
   const { profile, folder, reports, exploration, canUndo, nextReportAt } = learning
   const last = reports[0] || null
-  const active = profile && profile.changes && profile.changes.length && profile.month
+  const active = profileIsActive(profile) && profile.month
   const next = nextReportAt ? `${nextReportAt.getDate()} ${MONTHS_IT[nextReportAt.getMonth()]}` : ''
 
   const run = async (fn) => {

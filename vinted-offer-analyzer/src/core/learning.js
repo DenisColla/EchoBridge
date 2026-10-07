@@ -52,6 +52,8 @@ export const unsquash = (p) => {
   return Math.log(q / (1 - q))
 }
 const lrnClip = (p) => clamp(p, 1e-6, 1 - 1e-6)
+/** Number or NaN: null and '' are missing values, not zeros (Number(null) === 0). */
+const lrnNum = (v) => (v == null || v === '' ? NaN : Number(v))
 const lrnMean = (xs) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null)
 const lrnMedian = (xs) => {
   if (!xs.length) return null
@@ -181,11 +183,15 @@ function lrnRounds(item, final, now) {
       }
     }
     const replyAt = reply ? lrnDate(reply.at) : null
-    const pRead = reply && Number.isFinite(Number(reply.pRead)) && Number(reply.pRead) > 0 ? Number(reply.pRead) : 1
-    const replyRawLogit = !reply ? null
-      : Number.isFinite(Number(reply.rawLogit)) ? Number(reply.rawLogit)
-        : Number.isFinite(Number(reply.pAccept)) ? unsquash(Number(reply.pAccept) / pRead) - (Number(reply.learnedWeight) || 0) : null
-    const replyWindow = reply ? (reply.windowId || (replyAt ? timeWindowAt(replyAt).id : null)) : null
+    const pRead = reply && lrnNum(reply.pRead) > 0 ? lrnNum(reply.pRead) : 1
+    // Sent more than an hour away from the planned moment: the stored logit (planned window, planned delay) does not
+    // describe what was sent, so the round stays out of the counter fit (it still counts in the analytics).
+    const plannedAt = reply ? lrnDate(reply.plannedAt) : null
+    const offPlan = Boolean(replyAt && plannedAt && Math.abs(replyAt.getTime() - plannedAt.getTime()) > 60 * 60000)
+    const replyRawLogit = !reply || offPlan ? null
+      : Number.isFinite(lrnNum(reply.rawLogit)) ? lrnNum(reply.rawLogit)
+        : Number.isFinite(lrnNum(reply.pAccept)) ? unsquash(lrnNum(reply.pAccept) / pRead) - (lrnNum(reply.learnedWeight) || 0) : null
+    const replyWindow = reply ? ((!offPlan && reply.windowId) || (replyAt ? timeWindowAt(replyAt).id : null)) : null
     rounds.push({
       index: rounds.length + 1,
       buyerPrice: B,
@@ -201,7 +207,8 @@ function lrnRounds(item, final, now) {
       replyGapShare: reply && S - B > 0.009 ? (Number(reply.price) - B) / (S - B) : null,
       replyIsSplit: reply ? Boolean(reply.isSplit) : null,
       replyIsFinal: reply ? Boolean(reply.isFinal) : null,
-      replyPAccept: reply && Number.isFinite(Number(reply.pAccept)) ? Number(reply.pAccept) : null,
+      replyPAccept: reply && Number.isFinite(lrnNum(reply.pAccept)) ? lrnNum(reply.pAccept) : null,
+      replyOffPlan: offPlan,
       replyRawLogit,
       replyPRead: pRead,
       replyWindowId: replyWindow,
@@ -220,15 +227,19 @@ export function learningRecord(item, now) {
   const history = Array.isArray(item.negotiation) ? item.negotiation : []
   // When the first offer's send time is unknown (an item created from the counter screen), the record still counts
   // for the negotiation numbers, dated at the seller's first counter, but stays out of the first-offer calibration.
-  const knownSentAt = lrnDate(item.sentAt) || (status !== 'planned' && history[0] && !history[0].planned ? lrnDate(history[0].at) : null)
   const firstSeller = history.find((e) => e.by === 'seller')
+  // A plan never sent (abandoned, or bought at list price without an offer) is not an offer at all.
+  if (!item.sentAt && !firstSeller && (!history[0] || history[0].planned)) return null
+  let knownSentAt = lrnDate(item.sentAt) || (status !== 'planned' && history[0] && !history[0].planned ? lrnDate(history[0].at) : null)
+  // An imputed send time that is not before the seller's counter is the moment the outcome was tapped, not a send.
+  if (knownSentAt && item.sentAtSource === 'imputed' && firstSeller && lrnDate(firstSeller.at) && knownSentAt.getTime() >= lrnDate(firstSeller.at).getTime()) knownSentAt = null
   const sentAt = knownSentAt || (status !== 'planned' ? lrnDate(firstSeller && firstSeller.at) || lrnDate(item.outcomeAt) || lrnDate(item.createdAt) : null)
   if (!sentAt) return null
   const sentKnown = Boolean(knownSentAt)
   const decision = item.decision || null
-  const listPrice = Number(item.listPrice)
-  const price = Number(item.targetPrice)
-  const discountPct = Number.isFinite(Number(item.discountPct)) ? Number(item.discountPct) : listPrice > 0 ? ((listPrice - price) / listPrice) * 100 : 0
+  const listPrice = lrnNum(item.listPrice)
+  const price = lrnNum(item.targetPrice)
+  const discountPct = Number.isFinite(lrnNum(item.discountPct)) ? lrnNum(item.discountPct) : listPrice > 0 ? ((listPrice - price) / listPrice) * 100 : 0
   const quiet = now.getTime() - (lastActivity(item) || sentAt).getTime() > LEARNING.NO_REPLY_AFTER_DAYS * DAY_MS
   const hasSeller = history.some((e) => e.by === 'seller')
 
@@ -254,8 +265,8 @@ export function learningRecord(item, now) {
   const rescored = sentKnown ? lrnRescore(item, sentAt) : null
   const rawLogit = rescored ? rescored.rawLogit
     : decision && Number.isFinite(decision.rawLogit) ? decision.rawLogit
-      : Number.isFinite(Number(item.probability)) ? unsquash(Number(item.probability)) : null
-  const k = rescored ? rescored.k : decision && Number.isFinite(decision.k) ? decision.k : 1
+      : lrnNum(item.probability) > 0 ? unsquash(lrnNum(item.probability)) : null
+  const k = rescored ? rescored.k : decision && lrnNum(decision.k) > 0 ? lrnNum(decision.k) : 1
   const windowId = rescored ? rescored.windowId : timeWindowAt(sentAt).id
   const recommendedAt = decision ? lrnDate(decision.recommendedAt) : null
   const delayMinutes = recommendedAt && sentKnown && item.sentAtSource !== 'imputed' ? Math.round((sentAt.getTime() - recommendedAt.getTime()) / 60000) : null
@@ -289,11 +300,11 @@ export function learningRecord(item, now) {
     k,
     input: rescored ? rescored.input : null,
     daysWaited: rescored ? rescored.daysWaited : 0,
-    pShown: Number.isFinite(Number(item.probability)) ? Number(item.probability) : decision ? decision.probability : null,
+    pShown: Number.isFinite(lrnNum(item.probability)) ? lrnNum(item.probability) : decision && Number.isFinite(lrnNum(decision.probability)) ? lrnNum(decision.probability) : null,
     first,
     implicit,
     y,
-    latencyFirstH: firstOutcomeAt ? Math.max(0, (firstOutcomeAt.getTime() - sentAt.getTime()) / 3_600_000) : null,
+    latencyFirstH: firstOutcomeAt && sentKnown && item.sentAtSource !== 'imputed' ? Math.max(0, (firstOutcomeAt.getTime() - sentAt.getTime()) / 3_600_000) : null,
     status,
     closed,
     lost,
@@ -369,7 +380,7 @@ const lrnInverse = (A) => {
 /** Feature value of record `r` for parameter `key` (slope multiplies the engine's own logit). */
 const lrnFeature = (key, r) => {
   if (key === 'intercept') return 1
-  if (key === 'slope') return r.rawLogit
+  if (key === 'slope') return r.rawLogit - LEARNING.SLOPE_CENTER
   const [kind, id] = key.split('.')
   if (kind === 'time') return r.timeGroup === id ? 1 : 0
   if (kind === 'disc') return (r.discW && r.discW[id]) || 0
@@ -471,7 +482,7 @@ const lrnGain = (a, b) => {
 export function predictWith(profile, r) {
   if (!profile) return lrnClip(r.k * squash(r.rawLogit))
   const P = normalizeProfile(profile)
-  const z = P.slope * r.rawLogit + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, r.discountPct)
+  const z = r.rawLogit + (P.slope - 1) * (r.rawLogit - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, r.discountPct)
   return lrnClip(r.k * squash(z))
 }
 
@@ -566,7 +577,7 @@ export function fitFirstOffers(records, now) {
     slope = lrnGain(lrnLoo(decided, ['intercept'], weights, base.vector), lrnLoo(decided, ['intercept', 'slope'], weights, withSlope.vector))
     if (slope.admitted) stage1 = withSlope
   }
-  const shiftOf = (r) => r.rawLogit * (1 + (stage1.theta.slope || 0)) + stage1.theta.intercept
+  const shiftOf = (r) => r.rawLogit + (stage1.theta.slope || 0) * (r.rawLogit - LEARNING.SLOPE_CENTER) + stage1.theta.intercept
   const shifted = decided.map((r) => ({ ...r, rawLogit: shiftOf(r) }))
 
   // Stage 2: offsets as a family, centred, monotone discount curve.
@@ -706,6 +717,33 @@ export function counterAnalytics(records, now) {
 }
 
 /**
+ * Iso-acceptance starting discount: the deepest discount (grid of 0,5 points within the bounds) whose corrected
+ * acceptance, averaged over the user's own items at their own moments, is still at least the plain engine's average
+ * acceptance at the default −20%. Tougher sellers → a softer opener; more generous sellers → a deeper one; with no
+ * correction exactly −20%. Monotone corrections make the search well defined.
+ */
+export function isoAcceptanceDiscount(records, profile, now) {
+  const P = normalizeProfile(profile)
+  const usable = records.filter((r) => r.y != null && r.input && r.listPrice > 0)
+  const weights = usable.map((r) => recencyWeight(r.sentAt, now))
+  const nEff = weights.reduce((s, w) => s + w, 0)
+  if (!nEff) return { target: null, targetAcceptance: null, curve: [], nEff: 0, n: 0 }
+  const z0At = (r, d) => scoreAt(withPrices(r.input, r.listPrice, Math.round(r.listPrice * (1 - d / 100) * 100) / 100), r.sentAt, r.daysWaited).logit
+  const corrected = (r, d, z0) => r.k * squash(z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d))
+  const d0 = LEARNING.DEFAULT_DISCOUNT_PCT
+  const targetAcceptance = usable.reduce((s, r, i) => s + weights[i] * r.k * squash(z0At(r, d0)), 0) / nEff
+  const [lo, hi] = LEARNING.BOUNDS.discountPct
+  const curve = []
+  let target = lo
+  for (let d = lo; d <= hi + 1e-9; d += 0.5) {
+    const a = usable.reduce((s, r, i) => s + weights[i] * corrected(r, d, z0At(r, d)), 0) / nEff
+    curve.push({ discountPct: d, pAccept: a })
+    if (a >= targetAcceptance - 1e-9) target = d
+  }
+  return { target, targetAcceptance, curve, nEff, n: usable.length }
+}
+
+/**
  * The default starting discount that maximises the expected saving share (of list price), averaged over the user's
  * own items, under the corrected engine:
  *   ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS]
@@ -735,7 +773,7 @@ export function optimalDiscount(records, profile, now, { priorsOnly = false } = 
       const price = Math.round(r.listPrice * (1 - share) * 100) / 100
       const input = withPrices(r.input, r.listPrice, price)
       const z0 = scoreAt(input, r.sentAt, r.daysWaited).logit
-      const z = P.slope * z0 + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d)
+      const z = z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d)
       const p = r.k * squash(z)
       es += weights[i] * (p * share + (1 - p) * (qd * rho * share - (1 - qd) * LEARNING.LOSS_COST_SHARE))
       pSum += weights[i] * p
@@ -805,6 +843,18 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   const next = normalizeProfile({ ...start, time: { ...start.time }, disc: { ...start.disc } })
 
   const changes = []
+  // A rollback is a change of its own: every parameter that goes back to the parent's value is listed (and undoable).
+  const rolledBack = new Set()
+  if (rollback) {
+    const keys = ['intercept', 'slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct']
+    for (const key of keys) {
+      const from = getParam(prev, key)
+      const to = getParam(start, key)
+      if (from === to || (from != null && to != null && Math.abs(from - to) < 1e-9)) continue
+      rolledBack.add(key)
+      changes.push({ key, label: paramLabel(key), from: from == null ? null : lrnR4(from), to: to == null ? null : lrnR4(to), target: null, nEff: null, minEffective: null, status: 'rollback', reason: 'Le correzioni in uso prevedevano peggio di quelle di prima (log Bayes factor sotto −2): torno al valore precedente.' })
+    }
+  }
   const sdOf = (key) => {
     if (firstFit.sd && firstFit.sd[key] != null) return firstFit.sd[key]
     const i = firstFit.keys.indexOf(key)
@@ -818,7 +868,7 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
     const minChange = kind === 'discount' ? LEARNING.MIN_CHANGE_DISCOUNT_PCT : LEARNING.MIN_CHANGE
     const base = { key, label: paramLabel(key), from: from == null ? null : lrnR4(from), target: target == null || !Number.isFinite(target) ? null : lrnR4(target), nEff: lrnR2(nEff || 0), minEffective }
     const keep = (status, reason) => changes.push({ ...base, to: base.from, status, reason })
-    if (frozen[familyOf(key)]) return keep('frozen', `Bloccata fino a ${monthLabel(frozen[familyOf(key)])} dopo il ritorno ai valori precedenti.`)
+    if (frozen[familyOf(key)]) return rolledBack.has(key) ? null : keep('frozen', `Bloccata fino a ${monthLabel(frozen[familyOf(key)])} dopo il ritorno ai valori precedenti.`)
     if ((nEff || 0) < minEffective) return keep('waiting_data', `Servono almeno ${minEffective} esiti pesati (ne hai ${String(lrnR2(nEff || 0)).replace('.', ',')}).`)
     if (!eligible) return keep('waiting_data', notEligible || 'Con questi dati non migliora le previsioni: resta com\'è.')
     if (target == null || !Number.isFinite(target)) return keep('waiting_data', 'Nessun esito utile.')
@@ -856,16 +906,13 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   consider('counter', counterFit ? counterFit.theta : null, counterFit ? counterFit.nEff : 0, 'counter', { sd: counterFit ? counterFit.sd : null })
   consider('counterShare', counterStats ? counterStats.shareMultiplier : null, counterStats ? counterStats.shareEff : 0, 'share', { sd: counterStats ? counterStats.shareMultiplierSd : null })
   consider('sellerReplyHours', counterStats && counterStats.latency.median != null ? counterStats.latency.median : null, counterStats ? counterStats.latency.events : 0, 'latency')
-  // Starting discount, with next month's corrections in place. Only what the data change moves it: the optimum under
-  // the corrected engine and the observed continuation, minus the optimum under the plain engine and the priors
-  // (the engine's own curve already produced the default; it must not drift by construction).
-  const withData = optimalDiscount(records, next, now)
-  const priorsOnly = optimalDiscount(records, DEFAULT_PROFILE, now, { priorsOnly: true })
-  const discountTarget = withData.target != null && priorsOnly.target != null ? LEARNING.DEFAULT_DISCOUNT_PCT + (withData.target - priorsOnly.target) : null
-  consider('discountPct', discountTarget, withData.nEff, 'discount')
-  const discountFit = { ...withData, priorsOnlyTarget: priorsOnly.target, learnedTarget: discountTarget }
+  // Starting discount, with next month's corrections in place: the deepest discount at which these sellers still accept
+  // as often as the plain engine expects at −20% (iso-acceptance). With an uncorrected engine it is exactly −20%.
+  const iso = isoAcceptanceDiscount(records, next, now)
+  consider('discountPct', iso.target, iso.nEff, 'discount')
+  const discountFit = { ...optimalDiscount(records, next, now), iso, learnedTarget: iso.target }
 
-  const moved = changes.filter((c) => c.status === 'applied' || c.status === 'capped')
+  const moved = changes.filter((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback')
   const renewed = moved.length > 0 || rollback
   next.version = DEFAULT_PROFILE.version
   next.frozen = frozen
@@ -944,6 +991,8 @@ function lrnTryArm(raw, base, arm, now, options) {
     if (!(price > 0) || price >= L || ((L - price) / L) * 100 > VINTED.MAX_DISCOUNT_PCT) return null
     result = analyzeOffer({ ...raw, targetPrice: String(price).replace('.', ',') }, now, { ...options, preferredSendAt: base.optimal.date })
     if (!result.ok || result.kind !== 'analysis') return null
+    // On cheap listings one price step is several points: the user agreed to about ±2, so cap the real change.
+    if (Math.abs(result.input.discountPct - base.input.discountPct) > LEARNING.EXPLORE_DISCOUNT_PTS + 1) return null
     at = result.optimal.date
     if (lrnQuiet(at) && !lrnQuiet(base.optimal.date)) return null
   }
@@ -988,10 +1037,14 @@ export function explorationPlan(raw, base, now, { key = null, month = null, enab
   }
   if (!safe.length) return null
   const pick = safe[Math.min(safe.length - 1, Math.floor(lrnUnit(k, m, 'arm') * safe.length))]
+  const pts = Math.round(Math.abs(pick.result.input.discountPct - base.input.discountPct) * 10) / 10
+  const label = pick.arm.kind === 'discount'
+    ? `${String(pts).replace('.', ',')} ${pts === 1 ? 'punto' : 'punti'} di sconto ${pick.arm.points > 0 ? 'in più' : 'in meno'}`
+    : pick.arm.label
   const exploration = {
     arm: pick.arm.id,
     kind: pick.arm.kind,
-    label: pick.arm.label,
+    label,
     propensity: share / safe.length,
     safe: safe.map((s) => s.arm.id),
     base: { price: base.input.targetPrice, at: lrnIso(base.optimal.date), probability: base.probability },
@@ -1024,7 +1077,7 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
   let hi = result.probabilityRange ? result.probabilityRange[1] : p
   const P = profile ? normalizeProfile(profile) : null
   let basis = 'engine'
-  if (P && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
+  if (P && profileIsActive(P) && P.basedOn >= LEARNING.MIN_EFFECTIVE.intercept && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
     const r = { rawLogit: optimal.score.rawLogit ?? z, timeGroup: timeGroupOf(optimal.score.timeWindow.id), discW: discKnotWeights(input.discountPct) }
     const x = P.paramKeys.map((key) => lrnFeature(key, r))
     let v = 0
@@ -1034,9 +1087,11 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
     hi = Math.max(hi, A * R * squash(z + 1.645 * sd))
     basis = 'history'
   } else {
-    // Without outcomes the engine's weights are still unvalidated for this user's sellers: say so with a wide range.
-    lo = Math.min(lo, Math.max(0.01, p - 0.12))
-    hi = Math.max(hi, Math.min(0.99, p + 0.12))
+    // Without a calibrated profile the engine is unvalidated for this user's sellers: the range is the prior on the
+    // general correction (sd 0,5 logit, 90%).
+    const half = 1.645 * LEARNING.PRIOR_SD.intercept
+    lo = Math.min(lo, A * R * squash(z - half))
+    hi = Math.max(hi, A * R * squash(z + half))
   }
   const reasons = []
   const negatives = (result.factors && result.factors.rows ? result.factors.rows : []).filter((f) => f.deltaPoints < 0).sort((a, b) => a.deltaPoints - b.deltaPoints)
@@ -1138,7 +1193,8 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
   const replies = rounds.filter((x) => x.replyPrice != null)
   const closed = inMonth.filter((r) => r.closed)
   const lost = inMonth.filter((r) => r.lost)
-  const count = (first) => inMonth.filter((r) => r.first === first).length
+  // Outcome counts on the same population as «Prime offerte con esito»: they add up to it.
+  const count = (first) => decided.filter((r) => r.first === first).length
 
   const summary = {
     offersSent: inMonth.length,
@@ -1149,6 +1205,7 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     noReply: count('no_reply'),
     noReplyImplicit: inMonth.filter((r) => r.implicit).length,
     soldOther: count('sold_other'),
+    unknownStart: inMonth.filter((r) => !r.sentKnown).length,
     pending: inMonth.filter((r) => r.pending).length,
     closedDeals: closed.length,
     lostDeals: lost.length,
@@ -1278,7 +1335,7 @@ const yesNo = (b) => (b == null ? '' : b ? 'Sì' : 'No')
 const lrnTyped = (value, format) => (value == null || format == null || format === 'text' ? value : { value, format })
 const num4 = (x) => (x == null || !Number.isFinite(x) ? null : lrnR4(x))
 const pm = (v, se) => (v == null ? null : `${String(lrnR4(v)).replace('.', ',')}${se != null ? ` ± ${String(lrnR4(se)).replace('.', ',')}` : ''}`)
-const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata' }
+const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata', rollback: 'Tornata al valore precedente' }
 
 /** The month's .xlsx: summary, offers, negotiations, counter analysis, time and discount groups, calibration, tests, engine changes, trend, notes. */
 export function reportWorkbook(report) {
@@ -1293,6 +1350,7 @@ export function reportWorkbook(report) {
     ['Rifiutate', s.declined, 'int'],
     ['Nessuna risposta (di cui presunte)', `${s.noReply} (${s.noReplyImplicit})`, 'text'],
     ['Vendute ad altri', s.soldOther, 'int'],
+    ['Trattative iniziate dalla controproposta (orario della prima offerta sconosciuto)', s.unknownStart, 'int'],
     ['Trattative ancora aperte', s.pending, 'int'],
     ['Affari conclusi', s.closedDeals, 'int'],
     ['Affari persi', s.lostDeals, 'int'],
@@ -1401,7 +1459,7 @@ export function reportWorkbook(report) {
     {
       name: 'Sconti',
       title: 'Sconti e sconto di partenza',
-      note: `Sconto di partenza: ${report.previousProfile.discountPct}% → ${report.nextProfile.discountPct}%. Risparmio atteso = probabilità × sconto + (1 − probabilità) × (affari chiusi dopo un primo no: ${Math.round(report.discount.closeAfterFail * 100)}%, con il ${Math.round(report.discount.continuationRatio * 100)}% del risparmio iniziale; un affare perso costa il ${Math.round(LEARNING.LOSS_COST_SHARE * 100)}%).`,
+      note: `Sconto di partenza: ${report.previousProfile.discountPct}% → ${report.nextProfile.discountPct}%: lo sconto più profondo al quale i tuoi venditori accettano ancora quanto il motore prevede al −20% (${report.discount.iso && report.discount.iso.targetAcceptance != null ? `${Math.round(report.discount.iso.targetAcceptance * 100)}%` : 'nessun dato'}). Il risparmio atteso è solo indicativo: probabilità × sconto + (1 − probabilità) × (affari chiusi dopo un primo no: ${Math.round(report.discount.closeAfterFail * 100)}%, con il ${Math.round(report.discount.continuationRatio * 100)}% del risparmio iniziale; un affare perso costa il ${Math.round(LEARNING.LOSS_COST_SHARE * 100)}%).`,
       columns: [{ header: 'Voce', width: 28 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' },
         { header: 'Correzione prima', format: 'num' }, { header: 'Correzione ora', format: 'num' }],
       rows: [

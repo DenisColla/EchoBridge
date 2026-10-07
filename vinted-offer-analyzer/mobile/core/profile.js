@@ -5,7 +5,7 @@ import { COUNTER, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS } from
  * acceptance logits, plus two counter-engine parameters. Without a profile (web app, tests, first month) the engine
  * is unchanged.
  *
- *   logit' = slope × logit + intercept + time[group of the send window] + disc(discount)          (first offer)
+ *   logit' = logit + (slope − 1)·(logit − c) + intercept + time[group] + disc(discount)    (first offer, c = SLOPE_CENTER)
  *   logit' = logit + counter + time[group of the send window]                                       (our counter)
  *   counterShare     how much this user's sellers concede in a counter, relative to eBay's 0,42 (stance reading)
  *   sellerReplyHours how long they take to answer (availability during the wait), null = engine default
@@ -147,7 +147,7 @@ export function learnedOfferRow(profile, { logit, windowId, discountPct }) {
   if (!profileIsActive(profile)) return null
   const time = finite(profile.time && profile.time[timeGroupOf(windowId)], 0)
   const disc = discOffset(profile, discountPct)
-  const weight = (finite(profile.slope, 1) - 1) * logit + finite(profile.intercept, 0) + time + disc
+  const weight = (finite(profile.slope, 1) - 1) * (logit - LEARNING.SLOPE_CENTER) + finite(profile.intercept, 0) + time + disc
   if (Math.abs(weight) < 1e-9) return null
   return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, disc, intercept: finite(profile.intercept, 0), slope: finite(profile.slope, 1) } }
 }

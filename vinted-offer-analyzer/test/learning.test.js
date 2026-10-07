@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { inflateRawSync } from 'node:zlib'
 import {
   DEFAULT_PROFILE, EXPLORATION_ARMS, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, analyzeCounter, analyzeOffer, buildDataset, buildXlsx,
-  calibrationMetrics, counterAnalytics, decisionSnapshot, defaultDiscountFor, discKnotOf, discKnotWeights, discOffset, dueMonths, explorationBudget,
+  calibrationMetrics, counterAnalytics, decisionSnapshot, isoAcceptanceDiscount, timeWindowAt, defaultDiscountFor, discKnotOf, discKnotWeights, discOffset, dueMonths, explorationBudget,
   explorationKey, explorationPlan, failureRiskFor, fitCorrection, fitFirstOffers, kaplanMeier, learnedOfferRow, learningRecord, monotoneDisc,
   monthKeyOf, monthLabel, monthlyReport, normalizeProfile, optimalDiscount, pickMoments, normalizeInput, predictWith, profileIsActive, proposeProfile,
   reportFileName, reportWorkbook, scoreAt, shiftMonth, squash, timeGroupOf, unsquash, xlsxBase64, xlsxColumn, xlsxCrc32, xlsxDateSerial, xlsxEscape,
@@ -348,8 +348,13 @@ test('rollback: a profile that predicts worse than its parent comes back to the 
   assert.ok(out.score < LEARNING.ROLLBACK_LOG_BF, `score ${out.score}`)
   assert.equal(out.rollback, true)
   assert.equal(out.profile.intercept, 0, 'parent values restored')
-  assert.equal(out.changes.find((c) => c.key === 'intercept').status, 'frozen')
+  const row = out.changes.find((c) => c.key === 'intercept')
+  assert.equal(row.status, 'rollback')
+  assert.deepEqual([row.from, row.to], [-1, 0])
+  assert.equal(out.changes.filter((c) => c.key === 'intercept').length, 1, 'one row per parameter')
   assert.equal(out.profile.frozen.intercept, '2026-11')
+  assert.equal(out.profile.parentId, '2026-09')
+  assert.ok(out.profile.changes.some((c) => c.status === 'rollback'), 'the rollback is undoable')
   // A good profile accumulates evidence instead.
   const good = proposeProfile({ previous: { ...active, intercept: 1.2 }, firstFit: fit, month: '2026-10', now, lastMonthRecords: recs })
   assert.equal(good.rollback, false)
@@ -602,4 +607,57 @@ test('no signal: with the engine already right, most seeded runs move nothing', 
     if (!rep.changes.some((x) => (x.status === 'applied' || x.status === 'capped') && firstOffer(x.key))) still++
   }
   assert.ok(still >= runs * 0.75, `${still}/${runs} runs without engine changes`)
+})
+
+test('review fixes: plans never sent, tapped outcomes after a counter, missing estimates, off-plan counters', () => {
+  const now = new Date(2026, 9, 10)
+  const planned = new Date(2026, 8, 20, 21, 30).toISOString()
+  const base = { id: 'p', createdAt: new Date(2026, 8, 20, 12).toISOString(), listPrice: 60, targetPrice: 45, discountPct: 25, form: FORM, sendAt: planned }
+  // A plan abandoned or bought at list price without any offer is not an offer.
+  assert.equal(learningRecord({ ...base, status: 'abandoned', firstOutcome: 'abandoned', negotiation: [{ by: 'buyer', price: 45, at: planned, planned: true }] }, now), null)
+  assert.equal(learningRecord({ ...base, status: 'bought', finalPrice: 60, negotiation: [{ by: 'buyer', price: 45, at: planned, planned: true }] }, now), null)
+  // An «imputed» send time stamped after the seller's counter is the outcome tap: unknown send time.
+  const counterAt = new Date(2026, 8, 28, 22, 0).toISOString()
+  const rec = learningRecord({
+    ...base, status: 'accepted', firstOutcome: 'countered', finalPrice: 51.7, probability: null, sentAt: new Date(2026, 9, 2, 13, 10).toISOString(), sentAtSource: 'imputed',
+    negotiation: [{ by: 'buyer', price: 45, at: null, planned: false }, { by: 'seller', price: 58.5, at: counterAt }, { by: 'buyer', price: 51.7, at: new Date(2026, 8, 29, 9, 0).toISOString(), plannedAt: new Date(2026, 8, 29, 21, 35).toISOString(), pAccept: 0.52, rawLogit: null }],
+  }, now)
+  assert.equal(rec.sentKnown, false)
+  assert.equal(rec.y, null)
+  assert.equal(rec.month, '2026-09')
+  assert.equal(rec.pShown, null, 'a missing estimate is not 0%')
+  assert.equal(rec.latencyFirstH, null)
+  // Our counter went out 12 hours before the planned moment: its stored logit does not describe it.
+  assert.equal(rec.rounds[0].replyOffPlan, true)
+  assert.equal(rec.rounds[0].replyRawLogit, null)
+  assert.equal(rec.rounds[0].replyWindowId, timeWindowAt(new Date(2026, 8, 29, 9, 0)).id)
+})
+
+test('review fixes: discount variations stay near ±2 points on cheap items and say how many points', () => {
+  for (const [L, T] of [[12, 9], [21, 16], [24, 18], [60, 48]]) {
+    const raw = { ...FORM, listPrice: String(L), targetPrice: String(T) }
+    const base = analyzeOffer(raw, NOW)
+    for (let i = 0; i < 200; i++) {
+      const out = explorationPlan(raw, base, NOW, { key: `c${L}-${i}`, month: '2026-10' })
+      if (!out || out.exploration.kind !== 'discount') continue
+      const delta = Math.abs(out.result.input.discountPct - base.input.discountPct)
+      assert.ok(delta <= LEARNING.EXPLORE_DISCOUNT_PTS + 1 + 1e-9, `L=${L}: ${delta} points`)
+      assert.match(out.exploration.label, new RegExp(`^${String(Math.round(delta * 10) / 10).replace('.', ',')} punt`))
+    }
+  }
+})
+
+test('review fixes: risk shows «calibrated» only with a real profile; iso-acceptance discount moves both ways', () => {
+  const r = analyzeOffer(FORM, NOW)
+  const thin = normalizeProfile({ cov: [[0.2]], paramKeys: ['intercept'], basedOn: 2 })
+  assert.equal(failureRiskFor(r, { profile: thin }).basis, 'engine')
+  const items = syntheticItems({ months: 4, perMonth: 14 })
+  const recs = buildDataset(items, new Date(2026, 7, 1))
+  const now = new Date(2026, 7, 1)
+  assert.equal(isoAcceptanceDiscount(recs, DEFAULT_PROFILE, now).target, 20, 'uncorrected engine: −20%')
+  assert.ok(isoAcceptanceDiscount(recs, normalizeProfile({ intercept: -0.5 }), now).target < 20, 'tough sellers: softer opener')
+  assert.ok(isoAcceptanceDiscount(recs, normalizeProfile({ intercept: 0.5 }), now).target > 20, 'generous sellers: deeper opener')
+  // The slope pivots around SLOPE_CENTER: at that logit only the intercept acts.
+  const row = learnedOfferRow(normalizeProfile({ slope: 1.2, intercept: -0.1 }), { logit: LEARNING.SLOPE_CENTER, windowId: 'sunday_night', discountPct: 20 })
+  near(row.weight, -0.1, 1e-12)
 })

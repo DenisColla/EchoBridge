@@ -203,7 +203,8 @@ export function useWatchlist() {
     }
     // An outcome without «Inviata» first: the offer went out at the recommended moment if that is past, else just now.
     const boughtWithoutOffer = status === 'bought' && neverSent
-    if (OUTCOMES.includes(status) && status !== 'abandoned' && !boughtWithoutOffer && !target.sentAt) {
+    // Never once a counter exists: then the tap time is the end of the negotiation, not the first send.
+    if (OUTCOMES.includes(status) && status !== 'abandoned' && !boughtWithoutOffer && !target.sentAt && !hasSeller) {
       const planned = history.length && history[history.length - 1].planned && history[history.length - 1].at ? new Date(history[history.length - 1].at) : null
       const imputed = planned && planned.getTime() <= Date.now() ? planned.toISOString() : now
       patch.sentAt = imputed
