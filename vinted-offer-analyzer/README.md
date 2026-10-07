@@ -108,25 +108,33 @@ controproposta, sopravvivenza della sua cifra dopo una nuova offerta, numero di 
 L'app Android tiene traccia di ogni offerta (cosa consigliava il motore, quando e a che prezzo l'hai inviata, com'è
 andata, ogni controproposta) e il primo del mese, alla prima apertura, chiude il mese:
 
-- **Report Excel** (`reportWorkbook`, 10 fogli: riepilogo, offerte, trattative, fasce orarie, sconti, calibrazione,
-  varianti di test, modifiche al motore, andamento mese per mese, note) salvato da solo nella cartella scelta una volta
-  (Storage Access Framework, permesso conservato da Android) e in una copia interna da aprire o condividere.
-- **Correzione del motore** (`learning.js`): una regressione logistica bayesiana (MAP + Laplace, mesi vecchi pesati con
-  un'emivita di 6 mesi) stima di quanto il motore sbaglia per questo utente, prima in generale e poi per fasce orarie e
-  fasce di sconto (centrate: si muovono solo se una fascia rende davvero diversamente dalle altre). Le correzioni
-  entrano nel profilo del mese dopo solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al
-  mese; se il mese prima hanno stimato peggio del motore di base vengono dimezzate. Si annullano con un tocco.
-- **Sconto di partenza**: il −20% proposto dal link si sposta (di un punto al mese) solo di quanto i tuoi esiti
-  cambiano il punto che massimizza il risparmio atteso, contando anche le trattative che chiudi dopo un primo no e il
-  costo di perdere l'articolo.
-- **Varianti di test**: circa un'offerta su cinque esce un'ora prima o dopo, o con due punti di sconto in più o in
-  meno, sempre segnalata, deterministica per articolo e mese e mai oltre 6 punti di probabilità in meno: sono i dati che
-  permettono di capire se orari e sconti vicini rendono di più.
+- **Report Excel** (`reportWorkbook`, 11 fogli: riepilogo, offerte, trattative, analisi delle controproposte, fasce
+  orarie, sconti, calibrazione, varianti di test, modifiche al motore, andamento mese per mese, note) salvato da solo
+  nella cartella scelta una volta (Storage Access Framework, permesso conservato da Android) e in una copia interna da
+  aprire o condividere.
+- **Correzione del motore** (`learning.js`): regressione logistica bayesiana (MAP + Laplace, priori centrati su
+  "nessuna correzione", mesi vecchi pesati con un'emivita di 6 mesi, orizzonte fisso di 7 giorni). Prima la correzione
+  generale, poi fasce orarie e curva dello sconto (lineare tra 10, 20 e 30%, sempre decrescente) sulla parte che resta,
+  centrate perché esprimano solo differenze tra fasce. Ogni gradino entra solo se migliora le previsioni
+  leave-one-out di almeno 1 nat e di un errore standard; poi ogni valore si muove solo con abbastanza esiti, oltre
+  mezzo errore standard e al massimo di un passo al mese.
+- **Rollback**: se le correzioni in uso prevedono peggio di quelle che hanno sostituito (log Bayes factor
+  prequenziale sotto −2) tornano i valori precedenti e quei parametri restano fermi un mese. Tutto si annulla con un
+  tocco.
+- **Sconto di partenza**: il −20% proposto dal link diventa lo sconto più profondo al quale i tuoi venditori accettano
+  ancora quanto il motore prevede al −20% (venditori più generosi → apertura più aggressiva, più duri → più morbida),
+  al massimo un punto al mese.
+- **Controproposte**: quota della distanza concessa dai venditori (stimata verso lo 0,42 di eBay) e tempi di risposta
+  (Kaplan–Meier) correggono il motore delle controproposte.
+- **Varianti di test**: circa un'offerta su cinque esce un'ora prima o dopo, o con circa due punti di sconto in più o
+  in meno, scelta solo tra le varianti sicure (al massimo 6 punti di probabilità e l'1% del listino di risparmio atteso
+  in meno, mai di notte, budget mensile del 3%), segnalata e con la propensione registrata.
 - **Rischio di fallimento**: anche nel momento e al prezzo consigliati l'offerta può fallire; il risultato mostra la
-  probabilità con un intervallo (dal profilo appreso quando ci sono esiti), i motivi e cosa dice il tuo storico.
+  probabilità con un intervallo, i motivi, come falliscono di solito le tue offerte e la probabilità di chiudere
+  comunque l'affare dopo le controproposte.
 
-Pensato per pochi dati (meno di 15 offerte al mese): con il motore già corretto il profilo resta fermo, con venditori
-più duri del previsto converge in pochi mesi (`test/learning.test.js` lo verifica su storie simulate).
+Pensato per pochi dati (meno di 15 offerte al mese): con il motore già corretto il profilo resta quasi sempre fermo,
+con venditori più duri del previsto converge in pochi mesi (`test/learning.test.js` lo verifica su storie simulate).
 
 ## Lettura dell'annuncio
 
