@@ -30,6 +30,9 @@ src/
     optimize.js    optimizeOffer: come arrivare a una probabilità obiettivo (aspetta / alza / entrambe)
     extract.js     parseVintedItemHtml + buildFormFromExtraction: dalla pagina pubblica di un annuncio al modulo compilato
     counter.js     analyzeCounter: la risposta migliore (cifra e momento) a una controproposta del venditore, round dopo round
+    learning.js    apprendimento mensile: dataset degli esiti, correzione bayesiana del motore, sconto di partenza, varianti di test, rischio di fallimento, report
+    profile.js     profilo appreso: le correzioni che scoring.js e counter.js aggiungono (nessun profilo = motore invariato)
+    xlsx.js        scrittore .xlsx senza dipendenze (zip STORE + SpreadsheetML), per il report mensile
     dates.js       formattazione italiana senza Intl, festivi, fuso Europe/Rome, aritmetica DST-safe
     math.js        logit, sigmoide, interpolazione, hash deterministico
   hooks/useOfferAnalysis.js   stato del form e dell'analisi (React puro)
@@ -100,11 +103,37 @@ successivi scendono di passo e finiscono con una sola offerta finale. Le regole 
 controproposta, sopravvivenza della sua cifra dopo una nuova offerta, numero di rilanci) sono ipotesi configurabili in
 `VINTED_ASSUMED` e `COUNTER` (`constants.js`), con la fonte o l'etichetta "euristica" accanto a ogni parametro.
 
+## Apprendimento mensile
+
+L'app Android tiene traccia di ogni offerta (cosa consigliava il motore, quando e a che prezzo l'hai inviata, com'è
+andata, ogni controproposta) e il primo del mese, alla prima apertura, chiude il mese:
+
+- **Report Excel** (`reportWorkbook`, 10 fogli: riepilogo, offerte, trattative, fasce orarie, sconti, calibrazione,
+  varianti di test, modifiche al motore, andamento mese per mese, note) salvato da solo nella cartella scelta una volta
+  (Storage Access Framework, permesso conservato da Android) e in una copia interna da aprire o condividere.
+- **Correzione del motore** (`learning.js`): una regressione logistica bayesiana (MAP + Laplace, mesi vecchi pesati con
+  un'emivita di 6 mesi) stima di quanto il motore sbaglia per questo utente, prima in generale e poi per fasce orarie e
+  fasce di sconto (centrate: si muovono solo se una fascia rende davvero diversamente dalle altre). Le correzioni
+  entrano nel profilo del mese dopo solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al
+  mese; se il mese prima hanno stimato peggio del motore di base vengono dimezzate. Si annullano con un tocco.
+- **Sconto di partenza**: il −20% proposto dal link si sposta (di un punto al mese) solo di quanto i tuoi esiti
+  cambiano il punto che massimizza il risparmio atteso, contando anche le trattative che chiudi dopo un primo no e il
+  costo di perdere l'articolo.
+- **Varianti di test**: circa un'offerta su cinque esce un'ora prima o dopo, o con due punti di sconto in più o in
+  meno, sempre segnalata, deterministica per articolo e mese e mai oltre 6 punti di probabilità in meno: sono i dati che
+  permettono di capire se orari e sconti vicini rendono di più.
+- **Rischio di fallimento**: anche nel momento e al prezzo consigliati l'offerta può fallire; il risultato mostra la
+  probabilità con un intervallo (dal profilo appreso quando ci sono esiti), i motivi e cosa dice il tuo storico.
+
+Pensato per pochi dati (meno di 15 offerte al mese): con il motore già corretto il profilo resta fermo, con venditori
+più duri del previsto converge in pochi mesi (`test/learning.test.js` lo verifica su storie simulate).
+
 ## Lettura dell'annuncio
 
 Il motore include un estrattore (`src/core/extract.js`) che legge la pagina pubblica di un annuncio Vinted (JSON-LD
 e frammenti server-side: titolo, prezzo, marca, condizioni, categoria, "caricato … fa", "ultima visita … fa",
-stelle, numero di recensioni, distintivi del venditore) e compila il modulo da solo, con un target al −20%.
+stelle, numero di recensioni, distintivi del venditore) e compila il modulo da solo, con un target al −20% (o lo
+sconto di partenza appreso dai tuoi esiti).
 L'app Android lo usa da "Estrai e calcola": basta il link. Nel browser le pagine di Vinted non sono leggibili per
 via del CORS, quindi la versione web offre "Leggi segnali dal testo": incolla il testo dell'annuncio e ricava
 prezzo e segnali ("prezzo fisso", "accetto offerte", "svuoto l'armadio").

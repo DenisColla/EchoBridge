@@ -499,6 +499,156 @@ const SELLER_STANCES = {
   flexible: { label: 'Flessibile', why: 'È sceso almeno quanto fa di solito chi vuole chiudere.' },
 }
 
+/* ───────── monthly learning loop (calibration from the user's own outcomes) ───────── */
+
+/** Stamped on every decision snapshot, so the monthly report knows which engine produced each estimate. */
+const ENGINE_VERSION = '1.3.0'
+
+/**
+ * The 16 time windows pooled into 5 groups: with a handful of offers a month a single window never collects enough
+ * outcomes, a group does. Holidays fall into the Sunday windows, so into the same groups.
+ */
+const LEARNING_TIME_GROUPS = [
+  { id: 'prime_evening', label: 'Sere migliori (dom e lun–gio 21–23)', windows: ['sunday_night', 'weeknight_late', 'weeknight_early', 'weeknight_end'] },
+  { id: 'weekend', label: 'Weekend (ven–sab sera, sab–dom di giorno)', windows: ['friday_night', 'saturday_night', 'sunday_afternoon', 'sunday_morning', 'saturday_morning'] },
+  { id: 'evening_other', label: 'Ora di cena e fasce neutre', windows: ['after_dinner', 'neutral'] },
+  { id: 'daytime', label: 'Giorno lavorativo (7–18)', windows: ['commute', 'work_morning', 'pre_lunch', 'lunch', 'work_afternoon'] },
+  { id: 'night', label: 'Notte (0–7)', windows: ['night'] },
+]
+
+const LEARNING_BANDS = [
+  { id: 'low', label: 'Sconto sotto il 15%' },
+  { id: 'medium', label: 'Sconto 15–30%' },
+  { id: 'high', label: 'Sconto oltre il 30%' },
+]
+
+/**
+ * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted: they are tuned for
+ * a buyer with fewer than 15 offers a month, so every learned value starts at the engine default and moves slowly.
+ * Logit units unless noted. The fit uses all history, older months weighted by a half-life.
+ */
+const LEARNING = {
+  HALF_LIFE_MONTHS: 6,
+  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, band: 0.35, counter: 0.5 },
+  /** Weighted outcomes a parameter needs before it may move at all. */
+  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, band: 6, counter: 6, discount: 10 },
+  /** Largest change applied in one month (the fit may want more: the rest waits for next month). */
+  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, band: 0.2, counter: 0.3, discountPct: 1 },
+  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], band: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30] },
+  /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
+  MIN_CHANGE: 0.02,
+  MIN_CHANGE_DISCOUNT_PCT: 0.5,
+  DEFAULT_DISCOUNT_PCT: 20,
+  /** An offer sent with no outcome after this many days counts as "no reply" (Vinted offers lapse well before). */
+  NO_REPLY_AFTER_DAYS: 7,
+  /** A counter of ours with no outcome after this many days counts as not accepted. */
+  COUNTER_NO_REPLY_AFTER_DAYS: 4,
+  /** Exploration: share of first offers that get a small, flagged variation (user choice: about 1 in 5). */
+  EXPLORE_SHARE: 0.2,
+  EXPLORE_TIME_MINUTES: 60,
+  EXPLORE_DISCOUNT_PTS: 2,
+  /** A variation is skipped when it would cost more than this in estimated acceptance (probability points). */
+  EXPLORE_MAX_COST: 0.06,
+  /** Reliability table bins for the calibration sheet. */
+  RELIABILITY_BINS: [0, 0.2, 0.4, 0.6, 0.8, 1.0001],
+  /** Months of reports caught up at once when the app was not opened for a while. */
+  MAX_CATCH_UP_MONTHS: 6,
+  /**
+   * Starting-discount objective (share of list price): ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS].
+   * q = chance a failed first offer still ends in a deal, ρ = saving of those deals relative to the first discount,
+   * LOSS = cost of losing the item (buying elsewhere at list price + 5%, as COUNTER.LOSS_PREMIUM). Priors with weight.
+   * Aggressive openers (27–33%) halve q: an irritated seller rarely keeps negotiating (blockRiskAt's ramp).
+   */
+  CLOSE_AFTER_FAIL_PRIOR: 0.4,
+  CONTINUATION_RATIO_PRIOR: 0.5,
+  CONTINUATION_PRIOR_WEIGHT: 4,
+  LOSS_COST_SHARE: 0.05,
+  AGGRESSIVE_RAMP_PCT: [27, 33],
+}
+
+// ───────────────────────── src/core/profile.js ─────────────────────────
+/**
+ * The learned profile: small corrections, fitted every month on the user's own outcomes, that the engine adds to its
+ * acceptance logits. Without a profile (web app, tests, first month) the engine is unchanged.
+ *
+ *   logit' = slope × logit + intercept + time[group of the send window] + band[discount band]      (first offer)
+ *   logit' = logit + counter + time[group of the send window]                                       (our counter)
+ */
+const DEFAULT_PROFILE = Object.freeze({
+  version: 1,
+  id: 'default',
+  month: null,
+  createdAt: null,
+  intercept: 0,
+  slope: 1,
+  time: Object.freeze(Object.fromEntries(LEARNING_TIME_GROUPS.map((g) => [g.id, 0]))),
+  band: Object.freeze(Object.fromEntries(LEARNING_BANDS.map((b) => [b.id, 0]))),
+  counter: 0,
+  discountPct: LEARNING.DEFAULT_DISCOUNT_PCT,
+  /** Posterior covariance of the first-offer parameters (keys of `profileParamKeys`), for failure-risk intervals. */
+  cov: null,
+  paramKeys: null,
+  changes: [],
+  basedOn: 0,
+})
+
+const finite = (v, fallback) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : fallback)
+const clampTo = (v, [lo, hi]) => Math.min(hi, Math.max(lo, v))
+
+/** A stored profile (any version, possibly partial or tampered with) → a complete, bounded profile. */
+function normalizeProfile(raw) {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_PROFILE }
+  const B = LEARNING.BOUNDS
+  return {
+    ...DEFAULT_PROFILE,
+    ...raw,
+    intercept: clampTo(finite(raw.intercept, 0), B.intercept),
+    slope: clampTo(finite(raw.slope, 1), B.slope),
+    time: Object.fromEntries(LEARNING_TIME_GROUPS.map((g) => [g.id, clampTo(finite(raw.time && raw.time[g.id], 0), B.time)])),
+    band: Object.fromEntries(LEARNING_BANDS.map((b) => [b.id, clampTo(finite(raw.band && raw.band[b.id], 0), B.band)])),
+    counter: clampTo(finite(raw.counter, 0), B.counter),
+    discountPct: clampTo(finite(raw.discountPct, LEARNING.DEFAULT_DISCOUNT_PCT), B.discountPct),
+    changes: Array.isArray(raw.changes) ? raw.changes : [],
+  }
+}
+
+const timeGroupOf = (windowId) => (LEARNING_TIME_GROUPS.find((g) => g.windows.includes(windowId)) || LEARNING_TIME_GROUPS[2]).id
+
+/** Same edges as riskBandFor (scoring.js), repeated here to keep this module free of engine imports. */
+const bandOf = (discountPct) => (discountPct < 15 ? 'low' : discountPct <= 30 ? 'medium' : 'high')
+
+/** True when the profile changes at least one estimate (a default or empty profile is a no-op). */
+function profileIsActive(profile) {
+  if (!profile) return false
+  if (Math.abs(finite(profile.intercept, 0)) > 1e-9 || Math.abs(finite(profile.slope, 1) - 1) > 1e-9 || Math.abs(finite(profile.counter, 0)) > 1e-9) return true
+  return Object.values(profile.time || {}).some((v) => Math.abs(finite(v, 0)) > 1e-9) || Object.values(profile.band || {}).some((v) => Math.abs(finite(v, 0)) > 1e-9)
+}
+
+/**
+ * The extra factor row for a first offer, or null when the profile is absent or changes nothing.
+ * `logit` is the engine's logit before the correction (base + capped factors).
+ */
+function learnedOfferRow(profile, { logit, windowId, discountPct }) {
+  if (!profileIsActive(profile)) return null
+  const time = finite(profile.time && profile.time[timeGroupOf(windowId)], 0)
+  const band = finite(profile.band && profile.band[bandOf(discountPct)], 0)
+  const weight = (finite(profile.slope, 1) - 1) * logit + finite(profile.intercept, 0) + time + band
+  if (Math.abs(weight) < 1e-9) return null
+  return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, band, intercept: finite(profile.intercept, 0), slope: finite(profile.slope, 1) } }
+}
+
+/** The extra factor row for our counter (seller accepts our number), or null. `windowId` is null for the lookahead. */
+function learnedCounterRow(profile, { windowId }) {
+  if (!profileIsActive(profile)) return null
+  const time = windowId ? finite(profile.time && profile.time[timeGroupOf(windowId)], 0) : 0
+  const weight = finite(profile.counter, 0) + time
+  if (Math.abs(weight) < 1e-9) return null
+  return { id: 'learned', group: 'learned', label: 'Correzione dai tuoi esiti', weight, rawWeight: weight, learned: { time, counter: finite(profile.counter, 0) } }
+}
+
+/** Default target discount for a listing read from a link: the learned one, else the engine default (−20%). */
+const defaultDiscountFor = (profile) => Math.round(clampTo(finite(profile && profile.discountPct, LEARNING.DEFAULT_DISCOUNT_PCT), LEARNING.BOUNDS.discountPct))
+
 // ───────────────────────── src/core/scoring.js ─────────────────────────
 const findCategory = (id) => CATEGORIES.find((c) => c.id === id) || null
 const findListingAge = (id) => LISTING_AGES.find((a) => a.id === id) || LISTING_AGES[0]
@@ -624,12 +774,17 @@ function scoreAt(input, sendDate, daysWaited = 0) {
   const factors = raw.map((f) => ({ ...f, rawWeight: f.weight, weight: f.weight > 0 ? f.weight * posScale : f.weight * negScale }))
 
   const total = base + factors.reduce((s, f) => s + f.weight, 0)
+  // The learned correction (monthly profile) comes after the caps: it measures how this user's sellers really answer.
+  const learned = learnedOfferRow(input.profile, { logit: total, windowId: timeWindow.id, discountPct })
+  const logit = learned ? total + learned.weight : total
   return {
     base,
-    logit: total,
-    pAccept: squash(total),
+    logit,
+    rawLogit: total,
+    learnedWeight: learned ? learned.weight : 0,
+    pAccept: squash(logit),
     pBase: squash(base),
-    factors,
+    factors: learned ? [...factors, learned] : factors,
     capped: posScale < 1 || negScale < 1,
     timeWindow,
     monthWindow,
@@ -791,7 +946,7 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
  * Chooses the moment to recommend. Among near-ties (within 1.5pp or 3% of the
  * best utility) the earliest wins, so the verdict does not flip by weeks on noise.
  */
-function pickMoments(input, now, { preferredSendAt = null } = {}) {
+function pickMoments(input, now, { preferredSendAt = null, exactSendAt = null } = {}) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
   // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
@@ -808,6 +963,14 @@ function pickMoments(input, now, { preferredSendAt = null } = {}) {
     const nearest = [...eligible].sort((a, b) => Math.abs(a.date.getTime() - wanted) - Math.abs(b.date.getTime() - wanted))[0]
     if (nearest && Math.abs(nearest.date.getTime() - wanted) <= 3 * 3_600_000) {
       chosen = nearest
+      pinned = true
+    }
+  }
+  // An exact moment (the learning loop's flagged ±1 h variation) is scored as its own slot and always chosen.
+  if (exactSendAt) {
+    const exactDate = ceilToMinutes(new Date(exactSendAt), 5)
+    if (Number.isFinite(exactDate.getTime()) && exactDate.getTime() > now.getTime()) {
+      chosen = evaluateSlot(input, { date: exactDate, daysWaited: calendarDaysBetween(now, exactDate), kind: 'canonical', exact: true, windowId: timeWindowAt(exactDate).id })
       pinned = true
     }
   }
@@ -1388,7 +1551,8 @@ function buildAnalysis(input, now, options = {}) {
 function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  const { input } = normalized
+  // The learned profile rides on the input, so every scoreAt call (slots, price search, two-step) sees it.
+  const input = options.profile ? { ...normalized.input, profile: options.profile } : normalized.input
 
   if (input.discountPct <= 0) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')
@@ -1455,10 +1619,10 @@ const describeSlot = (slot, now) =>
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
  */
-function optimizeOffer(raw, now = new Date(), { targetProbability = null } = {}) {
+function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  let input = normalized.input
+  let input = profile ? { ...normalized.input, profile } : normalized.input
   if (input.discountPct <= 0) return { ok: false, reason: 'no_offer_needed' }
   let capped = false
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
@@ -1748,7 +1912,7 @@ function normalizeCounterInput(raw, now = new Date(), options = {}) {
   }
   if (Object.keys(errors).length) return { ok: false, errors, warnings, state: null }
 
-  const input = base.input
+  const input = options.profile ? { ...base.input, profile: options.profile } : base.input
   const L = input.listPrice
   const buyers = useHistory ? buyerEntries.map((h) => h.price) : [B0]
   const sellers = useHistory ? sellerEntries.map((h) => h.price) : [S0]
@@ -1908,9 +2072,13 @@ function counterAcceptance(state, side, price, sendDate = null) {
   const negScale = sumNeg < NEGATIVE_CAP ? NEGATIVE_CAP / sumNeg : 1
   const capped = mods.map((m) => ({ ...m, rawWeight: m.weight, weight: m.weight > 0 ? m.weight * posScale : m.weight * negScale }))
   const factors = [{ id: 'split', group: 'split', label: 'Metà strada esatta', weight: split }, ...capped]
-  const logit = core + factors.reduce((s, f) => s + f.weight, 0)
+  const rawLogit = core + factors.reduce((s, f) => s + f.weight, 0)
+  // Learned from this user's counters (monthly profile), after the caps like the first-offer correction.
+  const learned = learnedCounterRow(input.profile, { windowId: timeWindow ? timeWindow.id : null })
+  if (learned) factors.push(learned)
+  const logit = learned ? rawLogit + learned.weight : rawLogit
   return {
-    gapShare, core, isSplit, split, base: core, pBase: squash(core), logit, pAccept: squash(logit), factors,
+    gapShare, core, isSplit, split, base: core, pBase: squash(core), logit, rawLogit, learnedWeight: learned ? learned.weight : 0, pAccept: squash(logit), factors,
     capped: posScale < 1 || negScale < 1, timeWindow, monthWindow, hoursAfter,
   }
 }
@@ -2134,7 +2302,7 @@ function ctrAcceptOption(state, { stale = false, recommended = false } = {}) {
 }
 
 const ctrNegotiation = (state) => ({
-  listPrice: state.L, previousOffer: state.B, firstOffer: state.buyers[0], sellerCounter: state.S, sellerCounterEntered: state.enteredAs,
+  listPrice: state.L, previousOffer: state.B, firstOffer: state.buyers[0], sellerCounter: state.S, sellerCounterRaw: state.lastSeller, sellerCounterEntered: state.enteredAs,
   round: state.k, buyerCountersSent: state.n, sellerStepEur: state.sigma, sellerStepPct: state.Sprev > 0 ? (state.sigma / state.Sprev) * 100 : 0,
   sellerConcessionShare: state.share, sellerConcessionShareNorm: state.shareNorm, sellerStance: state.stance, sellerStanceLabel: SELLER_STANCES[state.stance].label,
   sellerRaised: state.raised, counterOverOfferPct: (state.S / state.B - 1) * 100, gapEur: ctrR2(state.S - state.B), midpoint: (state.B + state.S) / 2,
@@ -2407,6 +2575,8 @@ function analyzeCounter(raw, now = new Date(), options = {}) {
       expectedPrice: row.expectedPrice, expectedSaving: S <= state.Wcap + CTR_EPS ? S - row.expectedPrice : null, totalWithFee: buyerTotal(row.price),
       landingPoint: (row.price + S) / 2, overBudget: false, next: row.isFinal ? { final: true, ifHolds: null, ifMoves: null } : { final: false, ifHolds, ifMoves },
       apply: { counterPrice: row.price, preferredSendAt: optimal.date },
+      // For the monthly learning loop: the engine's logit before the learned correction, at the planned moment.
+      learning: { rawLogit: row.score.rawLogit, learnedWeight: row.score.learnedWeight, pRead: row.pRead, windowId: row.score.timeWindow ? row.score.timeWindow.id : null },
     }
   }
   const balancedOption = optionFrom(balanced, 'balanced')
