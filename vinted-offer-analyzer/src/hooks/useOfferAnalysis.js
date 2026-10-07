@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import { VINTED, analyzeOffer, computeDiscountPct, findPriceInText, nextGoalFor, optimizeOffer, parsePrice, riskBandFor, signalFromText } from '../core/index.js'
+import { VINTED, analyzeCounter, analyzeOffer, computeDiscountPct, counterPreview, findPriceInText, nextGoalFor, optimizeOffer, parsePrice, riskBandFor, signalFromText } from '../core/index.js'
 
 export const EXAMPLE_FORM = {
   itemTitle: 'Nike Air Force 1 bianche, 42',
@@ -9,6 +9,18 @@ export const EXAMPLE_FORM = {
   listingAge: 'weeks_1_2',
   sellerProfile: 'unknown',
   listingSignal: 'none',
+}
+
+/** The seller's counter-offer, typed after the first offer was sent. */
+export const EMPTY_COUNTER_FORM = {
+  previousOffer: '',
+  sellerCounter: '',
+  counterMode: 'eur',
+  receivedAgo: 'just_now',
+  maxPrice: '',
+  chat: false,
+  competition: false,
+  publicPrice: false,
 }
 
 export const EMPTY_FORM = {
@@ -32,6 +44,10 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
   const [touched, setTouched] = useState(false)
   const [goal, setGoal] = useState(0.7)
   const [plan, setPlan] = useState(null)
+  const [counterForm, setCounterForm] = useState(EMPTY_COUNTER_FORM)
+  const [counterResult, setCounterResult] = useState(null)
+  const [counterErrors, setCounterErrors] = useState({})
+  const [counterApplied, setCounterApplied] = useState(null)
 
   const setField = useCallback((name, value) => {
     setForm((prev) => ({ ...prev, [name]: value }))
@@ -102,13 +118,66 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     return { signal, price }
   }, [])
 
+  /* ───────── counter-offer ───────── */
+
+  const setCounterField = useCallback((name, value) => {
+    setCounterForm((prev) => ({ ...prev, [name]: value }))
+  }, [])
+
+  /** The engine input: the first-offer form (category, list price, listing data) plus the counter fields. */
+  const counterRaw = useMemo(() => ({
+    ...form,
+    previousOffer: counterForm.previousOffer || form.targetPrice,
+    sellerCounter: counterForm.sellerCounter,
+    counterMode: counterForm.counterMode,
+    receivedAgo: counterForm.receivedAgo,
+    maxPrice: counterForm.maxPrice,
+    channel: counterForm.chat ? 'chat' : 'button',
+    competition: counterForm.competition,
+    publicPrice: counterForm.publicPrice,
+  }), [form, counterForm])
+
+  const counterLine = useMemo(() => counterPreview(counterRaw), [counterRaw])
+
+  /** Best reply to the seller's counter; `options` = { forcePrice, preferredSendAt } when an option is applied. */
+  const analyzeCounterOffer = useCallback((options = {}) => {
+    const outcome = analyzeCounter(counterRaw, clock(), options)
+    if (!outcome.ok) {
+      setCounterErrors(outcome.errors)
+      setCounterResult(null)
+      return null
+    }
+    setCounterErrors({})
+    setCounterResult(outcome)
+    if (!options.forcePrice) setCounterApplied(null)
+    return outcome
+  }, [counterRaw, clock])
+
+  const applyCounterOption = useCallback((option) => {
+    setCounterApplied(option)
+    return analyzeCounterOffer({ forcePrice: option.apply.counterPrice, preferredSendAt: option.apply.preferredSendAt })
+  }, [analyzeCounterOffer])
+
+  const clearCounter = useCallback(() => {
+    setCounterForm(EMPTY_COUNTER_FORM)
+    setCounterResult(null)
+    setCounterErrors({})
+    setCounterApplied(null)
+  }, [])
+
   const reset = useCallback(() => {
     setForm(EMPTY_FORM)
     setResult(null)
     setErrors({})
     setTouched(false)
     setPlan(null)
-  }, [])
+    clearCounter()
+  }, [clearCounter])
 
-  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText }
+  const counter = {
+    form: counterForm, setField: setCounterField, line: counterLine, result: counterResult, errors: counterErrors, applied: counterApplied,
+    analyze: analyzeCounterOffer, apply: applyCounterOption, clear: clearCounter,
+  }
+
+  return { form, setField, applyDiscount, errors, touched, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText, counter }
 }

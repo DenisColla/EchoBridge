@@ -44,6 +44,7 @@ const ORDER = [
   'src/components/MessageCard.jsx',
   'src/components/StrategyCard.jsx',
   'src/components/OptimizeCard.jsx',
+  'src/components/CounterOfferCard.jsx',
   'src/components/EmptyState.jsx',
   'src/App.jsx',
 ]

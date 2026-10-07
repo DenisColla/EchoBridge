@@ -5,6 +5,7 @@ import { articleFor, formatLongDate, formatTime } from './core/index.js'
 import { SURFACE, cx } from './theme.js'
 import { EmptyState } from './components/EmptyState.jsx'
 import { MessageCard } from './components/MessageCard.jsx'
+import { CounterOfferCard } from './components/CounterOfferCard.jsx'
 import { OfferForm } from './components/OfferForm.jsx'
 import { OptimizeCard } from './components/OptimizeCard.jsx'
 import { ScoreCard } from './components/ScoreCard.jsx'
@@ -17,7 +18,7 @@ import { VerdictCard } from './components/VerdictCard.jsx'
  * components are presentational: port to React Native by swapping ./components.
  */
 export default function VintedOfferAnalyzer({ clock } = {}) {
-  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText } = useOfferAnalysis({ clock })
+  const { form, setField, applyDiscount, errors, result, livePreview, analyze, reset, goal, setGoal, plan, optimize, applyOption, applyListingText, counter } = useOfferAnalysis({ clock })
   const resultsRef = useRef(null)
 
   useEffect(() => {
@@ -90,6 +91,7 @@ export default function VintedOfferAnalyzer({ clock } = {}) {
               <VerdictCard result={result} />
               <StrategyCard result={result} />
               <MessageCard key={result.now.getTime()} result={result} />
+              <CounterOfferCard result={result} counter={counter} />
             </>
           )}
         </div>
