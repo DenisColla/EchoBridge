@@ -67,9 +67,10 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
       const S = fields.counterMode === 'pct' ? counterFromPercent(B, parsePercent(fields.sellerCounter)) : parsePrice(fields.sellerCounter)
       if (!(S > 0)) return raw // let the engine report the missing counter
       const base = recalculating ? history.slice(0, -1) : history
-      const buyers = base.map((e) => ({ by: e.by, price: e.price, at: e.at || null }))
-      if (buyers.length && buyers[buyers.length - 1].by === 'buyer' && Number.isFinite(B)) buyers[buyers.length - 1] = { ...buyers[buyers.length - 1], price: B }
-      raw.history = [...buyers, { by: 'seller', price: S, at: recalculating ? last.at : null }]
+      // A planned (never marked as sent) offer has no real send time; keep the "final" flag and the uncertainty of each counter.
+      const entries = base.map((e) => ({ by: e.by, price: e.price, at: e.planned ? null : (e.at || null), isFinal: Boolean(e.isFinal), receivedUncertaintyMinutes: e.receivedUncertaintyMinutes || 0 }))
+      if (entries.length && entries[entries.length - 1].by === 'buyer' && Number.isFinite(B)) entries[entries.length - 1] = { ...entries[entries.length - 1], price: B }
+      raw.history = [...entries, { by: 'seller', price: S, at: recalculating ? last.at : null, receivedUncertaintyMinutes: recalculating ? (last.receivedUncertaintyMinutes || 0) : 0 }]
     }
     return raw
   }
@@ -243,15 +244,15 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
       <Card>
         <SectionLabel>Le tue opzioni</SectionLabel>
         <Title>Quanto salire</Title>
-        {result.options.map((o) => <OptionBox key={o.id} option={o} sellerPrice={n.sellerCounter} onApply={onApply} />)}
+        {result.options.map((o) => <OptionBox key={o.id} option={o} sellerPrice={n.sellerCounter} onApply={onApply} applyAllowed={!acceptRecommended} />)}
         {result.lines.whyNotLower ? <Body muted small>{result.lines.whyNotLower}</Body> : null}
       </Card>
 
       <Card>
-        <SectionLabel>E dopo?</SectionLabel>
-        <Title>Il piano per la prossima mossa</Title>
+        <SectionLabel>{acceptRecommended ? 'Come comprare' : 'E dopo?'}</SectionLabel>
+        <Title>{acceptRecommended ? 'Compra adesso' : 'Il piano per la prossima mossa'}</Title>
         {result.plan.map((line) => <Body key={line}>• {line}</Body>)}
-        <Body muted small>{result.ladder}</Body>
+        {!acceptRecommended && <Body muted small>{result.ladder}</Body>}
       </Card>
 
       <CounterMessageCard key={`${rec.id}-${rec.price}-${result.optimal.date.getTime()}`} result={result} />
@@ -260,15 +261,17 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
         <SectionLabel>Perché</SectionLabel>
         <Title>Come ho scelto cifra e momento</Title>
         {result.reasons.map((r) => <Body key={r}>• {r}</Body>)}
-        <Collapsible title="Che cosa pesa sulla probabilità" summary={`${result.factors.baseLabel} → ${result.factors.basePct}%, alla fine ${result.factors.totalPct}%`}>
-          <FactorRows factors={result.factors} />
-        </Collapsible>
-        <Collapsible title="Rischi e costi" summary="Cosa rischi inviando una nuova offerta, commissione Vinted">
-          <Body small>{result.lines.risk}</Body>
+        {!acceptRecommended && (
+          <Collapsible title="Che cosa pesa sulla probabilità" summary={`${result.factors.baseLabel} → ${result.factors.basePct}%, alla fine ${result.factors.totalPct}%`}>
+            <FactorRows factors={result.factors} />
+          </Collapsible>
+        )}
+        <Collapsible title={acceptRecommended ? 'Costi' : 'Rischi e costi'} summary={acceptRecommended ? 'Commissione Vinted' : 'Cosa rischi inviando una nuova offerta, commissione Vinted'}>
+          {!acceptRecommended && <Body small>{result.lines.risk}</Body>}
           <Body small>{result.lines.totals}</Body>
         </Collapsible>
-        {(result.timing.otherMoments.length > 0 || result.avoidToday.length > 0) && (
-          <Collapsible title="Altri momenti e fasce da evitare" summary={`${result.timing.otherMoments.length} alternative · ${result.avoidToday.length} fasce da evitare`}>
+        {!acceptRecommended && (result.timing.otherMoments.length > 0 || result.avoidToday.length > 0) && (
+          <Collapsible title="Altri momenti e fasce da evitare" summary={momentsSummary(result.timing.otherMoments.length, result.avoidToday.length)}>
             {result.timing.otherMoments.map((m) => (
               <View key={m.date.getTime()} style={styles.row}>
                 <Body small style={styles.rowLabel} numberOfLines={1}>{capitalize(formatLongDate(m.date, result.now))} · {formatTime(m.date)} · {m.score.timeWindow.label.toLowerCase()}</Body>
@@ -285,24 +288,29 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
   )
 }
 
-function OptionBox({ option, sellerPrice, onApply }) {
+const momentsSummary = (n, m) => [
+  n ? `${n} ${n === 1 ? 'alternativa' : 'alternative'}` : null,
+  m ? `${m} ${m === 1 ? 'fascia' : 'fasce'} da evitare` : null,
+].filter(Boolean).join(' · ')
+
+function OptionBox({ option, sellerPrice, onApply, applyAllowed = true }) {
   const t = useTheme()
   const o = option
   const isAccept = o.id === 'accept'
   return (
-    <View style={[styles.option, { borderColor: o.isRecommended ? t.accent : t.line, backgroundColor: t.cardMuted }]}>
+    <View style={[styles.option, { borderColor: o.isRecommended || o.isChosen ? t.accent : t.line, backgroundColor: t.cardMuted }]}>
       <View style={styles.row}>
         <Body style={[styles.rowLabel, { fontWeight: '700' }]} numberOfLines={2}>{o.isRecommended ? '★ ' : ''}{o.label}</Body>
         <Text style={[styles.optionPrice, { color: t.ink }]}>{formatEuro(o.price)}</Text>
       </View>
       {isAccept ? (
-        <Body small>{o.overBudget ? `Supera il tuo massimo: ` : ''}Compra subito con «Acquista». Con la commissione Vinted paghi {formatEuro(o.totalWithFee)}.</Body>
+        <Body small>{o.overBudget ? 'Supera il tuo massimo. ' : ''}{o.howToBuy} Con la commissione Vinted paghi {formatEuro(o.totalWithFee)}.</Body>
       ) : (
         <>
           <Body small>+{formatEuro(o.stepUpEur)} (+{pctText(o.stepUpPct)}%) dalla tua offerta · −{formatEuro(o.stepDownEur)} (−{pctText(o.stepDownPct)}%) dalla sua</Body>
           <Body small>{toPercent(o.pAccept)}% che accetti subito · {toPercent(o.pBelowSeller)}% di pagare meno di {formatEuro(sellerPrice)} · in media {formatEuro(o.expectedPrice)}</Body>
           <Body muted small>Totale con commissione {formatEuro(o.totalWithFee)}{o.isFinal ? ' · ultima offerta' : ''}{o.wholeEuroFallback != null ? ` · senza centesimi: ${formatEuro(o.wholeEuroFallback)}` : ''}</Body>
-          {!o.isRecommended && <Button label="Applica questa scelta" variant="secondary" small onPress={() => onApply(o)} />}
+          {applyAllowed && !o.isRecommended && !o.isChosen && <Button label="Applica questa scelta" variant="secondary" small onPress={() => onApply(o)} />}
         </>
       )}
     </View>

@@ -34,6 +34,7 @@ const ctrPct = (v) => String(Math.round(v * 10) / 10).replace('.', ',')
 /** Italian article before a percentage: "il 10%", "l'8%", "l'11%", "l'80%". */
 const ctrIl = (n) => {
   const r = Math.round(n)
+  if (r === 0) return 'lo '
   return r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89) ? "l'" : 'il '
 }
 const ctrApprox = (price, listPrice) => formatEuro(listPrice >= 200 ? Math.round(price) : Math.round(price * 10) / 10)
@@ -146,7 +147,7 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const errors = {}
   const warnings = []
   const history = Array.isArray(raw.history) && raw.history.length
-    ? raw.history.map((h) => ({ by: h.by, price: Number(h.price), at: ctrDate(h.at) }))
+    ? raw.history.map((h) => ({ by: h.by, price: Number(h.price), at: ctrDate(h.at), isFinal: Boolean(h.isFinal), unc: Number(h.unc ?? h.receivedUncertaintyMinutes) || 0 }))
     : null
   let useHistory = false
   if (history) {
@@ -210,7 +211,7 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
 
   // Times: history wins (saved items), then an explicit date, then the "quando l'hai ricevuta?" chip.
   let receivedAt = useHistory ? sellerEntries[k - 1].at : null
-  let unc = 0
+  let unc = receivedAt ? sellerEntries[k - 1].unc : 0
   if (!receivedAt) receivedAt = ctrDate(raw.receivedAt)
   if (!receivedAt) {
     const chip = COUNTER_RECEIVED_AGO.find((c) => c.id === raw.receivedAgo) || COUNTER_RECEIVED_AGO[0]
@@ -248,7 +249,9 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   warnings.push(...buildWarnings(now))
 
   const state = {
-    raw, input, now, L, B, S, S0: S, raised, Sprev, sigma, share, shareNorm, stance, k, n, buyers, sellers, mode, enteredAs,
+    raw, input, now, L, B, S, S0: S, raised, lastSeller, lastBuyerFinal: Boolean(useHistory && n >= 1 && buyerEntries[n].isFinal),
+    expired: Boolean(assumedExpiry && assumedExpiry.getTime() <= now.getTime()),
+    Sprev, sigma, share, shareNorm, stance, k, n, buyers, sellers, mode, enteredAs,
     receivedAt, unc, offerSentAt, latencyH, inactive, profile, ageDays, hazard, W, Wcap, V, chat, theta, validityHours,
     assumedExpiry, deadline, planHorizon, minDelayMinutes, tMin, minStep: priceStepFor(L), goalPrice: Number.isFinite(goalPrice) ? goalPrice : null,
     cache: new Map(),
@@ -278,7 +281,8 @@ export function counterPreview(raw) {
   const moved = sigma > 0.009
     ? `è sceso di ${formatEuro(sigma)} ${from} (−${ctrPct((sigma / prev) * 100)}%), ${ctrIl(share * 100)}${Math.round(share * 100)}% della distanza`
     : sigma < -0.009 ? `ha alzato la cifra rispetto alla sua proposta precedente (${formatEuro(prev)})` : `non è sceso ${from}`
-  return { S, overPct, sigma, share, stance, text: `${formatEuro(S)} · ${ctrIl(overPct)}${Math.round(overPct)}% sopra la tua offerta · ${moved}` }
+  const over = overPct < 0.5 ? 'appena sopra la tua offerta' : `${ctrIl(overPct)}${Math.round(overPct)}% sopra la tua offerta`
+  return { S, overPct, sigma, share, stance, text: `${formatEuro(S)} · ${over} · ${moved}` }
 }
 
 /* ───────── acceptance model ───────── */
@@ -399,7 +403,7 @@ function ctrAfterNoAccept(state, st, price, gapShare, isFinal, depthLeft) {
   const hold = Math.min(COUNTER.HOLD_PROB_MAX, COUNTER.HOLD_PROB[st.stance] + COUNTER.EAGER_HOLD * eager)
   const move = COUNTER.MOVE_SHARE[st.stance] * (1 - COUNTER.EAGER_MOVE * eager)
   let S2 = ctrR2(price + (st.S - price) * (1 - move) * (isPrecisePrice(price, state.L) ? 1 - COUNTER.PRECISION_PULL : 1))
-  S2 = Math.max(S2, ctrR2(price + ctrMinGap(state.L)))
+  S2 = Math.min(st.S, Math.max(S2, ctrR2(price + ctrMinGap(state.L))))
   const fallback = ctrFallback(state, st.S)
   let vHold
   let vMove
@@ -533,17 +537,32 @@ const ctrWhen = (date, now) => {
   return formatLongDate(date, now)
 }
 
+/**
+ * How to buy at his price. «Acquista» shows his price only for a button counter that is still live: a chat price has
+ * no offer object, a raised counter shows the new number, an old counter may be gone.
+ */
+const ctrBuyHow = (state, stale = false) => {
+  const S = formatEuro(state.S)
+  if (state.chat) return `fai tu un'offerta a ${S} con «Fai un'offerta»`
+  if (state.raised && !state.theta) return `riproponi tu ${S} con «Fai un'offerta» (con «Acquista» pagheresti ${formatEuro(state.lastSeller)})`
+  if (stale) return `se vedi ancora «Acquista» a ${S} usalo, altrimenti offri tu ${S} con «Fai un'offerta»`
+  return `premi «Acquista» a ${S}`
+}
+
 const ctrAcceptLabel = (state, stale) => {
   const S = formatEuro(state.S)
   if (state.chat) return `Accetta: fai tu un'offerta a ${S} con «Fai un'offerta»`
+  if (state.raised && !state.theta) return `Accetta: riproponi tu ${S} (con «Acquista» pagheresti ${formatEuro(state.lastSeller)})`
   if (stale) return `Accetta: se vedi ancora «Acquista» a ${S} usalo; se il pulsante non c'è più, offri tu ${S}`
   return `${COUNTER_OPTION_LABELS.accept} a ${S}`
 }
 
+const ctrBuyFooter = (state, stale) => `${capitalize(ctrBuyHow(state, stale))}, poi paga subito: il messaggio è facoltativo.`
+
 function ctrAcceptOption(state, { stale = false, recommended = false } = {}) {
   const overBudget = state.S > state.Wcap + CTR_EPS
   return {
-    id: 'accept', label: ctrAcceptLabel(state, stale), isRecommended: recommended, price: state.S, isSplit: false, isFinal: false,
+    id: 'accept', label: ctrAcceptLabel(state, stale), howToBuy: `${capitalize(ctrBuyHow(state, stale))}.`, isRecommended: recommended, price: state.S, isSplit: false, isFinal: false,
     isPrecise: false, wholeEuroFallback: null, stepUpEur: null, stepUpPct: null, stepDownEur: 0, stepDownPct: 0,
     discountFromListPct: ((state.L - state.S) / state.L) * 100, gapShare: null, pAccept: 1, pBelowSeller: null,
     expectedPrice: state.S, expectedSaving: null, totalWithFee: buyerTotal(state.S), landingPoint: state.S, overBudget,
@@ -571,7 +590,7 @@ function ctrShortResult(state, warnings, kind, message, { stale = false } = {}) 
     ok: true, kind, input: state.input, now: state.now, negotiation: ctrNegotiation(state), message, warnings,
     options: [accept], recommended: buyNow ? accept : null, tips,
     messages: buyNow ? buildAcceptMessages({ stale }) : [], recommendedTone: 'cordiale',
-    messageFooter: buyNow ? 'Premi «Acquista» e paga: il messaggio è facoltativo.' : null,
+    messageFooter: buyNow ? ctrBuyFooter(state, stale) : null,
     disclaimer: ctrDisclaimer, reminders: [],
   }
 }
@@ -593,13 +612,20 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
 
   if (S <= B + CTR_EPS) {
     const extra = S < B - 0.5 ? ' Controlla la cifra: è sotto la tua offerta.' : ''
-    return ctrShortResult(state, warnings, 'accept_counter', `È pari o sotto la tua offerta: premi «Acquista» e compra subito.${extra}`)
+    return ctrShortResult(state, warnings, 'accept_counter', `È pari o sotto la tua offerta: ${ctrBuyHow(state)} e compra subito.${extra}`)
   }
   if (state.goalPrice != null && S <= state.goalPrice + CTR_EPS) {
-    return ctrShortResult(state, warnings, 'accept_counter', 'È già al tuo obiettivo: compra subito.')
+    return ctrShortResult(state, warnings, 'accept_counter', `È già al tuo obiettivo: ${ctrBuyHow(state)} e compra subito.`)
   }
   if (state.n >= COUNTER.MAX_BUYER_COUNTERS) {
     return ctrShortResult(state, warnings, 'stop', `Hai già rilanciato tre volte: o compri a ${formatEuro(S)} o lasci perdere e riprovi tra 7–10 giorni.`)
+  }
+  // Our last offer was announced as the maximum: raising now would make it a bluff and cost credibility.
+  if (state.n >= 1 && state.lastBuyerFinal) {
+    const message = S <= state.Wcap + CTR_EPS
+      ? `Avevi detto che ${formatEuro(B)} era il tuo massimo: rilanciare adesso ti toglierebbe credibilità. Se lo vuoi davvero, ${ctrBuyHow(state)}; altrimenti lascia perdere per ora e segui l'articolo.`
+      : `Avevi detto che ${formatEuro(B)} era il tuo massimo e la sua cifra supera il tuo budget: lascia perdere per ora e segui l'articolo.`
+    return ctrShortResult(state, warnings, 'stop', message)
   }
 
   const stale = ctrHours(state.receivedAt, now) > COUNTER.STALE_AFTER_HOURS
@@ -622,7 +648,7 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     }
   }
   if (!cand.list.length) {
-    if (S <= state.Wcap + CTR_EPS) return ctrShortResult(state, warnings, 'accept', `Non c'è spazio per un'altra offerta sensata: compra a ${formatEuro(S)} con «Acquista».`, { stale })
+    if (S <= state.Wcap + CTR_EPS) return ctrShortResult(state, warnings, 'accept', `Non c'è spazio per un'altra offerta sensata: ${ctrBuyHow(state, stale || state.expired)}.`, { stale: stale || state.expired })
     return ctrShortResult(state, warnings, 'walk_away', `${formatEuro(S)} supera il tuo massimo e non c'è spazio per un'altra offerta: lascia perdere per ora e segui l'articolo.`)
   }
   const fixedFinal = Boolean(move && move.isFinal)
@@ -641,7 +667,9 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     const best = bestRowAt(s.date)
     return { ...s, best, E: best.expectedPrice, window: timeWindowAt(s.date) }
   })
-  const eligible = perSlot.filter((s) => s.window.weight >= 0)
+  // An inactive seller just replied and may vanish: while he is likely still online any window will do.
+  const stillOnline = (s) => state.inactive && ctrHours(state.receivedAt, s.date) <= 2 * COUNTER.INACTIVE_READ_TAU_HOURS
+  const eligible = perSlot.filter((s) => s.window.weight >= 0 || stillOnline(s))
   const tolOf = (E) => Math.max(COUNTER.NEAR_TIE_EUR, COUNTER.NEAR_TIE_SHARE * Math.max(0, S - E))
   const pick = (pool) => {
     const best = pool.reduce((a, b) => (b.E < a.E - CTR_EPS ? b : a))
@@ -688,12 +716,14 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     best = p.best
     forced = true
   } else {
-    // Nothing between now and the horizon (e.g. a stale counter at night): use the first polite moment.
-    const date = state.tMin
+    // Nothing between now and the horizon (e.g. a counter received at night, reopened the next night):
+    // the first polite moment out of quiet hours, with its real tier.
+    const date = ctrQuiet(state.tMin) ? ctrOutOfQuiet(state.tMin) : state.tMin
+    const tier = !state.assumedExpiry || stale ? 'on_time' : date <= state.deadline ? 'on_time' : date <= state.assumedExpiry ? 'tight' : 'late'
     const row = bestRowAt(date)
-    chosen = { date, kind: 'min_delay', tier: 'on_time', daysWaited: calendarDaysBetween(now, date), windowId: timeWindowAt(date).id, best: row, E: row.expectedPrice, window: timeWindowAt(date) }
+    chosen = { date, kind: date.getTime() - now.getTime() <= 10 * 60_000 ? 'now' : 'min_delay', tier, daysWaited: calendarDaysBetween(now, date), windowId: timeWindowAt(date).id, best: row, E: row.expectedPrice, window: timeWindowAt(date) }
     best = chosen
-    forced = true
+    forced = tier !== 'late'
   }
   let pinned = false
   if (options.preferredSendAt) {
@@ -751,8 +781,9 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
   let reason
   if (chosen.kind === 'now') reason = 'chosen'
   else if (now < addMinutes(state.receivedAt, state.minDelayMinutes)) reason = 'too_soon'
-  else if (nowWindow.weight < 0 || !nowRow) reason = 'avoid_window'
-  else if (nowRow.E <= chosen.E + tolOf(chosen.E)) reason = 'close_enough'
+  else if (nowWindow.weight < 0) reason = 'avoid_window'
+  else if (!nowRow) reason = 'quiet'
+  else if (nowRow.E <= chosen.E + tolOf(chosen.E) || nowView.expectedPrice - optimal.expectedPrice < 0.01) reason = 'close_enough'
   else reason = 'worse'
   const deltaPoints = Math.round((nowView.pAccept - optimal.pAccept) * 100)
   const optimalAt = isSameDay(optimal.date, now) ? `alle ${formatTime(optimal.date)}` : `${formatLongDate(optimal.date, now)} alle ${formatTime(optimal.date)}`
@@ -760,8 +791,11 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     chosen: 'Adesso è il momento giusto: invia ora.',
     too_soon: `Adesso no: ti ha risposto ${minutesSince <= 1 ? 'un minuto' : `${minutesSince} minuti`} fa. Rispondere a caldo gli dice che hai fretta: aspetta almeno fino alle ${formatTime(state.tMin)}.`,
     avoid_window: `Adesso no: è ${nowWindow.label.toLowerCase()}, una fascia sfavorevole per trattare.`,
+    quiet: "Adesso no: è tardi, meglio non scrivergli a quest'ora.",
     close_enough: 'Puoi anche inviare adesso: la differenza è minima.',
-    worse: `Adesso andrebbe, ma ${optimalAt} hai ${formatPoints(-deltaPoints).replace(/^\+/, '')} in più.`,
+    worse: deltaPoints < 0
+      ? `Adesso andrebbe, ma ${optimalAt} hai ${formatPoints(-deltaPoints).replace(/^\+/, '')} in più.`
+      : `Adesso andrebbe, ma ${optimalAt} in media paghi ${formatEuro(nowView.expectedPrice - optimal.expectedPrice)} in meno.`,
   }[reason]
   const sendNow = {
     ok: reason === 'chosen' || reason === 'close_enough', reason, text: nowText, deltaPoints, slot: nowView, window: nowView.score.timeWindow,
@@ -771,7 +805,7 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
   const verdict = buildVerdict(optimal, sendNow, now, view(best), { subject: 'la nuova offerta' })
   const timing = {
     tier: optimal.tier, pastAssumedExpiry: optimal.tier === 'late', deadlineForcesBadWindow: forced, stale,
-    expiryImminent: Boolean(state.deadline && ctrHours(now, state.deadline) <= 1),
+    expiryImminent: Boolean(state.deadline && state.deadline > now && ctrHours(now, state.deadline) <= 1),
   }
   const others = []
   const seenDays = new Set([startOfDay(chosen.date).getTime()])
@@ -796,10 +830,15 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
       ? { action: 'counter', sellerPrice: after.S2, price: after.vMove.price, isFinal: after.vMove.isFinal, isSplit: after.vMove.isSplit, pAccept: after.vMove.pAccept }
       : { action: 'accept', sellerPrice: after.S2, price: after.S2 }
     const isSplit = row.score.isSplit
-    const label = id === 'balanced' ? (isSplit ? `${COUNTER_OPTION_LABELS.split} · consigliata` : COUNTER_OPTION_LABELS.balanced) : COUNTER_OPTION_LABELS[id]
+    const chosenByUser = id === 'balanced' && options.forcePrice != null
+    const label = chosenByUser
+      ? 'La tua scelta'
+      : id === 'balanced'
+        ? (acceptWins ? (isSplit ? COUNTER_OPTION_LABELS.split : 'Nuova offerta') : isSplit ? `${COUNTER_OPTION_LABELS.split} · consigliata` : COUNTER_OPTION_LABELS.balanced)
+        : COUNTER_OPTION_LABELS[id]
     const whole = Math.abs(row.price - Math.round(row.price)) > 1e-6 ? wholeEuroFallback(row.price) : null
     return {
-      id, label, isRecommended: false, price: row.price, isSplit, isFinal: row.isFinal, isPrecise: isPrecisePrice(row.price, L), wholeEuroFallback: whole,
+      id, label, isRecommended: false, isChosen: chosenByUser, price: row.price, isSplit, isFinal: row.isFinal, isPrecise: isPrecisePrice(row.price, L), wholeEuroFallback: whole,
       stepUpEur: ctrR2(row.price - B), stepUpPct: ((row.price - B) / B) * 100, stepDownEur: ctrR2(S - row.price), stepDownPct: ((S - row.price) / S) * 100,
       discountFromListPct: ((L - row.price) / L) * 100, gapShare: row.score.gapShare, pAccept: row.pAccept, pBelowSeller: row.pBelowSeller,
       expectedPrice: row.expectedPrice, expectedSaving: S <= state.Wcap + CTR_EPS ? S - row.expectedPrice : null, totalWithFee: buyerTotal(row.price),
@@ -808,10 +847,10 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     }
   }
   const balancedOption = optionFrom(balanced, 'balanced')
-  const acceptOption = ctrAcceptOption(state, { stale, recommended: acceptWins })
+  const acceptOption = ctrAcceptOption(state, { stale: stale || state.expired, recommended: acceptWins })
   const optionList = [bold && optionFrom(bold, 'bold'), balancedOption, splitOption && optionFrom(splitOption, 'split'), acceptOption].filter(Boolean)
   const recommended = acceptWins ? acceptOption : balancedOption
-  if (!acceptWins) balancedOption.isRecommended = true
+  if (!acceptWins && options.forcePrice == null) balancedOption.isRecommended = true
 
   // Factors at the recommended price and moment.
   const recRow = evalAt(recPrice, optimal.date)
@@ -828,7 +867,7 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     : buildCounterMessages({ itemTitle: state.input.itemTitle, price: recPrice, previousOffer: B, firstOffer: state.buyers[0], sendAt: optimal.date, isSplit, isFinal, stale, total: buyerTotal(recPrice) })
   const recommendedTone = acceptWins ? 'cordiale' : recommendedCounterToneFor({ isSplit, isFinal, stance: state.stance, premium: state.input.category.premium })
   const hero = acceptWins
-    ? { title: `Accetta e compra a ${formatEuro(S)}`, sublabel: 'Premi «Acquista» adesso: aspettare non fa risparmiare e qualcuno potrebbe comprarlo prima.' }
+    ? { title: `Accetta e compra a ${formatEuro(S)}`, sublabel: `${capitalize(ctrBuyHow(state, stale || state.expired))} adesso: aspettare non fa risparmiare e qualcuno potrebbe comprarlo prima.` }
     : { title: `Rispondi con ${formatEuro(recPrice)}`, sublabel: verdict.headline }
 
   const result = {
@@ -839,9 +878,9 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     components: { pAccept: recRow.score.pAccept, pAvailable: recRow.pAvailable, pRead: recRow.pRead },
     factors: { ...factors, baseLabel: `Il tuo passo: ${ctrIl(recRow.score.gapShare * 100)}${Math.round(recRow.score.gapShare * 100)}% della distanza` },
     candidates: { mode: cand.mode, prices: cand.list, lo: cand.lo ?? null, hi: cand.hi ?? null },
-    reasons: ctrReasons(ctx, lines), tips: ctrTips(ctx), ladder: lines.ladder, plan: lines.plan, lines,
+    reasons: ctrReasons(ctx), tips: ctrTips(ctx), ladder: lines.ladder, plan: lines.plan, lines,
     messages, recommendedTone, messageBeforeOffer: false,
-    messageFooter: acceptWins ? 'Premi «Acquista» e paga: il messaggio è facoltativo.' : "Prima invia la nuova offerta con «Fai un'offerta» nella chat, poi incolla subito il messaggio.",
+    messageFooter: acceptWins ? ctrBuyFooter(state, stale || state.expired) : "Prima invia la nuova offerta con «Fai un'offerta» nella chat, poi incolla subito il messaggio.",
     avoidToday: avoidWindowsOn(optimal.date), nowInAvoid: nowWindow.weight < 0, disclaimer: ctrDisclaimer,
   }
   result.reminders = buildCounterReminders(result)
@@ -855,25 +894,36 @@ function ctrLines(ctx) {
   const { L, S, B } = state
   const now = state.now
   const price = balanced.price
+  const over = (x) => x > state.Wcap + CTR_EPS
+  const maxText = state.W != null ? formatEuro(state.W) : ''
   const lines = {}
 
+  // Deadline: never promise a button that may be gone or that shows another price.
   if (state.chat) lines.deadline = "Te l'ha scritta in chat: non scade, ma intanto qualcun altro può comprarlo."
-  else if (stale) lines.deadline = `Sono passate più di ${COUNTER.STALE_AFTER_HOURS} ore: se vedi ancora «Acquista» a ${formatEuro(S)} puoi usarlo, altrimenti la tua risposta vale come una nuova offerta.`
-  else if (state.assumedExpiry) lines.deadline = `La sua proposta potrebbe scadere ${formatLongDate(state.assumedExpiry, now)} alle ${formatTime(state.assumedExpiry)} (Vinted non indica una scadenza ufficiale): finché non rispondi puoi ancora comprarla a ${formatEuro(S)} con «Acquista».`
-  else lines.deadline = `Vinted non indica una scadenza ufficiale: finché non rispondi puoi comprarla a ${formatEuro(S)} con «Acquista», ma intanto qualcun altro può comprarlo.`
+  else if (stale) lines.deadline = `Sono passate più di ${COUNTER.STALE_AFTER_HOURS} ore: ${ctrBuyHow(state, true)}. Una tua nuova cifra vale come una nuova offerta.`
+  else if (state.expired) lines.deadline = `La sua proposta potrebbe essere già scaduta (alle ${formatTime(state.assumedExpiry)}; Vinted non indica una scadenza ufficiale): ${ctrBuyHow(state, true)}.`
+  else if (state.assumedExpiry) lines.deadline = `La sua proposta potrebbe scadere ${formatLongDate(state.assumedExpiry, now)} alle ${formatTime(state.assumedExpiry)} (Vinted non indica una scadenza ufficiale): finché non rispondi ${state.raised && !state.theta ? `puoi riproporgli tu ${formatEuro(S)}` : `puoi ancora comprarla a ${formatEuro(S)} con «Acquista»`}.`
+  else lines.deadline = `Vinted non indica una scadenza ufficiale: finché non rispondi ${state.raised && !state.theta ? `puoi riproporgli tu ${formatEuro(S)}` : `puoi comprarla a ${formatEuro(S)} con «Acquista»`}, ma intanto qualcun altro può comprarlo.`
 
-  if (state.theta) lines.risk = `La sua cifra resta disponibile: se la tua nuova offerta non passa, puoi ancora comprare a ${formatEuro(S)}.`
-  else if (L - S < 0.009) lines.risk = `È fermo al prezzo pieno: se la tua offerta non passa, puoi sempre comprare a ${formatEuro(L)}.`
+  if (over(S)) lines.risk = `La sua cifra è sopra il tuo massimo (${maxText}): se la tua offerta non passa, lasci perdere senza aver perso nulla.`
+  else if (state.theta) lines.risk = `La sua cifra resta disponibile: se la tua nuova offerta non passa, puoi ancora ${state.chat ? `offrirgli tu ${formatEuro(S)}` : `comprare a ${formatEuro(S)}`}.`
+  else if (L - S < 0.009) lines.risk = `È fermo al prezzo pieno: se la tua offerta non passa, puoi sempre comprare a ${formatEuro(L)}${over(L) ? ', ma è sopra il tuo massimo' : ''}.`
+  else if (over(L)) lines.risk = `Inviando la nuova offerta, la sua proposta a ${formatEuro(S)} potrebbe non essere più acquistabile: nel caso peggiore gliela riproponi tu.`
   else lines.risk = `Inviando la nuova offerta, la sua proposta a ${formatEuro(S)} potrebbe non essere più acquistabile: nel caso peggiore gliela riproponi tu o compri a ${formatEuro(L)}. Rischi al massimo ${formatEuro(L - S)}.`
 
-  lines.totals = `Con la commissione Vinted (${VINTED.BUYER_FEE_PCT}% + ${formatEuro(VINTED.BUYER_FEE_FIXED)}) paghi ${formatEuro(buyerTotal(price))} invece di ${formatEuro(buyerTotal(S))}, spedizione esclusa.`
+  lines.totals = ctx.acceptWins
+    ? `Con la commissione Vinted (${VINTED.BUYER_FEE_PCT}% + ${formatEuro(VINTED.BUYER_FEE_FIXED)}) paghi ${formatEuro(buyerTotal(S))}, spedizione esclusa.`
+    : `Con la commissione Vinted (${VINTED.BUYER_FEE_PCT}% + ${formatEuro(VINTED.BUYER_FEE_FIXED)}) paghi ${formatEuro(buyerTotal(price))} invece di ${formatEuro(buyerTotal(S))}, spedizione esclusa.`
 
-  if (ctx.alsoGood) {
+  if (ctx.alsoGood && !ctx.acceptWins) {
     const d = Math.round((ctx.alsoGood.pAccept - optimal.pAccept) * 100)
     const at = isSameDay(ctx.alsoGood.date, optimal.date) ? `Alle ${formatTime(ctx.alsoGood.date)}` : `${capitalize(formatLongDate(ctx.alsoGood.date, now))} alle ${formatTime(ctx.alsoGood.date)}`
-    lines.alsoGood = ctx.alsoGood.tier === 'on_time'
-      ? `${at} avresti ${formatPoints(d).replace(/^\+/, '')} in più.`
-      : `${at} avresti ${formatPoints(d).replace(/^\+/, '')} in più, ma sei a ridosso delle ${state.validityHours} ore: la sua proposta potrebbe scadere alle ${formatTime(state.assumedExpiry)}.`
+    const gain = formatPoints(d).replace(/^\+/, '')
+    if (d > 0) {
+      if (ctx.alsoGood.tier === 'on_time') lines.alsoGood = `${at} avresti ${gain} in più.`
+      else if (ctx.alsoGood.tier === 'tight') lines.alsoGood = `${at} avresti ${gain} in più, ma sei a ridosso delle ${state.validityHours} ore: la sua proposta potrebbe scadere alle ${formatTime(state.assumedExpiry)}.`
+      else lines.alsoGood = `${at} avresti ${gain} in più, ma sei oltre le ${state.validityHours} ore: la sua proposta potrebbe essere già scaduta (alle ${formatTime(state.assumedExpiry)}).`
+    }
   }
 
   if (optimal.tier === 'tight') {
@@ -883,32 +933,43 @@ function ctrLines(ctx) {
       : `È al limite delle ${state.validityHours} ore${expiry}: se puoi, rispondi prima.`
   } else if (optimal.tier === 'late') {
     lines.tier = `Dopo le ${state.validityHours} ore la sua proposta potrebbe non valere più: la tua sarà letta come una nuova offerta.`
-  } else if (ctx.forced) {
+  }
+  if (ctx.forced) {
     const re = ctx.reapproach ? `${formatLongDate(ctx.reapproach.date, now)} alle ${formatTime(ctx.reapproach.date)}` : 'nei prossimi giorni'
-    lines.tier = `La sua proposta potrebbe scadere prima della prossima fascia buona: rispondi adesso, oppure riprova come nuova offerta ${re}.`
+    const when = optimal.kind === 'now' ? 'adesso' : `${ctrWhen(optimal.date, now)} alle ${formatTime(optimal.date)}`
+    lines.tier = `La sua proposta potrebbe scadere prima della prossima fascia buona: rispondi ${when}, oppure riprova come nuova offerta ${re}.`
   }
 
-  if (bold) {
+  if (bold && !ctx.acceptWins) {
     lines.whyNotLower = `Puoi tentare ${formatEuro(bold.price)}: se accetta risparmi altri ${formatEuro(price - bold.price)}, ma succede circa ${ctrIl(bold.pAccept * 100)}${toPercent(bold.pAccept)}% delle volte e in media pagheresti ${formatEuro(bold.expectedPrice)}.`
   }
 
-  // E dopo?
-  const plan = [`Se accetta: paga subito (${formatEuro(buyerTotal(price))}).`]
-  const next = balanced.next
-  if (next && next.final) {
-    plan.push(`Se resta a ${formatEuro(S)}: era la tua ultima offerta. Compra con «Acquista» se lo vuoi ancora, altrimenti lascia stare per qualche giorno.`)
-  } else if (next) {
-    plan.push(next.ifHolds.action === 'counter'
-      ? `Se resta a ${formatEuro(S)}: ${next.ifHolds.isFinal ? 'ultima offerta' : 'rilancia a'} ${formatEuro(next.ifHolds.price)}${next.ifHolds.isFinal ? ', poi basta' : ''}.`
-      : `Se resta a ${formatEuro(S)}: compra a ${formatEuro(S)} con «Acquista», se lo vuoi ancora.`)
-    plan.push(next.ifMoves.action === 'counter'
-      ? `Se scende verso ${ctrApprox(next.ifMoves.sellerPrice, L)}: ${next.ifMoves.isSplit ? 'chiudi a metà strada, circa' : next.ifMoves.isFinal ? 'ultima offerta, circa' : 'sali a circa'} ${ctrApprox(next.ifMoves.price, L)}.`
-      : `Se scende verso ${ctrApprox(next.ifMoves.sellerPrice, L)}: accetta.`)
+  // E dopo? Every price it names is checked against the budget, and the way to buy matches the channel.
+  if (ctx.acceptWins) {
+    lines.plan = [`Compra subito: ${ctrBuyHow(state, stale || state.expired)} (${formatEuro(buyerTotal(S))} con la commissione). Chi paga per primo se lo aggiudica.`]
+  } else {
+    const plan = [`Se accetta: paga subito (${formatEuro(buyerTotal(price))}).`]
+    const next = balanced.next
+    const holdAccept = over(S)
+      ? `è sopra il tuo massimo (${maxText}): lascia perdere e segui l'articolo`
+      : `${ctrBuyHow(state)}, se lo vuoi ancora`
+    if (next && next.final) {
+      plan.push(`Se resta a ${formatEuro(S)}: era la tua ultima offerta. ${over(S) ? `È sopra il tuo massimo: lascia perdere e segui l'articolo.` : `${capitalize(ctrBuyHow(state))} se lo vuoi ancora, altrimenti lascia stare per qualche giorno.`}`)
+    } else if (next) {
+      plan.push(next.ifHolds.action === 'counter'
+        ? `Se resta a ${formatEuro(S)}: ${next.ifHolds.isFinal ? 'ultima offerta' : 'rilancia a'} ${formatEuro(next.ifHolds.price)}${next.ifHolds.isFinal ? ', poi basta' : ''}.`
+        : `Se resta a ${formatEuro(S)}: ${holdAccept}.`)
+      const moved = ctrApprox(next.ifMoves.sellerPrice, L)
+      plan.push(next.ifMoves.action === 'counter'
+        ? `Se scende verso ${moved}: ${next.ifMoves.isSplit ? 'chiudi a metà strada, circa' : next.ifMoves.isFinal ? 'ultima offerta, circa' : 'sali a circa'} ${ctrApprox(next.ifMoves.price, L)}.`
+        : over(next.ifMoves.sellerPrice) ? `Se scende verso ${moved}: è ancora sopra il tuo massimo, lascia stare.` : `Se scende verso ${moved}: accetta.`)
+    }
+    const refusal = []
+    if (!over(S)) refusal.push(L - S < 0.009 ? `compra a ${formatEuro(L)} con «Acquista»` : state.theta ? (state.chat ? `offrigli tu ${formatEuro(S)} con «Fai un'offerta»` : `compra a ${formatEuro(S)} con «Acquista»`) : `riproponi ${formatEuro(S)}`)
+    if (!state.theta && L - S >= 0.009 && !over(L)) refusal.push(`compra a ${formatEuro(L)}`)
+    plan.push(refusal.length ? `Se rifiuta: ${refusal.join(' o ')}, se lo vuoi ancora.` : "Se rifiuta: lascia perdere per ora e segui l'articolo.")
+    lines.plan = plan
   }
-  plan.push(state.theta
-    ? `Se rifiuta: compra a ${formatEuro(S)} con «Acquista», se lo vuoi ancora.`
-    : `Se rifiuta: riproponi ${formatEuro(S)} o compra a ${formatEuro(L)}, se lo vuoi ancora.`)
-  lines.plan = plan
 
   // Ladder: every step with euros and percentages.
   const first = state.buyers[0]
@@ -922,24 +983,34 @@ function ctrLines(ctx) {
   }
   if (!ctx.acceptWins) {
     steps.push(`tua nuova offerta ${formatEuro(price)} (+${formatEuro(price - B)}, +${ctrPct(((price - B) / B) * 100)}%; −${formatEuro(S - price)}, −${ctrPct(((S - price) / S) * 100)}% dalla sua)`)
+    const next = balanced.next
     if (next && !next.final && next.ifHolds.action === 'counter' && next.ifHolds.isFinal) steps.push(`se resta fermo, ultima offerta ${formatEuro(next.ifHolds.price)}`)
   }
   lines.ladder = `${steps.join(' → ')}.`
   return lines
 }
 
-function ctrReasons(ctx, lines) {
+function ctrReasons(ctx) {
   const { state, optimal, balanced, acceptWins } = ctx
   const out = []
   const now = state.now
   const sharePct = Math.round(state.share * 100)
   const typical = Math.round(COUNTER.ROUND_MEAN_SHARE[Math.min(state.k - 1, COUNTER.ROUND_MEAN_SHARE.length - 1)] * 20) * 5
   const sigma = formatEuro(state.sigma)
-  if (acceptWins) out.push(`In media risparmieresti solo ${formatEuro(Math.max(0, ctx.saving))}: accetta e premi «Acquista» adesso.`)
-  if (state.stance === 'hold') out.push('Il venditore non è sceso affatto: fai una sola offerta finale, poi lascia stare per qualche giorno.')
-  else if (state.stance === 'firm') out.push(`Il venditore è sceso solo di ${sigma} (${ctrIl(sharePct)}${sharePct}% della distanza; di solito si scende del ${typical}% circa): è rigido e difficilmente scenderà ancora da solo.`)
-  else if (state.stance === 'moving') out.push(`Il venditore è sceso di ${sigma} (${ctrIl(sharePct)}${sharePct}% della distanza): è disposto a trattare, ma non ha fretta.`)
-  else out.push(`Il venditore è sceso di ${sigma} (${ctrIl(sharePct)}${sharePct}% della distanza): è pronto a chiudere.${balanced.isSplit ? '' : ' Puoi salire poco e lasciare che scenda ancora.'}`)
+  const share = `${ctrIl(sharePct)}${sharePct}% della distanza`
+  if (acceptWins) {
+    out.push(ctx.saving < 0.01
+      ? `Rilanciare non ti farebbe risparmiare nulla in media: accetta e ${ctrBuyHow(state, ctx.stale || state.expired)} adesso.`
+      : `In media risparmieresti solo ${formatEuro(ctx.saving)}: accetta e ${ctrBuyHow(state, ctx.stale || state.expired)} adesso.`)
+  }
+  // The seller: a description, plus advice only when we are going to counter.
+  if (state.raised) out.push(`Ha alzato la cifra rispetto alla sua proposta precedente: non inseguirlo, ragioniamo sui ${formatEuro(state.S)}.`)
+  else if (state.stance === 'hold') {
+    const what = state.sigma < 0.01 ? 'Il venditore non è sceso affatto' : `Il venditore è sceso solo di ${sigma}, quasi niente`
+    out.push(acceptWins ? `${what}.` : `${what}: fai una sola offerta finale, poi lascia stare per qualche giorno.`)
+  } else if (state.stance === 'firm') out.push(`Il venditore è sceso solo di ${sigma} (${share}; di solito si scende del ${typical}% circa)${acceptWins ? '.' : ': è rigido e difficilmente scenderà ancora da solo.'}`)
+  else if (state.stance === 'moving') out.push(`Il venditore è sceso di ${sigma} (${share})${acceptWins ? '.' : ': è disposto a trattare, ma non ha fretta.'}`)
+  else out.push(`Il venditore è sceso di ${sigma} (${share}): è pronto a chiudere.${!acceptWins && !balanced.isSplit && !balanced.isFinal ? ' Puoi salire poco e lasciare che scenda ancora.' : ''}`)
   if (acceptWins) return out.slice(0, 3)
 
   const price = formatEuro(balanced.price)
@@ -958,22 +1029,27 @@ function ctrReasons(ctx, lines) {
   const window = optimal.score.timeWindow
   const when = ctrWhen(optimal.date, now)
   const hoursAfter = optimal.score.hoursAfter
-  if (state.inactive) out.push(`Entra di rado: rispondi mentre è ancora online, ${when} alle ${formatTime(optimal.date)}.`)
-  else if (ctx.forced) out.push(lines.tier)
-  else if (hoursAfter >= 12) out.push(`Rispondere dopo qualche ora, ${when} alle ${formatTime(optimal.date)} (${window.label.toLowerCase()}), aumenta le accettazioni: una risposta immediata segnala fretta.`)
+  const at = `${when} alle ${formatTime(optimal.date)}`
+  if (ctx.forced) out.push(`Rispondi ${optimal.kind === 'now' ? 'adesso' : at}: dopo, la sua proposta potrebbe essere scaduta.`)
+  else if (state.inactive) out.push(hoursAfter <= 2 ? `Entra di rado: rispondi mentre è ancora online, ${at}.` : `Entra di rado: rispondi ${at}, quando è più probabile che riapra l'app.`)
+  else if (hoursAfter >= 12) out.push(`Rispondere dopo qualche ora, ${at} (${window.label.toLowerCase()}), aumenta le accettazioni: una risposta immediata segnala fretta.`)
   else if (optimal.kind === 'now') out.push(`Rispondi adesso: è passata almeno un'ora dalla sua risposta e sei in una fascia ${window.weight > 0 ? 'favorevole' : 'neutra'}.`)
-  else out.push(`Rispondi ${when} alle ${formatTime(optimal.date)} (${window.label.toLowerCase()}): è passata almeno un'ora dalla sua risposta e aspettare oltre non migliora il prezzo atteso.`)
+  else out.push(`Rispondi ${at} (${window.label.toLowerCase()}): è passata almeno un'ora dalla sua risposta e aspettare oltre non migliora il prezzo atteso.`)
   return out.slice(0, 3)
 }
 
 function ctrTips(ctx) {
   const { state, optimal, balanced, stale } = ctx
   const tips = []
-  if (state.stance === 'hold') tips.push("Non si è mosso di un euro: se rifiuta, metti il cuore all'articolo e riprova tra 7–10 giorni; le offerte fatte più avanti ottengono prezzi migliori.")
+  if (state.stance === 'hold' && !ctx.acceptWins) {
+    tips.push(state.sigma < 1
+      ? "Non si è mosso di un euro: se rifiuta, metti il cuore all'articolo e riprova tra 7–10 giorni; le offerte fatte più avanti ottengono prezzi migliori."
+      : "È sceso pochissimo: se rifiuta, metti il cuore all'articolo e riprova tra 7–10 giorni; le offerte fatte più avanti ottengono prezzi migliori.")
+  }
   const pLost = 1 - optimal.pAvailable
-  if (pLost >= 0.05) tips.push(`C'è circa ${ctrIl(pLost * 100)}${toPercent(pLost)}% che qualcun altro lo compri prima: se ci tieni molto, compralo ora a ${formatEuro(state.S)}.`)
+  if (pLost >= 0.05 && !ctx.acceptWins) tips.push(`C'è circa ${ctrIl(pLost * 100)}${toPercent(pLost)}% di probabilità che qualcun altro lo compri prima: se ci tieni molto, ${state.S <= state.Wcap + CTR_EPS ? `compralo ora a ${formatEuro(state.S)}` : 'non aspettare troppo'}.`)
   if (!ctx.acceptWins && balanced.wholeEuroFallback != null) tips.push(`Se Vinted non accetta i centesimi, usa ${formatEuro(balanced.wholeEuroFallback)}.`)
-  if (ctx.forced) tips.push(`La sua proposta scade prima della prossima fascia buona: se non puoi rispondere adesso, riprova più tardi come nuova offerta${ctx.reapproach ? ` (${formatLongDate(ctx.reapproach.date, state.now)} alle ${formatTime(ctx.reapproach.date)})` : ''}.`)
+  if (ctx.forced) tips.push(`La sua proposta potrebbe scadere prima della prossima fascia buona: se non puoi rispondere ${optimal.kind === 'now' ? 'adesso' : `alle ${formatTime(optimal.date)}`}, riprova più tardi come nuova offerta${ctx.reapproach ? ` (${formatLongDate(ctx.reapproach.date, state.now)} alle ${formatTime(ctx.reapproach.date)})` : ''}.`)
   if (stale) tips.push('Sono passate molte ore: se il venditore non risponde entro un giorno, scrivigli due righe senza cambiare cifra.')
   tips.push(ctrFavouriteTip)
   return tips
@@ -1012,7 +1088,9 @@ export function buildCounterReminders(result, { sentAt = null, title = null } = 
   const out = []
   if (!sentAt) {
     if (price) {
-      const at = ctrOutOfQuiet(addMinutes(result.optimal.date, -10))
+      const at0 = addMinutes(result.optimal.date, -10)
+      let at = ctrQuiet(at0) ? ctrOutOfQuiet(at0) : at0
+      if (at.getTime() > result.optimal.date.getTime()) at = at0
       out.push({ kind: 'counter_send', at, title: 'Tra 10 minuti: invia la nuova offerta', body: `${name}: proponi ${price} con il messaggio pronto.${result.optimal.tier === 'tight' ? ' È al limite delle 24 ore.' : ''}` })
     }
     const expiry = result.negotiation.assumedExpiry

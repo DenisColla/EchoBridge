@@ -382,7 +382,9 @@ test('counter timing invariants over a week of counters (polite delay, no bad wi
           const minDelay = sellerProfile === 'inactive' ? 30 : 60
           if (r.kind !== 'counter_stale') assert.ok(r.optimal.date - receivedAt >= minDelay * 60_000 - 1)
           const w = timeWindowAt(r.optimal.date)
-          if (!r.timing.deadlineForcesBadWindow) assert.ok(w.weight >= 0, `bad window ${w.id} at ${r.optimal.date}`)
+          // An inactive seller who just replied may get an answer in any window while he is likely still online (≤ 4 h).
+          const stillOnline = sellerProfile === 'inactive' && r.optimal.date - receivedAt <= 4 * 3_600_000
+          if (!r.timing.deadlineForcesBadWindow && !stillOnline) assert.ok(w.weight >= 0, `bad window ${w.id} at ${r.optimal.date}`)
           const m = r.optimal.date.getHours() * 60 + r.optimal.date.getMinutes()
           if (m >= 23 * 60 || m < 7 * 60) assert.ok(w.weight > 0 || r.timing.deadlineForcesBadWindow, `quiet hour ${r.optimal.date}`)
           assertGuardRails(r)
@@ -575,4 +577,77 @@ test('mobile/core is a byte-identical copy of src/core (run `npm run sync-core` 
 test('the artifact bundler accepts every module (no collisions, no dangling imports)', () => {
   const out = spawnSync(process.execPath, [join(root, 'scripts/build-artifact.mjs'), '--check'], { encoding: 'utf8' })
   assert.equal(out.status, 0, out.stderr)
+})
+
+/* ───────── review fixes ───────── */
+
+test('counter: after our "final" offer the next round never raises (no bluff)', () => {
+  const r = analyzeCounter({ ...EX1, history: [
+    { by: 'buyer', price: 45, at: at(13, 21, 35) }, { by: 'seller', price: 60, at: at(13, 21, 40) },
+    { by: 'buyer', price: 49.8, at: at(14, 21, 5), isFinal: true }, { by: 'seller', price: 57, at: at(14, 21, 50) },
+  ] }, at(14, 21, 55))
+  assert.equal(r.kind, 'stop')
+  assert.match(r.message, /era il tuo massimo/)
+  assert.equal(r.recommended, null)
+})
+
+test('counter: chat counters and raised counters never say «premi Acquista» for his price', () => {
+  for (const s of ['47', '44']) {
+    const r = analyzeCounter({ ...EX1, channel: 'chat', sellerCounter: s }, NOW1)
+    const texts = [r.message, r.messageFooter, r.verdict && r.verdict.hero.sublabel, ...(r.reasons || []), ...(r.plan || []), r.options[0].howToBuy].filter(Boolean).join(' ')
+    assert.ok(!/premi «Acquista»/.test(texts), texts)
+    assert.match(texts, /Fai un'offerta/)
+  }
+  const raised = analyzeCounter({ ...EX1, history: H(['buyer', 45, at(13, 21, 35)], ['seller', 58.5, at(13, 21, 40)], ['buyer', 51.7, at(14, 21, 5)], ['seller', 59, at(14, 21, 50)]) }, at(14, 21, 55))
+  const all = [raised.lines.deadline, ...raised.plan, option(raised, 'accept').label, option(raised, 'accept').howToBuy].join(' ')
+  assert.ok(!/comprarla a 58,50 € con «Acquista»/.test(all), all)
+  assert.match(option(raised, 'accept').label, /pagheresti 59 €/)
+})
+
+test('counter: with a budget the plan never tells the user to buy above it', () => {
+  const r = analyzeCounter({ ...EX1, maxPrice: '55' }, NOW1)
+  for (const line of r.plan) {
+    for (const m of line.matchAll(/(compra|accetta|riproponi)[^.]*?(\d+(?:,\d+)?) €/g)) {
+      assert.ok(Number(m[2].replace(',', '.')) <= 55 + 1e-9, line)
+    }
+  }
+  assert.ok(r.plan.some((l) => /sopra il tuo massimo|lascia perdere/.test(l)), r.plan.join(' | '))
+  assert.ok(!/Rischi al massimo/.test(r.lines.risk))
+})
+
+test('counter: when accepting wins, the page shows the purchase, not the counter plan', () => {
+  const r = analyzeCounter({ ...EX1, sellerCounter: '48' }, NOW1)
+  assert.equal(r.kind, 'accept')
+  assert.equal(r.plan.length, 1)
+  assert.match(r.plan[0], /^Compra subito/)
+  assert.equal(r.lines.whyNotLower, undefined)
+  assert.ok(!r.options.some((o) => o.id !== 'accept' && /consigliata|Consigliata/.test(o.label)))
+  assert.ok(!r.reasons.some((x) => /offerta finale|Puoi salire poco/.test(x)))
+})
+
+test('counter: night fallback, Saturday 23:xx reminder, quiet "Adesso?" wording', () => {
+  const night = analyzeCounter({ ...EX1, offerSentAt: at(13, 2, 0), receivedAt: at(13, 3, 0) }, at(14, 1, 0))
+  const m = night.optimal.date.getHours() * 60 + night.optimal.date.getMinutes()
+  assert.ok(m >= 7 * 60 && m < 23 * 60, `optimal at ${night.optimal.date}`)
+  assert.equal(night.optimal.tier, 'late')
+  assert.ok(night.reminders.every((x) => x.at <= night.optimal.date))
+
+  const saturday = analyzeCounter({ ...EX1, offerSentAt: at(17, 17, 40), receivedAt: at(17, 18, 40) }, at(17, 18, 42))
+  const send = saturday.reminders.find((x) => x.kind === 'counter_send')
+  if (send) assert.ok(send.at <= saturday.optimal.date && saturday.optimal.date - send.at <= 10 * 60_000 + 1, `${send.at} vs ${saturday.optimal.date}`)
+
+  const late = analyzeCounter(EX1, at(13, 23, 40))
+  assert.ok(!/fascia neutra, una fascia sfavorevole/.test(late.sendNow.text), late.sendNow.text)
+})
+
+test('counter: saved negotiations keep the received-time uncertainty and the "final" flag', () => {
+  const chip = analyzeCounter({ ...EX1, receivedAt: null, offerSentAt: null, receivedAgo: 'hours_8_16' }, NOW1)
+  const history = [{ by: 'buyer', price: 45, at: null }, { by: 'seller', price: 58.5, at: chip.negotiation.receivedAt, receivedUncertaintyMinutes: chip.negotiation.receivedUncertaintyMinutes }]
+  const reopened = analyzeCounter({ ...EX1, offerSentAt: null, history }, NOW1)
+  assert.equal(reopened.negotiation.receivedUncertaintyMinutes, 240)
+  sameTime(reopened.negotiation.assumedExpiry, chip.negotiation.assumedExpiry)
+})
+
+test('counter: Italian details (lo 0%, "appena sopra", "di probabilità")', () => {
+  assert.match(counterPreview({ listPrice: '60', previousOffer: '58,50', sellerCounter: '58,60' }).text, /appena sopra la tua offerta/)
 })

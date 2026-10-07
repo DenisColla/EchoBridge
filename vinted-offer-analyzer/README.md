@@ -83,7 +83,9 @@ griglia dei prezzi), oppure la combinazione più economica; riporta anche il mas
 prezzo pieno. "Applica" fissa il momento scelto (`analyzeOffer(form, now, { preferredSendAt })`).
 
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
-offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
+offerta, 25 offerte al giorno per account, commissione acquirente 5% + 0,70 €. Vinted non indica una scadenza delle
+offerte né delle controproposte: il piano assume prudentemente circa 24 ore (euristica, `OFFER_VALIDITY_HOURS` e
+`VINTED_ASSUMED.COUNTER_VALIDITY_HOURS`).
 
 ## Controproposta del venditore
 

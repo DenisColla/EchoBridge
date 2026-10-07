@@ -73,7 +73,7 @@ export function CounterOfferCard({ result, counter }) {
               ))}
             </div>
           </details>
-          {(counter.errors.category || counter.errors.listPrice) && <p className="text-sm text-rose-600 dark:text-rose-400">{counter.errors.category || counter.errors.listPrice} Correggi i dati dell'annuncio nel modulo a sinistra.</p>}
+          {(counter.errors.category || counter.errors.listPrice) && <p className="text-sm text-rose-600 dark:text-rose-400">{counter.errors.category || counter.errors.listPrice} Correggi i dati dell'annuncio nel modulo della prima offerta.</p>}
           <Button type="submit" icon={ArrowRightLeft} className="w-full sm:w-auto">Calcola la mia risposta</Button>
         </form>
       )}
@@ -129,19 +129,19 @@ function CounterAnswer({ result, applied, onApply, onReset }) {
       <div className="flex flex-col gap-2">
         <p className="text-sm font-semibold">Le tue opzioni</p>
         {result.options.map((o) => (
-          <div key={o.id} className={cx('rounded-xl p-3 text-sm ring-1', o.isRecommended ? 'ring-teal-600 dark:ring-teal-400' : 'ring-slate-200 dark:ring-slate-700', SURFACE.cardMuted)}>
+          <div key={o.id} className={cx('rounded-xl p-3 text-sm ring-1', o.isRecommended || o.isChosen ? 'ring-teal-600 dark:ring-teal-400' : 'ring-slate-200 dark:ring-slate-700', SURFACE.cardMuted)}>
             <div className="flex items-start justify-between gap-3">
               <p className="font-semibold">{o.isRecommended && <Star className="mr-1 inline h-4 w-4 text-teal-600" aria-hidden="true" />}{o.label}</p>
               <p className="shrink-0 text-lg font-bold tabular-nums">{formatEuro(o.price)}</p>
             </div>
             {o.id === 'accept' ? (
-              <p className="mt-1">{o.overBudget ? 'Supera il tuo massimo. ' : ''}Compra subito con «Acquista»: con la commissione Vinted paghi {formatEuro(o.totalWithFee)}.</p>
+              <p className="mt-1">{o.overBudget ? 'Supera il tuo massimo. ' : ''}{o.howToBuy} Con la commissione Vinted paghi {formatEuro(o.totalWithFee)}.</p>
             ) : (
               <>
                 <p className="mt-1">+{formatEuro(o.stepUpEur)} (+{counterPct(o.stepUpPct)}%) dalla tua offerta · −{formatEuro(o.stepDownEur)} (−{counterPct(o.stepDownPct)}%) dalla sua</p>
                 <p>{toPercent(o.pAccept)}% che accetti subito · {toPercent(o.pBelowSeller)}% di pagare meno di {formatEuro(n.sellerCounter)} · in media {formatEuro(o.expectedPrice)}</p>
                 <p className={SURFACE.muted}>Totale con commissione {formatEuro(o.totalWithFee)}{o.isFinal ? ' · ultima offerta' : ''}{o.wholeEuroFallback != null ? ` · senza centesimi: ${formatEuro(o.wholeEuroFallback)}` : ''}</p>
-                {!o.isRecommended && <Button variant="secondary" onClick={() => onApply(o)} className="mt-2 w-full sm:w-auto">Applica questa scelta</Button>}
+                {!o.isRecommended && !o.isChosen && !acceptRecommended && <Button variant="secondary" onClick={() => onApply(o)} className="mt-2 w-full sm:w-auto">Applica questa scelta</Button>}
               </>
             )}
           </div>
@@ -150,9 +150,9 @@ function CounterAnswer({ result, applied, onApply, onReset }) {
       </div>
 
       <div className="flex flex-col gap-1 text-sm">
-        <p className="font-semibold">E dopo?</p>
+        <p className="font-semibold">{acceptRecommended ? 'Come comprare' : 'E dopo?'}</p>
         {result.plan.map((l) => <p key={l}>• {l}</p>)}
-        <p className={cx('mt-1 text-xs', SURFACE.muted)}>{result.ladder}</p>
+        {!acceptRecommended && <p className={cx('mt-1 text-xs', SURFACE.muted)}>{result.ladder}</p>}
       </div>
 
       <CounterMessages key={`${rec.id}-${rec.price}-${result.optimal.date.getTime()}`} result={result} />
@@ -160,7 +160,7 @@ function CounterAnswer({ result, applied, onApply, onReset }) {
       <div className="flex flex-col gap-2 text-sm">
         <p className="font-semibold">Perché</p>
         {result.reasons.map((r) => <p key={r}>• {r}</p>)}
-        <details className={cx('rounded-xl p-3', SURFACE.cardMuted)}>
+        {!acceptRecommended && <details className={cx('rounded-xl p-3', SURFACE.cardMuted)}>
           <summary className="flex cursor-pointer items-center justify-between gap-2 font-semibold">Che cosa pesa sulla probabilità <ChevronDown className="h-4 w-4" aria-hidden="true" /></summary>
           <ul className="mt-2 flex flex-col gap-1">
             <li className="flex justify-between gap-3"><span>{result.factors.baseLabel} (punto di partenza)</span><span className="font-semibold tabular-nums">{result.factors.basePct}%</span></li>
@@ -169,10 +169,10 @@ function CounterAnswer({ result, applied, onApply, onReset }) {
             ))}
             <li className="flex justify-between gap-3 border-t pt-1 font-semibold dark:border-slate-700"><span>Accettazione nel momento consigliato</span><span className="tabular-nums">{result.factors.totalPct}%</span></li>
           </ul>
-        </details>
+        </details>}
         <details className={cx('rounded-xl p-3', SURFACE.cardMuted)}>
           <summary className="flex cursor-pointer items-center justify-between gap-2 font-semibold">Rischi, costi e altri momenti <ChevronDown className="h-4 w-4" aria-hidden="true" /></summary>
-          <p className="mt-2">{result.lines.risk}</p>
+          {!acceptRecommended && <p className="mt-2">{result.lines.risk}</p>}
           <p className="mt-1">{result.lines.totals}</p>
           {result.timing.otherMoments.map((m) => (
             <p key={m.date.getTime()} className="mt-1 flex justify-between gap-3"><span className="min-w-0 truncate">{capitalize(formatLongDate(m.date, result.now))} · {formatTime(m.date)} · {m.score.timeWindow.label.toLowerCase()}</span><span className="shrink-0 font-semibold tabular-nums">{toPercent(m.pAccept)}%</span></p>

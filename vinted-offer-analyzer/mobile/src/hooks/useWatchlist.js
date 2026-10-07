@@ -32,7 +32,9 @@ async function scheduleAll(reminders, itemId, link) {
       const id = await scheduleReminderAt({ itemId, link, at: r.at, title: r.title, body: r.body })
       if (id) ids[r.kind.replace('counter_', '')] = id
     }
-    return { ids, status: Object.keys(ids).length ? 'scheduled' : 'too_soon' }
+    // 'scheduled' only when the main reminder exists: a lone last-call reminder must not read as "ti avviso prima".
+    const main = ids.send || ids.followup
+    return { ids, status: main ? 'scheduled' : Object.keys(ids).length ? 'partial' : 'too_soon' }
   } catch {
     return { ids: {}, status: 'skipped' }
   }
@@ -73,6 +75,7 @@ export function useWatchlist() {
   const [items, setItems] = useState([])
   const [ready, setReady] = useState(false)
   const itemsRef = useRef([])
+  const markCounterSentRef = useRef(null)
 
   useEffect(() => {
     loadItems().then((loaded) => {
@@ -150,6 +153,11 @@ export function useWatchlist() {
   const setStatus = useCallback(async (id, status) => {
     const target = itemsRef.current.find((it) => it.id === id)
     if (!target) return
+    // «Inviata» on an item waiting for our counter means the counter was sent: record it like «Ho inviato».
+    if (status === 'sent' && target.status === 'countered' && target.counterPlan && target.counterPlan.price != null && !target.counterPlan.sentAt && markCounterSentRef.current) {
+      await markCounterSentRef.current(id)
+      return
+    }
     const now = new Date().toISOString()
     const patch = { status, outcomeAt: status === 'planned' ? null : now }
     if (status !== 'planned') {
@@ -163,7 +171,7 @@ export function useWatchlist() {
       patch.negotiation = history.map((e, i) => (i === history.length - 1 && e.planned ? { ...e, at: now, planned: false } : e))
     }
     if (!target.firstOutcome && OUTCOMES.includes(status)) patch.firstOutcome = status
-    if ((status === 'accepted' || status === 'bought') && history.length) patch.finalPrice = history[history.length - 1].price
+    patch.finalPrice = (status === 'accepted' || status === 'bought') && history.length ? history[history.length - 1].price : null
     await update(id, patch)
   }, [update])
 
@@ -182,11 +190,21 @@ export function useWatchlist() {
     let item
     if (existing) {
       await cancelAll(existing)
-      const history = Array.isArray(existing.negotiation) ? existing.negotiation.map((e) => (e.planned ? { ...e, planned: false } : e)) : []
+      // A planned first offer was sent at an unknown time (not at the planned one): keep the real send time if known.
+      const history = Array.isArray(existing.negotiation) ? existing.negotiation.map((e) => (e.planned ? { ...e, planned: false, at: existing.sentAt || null } : e)) : []
       const last = history[history.length - 1]
-      const negotiation = last && last.by === 'seller' ? [...history.slice(0, -1), sellerEntry] : [...history, sellerEntry]
+      const base = last && last.by === 'seller' ? history.slice(0, -1) : history
+      // The user may have corrected «La tua offerta inviata»: store the price the plan was computed on.
+      const iB = base.map((e) => e.by).lastIndexOf('buyer')
+      if (iB >= 0 && Math.abs(base[iB].price - n.previousOffer) > 0.004) base[iB] = { ...base[iB], price: n.previousOffer }
+      const negotiation = [...base, sellerEntry]
+      const firstChanged = iB === 0 && Math.abs(existing.targetPrice - n.previousOffer) > 0.004
       item = {
-        ...existing, negotiation, status: 'countered', outcomeAt: new Date().toISOString(), notificationId: null, counterPlan: plan,
+        ...existing, negotiation, status: 'countered', outcomeAt: new Date().toISOString(), notificationId: null, calendarOpenedAt: null, finalPrice: null, counterPlan: plan,
+        ...(firstChanged ? {
+          targetPrice: n.previousOffer, discountPct: ((existing.listPrice - n.previousOffer) / existing.listPrice) * 100,
+          form: existing.form ? { ...existing.form, targetPrice: String(n.previousOffer).replace('.', ',') } : existing.form,
+        } : {}),
         firstOutcome: existing.firstOutcome || 'countered', sentAt: existing.sentAt || iso(n.receivedAt),
         message: plan.message || existing.message, sendAt: plan.sendAt || existing.sendAt, windowLabel: plan.windowLabel || existing.windowLabel,
       }
@@ -232,8 +250,9 @@ export function useWatchlist() {
     if (Object.keys(scheduled.ids).length) {
       await persist((prev) => prev.map((it) => (it.id === itemId && it.status === 'sent' ? { ...it, counterPlan: { ...it.counterPlan, reminderIds: scheduled.ids } } : it)))
     }
-    return next
+    return { item: next, reminder: scheduled.status }
   }, [persist])
+  markCounterSentRef.current = markCounterSent
 
   const remove = useCallback(async (id) => {
     const target = itemsRef.current.find((it) => it.id === id)
@@ -266,7 +285,8 @@ export function useWatchlist() {
       countered,
       declined,
       noReply,
-      acceptanceRate: decided ? accepted / decided : null,
+      // Same population as the prediction: only items that carried a first-offer estimate.
+      acceptanceRate: decidedItems.length ? decidedItems.filter((it) => ['accepted', 'bought'].includes(first(it))).length / decidedItems.length : null,
       predictedAverage: decidedItems.length ? decidedItems.reduce((s, it) => s + (it.probability || 0), 0) / decidedItems.length : null,
       averageSaving: closed.length ? closed.reduce((s, it) => s + (it.listPrice - it.finalPrice), 0) / closed.length : null,
       closedDeals: closed.length,

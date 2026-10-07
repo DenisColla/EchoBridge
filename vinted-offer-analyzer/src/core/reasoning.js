@@ -51,7 +51,9 @@ export function buildVerdict(chosen, sendNow, now, best = null, { subject = "l'o
     headline = `${lead} ${chosen.date.getHours() >= 17 ? 'stasera' : 'oggi'} alle ore ${time}`
     sublabel = capitalize(dateLabel)
   } else if (k === 1) {
-    headline = `${lead} domani ${dayPart(chosen.date)}, ${dateLabel}, alle ore ${time}`
+    // The day part follows the window's own name when it has one ("Domenica mattina" → "domani mattina").
+    const part = /morning/.test(window.id) ? 'mattina' : /afternoon/.test(window.id) ? 'pomeriggio' : dayPart(chosen.date)
+    headline = `${lead} domani ${part}, ${dateLabel}, alle ore ${time}`
     sublabel = 'Domani'
   } else {
     headline = `${lead} ${dateLabel} alle ore ${time}`

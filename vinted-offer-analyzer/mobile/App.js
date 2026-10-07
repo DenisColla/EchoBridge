@@ -307,7 +307,9 @@ function Main() {
       openCounterFromItem(saved)
       return
     }
-    setCounterContext({ key: `analysis-${Date.now()}`, source: 'analysis', itemId: null, form, history: [], offerSentAt: null, link: form.link })
+    // The offer that was analysed (and sent), not whatever the form says now.
+    const sentForm = result && result.input ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form
+    setCounterContext({ key: `analysis-${Date.now()}`, source: 'analysis', itemId: null, form: sentForm, history: [], offerSentAt: null, link: form.link })
     scrollTop()
   }
 
@@ -315,6 +317,8 @@ function Main() {
     const ctx = counterContext
     const { item, reminder } = await watchlist.addCounter({ itemId: ctx.itemId, result: counterResult, link: ctx.link, form: ctx.form })
     setCounterContext((prev) => (prev ? { ...prev, itemId: item.id, history: item.negotiation } : prev))
+    // Link the first-offer result to the new item, so reopening or «Salva» does not create a duplicate.
+    if (ctx.source === 'analysis' && !ctx.itemId) setSaveState({ saved: true, itemId: item.id, tone: 'neutral', message: 'Salvato nella lista con la controproposta.' })
     const rec = counterResult.recommended
     if (rec && rec.id === 'accept') return { saved: true, tone: 'good', message: 'Salvato nella lista. Quando hai comprato, segna l\'esito «Accettata».' }
     const when = counterResult.verdict.action
@@ -323,6 +327,7 @@ function Main() {
       ...({
         scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${when}, con ${formatEuro(rec.price)} e il messaggio pronto.` },
         too_soon: { tone: 'warn', message: 'Salvato. Il momento è troppo vicino per una notifica: rispondi adesso.' },
+        partial: { tone: 'warn', message: 'Salvato. Il momento è troppo vicino per avvisarti prima: rispondi adesso. Ti ricordo solo la possibile scadenza della sua proposta.' },
         denied: { tone: 'warn', message: 'Salvato senza promemoria: le notifiche sono disattivate. Puoi attivarle nella scheda Info.' },
         skipped: { tone: 'neutral', message: 'Salvato nella lista.' },
       })[reminder],
@@ -343,8 +348,12 @@ function Main() {
   }
 
   const counterSent = async (itemId) => {
-    const next = await watchlist.markCounterSent(itemId)
-    if (next) showToast(`Registrato: hai proposto ${formatEuro(next.counterPlan.price)}. Se non risponde entro un giorno ti ricordo di scrivergli.`, 4000)
+    const outcome = await watchlist.markCounterSent(itemId)
+    if (!outcome) return
+    const price = formatEuro(outcome.item.counterPlan.price)
+    showToast(outcome.reminder === 'scheduled'
+      ? `Registrato: hai proposto ${price}. Se non risponde entro un giorno ti ricordo di scrivergli.`
+      : `Registrato: hai proposto ${price}.`, 4000)
   }
 
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)

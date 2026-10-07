@@ -88,6 +88,9 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
 
   const analyze = useCallback(() => {
     setPlan(null)
+    // A new first-offer analysis makes any counter answer stale (the typed counter stays in the form).
+    setCounterResult(null)
+    setCounterApplied(null)
     return run(form, null)
   }, [form, run])
 
@@ -127,7 +130,8 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
   /** The engine input: the first-offer form (category, list price, listing data) plus the counter fields. */
   const counterRaw = useMemo(() => ({
     ...form,
-    previousOffer: counterForm.previousOffer || form.targetPrice,
+    // Empty field = the offer that was analysed (and sent), not whatever the first-offer form says now.
+    previousOffer: counterForm.previousOffer || (result && result.input ? String(result.input.targetPrice).replace('.', ',') : form.targetPrice),
     sellerCounter: counterForm.sellerCounter,
     counterMode: counterForm.counterMode,
     receivedAgo: counterForm.receivedAgo,
@@ -135,7 +139,7 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     channel: counterForm.chat ? 'chat' : 'button',
     competition: counterForm.competition,
     publicPrice: counterForm.publicPrice,
-  }), [form, counterForm])
+  }), [form, counterForm, result])
 
   const counterLine = useMemo(() => counterPreview(counterRaw), [counterRaw])
 

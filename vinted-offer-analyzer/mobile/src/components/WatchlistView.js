@@ -28,7 +28,7 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onCounter
   const hasCounter = history.some((e) => e.by === 'seller')
   const pendingCounter = item.status === 'countered' && plan && plan.price != null && !plan.sentAt
   const awaitingReply = item.status === 'sent' && lastEntry && lastEntry.by === 'buyer'
-  const estimate = pendingCounter ? plan.pAccept : item.probability
+  const estimate = pendingCounter ? plan.pAccept : awaitingReply && hasCounter ? (lastEntry.pAccept ?? null) : hasCounter ? null : item.probability
 
   const copyMessage = async () => {
     const ok = await copyText(item.message)
