@@ -278,14 +278,15 @@ function Main() {
 
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
-    const { item, reminder } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
+    const { item, reminder, replaced } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
     const messages = {
       scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${result.verdict.headline.replace("Invia l'offerta ", '')}.` },
       too_soon: { tone: 'warn', message: 'Salvato. Il momento consigliato è troppo vicino per una notifica: invia l\'offerta adesso.' },
       denied: { tone: 'warn', message: 'Salvato senza promemoria: le notifiche sono disattivate. Puoi attivarle nella scheda Info.' },
       skipped: { tone: 'neutral', message: 'Salvato nella lista.' },
     }
-    setSaveState({ saved: true, itemId: item.id, ...messages[reminder] })
+    const outcome = messages[reminder]
+    setSaveState({ saved: true, itemId: item.id, ...outcome, message: replaced ? outcome.message.replace(/^Salvato/, 'Aggiornato (sostituisce il piano precedente per questo annuncio)') : outcome.message })
   }
 
   const calendarPayload = (source) => {

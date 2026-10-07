@@ -150,8 +150,12 @@ export function useWatchlist() {
       decision: decisionSnapshot(result, { now, profile, exploration: result.exploration || null }),
       events: [{ at: now.toISOString(), type: 'saved', price: input.targetPrice, recommendedAt: optimal.date.toISOString(), probability, exploration: result.exploration ? result.exploration.arm : null }],
     }
+    // The same listing saved again before sending replaces the old plan: one negotiation, one item in the data.
+    const sameLink = item.link ? itemsRef.current.filter((it) => it.link === item.link && it.status === 'planned' && !it.sentAt) : []
+    for (const old of sameLink) await cancelAll(old)
+    const replaced = new Set(sameLink.map((it) => it.id))
     // Save first: the item must never depend on the notification permission prompt (the app may be killed meanwhile).
-    await persist((prev) => [item, ...prev])
+    await persist((prev) => [item, ...prev.filter((it) => !replaced.has(it.id))])
     let reminder = 'skipped'
     try {
       const allowed = await ensureNotificationPermission()
@@ -171,7 +175,7 @@ export function useWatchlist() {
     } catch {
       reminder = 'skipped' // the item is saved anyway
     }
-    return { item, reminder }
+    return { item, reminder, replaced: replaced.size }
   }, [persist])
 
   const update = useCallback(async (id, patch, event = null) => {
