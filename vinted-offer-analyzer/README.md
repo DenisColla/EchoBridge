@@ -10,6 +10,7 @@ cd vinted-offer-analyzer
 npm install
 npm run dev        # http://localhost:5173
 npm test           # test del motore (node:test, nessuna dipendenza)
+npm run test:rome  # gli stessi test sull'ora italiana (cambio dell'ora incluso)
 npm run lint
 npm run build      # produzione in dist/
 npm run build:artifact   # artifact/VintedOfferAnalyzer.jsx + artifact/index.html
@@ -28,6 +29,7 @@ src/
     analyze.js     analyzeOffer(form, now, { preferredSendAt }): punto d'ingresso unico (analisi, nessuna offerta, oltre il tetto)
     optimize.js    optimizeOffer: come arrivare a una probabilità obiettivo (aspetta / alza / entrambe)
     extract.js     parseVintedItemHtml + buildFormFromExtraction: dalla pagina pubblica di un annuncio al modulo compilato
+    counter.js     analyzeCounter: la risposta migliore (cifra e momento) a una controproposta del venditore, round dopo round
     dates.js       formattazione italiana senza Intl, festivi, fuso Europe/Rome, aritmetica DST-safe
     math.js        logit, sigmoide, interpolazione, hash deterministico
   hooks/useOfferAnalysis.js   stato del form e dell'analisi (React puro)
@@ -82,6 +84,19 @@ prezzo pieno. "Applica" fissa il momento scelto (`analyzeOffer(form, now, { pref
 
 Vincoli Vinted incorporati (verificati a ottobre 2026, configurabili in `constants.js`): sconto massimo 40% per
 offerta, 25 offerte al giorno per account, validità dell'offerta circa 24 ore.
+
+## Controproposta del venditore
+
+Quando il venditore risponde con la sua cifra ("Fai il tuo prezzo"), `src/core/counter.js` calcola la risposta che
+minimizza il **prezzo finale atteso** per l'acquirente: per ogni cifra candidata e ogni momento di invio considera
+che il venditore accetti, rilanci di nuovo (con un round di previsione), rifiuti o che qualcun altro compri l'articolo
+nel frattempo. Le probabilità vengono dal modello di campo di eBay Best Offer (Backus et al. 2020) sulla quota della
+distanza che concedi, con il bonus della metà strada esatta, la rigidità mostrata dal venditore e le fasce orarie e
+mensili già usate per la prima offerta; il momento rispetta un'attesa minima di un'ora (rispondere a caldo segnala
+fretta). Le cifre sono "precise" (,30 / ,70 / ,80 o interi non multipli di 5) oppure la metà strada esatta; i rilanci
+successivi scendono di passo e finiscono con una sola offerta finale. Le regole che Vinted non documenta (durata della
+controproposta, sopravvivenza della sua cifra dopo una nuova offerta, numero di rilanci) sono ipotesi configurabili in
+`VINTED_ASSUMED` e `COUNTER` (`constants.js`), con la fonte o l'etichetta "euristica" accanto a ogni parametro.
 
 ## Lettura dell'annuncio
 
