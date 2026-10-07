@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Share, View } from 'react-native'
-import { VINTED } from '../../core/index.js'
+import { VINTED, formatEuro } from '../../core/index.js'
 import { ensureNotificationPermission, getNotificationStatus } from '../services/notifications.js'
 import { STEP_LABEL, VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
 import { space } from '../theme.js'
@@ -85,6 +85,8 @@ export function InfoView({ stats, items }) {
         <Title>Quanto sono affidabili le stime</Title>
         <Body>Offerte salvate: {stats.total} · da inviare: {stats.planned} · con esito: {stats.sent}</Body>
         <Body>Accettate: {stats.accepted} · controproposte: {stats.countered} · rifiutate: {stats.declined} · senza risposta: {stats.noReply}</Body>
+        {stats.averageSaving != null ? <Body>Risparmio medio sul listino: {formatEuro(stats.averageSaving)} su {stats.closedDeals} {stats.closedDeals === 1 ? 'acquisto' : 'acquisti'}</Body> : null}
+        {stats.countersWon != null ? <Body>Controproposte chiuse sotto la cifra del venditore: {Math.round(stats.countersWon * 100)}% ({stats.countersClosed} {stats.countersClosed === 1 ? 'trattativa' : 'trattative'})</Body> : null}
         {stats.acceptanceRate !== null ? (
           <Note tone={stats.acceptanceRate >= (stats.predictedAverage || 0) ? 'good' : 'warn'}>
             Accettazione reale {Math.round(stats.acceptanceRate * 100)}% contro una stima media del {Math.round((stats.predictedAverage || 0) * 100)}%. Con qualche decina di esiti i pesi del modello si possono ritarare.

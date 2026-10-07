@@ -268,13 +268,16 @@ export function counterPreview(raw) {
   if (!(S > 0)) return null
   if (S > L + CTR_EPS) return { S, overList: true, text: `${formatEuro(S)} supera il prezzo di listino (${formatEuro(L)}): controlla la cifra.` }
   if (S <= B + CTR_EPS) return { S, atOrBelowOffer: true, text: `${formatEuro(S)} è pari o sotto la tua offerta: puoi comprare subito.` }
+  // Later rounds: the step is measured from his previous counter, not from the list price.
+  const prev = Number(raw.sellerPrevious) > 0 ? Math.min(Number(raw.sellerPrevious), L) : L
+  const from = prev < L - CTR_EPS ? 'dalla sua proposta precedente' : 'dal listino'
   const overPct = (S / B - 1) * 100
-  const sigma = ctrR2(L - S)
-  const share = L - B > CTR_EPS ? sigma / (L - B) : 1
+  const sigma = ctrR2(prev - S)
+  const share = prev - B > CTR_EPS ? Math.max(0, sigma) / (prev - B) : 1
   const stance = sellerStanceOf(share)
   const moved = sigma > 0.009
-    ? `è sceso di ${formatEuro(sigma)} dal listino (−${ctrPct((sigma / L) * 100)}%), ${ctrIl(share * 100)}${Math.round(share * 100)}% della distanza`
-    : 'non è sceso dal listino'
+    ? `è sceso di ${formatEuro(sigma)} ${from} (−${ctrPct((sigma / prev) * 100)}%), ${ctrIl(share * 100)}${Math.round(share * 100)}% della distanza`
+    : sigma < -0.009 ? `ha alzato la cifra rispetto alla sua proposta precedente (${formatEuro(prev)})` : `non è sceso ${from}`
   return { S, overPct, sigma, share, stance, text: `${formatEuro(S)} · ${ctrIl(overPct)}${Math.round(overPct)}% sopra la tua offerta · ${moved}` }
 }
 

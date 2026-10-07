@@ -57,6 +57,19 @@ export async function scheduleOfferReminder({ id, title, link, sendAt }) {
   })
 }
 
+/**
+ * A reminder at an exact moment with its own title and body (counter-offer plan: send, last call, nudge, give up).
+ * Returns the notification id, or null when the moment is already past.
+ */
+export async function scheduleReminderAt({ itemId, link, at, title, body, kind = 'counter' }) {
+  const fireAt = new Date(at)
+  if (!Number.isFinite(fireAt.getTime()) || fireAt.getTime() <= Date.now() + 5_000) return null
+  return Notifications.scheduleNotificationAsync({
+    content: { title, body, data: { itemId, link: link || null, kind }, sound: 'default' },
+    trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt, channelId: CHANNEL_ID },
+  })
+}
+
 export async function cancelReminder(notificationId) {
   if (!notificationId) return
   try {

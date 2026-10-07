@@ -119,9 +119,11 @@ export function Field({ label, hint, error, value, onChangeText, placeholder, ke
   const t = useTheme()
   return (
     <View style={styles.field}>
-      <Text style={[styles.fieldLabel, { color: t.ink }]}>
-        {label}{hint ? <Text style={{ color: t.ink3, fontWeight: '400' }}> {hint}</Text> : null}
-      </Text>
+      {label ? (
+        <Text style={[styles.fieldLabel, { color: t.ink }]}>
+          {label}{hint ? <Text style={{ color: t.ink3, fontWeight: '400' }}> {hint}</Text> : null}
+        </Text>
+      ) : null}
       <View style={[styles.inputWrap, { backgroundColor: t.card, borderColor: error ? t.bad : t.line }]}>
         <TextInput
           value={value}
@@ -159,6 +161,19 @@ export function Collapsible({ title, summary, children, initiallyOpen = false })
       </Pressable>
       {open ? <View style={styles.collapsibleBody}>{children}</View> : null}
     </View>
+  )
+}
+
+/** A full-width on/off row (checkbox look) for optional details with long labels. */
+export function Toggle({ label, value, onChange }) {
+  const t = useTheme()
+  return (
+    <Pressable onPress={() => onChange(!value)} accessibilityRole="checkbox" accessibilityState={{ checked: value }} style={({ pressed }) => [styles.toggle, { borderColor: value ? t.accent : t.line, backgroundColor: value ? t.accentSoft : t.card, opacity: pressed ? 0.85 : 1 }]}>
+      <View style={[styles.toggleBox, { borderColor: value ? t.accent : t.ink3, backgroundColor: value ? t.accent : 'transparent' }]}>
+        {value ? <Text style={{ color: t.onAccent, fontSize: 13, fontWeight: '800', lineHeight: 16 }}>✓</Text> : null}
+      </View>
+      <Text style={[styles.body, { color: t.ink, flex: 1, minWidth: 0 }]}>{label}</Text>
+    </Pressable>
   )
 }
 
@@ -205,6 +220,8 @@ const styles = StyleSheet.create({
   error: { fontSize: 12, fontWeight: '600' },
   row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   note: { borderRadius: radius.md, padding: space.md },
+  toggle: { flexDirection: 'row', alignItems: 'center', gap: space.sm, borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: 10, minHeight: 48 },
+  toggleBox: { width: 20, height: 20, borderRadius: 6, borderWidth: 2, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   collapsible: { borderWidth: 1, borderRadius: radius.md, overflow: 'hidden' },
   collapsibleHeader: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.md, paddingVertical: 10, minHeight: 48 },
   collapsibleTitle: { fontSize: 14, fontWeight: '700' },

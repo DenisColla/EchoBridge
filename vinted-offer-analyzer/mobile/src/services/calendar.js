@@ -32,7 +32,7 @@ const deviceTimeZone = () => {
   }
 }
 
-export const eventTitleFor = (title) => `Invia l'offerta: ${title && title.trim() ? title.trim() : 'articolo Vinted'}`
+export const eventTitleFor = (title, subject = "Invia l'offerta") => `${subject}: ${title && title.trim() ? title.trim() : 'articolo Vinted'}`
 
 export const eventNotesFor = ({ link, targetPrice, probability, message }) => [
   targetPrice && Number.isFinite(Number(String(targetPrice).replace(',', '.'))) ? `Offerta: ${formatEuro(Number(String(targetPrice).replace(',', '.')))}` : null,
@@ -51,7 +51,7 @@ const eventWindow = (sendAt) => {
  * Path 1: the calendar app's own "new event" screen (Android ACTION_INSERT, no permission).
  * Resolves when the user comes back from the calendar app; Android does not say whether they saved.
  */
-export async function openCalendarInsert({ title, link, sendAt, notes }) {
+export async function openCalendarInsert({ title, link, sendAt, notes, subject }) {
   if (Platform.OS !== 'android') return { ok: false, reason: 'not_android' }
   const { start, end } = eventWindow(sendAt)
   try {
@@ -59,7 +59,7 @@ export async function openCalendarInsert({ title, link, sendAt, notes }) {
       data: 'content://com.android.calendar/events',
       type: 'vnd.android.cursor.dir/event',
       extra: {
-        title: eventTitleFor(title),
+        title: eventTitleFor(title, subject),
         description: notes || (link ? `Annuncio: ${link}` : ''),
         beginTime: start.getTime(),
         endTime: end.getTime(),
@@ -76,11 +76,11 @@ export async function openCalendarInsert({ title, link, sendAt, notes }) {
 }
 
 /** Path 2: Google Calendar with the event pre-filled (the app claims the link when installed). */
-export async function openGoogleCalendar({ title, sendAt, notes }) {
+export async function openGoogleCalendar({ title, sendAt, notes, subject }) {
   const { start, end } = eventWindow(sendAt)
   const params = new URLSearchParams({
     action: 'TEMPLATE',
-    text: eventTitleFor(title),
+    text: eventTitleFor(title, subject),
     dates: `${localStamp(start)}/${localStamp(end)}`,
     details: notes || '',
     ctz: deviceTimeZone(),
@@ -98,7 +98,7 @@ export async function openGoogleCalendar({ title, sendAt, notes }) {
 const icsEscape = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
 
 /** Builds a standard .ics (iCalendar) text for the reminder event, with a 10-minute alarm. */
-export function buildIcs({ title, sendAt, notes, uid }) {
+export function buildIcs({ title, sendAt, notes, uid, subject }) {
   const { start, end } = eventWindow(sendAt)
   return [
     'BEGIN:VCALENDAR',
@@ -111,7 +111,7 @@ export function buildIcs({ title, sendAt, notes, uid }) {
     `DTSTAMP:${utcStamp(new Date())}`,
     `DTSTART:${utcStamp(start)}`,
     `DTEND:${utcStamp(end)}`,
-    `SUMMARY:${icsEscape(eventTitleFor(title))}`,
+    `SUMMARY:${icsEscape(eventTitleFor(title, subject))}`,
     `DESCRIPTION:${icsEscape(notes)}`,
     'BEGIN:VALARM',
     'TRIGGER:-PT10M',

@@ -535,6 +535,7 @@ test('counter preview line under the field', () => {
   assert.equal(counterPreview({ listPrice: '60', previousOffer: '45', sellerCounter: '30', counterMode: 'pct' }).S, 58.5)
   assert.ok(counterPreview({ listPrice: '60', previousOffer: '45', sellerCounter: '63' }).overList)
   assert.equal(counterPreview({ listPrice: '60', previousOffer: '45', sellerCounter: '' }), null)
+  assert.equal(counterPreview({ listPrice: '60', previousOffer: '51,70', sellerCounter: '56,70', sellerPrevious: 58.5 }).text, '56,70 € · il 10% sopra la tua offerta · è sceso di 1,80 € dalla sua proposta precedente (−3,1%), il 26% della distanza')
 })
 
 test('counter reminders: send and last call before, nudge and give-up after, nothing in quiet hours', () => {

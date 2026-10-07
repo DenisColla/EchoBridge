@@ -5,6 +5,7 @@ import { copyText } from '../services/clipboard.js'
 import { STATUSES, statusMeta } from '../services/storage.js'
 import { space, useTheme } from '../theme.js'
 import { Badge, Body, Button, ButtonRow, Card, Chip, Note, Row, SectionLabel, Title } from './ui.js'
+import { negotiationLine } from './CounterView.js'
 
 const hostOf = (link) => {
   try {
@@ -14,13 +15,20 @@ const hostOf = (link) => {
   }
 }
 
-function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, now }) {
+function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onCounter, onCounterSent, now }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const [showOutcome, setShowOutcome] = useState(false)
   const sendAt = new Date(item.sendAt)
   const meta = statusMeta(item.status)
   const past = sendAt.getTime() < now.getTime()
+  const plan = item.counterPlan
+  const history = item.negotiation || []
+  const lastEntry = history[history.length - 1]
+  const hasCounter = history.some((e) => e.by === 'seller')
+  const pendingCounter = item.status === 'countered' && plan && plan.price != null && !plan.sentAt
+  const awaitingReply = item.status === 'sent' && lastEntry && lastEntry.by === 'buyer'
+  const estimate = pendingCounter ? plan.pAccept : item.probability
 
   const copyMessage = async () => {
     const ok = await copyText(item.message)
@@ -32,25 +40,47 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, now }) {
     <Card style={highlighted ? { borderColor: t.accent, borderWidth: 2 } : null}>
       <Row style={{ justifyContent: 'space-between' }}>
         <Badge tone={meta.tone}>{meta.label}</Badge>
-        <Text style={{ color: t.ink3, fontSize: 12 }}>{toPercent(item.probability)}% stimato</Text>
+        {estimate != null ? <Text style={{ color: t.ink3, fontSize: 12 }}>{toPercent(estimate)}% stimato</Text> : null}
       </Row>
       <Title>{item.title || 'Articolo senza titolo'}</Title>
       <Body muted small>
-        Listino {formatEuro(item.listPrice)} · offerta {formatEuro(item.targetPrice)} · sconto {Math.round(item.discountPct)}%
+        Listino {formatEuro(item.listPrice)} · prima offerta {formatEuro(item.targetPrice)} · sconto {Math.round(item.discountPct)}%
       </Body>
-      <Body>
-        <Text style={{ fontWeight: '700' }}>{item.status === 'planned' && !past ? 'Invia ' : 'Momento consigliato: '}</Text>
-        {capitalize(formatLongDate(sendAt, now))} alle {formatTime(sendAt)} ({formatRelativeDay(sendAt, now)}){item.windowLabel ? ` · ${item.windowLabel.toLowerCase()}` : ''}
-      </Body>
+      {hasCounter ? <Body small>Trattativa: {negotiationLine(item)}</Body> : null}
+      {pendingCounter ? (
+        <Body>
+          <Text style={{ fontWeight: '700' }}>Rispondi con {formatEuro(plan.price)}: </Text>
+          {capitalize(formatLongDate(sendAt, now))} alle {formatTime(sendAt)} ({formatRelativeDay(sendAt, now)}){plan.windowLabel ? ` · ${plan.windowLabel.toLowerCase()}` : ''}
+        </Body>
+      ) : item.status === 'countered' && plan && plan.accept ? (
+        <Note tone="good">Conviene comprare alla sua cifra: premi «Acquista» e poi segna l'esito «Accettata».</Note>
+      ) : awaitingReply && hasCounter ? (
+        <Body>Hai proposto {formatEuro(lastEntry.price)}{lastEntry.isFinal ? ' (ultima offerta)' : ''}: aspetta la sua risposta.</Body>
+      ) : item.status === 'planned' ? (
+        <Body>
+          <Text style={{ fontWeight: '700' }}>{!past ? 'Invia ' : 'Momento consigliato: '}</Text>
+          {capitalize(formatLongDate(sendAt, now))} alle {formatTime(sendAt)} ({formatRelativeDay(sendAt, now)}){item.windowLabel ? ` · ${item.windowLabel.toLowerCase()}` : ''}
+        </Body>
+      ) : null}
       {item.status === 'planned' && past && <Note tone="warn">La finestra consigliata è passata: ricalcola l'offerta o segna l'esito.</Note>}
-      {item.notificationId ? <Body muted small>Promemoria impostato 10 minuti prima.</Body> : item.status === 'planned' ? <Body muted small>Nessun promemoria attivo (troppo vicino o permesso negato).</Body> : null}
+      {pendingCounter && past && <Note tone="warn">Il momento consigliato è passato: tocca «Ricalcola» per un nuovo piano.</Note>}
+      {item.notificationId || (plan && Object.keys(plan.reminderIds || {}).length) ? <Body muted small>Promemoria impostato.</Body> : item.status === 'planned' ? <Body muted small>Nessun promemoria attivo (troppo vicino o permesso negato).</Body> : null}
       {item.link ? <Body muted small numberOfLines={1}>{hostOf(item.link)}</Body> : null}
       <ButtonRow>
         {item.link ? <Button label="Apri annuncio" onPress={() => Linking.openURL(item.link).catch(() => {})} /> : null}
         <Button label={copied ? 'Copiato!' : 'Copia messaggio'} variant={item.link ? 'secondary' : 'primary'} onPress={copyMessage} />
       </ButtonRow>
+      {pendingCounter && (
+        <ButtonRow>
+          <Button label="Ho inviato la nuova offerta" small onPress={() => onCounterSent(item.id)} />
+          <Button label="Ricalcola" variant="secondary" small onPress={() => onCounter(item)} />
+        </ButtonRow>
+      )}
+      {(awaitingReply || (item.status === 'planned' && past)) && (
+        <Button label={hasCounter ? 'Ha risposto con un\'altra cifra' : 'Ha fatto una controproposta'} variant="secondary" small onPress={() => onCounter(item)} />
+      )}
       <View style={styles.actions}>
-        {item.status === 'planned' && !past ? <Button label={item.calendarOpenedAt ? 'Calendario aperto' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} /> : null}
+        {(item.status === 'planned' || pendingCounter) && !past ? <Button label={item.calendarOpenedAt ? 'Calendario aperto' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} /> : null}
         <Button label={showOutcome ? 'Chiudi esito' : 'Segna esito'} variant="ghost" small onPress={() => setShowOutcome((v) => !v)} />
         <Button label="Elimina" variant="ghostDanger" small onPress={() => onRemove(item.id)} />
       </View>
@@ -59,17 +89,17 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, now }) {
           <SectionLabel>Com'è andata?</SectionLabel>
           <Row>
             {STATUSES.map((s) => (
-              <Chip key={s.id} compact label={s.label} active={item.status === s.id} onPress={() => { onStatus(item.id, s.id); setShowOutcome(false) }} />
+              <Chip key={s.id} compact label={s.label} active={item.status === s.id} onPress={() => { setShowOutcome(false); if (s.id === 'countered') onCounter(item); else onStatus(item.id, s.id) }} />
             ))}
           </Row>
-          <Body muted small>Gli esiti restano sul telefono e servono a misurare quanto sono affidabili le stime.</Body>
+          <Body muted small>«Controproposta» apre il calcolo della tua risposta. Gli esiti restano sul telefono e servono a misurare quanto sono affidabili le stime.</Body>
         </View>
       )}
     </Card>
   )
 }
 
-export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, onCalendar, now }) {
+export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, onCalendar, onCounter, onCounterSent, now }) {
   if (!ready) return <Card><Body muted>Carico la lista…</Body></Card>
   if (items.length === 0) {
     return (
@@ -81,13 +111,13 @@ export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, o
     )
   }
   const sorted = [...items].sort((a, b) => {
-    const rank = (it) => (it.status === 'planned' ? 0 : 1)
+    const rank = (it) => (it.status === 'planned' || (it.status === 'countered' && it.counterPlan && it.counterPlan.price != null && !it.counterPlan.sentAt) ? 0 : 1)
     return rank(a) - rank(b) || new Date(a.sendAt) - new Date(b.sendAt)
   })
   return (
     <View style={{ gap: space.lg }}>
       {sorted.map((item) => (
-        <ItemCard key={item.id} item={item} highlighted={item.id === highlightId} onStatus={onStatus} onRemove={onRemove} onCalendar={onCalendar} now={now} />
+        <ItemCard key={item.id} item={item} highlighted={item.id === highlightId} onStatus={onStatus} onRemove={onRemove} onCalendar={onCalendar} onCounter={onCounter} onCounterSent={onCounterSent} now={now} />
       ))}
     </View>
   )

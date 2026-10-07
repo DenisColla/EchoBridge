@@ -274,7 +274,7 @@ function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply, busy })
   )
 }
 
-export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData }) {
+export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData, onCounter }) {
   const t = useTheme()
   if (result.kind === 'no_offer_needed') {
     return (
@@ -309,6 +309,14 @@ export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy
           <Button label={calendarBusy ? 'Apro il calendario…' : 'Metti in calendario'} variant="secondary" onPress={onCalendar} disabled={calendarBusy} />
         </ButtonRow>
       </Card>
+      {onCounter && (
+        <Card>
+          <SectionLabel>Dopo l'invio</SectionLabel>
+          <Title>Ti ha risposto con una controproposta?</Title>
+          <Body muted small>Inserisci la sua cifra: calcolo la tua risposta migliore, quanto salire in euro e in percentuale e quando inviarla.</Body>
+          <Button label="Rispondi alla controproposta" variant="secondary" onPress={onCounter} />
+        </Card>
+      )}
       <OptimizeCard result={result} goal={goal} onGoal={onGoal} plan={plan} onOptimize={onOptimize} onApply={onApply} busy={optimizing} />
       <StrategyCard result={result} />
       <MessageCard key={result.now.getTime()} result={result} />

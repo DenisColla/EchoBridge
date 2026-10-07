@@ -2,11 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { analyzeOffer, buildFormFromExtraction, nextGoalFor, optimizeOffer, parseVintedItemHtml } from './core/index.js'
+import { analyzeOffer, buildFormFromExtraction, formatEuro, nextGoalFor, optimizeOffer, parseVintedItemHtml } from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
 import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
+import { CounterView } from './src/components/CounterView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
@@ -57,6 +58,7 @@ function Main() {
   const [extracting, setExtracting] = useState(false)
   const [extraction, setExtraction] = useState(null)
   const [clipboardLink, setClipboardLink] = useState(null)
+  const [counterContext, setCounterContext] = useState(null)
   const scrollRef = useRef(null)
   const formYRef = useRef(0)
   const formViewRef = useRef(null)
@@ -74,6 +76,7 @@ function Main() {
 
   useEffect(() => listenToReminderTaps((data) => {
     if (data && data.itemId) {
+      setCounterContext(null)
       setTab('lista')
       setHighlightId(data.itemId)
     }
@@ -225,7 +228,7 @@ function Main() {
 
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
-    const { item, reminder } = await watchlist.addFromAnalysis({ result, link: form.link })
+    const { item, reminder } = await watchlist.addFromAnalysis({ result, link: form.link, form })
     const messages = {
       scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${result.verdict.headline.replace("Invia l'offerta ", '')}.` },
       too_soon: { tone: 'warn', message: 'Salvato. Il momento consigliato è troppo vicino per una notifica: invia l\'offerta adesso.' },
@@ -235,17 +238,22 @@ function Main() {
     setSaveState({ saved: true, itemId: item.id, ...messages[reminder] })
   }
 
-  const calendarPayload = (source) => ({
-    title: source.title || source.input?.itemTitle || '',
-    link: source.link || form.link,
-    sendAt: source.sendAt || source.optimal.date,
-    notes: eventNotesFor({
+  const calendarPayload = (source) => {
+    // A saved item waiting for our counter: the event carries the new price, not the first offer.
+    const plan = source.counterPlan && source.counterPlan.price != null && !source.counterPlan.sentAt ? source.counterPlan : null
+    return {
+      title: source.title || source.input?.itemTitle || '',
       link: source.link || form.link,
-      targetPrice: source.targetPrice || source.input?.targetPrice,
-      probability: source.probability,
-      message: source.message || (source.messages ? (source.messages.find((m) => m.tone === source.recommendedTone) || source.messages[0]).text : ''),
-    }),
-  })
+      sendAt: source.sendAt || source.optimal.date,
+      subject: plan ? 'Invia la nuova offerta' : undefined,
+      notes: eventNotesFor({
+        link: source.link || form.link,
+        targetPrice: plan ? plan.price : source.targetPrice || source.input?.targetPrice,
+        probability: plan ? plan.pAccept : source.probability,
+        message: source.message || (source.messages ? (source.messages.find((m) => m.tone === source.recommendedTone) || source.messages[0]).text : ''),
+      }),
+    }
+  }
 
   const [calendarBusy, setCalendarBusy] = useState(false)
 
@@ -253,9 +261,9 @@ function Main() {
    * "Metti in calendario": opens the phone's calendar app on a pre-filled "new event" screen (no permission);
    * the user taps Save there. Falls back to Google Calendar and to a .ics file on its own; every outcome is a toast.
    */
-  const addCalendar = async (source, itemId) => {
+  const addCalendar = async (source, itemId, explicitPayload = null) => {
     if (calendarBusy) return
-    const payload = calendarPayload(source)
+    const payload = explicitPayload || calendarPayload(source)
     setCalendarBusy(true)
     showToast('Apro il calendario con l\'evento già compilato: controlla e tocca Salva.', 4000)
     try {
@@ -280,6 +288,65 @@ function Main() {
     }
   }
 
+  /* ───────── counter-offers ───────── */
+
+  const scrollTop = () => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
+
+  const openCounterFromItem = (item) => {
+    const fallbackForm = {
+      itemTitle: item.title || '', category: item.category || '', listPrice: String(item.listPrice ?? '').replace('.', ','),
+      targetPrice: String(item.targetPrice ?? '').replace('.', ','), listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', link: item.link || '',
+    }
+    setCounterContext({ key: `${item.id}-${Date.now()}`, source: 'item', itemId: item.id, form: item.form || fallbackForm, history: item.negotiation || [], offerSentAt: item.sentAt || null, link: item.link || '' })
+    scrollTop()
+  }
+
+  const openCounterFromAnalysis = () => {
+    const saved = saveState && saveState.itemId ? watchlist.items.find((it) => it.id === saveState.itemId) : null
+    if (saved) {
+      openCounterFromItem(saved)
+      return
+    }
+    setCounterContext({ key: `analysis-${Date.now()}`, source: 'analysis', itemId: null, form, history: [], offerSentAt: null, link: form.link })
+    scrollTop()
+  }
+
+  const saveCounter = async (counterResult) => {
+    const ctx = counterContext
+    const { item, reminder } = await watchlist.addCounter({ itemId: ctx.itemId, result: counterResult, link: ctx.link, form: ctx.form })
+    setCounterContext((prev) => (prev ? { ...prev, itemId: item.id, history: item.negotiation } : prev))
+    const rec = counterResult.recommended
+    if (rec && rec.id === 'accept') return { saved: true, tone: 'good', message: 'Salvato nella lista. Quando hai comprato, segna l\'esito «Accettata».' }
+    const when = counterResult.verdict.action
+    return {
+      saved: true,
+      ...({
+        scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${when}, con ${formatEuro(rec.price)} e il messaggio pronto.` },
+        too_soon: { tone: 'warn', message: 'Salvato. Il momento è troppo vicino per una notifica: rispondi adesso.' },
+        denied: { tone: 'warn', message: 'Salvato senza promemoria: le notifiche sono disattivate. Puoi attivarle nella scheda Info.' },
+        skipped: { tone: 'neutral', message: 'Salvato nella lista.' },
+      })[reminder],
+    }
+  }
+
+  const counterCalendar = (counterResult) => {
+    const rec = counterResult.recommended
+    const message = (counterResult.messages.find((m) => m.tone === counterResult.recommendedTone) || counterResult.messages[0] || {}).text || ''
+    const ctx = counterContext
+    addCalendar(null, ctx && ctx.itemId, {
+      title: counterResult.input.itemTitle,
+      link: ctx ? ctx.link : form.link,
+      sendAt: counterResult.optimal.date,
+      subject: 'Invia la nuova offerta',
+      notes: eventNotesFor({ link: ctx ? ctx.link : form.link, targetPrice: rec.price, probability: rec.pAccept, message }),
+    })
+  }
+
+  const counterSent = async (itemId) => {
+    const next = await watchlist.markCounterSent(itemId)
+    if (next) showToast(`Registrato: hai proposto ${formatEuro(next.counterPlan.price)}. Se non risponde entro un giorno ti ricordo di scrivergli.`, 4000)
+  }
+
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
   const bottomInset = Math.max(insets.bottom, 8)
 
@@ -296,7 +363,18 @@ function Main() {
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView ref={scrollRef} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          {tab === 'calcola' && (
+          {counterContext && (
+            <CounterView
+              key={counterContext.key}
+              context={counterContext}
+              onClose={() => setCounterContext(null)}
+              onSave={saveCounter}
+              onCalendar={counterCalendar}
+              calendarBusy={calendarBusy}
+              onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
+            />
+          )}
+          {!counterContext && tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
               {clipboardLink && (
                 <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
@@ -323,6 +401,7 @@ function Main() {
                   onRecalc={recalcKeepingPin}
                   extraction={extraction}
                   onEditData={scrollToForm}
+                  onCounter={openCounterFromAnalysis}
                 />
               )}
               <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
@@ -340,7 +419,7 @@ function Main() {
               </View>
             </View>
           )}
-          {tab === 'lista' && (
+          {!counterContext && tab === 'lista' && (
             <WatchlistView
               items={watchlist.items}
               ready={watchlist.ready}
@@ -349,9 +428,11 @@ function Main() {
               onStatus={watchlist.setStatus}
               onRemove={watchlist.remove}
               onCalendar={(item) => addCalendar(item, item.id)}
+              onCounter={openCounterFromItem}
+              onCounterSent={counterSent}
             />
           )}
-          {tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.items} />}
+          {!counterContext && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.items} />}
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -364,7 +445,7 @@ function Main() {
           const active = tab === item.id
           const count = item.id === 'lista' ? watchlist.stats.planned : 0
           return (
-            <Pressable key={item.id} onPress={() => { setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active }}>
+            <Pressable key={item.id} onPress={() => { setCounterContext(null); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
               <Text style={[styles.tabLabel, { color: active ? t.accent : t.ink3, fontWeight: active ? '700' : '500' }]}>
                 {item.label}{count ? ` (${count})` : ''}
               </Text>
