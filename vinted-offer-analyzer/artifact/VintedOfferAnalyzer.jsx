@@ -4,7 +4,7 @@
  * Requires: react, lucide-react, Tailwind CSS classes.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Baby, BadgeEuro, Ban, Briefcase, Calculator, CalendarClock, Check, ClipboardPaste, Clock, Coffee, Copy, Crown, Footprints, Gauge, Gem, Hourglass, Lightbulb, MessageSquare, Moon, Package, Repeat, RotateCcw, Scale, ShieldAlert, Shirt, Smartphone, Sparkles, Star, Sun, Tag, TriangleAlert, Utensils, X, Zap } from 'lucide-react'
+import { Baby, BadgeEuro, Ban, Briefcase, Calculator, CalendarClock, Check, ClipboardPaste, Clock, Coffee, Copy, Crown, Footprints, Gauge, Gem, Hourglass, Lightbulb, MessageSquare, Moon, Package, Repeat, RotateCcw, Scale, ShieldAlert, Shirt, Smartphone, Sparkles, Star, Sun, Tag, Target, TriangleAlert, Utensils, Wand2, X, Zap } from 'lucide-react'
 
 // ───────────────────────── src/core/math.js ─────────────────────────
 /**
@@ -1055,6 +1055,7 @@ const withPrices = (input, listPrice, targetPrice) => {
   return { ...input, listPrice, targetPrice, discountPct, riskBand: riskBandFor(discountPct) }
 }
 
+/** Price grid used when searching prices: 0,50 € under 20 €, 1 € under 200 €, then 5 €. */
 const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 : 5)
 
 /**
@@ -1207,6 +1208,423 @@ function analyzeOffer(raw, now = new Date(), options = {}) {
   }
 
   return buildAnalysis(input, now, options)
+}
+
+// ───────────────────────── src/core/optimize.js ─────────────────────────
+/** Next "round" goal above the current probability: 63% → 70%, 88% → 93%, capped at 95%. */
+const nextGoalFor = (p) => {
+  if (p >= 0.9) return 0.95
+  return Math.min(0.9, Math.ceil((p + 0.03) * 10) / 10)
+}
+
+const GOAL_CHOICES = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+const roundPrice = (v) => Math.round(v * 100) / 100
+
+const bestByProbability = (moments) =>
+  [...moments.eligible].sort((a, b) => b.pOverall - a.pOverall || a.date - b.date)[0]
+
+/** Smallest grid index i in [1, n] whose predicate holds (predicate is monotone in i), or null. */
+function bisect(n, predicate) {
+  if (n < 1 || !predicate(n)) return null
+  let lo = 0
+  let hi = n
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (predicate(mid)) hi = mid
+    else lo = mid
+  }
+  return hi
+}
+
+const describeSlot = (slot, now) =>
+  slot.kind === 'now' ? 'adesso' : `${formatLongDate(slot.date, now)} alle ${formatTime(slot.date)} (${formatRelativeDay(slot.date, now)})`
+
+/**
+ * Finds the cheapest ways to reach a target overall probability: waiting for a
+ * better moment, raising the offer, or both. Every option carries what to apply
+ * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
+ */
+function optimizeOffer(raw, now = new Date(), { targetProbability = null } = {}) {
+  const normalized = normalizeInput(raw)
+  if (!normalized.ok) return { ok: false, errors: normalized.errors }
+  let input = normalized.input
+  if (input.discountPct <= 0) return { ok: false, reason: 'no_offer_needed' }
+  let capped = false
+  if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
+    input = withPrices(input, input.listPrice, Math.ceil(input.listPrice * (1 - VINTED.MAX_DISCOUNT_PCT / 100) * 100) / 100)
+    capped = true
+  }
+
+  const current = pickMoments(input, now)
+  const currentP = current.chosen.pOverall
+  const target = targetProbability || nextGoalFor(currentP)
+  const step = priceStepFor(input.listPrice)
+  const gridSize = Math.max(0, Math.ceil((input.listPrice - input.targetPrice) / step) - 1)
+  const priceAt = (i) => roundPrice(Math.min(input.listPrice - step, input.targetPrice + i * step))
+
+  const options = []
+  const makeOption = (id, label, { price, slot, probability, changes, momentsOf }) => ({
+    id,
+    label,
+    price,
+    discountPct: withPrices(input, input.listPrice, price).discountPct,
+    slot,
+    slotLabel: describeSlot(slot, now),
+    probability,
+    deltaPoints: Math.round((probability - currentP) * 100),
+    priceIncrease: roundPrice(price - input.targetPrice),
+    daysWaited: slot.daysWaited,
+    changes,
+    apply: { targetPrice: price, preferredSendAt: slot.date.toISOString() },
+    reachesTarget: probability >= target,
+    momentsOf,
+  })
+
+  // Lever 1: only wait for the best moment in the horizon.
+  const waitSlot = bestByProbability(current)
+  if (waitSlot && waitSlot !== current.chosen && waitSlot.pOverall > currentP + 0.005) {
+    options.push(makeOption('wait', 'Aspetta il momento migliore', {
+      price: input.targetPrice,
+      slot: waitSlot,
+      probability: waitSlot.pOverall,
+      changes: [`Invia ${describeSlot(waitSlot, now)} invece di ${describeSlot(current.chosen, now)}`],
+    }))
+  }
+
+  // Lever 2: only raise the offer, keeping the recommended moment.
+  const chosenSlot = current.chosen
+  const pAtPrice = (i) => evaluateSlot(withPrices(input, input.listPrice, priceAt(i)), chosenSlot).pOverall
+  const priceIdx = bisect(gridSize, (i) => pAtPrice(i) >= target)
+  if (priceIdx !== null) {
+    const price = priceAt(priceIdx)
+    options.push(makeOption('price', 'Alza un po\' l\'offerta', {
+      price,
+      slot: chosenSlot,
+      probability: pAtPrice(priceIdx),
+      changes: [`Offri ${formatEuro(price)} invece di ${formatEuro(input.targetPrice)} (+${formatEuro(roundPrice(price - input.targetPrice))})`],
+    }))
+  }
+
+  // Lever 3: smallest raise combined with the best moment at that price.
+  const momentsCache = new Map()
+  const momentsAt = (i) => {
+    if (!momentsCache.has(i)) momentsCache.set(i, pickMoments(withPrices(input, input.listPrice, priceAt(i)), now))
+    return momentsCache.get(i)
+  }
+  const comboIdx = bisect(gridSize, (i) => bestByProbability(momentsAt(i)).pOverall >= target)
+  if (comboIdx !== null) {
+    const m = momentsAt(comboIdx)
+    const slot = bestByProbability(m)
+    const price = priceAt(comboIdx)
+    const duplicate = options.some((o) => Math.abs(o.price - price) < 0.001 && isSameDay(o.slot.date, slot.date) && o.slot.date.getTime() === slot.date.getTime())
+    if (!duplicate) {
+      options.push(makeOption('combined', 'Alza un po\' e scegli il momento', {
+        price,
+        slot,
+        probability: slot.pOverall,
+        changes: [
+          `Offri ${formatEuro(price)} invece di ${formatEuro(input.targetPrice)} (+${formatEuro(roundPrice(price - input.targetPrice))})`,
+          `Invia ${describeSlot(slot, now)}`,
+        ],
+      }))
+    }
+  }
+
+  // Ceiling: the most the model can reach without paying list price.
+  const topMoments = gridSize >= 1 ? momentsAt(gridSize) : current
+  const topSlot = bestByProbability(topMoments)
+  const maxAchievable = makeOption('max', 'Il massimo raggiungibile', {
+    price: gridSize >= 1 ? priceAt(gridSize) : input.targetPrice,
+    slot: topSlot,
+    probability: topSlot.pOverall,
+    changes: gridSize >= 1
+      ? [`Offri ${formatEuro(priceAt(gridSize))}`, `Invia ${describeSlot(topSlot, now)}`]
+      : [`Invia ${describeSlot(topSlot, now)}`],
+  })
+
+  const reaching = options.filter((o) => o.reachesTarget)
+  // Cheapest first: less money, then fewer days of waiting.
+  reaching.sort((a, b) => a.priceIncrease - b.priceIncrease || a.daysWaited - b.daysWaited)
+  const partial = options.filter((o) => !o.reachesTarget).sort((a, b) => b.probability - a.probability)
+
+  return {
+    ok: true,
+    capped,
+    target,
+    current: { probability: currentP, price: input.targetPrice, slot: current.chosen, slotLabel: describeSlot(current.chosen, now) },
+    reachable: reaching.length > 0,
+    options: reaching,
+    partial,
+    maxAchievable,
+    recommended: reaching[0] || null,
+  }
+}
+
+// ───────────────────────── src/core/extract.js ─────────────────────────
+/**
+ * Extraction from a Vinted item page and mapping onto the analyzer's form.
+ * Pure string parsing (no DOM): works in Node, the browser and React Native.
+ *
+ * What a public item page contains server-side (verified October 2026):
+ * - JSON-LD Product: name, description, brand, price, currency, condition, category path, color.
+ * - data-testid="seller-last-logged-in": "Ultima visita 26 min fa".
+ * - data-testid="profile-username" and a rating aria-label "valutazione di 5 su 5 stelle".
+ * - itemProp="upload_date": "un minuto fa", "3 giorni fa", "2 settimane fa"…
+ */
+
+
+const CONDITION_LABELS = { New: 'nuovo con etichetta', NewWithTags: 'nuovo con etichetta', NewWithoutTags: 'nuovo senza etichetta', Used: 'usato', Refurbished: 'ricondizionato', Damaged: 'danneggiato' }
+
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+
+const decodeEntities = (s) => String(s || '')
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+  .replace(/&([a-z]+);/gi, (m, name) => (ENTITIES[name.toLowerCase()] !== undefined ? ENTITIES[name.toLowerCase()] : m))
+
+const stripTags = (s) => decodeEntities(String(s || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()
+
+const NUMBER_WORDS = { un: 1, una: 1, "un'": 1, uno: 1, due: 2, tre: 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9, dieci: 10 }
+
+/**
+ * "26 min fa", "un'ora fa", "ieri", "3 giorni fa", "una settimana fa", "2 mesi fa", "un anno fa"
+ * → elapsed days (fractional), or null when unparseable. Prefixes like "Ultima visita" / "Caricato" are ignored.
+ */
+function parseRelativeItalian(text) {
+  const t = String(text || '').toLowerCase().replace(/[’]/g, "'").trim()
+  if (!t) return null
+  if (/\b(adesso|ora|poco fa|un attimo fa)\b/.test(t) && !/\bun'?ora\b/.test(t)) return 0
+  if (/\bieri\b/.test(t)) return 1
+  if (/\boggi\b/.test(t)) return 0
+  const m = t.match(/(\d+|un'|un|una|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\s*(secondi?|sec|minut[oi]|min|or[ae]|giorn[oi]|gg|settiman[ae]|sett|mes[ei]|ann[oi])\b/)
+  if (!m) return null
+  const raw = m[1].replace(/\s/g, '')
+  const n = /^\d+$/.test(raw) ? Number(raw) : NUMBER_WORDS[raw] || 1
+  const unit = m[2]
+  if (/^sec/.test(unit)) return n / 86_400
+  if (/^min/.test(unit)) return n / 1_440
+  if (/^or/.test(unit)) return n / 24
+  if (/^(giorn|gg)/.test(unit)) return n
+  if (/^sett/.test(unit)) return n * 7
+  if (/^mes/.test(unit)) return n * 30
+  if (/^ann/.test(unit)) return n * 365
+  return null
+}
+
+const firstMatch = (html, re) => {
+  const m = html.match(re)
+  return m ? m[1] : null
+}
+
+/** Parses the HTML of a Vinted item page. Every field may be null; `found`/`missing` list what was recognised. */
+function parseVintedItemHtml(html) {
+  const src = String(html || '').replace(/<!--[\s\S]*?-->/g, '')
+  const out = {
+    title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null,
+    uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
+    sellerBusiness: null, sellerBadges: [],
+    found: [], missing: [],
+  }
+
+  const ldScripts = [...src.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)]
+  for (const m of ldScripts) {
+    try {
+      const json = JSON.parse(m[1])
+      const product = Array.isArray(json) ? json.find((j) => j && j['@type'] === 'Product') : (json && json['@type'] === 'Product' ? json : null)
+      if (!product) continue
+      out.title = product.name ? decodeEntities(product.name).trim() : null
+      out.description = product.description ? decodeEntities(product.description).trim() : null
+      out.brand = product.brand && (product.brand.name || product.brand) ? decodeEntities(product.brand.name || product.brand).trim() : null
+      out.categoryText = product.category ? decodeEntities(product.category).trim() : null
+      out.color = product.color ? decodeEntities(product.color).trim() : null
+      const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers
+      if (offer) {
+        const price = Number(String(offer.price).replace(',', '.'))
+        out.listPrice = Number.isFinite(price) && price > 0 ? price : null
+        out.currency = offer.priceCurrency || null
+        const rawCondition = offer.itemCondition ? String(offer.itemCondition).replace(/^.*\//, '').replace(/Condition$/, '') : null
+        out.condition = rawCondition ? (CONDITION_LABELS[rawCondition] || rawCondition) : null
+        out.url = offer.url || null
+      }
+      break
+    } catch {
+      // malformed JSON-LD: fall back to meta tags below
+    }
+  }
+  if (!out.title) {
+    const og = firstMatch(src, /<meta property="og:title" content="([^"]*)"/i)
+    if (og) out.title = decodeEntities(og).replace(/\s*\|\s*Vinted\s*$/i, '').trim()
+  }
+  if (!out.description) {
+    const og = firstMatch(src, /<meta property="og:description" content="([^"]*)"/i)
+    if (og) out.description = decodeEntities(og).trim()
+  }
+
+  const upload = firstMatch(src, /itemProp="upload_date"[^>]*>\s*<span[^>]*>([^<]+)</i) || firstMatch(src, /\\"value\\":\\"Caricato ([^"\\]+)\\"/)
+  if (upload) {
+    out.uploadedText = stripTags(upload).replace(/^caricato\s*/i, '')
+    out.uploadedDays = parseRelativeItalian(out.uploadedText)
+  }
+  const lastSeen = firstMatch(src, /<[a-z0-9]+[^>]*data-testid="seller-last-logged-in"[^>]*>\s*([^<]+?)\s*<\//i)
+  if (lastSeen) {
+    out.sellerLastSeenText = stripTags(lastSeen)
+    out.sellerLastSeenDays = parseRelativeItalian(out.sellerLastSeenText)
+  }
+  const username = firstMatch(src, /<[a-z0-9]+[^>]*data-testid="profile-username"[^>]*>\s*([^<]{1,80}?)\s*<\//i)
+  if (username) out.sellerUsername = stripTags(username)
+  const rating = firstMatch(src, /valutazione di ([\d.,]+) su 5 stelle/i)
+  if (rating) out.sellerRating = Number(rating.replace(',', '.'))
+  // The seller block is also embedded as escaped JSON (feedback_count, feedback_reputation 0..1, business flag, badges).
+  const feedback = firstMatch(src, /\\"feedback_count\\":(\d+)/)
+    || firstMatch(src, /web_ui__Rating__label[^>]*>(?:\s*<span[^>]*>)?\s*(\d+)\s*</i)
+    || firstMatch(src, /su 5 stelle"[\s\S]{0,400}?>\s*\(?(\d+)\)?\s*<\/span>/i)
+  if (feedback) out.sellerFeedbackCount = Number(feedback)
+  else if (/Nessuna recensione|Nessuna valutazione/i.test(src)) out.sellerFeedbackCount = 0
+  const reputation = firstMatch(src, /\\"feedback_reputation\\":([\d.]+)/)
+  if (out.sellerRating === null && reputation) out.sellerRating = Math.round(Number(reputation) * 5 * 10) / 10
+  const business = firstMatch(src, /\\"business\\":(true|false)[^}]{0,200}\\"feedback_count\\"/)
+  if (business) out.sellerBusiness = business === 'true'
+  const badgeBlock = firstMatch(src, /\\"badges\\":\[([^\]]*)\][^}]{0,80}\\"username\\"/)
+  if (badgeBlock) out.sellerBadges = [...badgeBlock.matchAll(/\\"type\\":\\"([A-Z_]+)\\"/g)].map((m) => m[1])
+
+  const labels = [
+    ['title', 'titolo'], ['listPrice', 'prezzo'], ['brand', 'marca'], ['categoryText', 'categoria'], ['condition', 'condizioni'],
+    ['uploadedText', 'data di caricamento'], ['sellerLastSeenText', 'attività del venditore'], ['sellerRating', 'valutazione del venditore'],
+    ['sellerFeedbackCount', 'numero di recensioni'], ['description', 'descrizione'],
+  ]
+  for (const [key, label] of labels) (out[key] !== null && out[key] !== undefined ? out.found : out.missing).push(label)
+  return out
+}
+
+/* ───────── mapping onto the analyzer ───────── */
+
+const DECORATION = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}\u{2300}-\u{23FF}]/gu
+
+/** Listing titles are quoted in the message to the seller: drop emoji and cut at a word boundary, never mid-word. */
+function cleanTitle(title, max = 90) {
+  const t = String(title || '').replace(DECORATION, ' ').replace(/\s+/g, ' ').trim()
+  if (t.length <= max) return t
+  const cut = t.slice(0, max)
+  const at = cut.lastIndexOf(' ')
+  return (at > max * 0.5 ? cut.slice(0, at) : cut).replace(/[\s,;:.\-–(]+$/, '')
+}
+
+const labelOf = (list, id) => ((list.find((x) => x.id === id) || {}).label || id)
+const BADGE_LABELS = { ACTIVE_LISTER: 'pubblica spesso', SPEEDY_SHIPPING: 'spedisce in fretta', FAST_REPLIER: 'risponde in fretta' }
+
+const LUXURY_BRANDS = /\b(gucci|prada|louis vuitton|chanel|herm[èe]s|dior|fendi|balenciaga|bottega veneta|burberry|versace|valentino|saint laurent|ysl|c[eé]line|loewe|givenchy|miu miu|rolex|cartier|omega|tiffany|bulgari|dolce\s*&\s*gabbana|armani(?! exchange)|moncler|golden goose|off-white|balmain|chlo[ée]|alexander mcqueen|jimmy choo|tod'?s|ferragamo|max mara)\b/i
+const FAST_FASHION_BRANDS = /\b(zara|h\s*&\s*m|hm|shein|primark|bershka|pull\s*&\s*bear|stradivarius|mango|ovs|terranova|tezenis|calzedonia|intimissimi|kiabi|c\s*&\s*a|new yorker|uniqlo|asos|boohoo|prettylittlething|missguided|jennyfer|alcott|piazza italia|benetton|motivi|oviesse|subdued|brandy melville|hollister|abercrombie)\b/i
+const SNEAKER_HINTS = /\b(sneakers?|scarpe da ginnastica|scarpe sportive|air force|air max|jordan|dunk|yeezy|new balance|nb\s?\d{3}|adidas samba|gazelle|campus|superstar|stan smith|converse|vans|asics|reebok|puma suede|hoka|salomon)\b/i
+const ELECTRONICS_HINTS = /\b(elettronica|smartphone|iphone|samsung galaxy|pixel|tablet|ipad|console|playstation|ps[45]|xbox|nintendo|switch|cuffie|airpods|auricolari|smartwatch|apple watch|laptop|notebook|macbook|monitor|fotocamera|gopro|drone|kindle|dyson|speaker|videogioc)\b/i
+const COLLECTIBLE_HINTS = /\b(collezionismo|collezione|carte|pok[ée]mon|yu-?gi-?oh|magic the gathering|funko|lego|vintage|fumett|manga|vinil|francobolli|monete|figure|statua|action figure|hot wheels|raro|rara|rare|limited|edizione limitata|prima edizione|autografat)\b/i
+const KIDS_HINTS = /^(bambin[ie]|neonat[io]|ragazz[ie]|kids|bimb[aoie])\b|\b(bambin[ioae]|neonat[io]|ragazz[ioae]|bimb[aoie]|baby)\b/i
+
+function categoryGuess({ categoryText = '', brand = '', title = '', description = '', listPrice = null }) {
+  const cat = String(categoryText || '')
+  const text = `${title || ''} ${description || ''}`
+  const brandText = String(brand || '')
+  if (KIDS_HINTS.test(cat)) return { id: 'kids', reason: `categoria "${cat}"` }
+  if (LUXURY_BRANDS.test(brandText) || (LUXURY_BRANDS.test(title) && (listPrice === null || listPrice >= 80))) return { id: 'luxury', reason: `marca ${brandText || 'di lusso'}` }
+  if (/\b(scarpe|sneakers|calzature)\b/i.test(cat) && (SNEAKER_HINTS.test(cat) || SNEAKER_HINTS.test(text) || /\b(nike|adidas|puma|new balance|reebok|asics|vans|converse|jordan)\b/i.test(brandText))) return { id: 'sneakers', reason: 'scarpe sportive' }
+  if (SNEAKER_HINTS.test(title) && /\b(nike|adidas|puma|new balance|reebok|asics|vans|converse|jordan|hoka|salomon)\b/i.test(`${brandText} ${title}`)) return { id: 'sneakers', reason: 'titolo e marca' }
+  if (ELECTRONICS_HINTS.test(cat) || (ELECTRONICS_HINTS.test(title) && /\b(apple|samsung|sony|nintendo|microsoft|xiaomi|huawei|google|dyson|bose|jbl|garmin)\b/i.test(`${brandText} ${title}`))) return { id: 'electronics', reason: 'elettronica' }
+  if (COLLECTIBLE_HINTS.test(cat) || /\b(collezionismo|carte|fumetti|vinili|lego|funko|pok[ée]mon)\b/i.test(title)) return { id: 'collectible', reason: 'collezionismo' }
+  if (FAST_FASHION_BRANDS.test(brandText)) return { id: 'fast_fashion', reason: `marca ${brandText}` }
+  if (/^(donna|uomo|women|men)\b/i.test(cat) || /\b(abbigliamento|vestiti|maglie|felpe|pantaloni|jeans|giacche|abiti|gonne|camicie|t-shirt|scarpe)\b/i.test(cat)) {
+    return { id: brandText ? 'other' : 'fast_fashion', reason: brandText ? `abbigliamento ${brandText}` : 'abbigliamento senza marca' }
+  }
+  return { id: 'other', reason: cat ? `categoria "${cat}"` : 'categoria non riconosciuta' }
+}
+
+function listingAgeGuess(days) {
+  if (days === null || days === undefined || !Number.isFinite(days)) return 'unknown'
+  if (days < 1) return 'today'
+  if (days < 7) return 'days_2_6'
+  if (days < 14) return 'weeks_1_2'
+  if (days < 30) return 'weeks_2_4'
+  return 'over_month'
+}
+
+function sellerProfileGuess({ lastSeenDays = null, feedbackCount = null, rating = null }) {
+  if (lastSeenDays !== null && lastSeenDays >= 14) return { id: 'inactive', reason: `ultima visita ${Math.round(lastSeenDays)} giorni fa` }
+  if (feedbackCount !== null && feedbackCount < 5) return { id: 'new_seller', reason: `${feedbackCount} recension${feedbackCount === 1 ? 'e' : 'i'}` }
+  if (feedbackCount !== null && feedbackCount >= 20 && rating !== null && rating >= 4.8) return { id: 'expert', reason: `${feedbackCount} recensioni, ${rating} stelle` }
+  if (feedbackCount === null && rating !== null && rating >= 4.8 && lastSeenDays !== null && lastSeenDays < 2) return { id: 'unknown', reason: 'valutazione alta ma recensioni non lette' }
+  return { id: 'unknown', reason: 'dati insufficienti' }
+}
+
+const FIXED_PRICE = /\b(prezzo (fisso|non trattabile|non negoziabile|bloccato)|non trattabile|non negoziabile|no offerte|no offers|niente offerte|non accetto offerte|offerte? non accettat[ea]|no sconti|non faccio sconti|no trattative)\b/i
+const OPEN_TO_OFFERS = /\b(accetto offerte|trattabile|trattabili|fate offerte|fatemi offerte|aperto a offerte|offerte benvenute|offerte ben accette|prezzo trattabile|si accettano offerte|accetto proposte|ascolto offerte)\b/i
+const CLEARING_OUT = /\b(svuoto (l')?armadio|svuoto tutto|faccio spazio|vendo tutto|sgombero|devo liberare|cambio casa|trasloc[oa]|svendo|svendita|tutto deve andare|prezzi stracciati)\b/i
+
+function signalFromText(text) {
+  const t = String(text || '')
+  if (FIXED_PRICE.test(t)) return { id: 'fixed_price', reason: 'l\'annuncio dice che il prezzo non è trattabile' }
+  if (CLEARING_OUT.test(t)) return { id: 'clearing_out', reason: 'il venditore sta svuotando l\'armadio' }
+  if (OPEN_TO_OFFERS.test(t)) return { id: 'open_to_offers', reason: 'l\'annuncio invita a fare offerte' }
+  return { id: 'none', reason: 'nessun segnale nel testo' }
+}
+
+/** First plausible euro amount in free text ("8,90 €", "€ 25", "25€"). */
+function findPriceInText(text) {
+  const t = String(text || '')
+  const m = t.match(/(\d{1,5}(?:[.,]\d{1,2})?)\s*€/) || t.match(/€\s*(\d{1,5}(?:[.,]\d{1,2})?)/)
+  if (!m) return null
+  const v = Number(m[1].replace(',', '.'))
+  return Number.isFinite(v) && v > 0 ? v : null
+}
+
+const roundTarget = (value, listPrice) => (listPrice >= 20 ? Math.round(value) : Math.round(value * 2) / 2)
+const euro = (n) => `${(Number.isInteger(n) ? String(n) : n.toFixed(2)).replace('.', ',')} €`
+
+/**
+ * Turns an extraction into form values plus a human summary. Fields the page did not provide
+ * keep the previous form value (or the neutral default).
+ */
+function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20, previousForm = {} } = {}) {
+  const found = []
+  const guessed = []
+  const missing = []
+  const form = { ...previousForm, link: link || previousForm.link || ex.url || '' }
+
+  const title = cleanTitle(ex.title)
+  if (title) { form.itemTitle = title; found.push(`Titolo: ${title.length > 60 ? `${cleanTitle(title, 60)}…` : title}`) } else missing.push('titolo')
+  if (ex.listPrice) {
+    form.listPrice = String(ex.listPrice).replace('.', ',')
+    const target = roundTarget(ex.listPrice * (1 - targetDiscountPct / 100), ex.listPrice)
+    form.targetPrice = String(target).replace('.', ',')
+    found.push(`Prezzo ${euro(ex.listPrice)} (target proposto ${euro(target)}, −${targetDiscountPct}%)`)
+  } else missing.push('prezzo')
+
+  const cat = categoryGuess(ex)
+  form.category = cat.id
+  guessed.push(`Categoria: ${labelOf(CATEGORIES, cat.id)} (${cat.reason})`)
+
+  if (ex.uploadedDays !== null && ex.uploadedDays !== undefined) {
+    form.listingAge = listingAgeGuess(ex.uploadedDays)
+    found.push(`Caricato ${ex.uploadedText}`)
+  } else { form.listingAge = previousForm.listingAge || 'unknown'; missing.push('data di caricamento') }
+
+  const seller = sellerProfileGuess({ lastSeenDays: ex.sellerLastSeenDays, feedbackCount: ex.sellerFeedbackCount, rating: ex.sellerRating })
+  form.sellerProfile = seller.id
+  const sellerBits = [
+    ex.sellerUsername ? ex.sellerUsername : null,
+    ex.sellerLastSeenText ? ex.sellerLastSeenText.toLowerCase() : null,
+    ex.sellerRating !== null ? `${ex.sellerRating} stelle` : null,
+    ex.sellerFeedbackCount !== null ? `${ex.sellerFeedbackCount} recension${ex.sellerFeedbackCount === 1 ? 'e' : 'i'}` : null,
+    ex.sellerBusiness ? 'venditore professionale' : null,
+    ...(ex.sellerBadges || []).map((b) => BADGE_LABELS[b]).filter(Boolean),
+  ].filter(Boolean)
+  if (sellerBits.length) found.push(`Venditore: ${sellerBits.join(', ')}`)
+  guessed.push(`Venditore: ${labelOf(SELLER_PROFILES, seller.id).toLowerCase()} (${seller.reason})`)
+  if (ex.sellerFeedbackCount === null) missing.push('numero di recensioni')
+
+  const signal = signalFromText(`${ex.title || ''} ${ex.description || ''}`)
+  form.listingSignal = signal.id
+  if (signal.id !== 'none') found.push(`Nell'annuncio: ${signal.reason}`)
+
+  return { form, summary: { found, guessed, missing, condition: ex.condition, brand: ex.brand } }
 }
 
 // ───────────────────────── src/theme.js ─────────────────────────
@@ -2092,6 +2510,74 @@ function StrategyCard({ result }) {
       <p className={cx('mt-4 text-xs', SURFACE.muted)}>
         Stime basate su euristiche di psicologia della negoziazione e sulle abitudini d'uso di Vinted, non su dati ufficiali della piattaforma.
       </p>
+    </Card>
+  )
+}
+
+// ───────────────────────── src/components/OptimizeCard.jsx ─────────────────────────
+function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply }) {
+  const currentPct = toPercent(result.probability)
+  const goalPct = Math.round(goal * 100)
+  const alreadyThere = currentPct >= goalPct
+
+  return (
+    <Card eyebrow="Obiettivo" title="Quante probabilità vorresti?" icon={Target}>
+      <div role="radiogroup" aria-label="Probabilità desiderata" className="flex flex-wrap gap-2">
+        {GOAL_CHOICES.map((g) => {
+          const active = Math.abs(goal - g) < 0.001
+          return (
+            <button
+              key={g}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => onGoal(g)}
+              className={cx('rounded-full px-3.5 py-2 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600', active ? SURFACE.chipActive : SURFACE.chip)}
+            >
+              {Math.round(g * 100)}%
+            </button>
+          )
+        })}
+      </div>
+      <p className={cx('mt-3 text-sm', SURFACE.muted)}>
+        Oggi sei al {currentPct}%. Con un clic cerco il modo più economico per arrivare al {goalPct}%: aspettare un momento migliore, alzare di poco l'offerta, o entrambe le cose.
+      </p>
+      <Button icon={Wand2} onClick={onOptimize} disabled={alreadyThere} className="mt-3 w-full sm:w-auto">
+        Portami al {goalPct}%
+      </Button>
+      {alreadyThere && <p className={cx('mt-2 text-xs', SURFACE.muted)}>Sei già oltre questo obiettivo: scegli una percentuale più alta.</p>}
+
+      {plan && !plan.ok && (
+        <p className="mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-950 ring-1 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-100 dark:ring-amber-900">
+          Non posso ottimizzare questa offerta: {plan.reason === 'no_offer_needed' ? 'non serve nessuna offerta.' : 'controlla i dati inseriti.'}
+        </p>
+      )}
+      {plan && plan.ok && (
+        <div className="mt-4 flex flex-col gap-3">
+          {plan.options.length === 0 && (
+            <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-950 ring-1 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-100 dark:ring-amber-900">
+              Il {Math.round(plan.target * 100)}% non è raggiungibile senza pagare quasi il prezzo pieno. Il massimo è {toPercent(plan.maxAchievable.probability)}%: {plan.maxAchievable.changes.join(' e ').toLowerCase()}.
+            </p>
+          )}
+          {plan.options.map((o, index) => (
+            <div key={o.id} className={cx('rounded-xl p-3 ring-1', index === 0 ? 'ring-teal-600 dark:ring-teal-400' : 'ring-slate-200 dark:ring-slate-700', SURFACE.cardMuted)}>
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm font-semibold">{index === 0 && <Sparkles className="mr-1 inline h-4 w-4 text-teal-600" aria-hidden="true" />}{o.label}</p>
+                <p className={cx('shrink-0 text-sm font-semibold tabular-nums', TONE.good.text)}>{toPercent(o.probability)}% ({formatPoints(o.deltaPoints)})</p>
+              </div>
+              <ul className="mt-1.5 flex flex-col gap-1 text-sm">
+                {o.changes.map((c) => <li key={c}>• {c}</li>)}
+              </ul>
+              <Button variant={index === 0 ? 'primary' : 'secondary'} onClick={() => onApply(o)} className="mt-3 w-full sm:w-auto">
+                Applica questa scelta
+              </Button>
+            </div>
+          ))}
+          {plan.options.length > 0 && plan.maxAchievable.probability > plan.options[0].probability + 0.05 && (
+            <p className={cx('text-xs', SURFACE.muted)}>Massimo raggiungibile: {toPercent(plan.maxAchievable.probability)}% ({plan.maxAchievable.changes.join(', ').toLowerCase()}).</p>
+          )}
+        </div>
+      )}
     </Card>
   )
 }

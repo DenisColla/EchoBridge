@@ -25,6 +25,8 @@ const ORDER = [
   'src/core/messages.js',
   'src/core/reasoning.js',
   'src/core/analyze.js',
+  'src/core/optimize.js',
+  'src/core/extract.js',
   'src/theme.js',
   'src/platform/clipboard.js',
   'src/hooks/useOfferAnalysis.js',
@@ -40,6 +42,7 @@ const ORDER = [
   'src/components/VerdictCard.jsx',
   'src/components/MessageCard.jsx',
   'src/components/StrategyCard.jsx',
+  'src/components/OptimizeCard.jsx',
   'src/components/EmptyState.jsx',
   'src/App.jsx',
 ]
@@ -48,6 +51,7 @@ const reactImports = new Set()
 const lucideImports = new Set()
 const bodies = []
 const declared = new Map() // top-level identifier → file, to catch collisions between concatenated modules
+const localImports = [] // { name, file, source }: every name imported from a local module must be declared somewhere in the bundle
 
 const IMPORT_RE = /^import\s+([\s\S]*?)\s+from\s+'([^']+)'\s*$/
 
@@ -73,6 +77,8 @@ for (const file of ORDER) {
         clause.replace(/[{}]/g, '').split(',').map((s) => s.trim()).filter(Boolean).forEach((s) => lucideImports.add(s))
       } else if (!source.startsWith('.')) {
         throw new Error(`Unexpected external import '${source}' in ${file}`)
+      } else {
+        clause.replace(/[{}]/g, '').split(',').map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean).forEach((name) => localImports.push({ name, file, source }))
       }
       i++
       continue
@@ -91,6 +97,12 @@ for (const file of ORDER) {
     i++
   }
   bodies.push(`// ───────────────────────── ${file} ─────────────────────────\n${out.join('\n').trim()}\n`)
+}
+
+// A module missing from ORDER would leave a dangling reference that only fails at runtime in the browser.
+const missing = localImports.filter(({ name }) => !declared.has(name))
+if (missing.length) {
+  throw new Error(`Imported but not bundled (add the module to ORDER): ${missing.map((m) => `${m.name} (${m.file} ← ${m.source})`).join(', ')}`)
 }
 
 const header = `/**

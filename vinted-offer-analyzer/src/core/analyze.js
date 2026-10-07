@@ -62,7 +62,8 @@ export const withPrices = (input, listPrice, targetPrice) => {
   return { ...input, listPrice, targetPrice, discountPct, riskBand: riskBandFor(discountPct) }
 }
 
-const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 : 5)
+/** Price grid used when searching prices: 0,50 € under 20 €, 1 € under 200 €, then 5 €. */
+export const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 : 5)
 
 /**
  * Smallest price increase (from the target upward) whose best moment reaches the

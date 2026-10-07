@@ -1,7 +1,7 @@
 import { VINTED } from './constants.js'
 import { formatLongDate, formatRelativeDay, formatTime, isSameDay } from './dates.js'
 import { formatEuro } from './messages.js'
-import { normalizeInput, withPrices } from './analyze.js'
+import { normalizeInput, priceStepFor, withPrices } from './analyze.js'
 import { evaluateSlot, pickMoments } from './scheduler.js'
 
 /** Next "round" goal above the current probability: 63% → 70%, 88% → 93%, capped at 95%. */
@@ -12,7 +12,6 @@ export const nextGoalFor = (p) => {
 
 export const GOAL_CHOICES = [0.5, 0.6, 0.7, 0.8, 0.9]
 
-const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 : 5)
 const roundPrice = (v) => Math.round(v * 100) / 100
 
 const bestByProbability = (moments) =>
