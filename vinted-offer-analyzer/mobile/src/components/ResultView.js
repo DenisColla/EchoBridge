@@ -274,7 +274,53 @@ function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply, busy })
   )
 }
 
-export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData, onCounter }) {
+/**
+ * Failure risk even at the recommended moment and price: the complement of the estimate with a range, the reasons and
+ * what the user's own history says. Without outcomes the range is wide on purpose.
+ */
+function RiskCard({ risk }) {
+  if (!risk) return null
+  const tone = toneForLevel(risk.level)
+  const pct = (x) => Math.round(x * 100)
+  return (
+    <Card>
+      <SectionLabel>Rischio di fallimento</SectionLabel>
+      <Title>Anche nel momento giusto può andare male</Title>
+      <Row>
+        <Badge tone={tone}>{pct(risk.pFail)}% di rischio · tra {pct(risk.range[0])} e {pct(risk.range[1])}%</Badge>
+        <Badge tone="neutral">{risk.basis === 'history' ? 'Calibrato sui tuoi esiti' : 'Stima del motore, non ancora calibrata'}</Badge>
+      </Row>
+      {risk.reasons.length > 0 && (
+        <View style={{ gap: 2 }}>
+          <Body small style={{ fontWeight: '700' }}>Perché può fallire</Body>
+          {risk.reasons.map((r) => <Body key={r.id} small>• {r.text}</Body>)}
+        </View>
+      )}
+      {risk.similar ? (
+        <Body muted small>Nel tuo storico, con uno sconto simile: {risk.similar.successes} accettate su {risk.similar.n} offerte.</Body>
+      ) : null}
+      {risk.closeAfterFail ? (
+        <Body muted small>Quando la prima offerta non passa, hai chiuso comunque {risk.closeAfterFail.closed} trattative su {risk.closeAfterFail.n}.</Body>
+      ) : null}
+      {risk.plan.map((p) => <Note key={p}>{p}</Note>)}
+    </Card>
+  )
+}
+
+/** The flagged test variation (about 1 offer in 5) and the way out of it. */
+function ExplorationNote({ exploration, onSkip }) {
+  if (!exploration) return null
+  const what = exploration.kind === 'time' ? `invio ${exploration.label}` : `${exploration.label} (${String(exploration.price).replace('.', ',')} € invece di ${String(exploration.base.price).replace('.', ',')} €)`
+  return (
+    <Note tone="warn">
+      Variante di test: {what}. Costo stimato {exploration.costPoints > 0 ? `${exploration.costPoints} ${exploration.costPoints === 1 ? 'punto' : 'punti'}` : 'nessuno'} di probabilità: serve al motore per capire se orari e sconti vicini rendono di più.
+      {onSkip ? '\n' : ''}
+      {onSkip ? <Text style={{ fontWeight: '700', textDecorationLine: 'underline' }} onPress={onSkip} accessibilityRole="button">Usa il piano migliore</Text> : null}
+    </Note>
+  )
+}
+
+export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData, onCounter, risk = null, onSkipExploration = null }) {
   const t = useTheme()
   if (result.kind === 'no_offer_needed') {
     return (
@@ -293,9 +339,10 @@ export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy
           {result.message}{'\n'}{result.capAdvice.map((a) => `• ${a}`).join('\n')}
         </Note>
       )}
-      {result.pinned && <Note>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</Note>}
+      {result.exploration ? <ExplorationNote exploration={result.exploration} onSkip={onSkipExploration} /> : result.pinned && <Note>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</Note>}
       <ScoreCard result={result} />
       <VerdictCard result={result} />
+      <RiskCard risk={risk} />
       {extraction && extraction.ok && <SourceCard extraction={extraction} onEdit={onEditData} />}
       <Card style={{ borderColor: t.accent }}>
         <SectionLabel>Promemoria</SectionLabel>

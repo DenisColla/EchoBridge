@@ -79,13 +79,58 @@ export async function cancelReminder(notificationId) {
   }
 }
 
-/** Calls `onOpen(data)` when the user taps a reminder (app running or cold start). */
+/**
+ * Calls `onOpen(data)` when the user taps a reminder (app running or cold start). The cold-start response is cleared
+ * once handled: otherwise every later cold start would replay the same tap.
+ */
 export function listenToReminderTaps(onOpen) {
-  Notifications.getLastNotificationResponseAsync().then((response) => {
-    if (response) onOpen(response.notification.request.content.data || {})
-  }).catch(() => {})
+  try {
+    const response = typeof Notifications.getLastNotificationResponse === 'function' ? Notifications.getLastNotificationResponse() : null
+    if (response) {
+      onOpen(response.notification.request.content.data || {})
+      if (typeof Notifications.clearLastNotificationResponse === 'function') Notifications.clearLastNotificationResponse()
+    }
+  } catch {
+    // not available on this platform (web preview)
+  }
   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
     onOpen(response.notification.request.content.data || {})
   })
   return () => sub.remove()
+}
+
+/**
+ * The monthly "report ready" reminder: a repeating MONTHLY trigger (1st of the month, 09:07), restored by Android after
+ * a reboot. Force-stop clears alarms, so it is re-checked at every start. Never prompts for permission: without it the
+ * report still runs at the first app open of the month. A local notification cannot run code when it fires: tapping
+ * it opens the app, and the app makes the report. Returns the notification id or null.
+ */
+export async function ensureMonthlyReminder() {
+  try {
+    const p = await Notifications.getPermissionsAsync()
+    if (!p.granted) return null
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync()
+    const existing = scheduled.find((n) => n.content && n.content.data && n.content.data.kind === 'monthly')
+    if (existing) return existing.identifier
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
+        name: 'Promemoria offerte',
+        description: 'Ti avvisa pochi minuti prima della finestra giusta per inviare l\'offerta.',
+        importance: Notifications.AndroidImportance.HIGH,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#0f766e',
+      })
+    }
+    return await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Report mensile delle offerte',
+        body: 'Apri l\'app: preparo l\'Excel del mese appena chiuso e aggiorno il motore con i tuoi esiti.',
+        data: { kind: 'monthly' },
+        sound: 'default',
+      },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.MONTHLY, day: 1, hour: 9, minute: 7, channelId: CHANNEL_ID },
+    })
+  } catch {
+    return null
+  }
 }

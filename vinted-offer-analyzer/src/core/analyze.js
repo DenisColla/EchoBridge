@@ -185,7 +185,8 @@ function buildAnalysis(input, now, options = {}) {
 export function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  const { input } = normalized
+  // The learned profile rides on the input, so every scoreAt call (slots, price search, two-step) sees it.
+  const input = options.profile ? { ...normalized.input, profile: options.profile } : normalized.input
 
   if (input.discountPct <= 0) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')

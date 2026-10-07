@@ -85,7 +85,7 @@ const byUtilityThenDate = (a, b) => b.utility - a.utility || a.date - b.date
  * Chooses the moment to recommend. Among near-ties (within 1.5pp or 3% of the
  * best utility) the earliest wins, so the verdict does not flip by weeks on noise.
  */
-export function pickMoments(input, now, { preferredSendAt = null } = {}) {
+export function pickMoments(input, now, { preferredSendAt = null, exactSendAt = null } = {}) {
   const horizon = horizonFor(input)
   const evaluated = buildCandidateSlots(input, now, horizon).map((s) => evaluateSlot(input, s))
   // "Now" competes only when neither the current instant nor the +5 min send moment sits in an unfavourable window.
@@ -102,6 +102,14 @@ export function pickMoments(input, now, { preferredSendAt = null } = {}) {
     const nearest = [...eligible].sort((a, b) => Math.abs(a.date.getTime() - wanted) - Math.abs(b.date.getTime() - wanted))[0]
     if (nearest && Math.abs(nearest.date.getTime() - wanted) <= 3 * 3_600_000) {
       chosen = nearest
+      pinned = true
+    }
+  }
+  // An exact moment (the learning loop's flagged ±1 h variation) is scored as its own slot and always chosen.
+  if (exactSendAt) {
+    const exactDate = ceilToMinutes(new Date(exactSendAt), 5)
+    if (Number.isFinite(exactDate.getTime()) && exactDate.getTime() > now.getTime()) {
+      chosen = evaluateSlot(input, { date: exactDate, daysWaited: calendarDaysBetween(now, exactDate), kind: 'canonical', exact: true, windowId: timeWindowAt(exactDate).id })
       pinned = true
     }
   }

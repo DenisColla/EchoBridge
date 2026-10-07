@@ -16,7 +16,7 @@ const priceText = (v) => (Math.abs(v - Math.round(v)) > 0.004 ? v.toFixed(2) : S
  * the engine returns the best reply price, the moment to send it, the plan for the next round and the message.
  * `context` comes from a fresh analysis ({ form }) or from a saved item ({ itemId, form, history }).
  */
-export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null }) {
+export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null }) {
   const t = useTheme()
   const pendingScroll = useRef(false)
   const history = Array.isArray(context.history) ? context.history : []
@@ -76,7 +76,8 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
   }
 
   const run = (opts = {}) => {
-    const outcome = analyzeCounter(buildRaw(), clock(), opts)
+    // The learned profile (monthly report) corrects the acceptance of our counter for this user's sellers.
+    const outcome = analyzeCounter(buildRaw(), clock(), profile ? { ...opts, profile } : opts)
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)

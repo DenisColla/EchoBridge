@@ -5,6 +5,7 @@ import { ensureNotificationPermission, getNotificationStatus } from '../services
 import { STEP_LABEL, VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
 import { space } from '../theme.js'
 import { Body, Button, Card, Note, SectionLabel, Title } from './ui.js'
+import { LearningCard } from './LearningCard.js'
 
 const STATUS_LABEL = {
   granted: 'Notifiche attive',
@@ -55,7 +56,7 @@ function CalendarSection() {
   )
 }
 
-export function InfoView({ stats, items }) {
+export function InfoView({ stats, items, learning = null, onToast = () => {} }) {
   const [status, setStatus] = useState('undetermined')
   useEffect(() => {
     getNotificationStatus().then(setStatus)
@@ -69,8 +70,12 @@ export function InfoView({ stats, items }) {
     }
   }
 
+  const discount = learning ? learning.discountPct : 20
+
   return (
     <View style={{ gap: space.lg }}>
+      <LearningCard learning={learning} onToast={onToast} />
+
       <Card>
         <SectionLabel>Promemoria</SectionLabel>
         <Title>{STATUS_LABEL[status] || STATUS_LABEL.undetermined}</Title>
@@ -84,24 +89,25 @@ export function InfoView({ stats, items }) {
         <SectionLabel>I tuoi esiti</SectionLabel>
         <Title>Quanto sono affidabili le stime</Title>
         <Body>Offerte salvate: {stats.total} · da inviare: {stats.planned} · con esito: {stats.sent}</Body>
-        <Body>Accettate: {stats.accepted} · controproposte: {stats.countered} · rifiutate: {stats.declined} · senza risposta: {stats.noReply}</Body>
+        <Body>Accettate: {stats.accepted} · controproposte: {stats.countered} · rifiutate: {stats.declined} · senza risposta: {stats.noReply}{stats.soldOther ? ` · vendute ad altri: ${stats.soldOther}` : ''}</Body>
+        {stats.archived ? <Body muted small>Più {stats.archived} {stats.archived === 1 ? 'trattativa eliminata dalla lista' : 'trattative eliminate dalla lista'}: restano nel report mensile.</Body> : null}
         {stats.averageSaving != null ? <Body>Risparmio medio sul listino: {formatEuro(stats.averageSaving)} su {stats.closedDeals} {stats.closedDeals === 1 ? 'acquisto' : 'acquisti'}</Body> : null}
         {stats.countersWon != null ? <Body>Controproposte chiuse sotto la cifra del venditore: {Math.round(stats.countersWon * 100)}% ({stats.countersClosed} {stats.countersClosed === 1 ? 'trattativa' : 'trattative'})</Body> : null}
         {stats.acceptanceRate !== null ? (
           <Note tone={stats.acceptanceRate >= (stats.predictedAverage || 0) ? 'good' : 'warn'}>
-            Accettazione reale {Math.round(stats.acceptanceRate * 100)}% contro una stima media del {Math.round((stats.predictedAverage || 0) * 100)}%. Con qualche decina di esiti i pesi del modello si possono ritarare.
+            Accettazione reale {Math.round(stats.acceptanceRate * 100)}% contro una stima media del {Math.round((stats.predictedAverage || 0) * 100)}%. Il report mensile ritara il motore su questi esiti, a piccoli passi.
           </Note>
         ) : (
           <Body muted small>Segna l'esito di ogni offerta inviata: è l'unico modo per capire se il modello sovrastima o sottostima.</Body>
         )}
-        <Button label="Esporta gli esiti (JSON)" variant="secondary" onPress={exportData} disabled={items.length === 0} />
+        <Button label="Backup dei dati (JSON)" variant="ghost" small onPress={exportData} disabled={items.length === 0} />
       </Card>
 
       <Card>
         <SectionLabel>Lettura dal link</SectionLabel>
         <Title>Che cosa legge l'app da un annuncio</Title>
         <Body>• Dalla pagina pubblica dell'annuncio: titolo, prezzo, marca, condizioni, categoria, data di caricamento e ultima attività del venditore (es. "Ultima visita 26 min fa"), più la valutazione in stelle.</Body>
-        <Body>• Da questi dati stima categoria e tipo di venditore e propone un target al −{20}%: controlla sempre i campi stimati prima di salvare.</Body>
+        <Body>• Da questi dati stima categoria e tipo di venditore e propone un target al −{discount}%{discount !== 20 ? ' (appreso dai tuoi esiti)' : ''}: controlla sempre i campi stimati prima di salvare.</Body>
         <Body>• Il numero di recensioni e i distintivi del venditore vengono letti quando la pagina li contiene; se mancano, il tipo di venditore resta "Non lo so" e puoi impostarlo a mano.</Body>
         <Body muted small>La lettura usa solo la pagina pubblica, senza login. Se Vinted blocca la richiesta, l'app te lo dice e puoi compilare i dati a mano.</Body>
       </Card>

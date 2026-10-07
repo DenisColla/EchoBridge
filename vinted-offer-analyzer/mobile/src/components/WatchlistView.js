@@ -65,6 +65,7 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onCounter
       {item.status === 'planned' && past && <Note tone="warn">La finestra consigliata è passata: ricalcola l'offerta o segna l'esito.</Note>}
       {pendingCounter && past && <Note tone="warn">Il momento consigliato è passato: tocca «Ricalcola» per un nuovo piano.</Note>}
       {item.notificationId || (plan && Object.keys(plan.reminderIds || {}).length) ? <Body muted small>Promemoria impostato.</Body> : item.status === 'planned' ? <Body muted small>Nessun promemoria attivo (troppo vicino o permesso negato).</Body> : null}
+      {item.decision && item.decision.exploration ? <Body muted small>Variante di test: {item.decision.exploration.label}.</Body> : null}
       {item.link ? <Body muted small numberOfLines={1}>{hostOf(item.link)}</Body> : null}
       <ButtonRow>
         {item.link ? <Button label="Apri annuncio" onPress={() => Linking.openURL(item.link).catch(() => {})} /> : null}
@@ -92,7 +93,7 @@ function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onCounter
               <Chip key={s.id} compact label={s.label} active={item.status === s.id} onPress={() => { setShowOutcome(false); if (s.id === 'countered') onCounter(item); else onStatus(item.id, s.id) }} />
             ))}
           </Row>
-          <Body muted small>«Controproposta» apre il calcolo della tua risposta. Gli esiti restano sul telefono e servono a misurare quanto sono affidabili le stime.</Body>
+          <Body muted small>«Controproposta» apre il calcolo della tua risposta. Gli esiti restano sul telefono e ogni mese ritarano il motore: segna anche «Venduto ad altri» o «Lasciato perdere».</Body>
         </View>
       )}
     </Card>

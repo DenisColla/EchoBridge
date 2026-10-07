@@ -5,6 +5,7 @@ import {
 } from './constants.js'
 import { clamp, interpolate, interpolateLogit, ramp, squash } from './math.js'
 import { daysInMonth, isItalianHoliday, minutesOfDay } from './dates.js'
+import { learnedOfferRow } from './profile.js'
 
 export const findCategory = (id) => CATEGORIES.find((c) => c.id === id) || null
 export const findListingAge = (id) => LISTING_AGES.find((a) => a.id === id) || LISTING_AGES[0]
@@ -130,12 +131,17 @@ export function scoreAt(input, sendDate, daysWaited = 0) {
   const factors = raw.map((f) => ({ ...f, rawWeight: f.weight, weight: f.weight > 0 ? f.weight * posScale : f.weight * negScale }))
 
   const total = base + factors.reduce((s, f) => s + f.weight, 0)
+  // The learned correction (monthly profile) comes after the caps: it measures how this user's sellers really answer.
+  const learned = learnedOfferRow(input.profile, { logit: total, windowId: timeWindow.id, discountPct })
+  const logit = learned ? total + learned.weight : total
   return {
     base,
-    logit: total,
-    pAccept: squash(total),
+    logit,
+    rawLogit: total,
+    learnedWeight: learned ? learned.weight : 0,
+    pAccept: squash(logit),
     pBase: squash(base),
-    factors,
+    factors: learned ? [...factors, learned] : factors,
     capped: posScale < 1 || negScale < 1,
     timeWindow,
     monthWindow,

@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { analyzeOffer, buildFormFromExtraction, formatEuro, nextGoalFor, optimizeOffer, parseVintedItemHtml } from './core/index.js'
+import {
+  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationArmFor, explorationKey, exploreOffer, failureRiskFor, formatEuro, monthKeyOf,
+  nextGoalFor, optimizeOffer, parseVintedItemHtml,
+} from './core/index.js'
 import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
 import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
 import { CounterView } from './src/components/CounterView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
+import { useLearning } from './src/hooks/useLearning.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
@@ -22,8 +26,6 @@ const TABS = [
 
 const EXAMPLE_FORM = { ...EMPTY_FORM, itemTitle: 'Nike Air Force 1 bianche, 42', category: 'sneakers', listPrice: '60', targetPrice: '45', listingAge: 'weeks_1_2' }
 
-/** Default ask when the price comes from the listing: −20% sits in the "medium risk" band, the usual starting point on Vinted. */
-const DEFAULT_TARGET_DISCOUNT = 20
 
 const EXTRACT_ERRORS = {
   not_a_vinted_link: 'Serve un link a un articolo Vinted, del tipo vinted.it/items/… .',
@@ -65,6 +67,8 @@ function Main() {
   const formRef = useRef(form)
   const offeredLinkRef = useRef(null)
   const watchlist = useWatchlist()
+  const learning = useLearning({ items: watchlist.allItems, ready: watchlist.ready })
+  const skipExploreRef = useRef(new Set())
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toastTimer = useRef(null)
@@ -75,6 +79,11 @@ function Main() {
   }, [])
 
   useEffect(() => listenToReminderTaps((data) => {
+    if (data && data.kind === 'monthly') {
+      setCounterContext(null)
+      setTab('info')
+      return
+    }
     if (data && data.itemId) {
       setCounterContext(null)
       setTab('lista')
@@ -82,10 +91,42 @@ function Main() {
     }
   }), [])
 
+  /** Monthly close: at the first open of a new month (and when the app comes back to the foreground). */
+  const runMonthly = useCallback(async () => {
+    const entry = await learning.runDue(new Date())
+    if (!entry) return
+    const where = entry.savedTo === 'folder' ? `salvato in ${learning.folder ? learning.folder.label : 'cartella'}` : entry.savedTo === 'app' ? 'pronto nella scheda Info' : 'pronto'
+    showToast(`Report di ${entry.label} ${where}: ${entry.changes.length ? `${entry.changes.length} ${entry.changes.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato'}.`, 5000)
+  }, [learning, showToast])
+  const runMonthlyRef = useRef(runMonthly)
+  useEffect(() => { runMonthlyRef.current = runMonthly }, [runMonthly])
+  useEffect(() => {
+    if (watchlist.ready && learning.ready) runMonthlyRef.current()
+  }, [watchlist.ready, learning.ready])
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') runMonthlyRef.current() })
+    return () => sub.remove()
+  }, [])
+
   const setField = (name, value) => setForm((prev) => ({ ...prev, [name]: value }))
 
-  const runAnalysis = (nextForm, preferredSendAt) => {
-    const outcome = analyzeOffer(nextForm, new Date(), preferredSendAt ? { preferredSendAt } : {})
+  /** Engine options with the learned profile (none until the monthly report has something to correct). */
+  const engineOptions = (extra = {}) => ({ ...extra, ...(learning.engineProfile ? { profile: learning.engineProfile } : {}) })
+
+  /**
+   * `explore` only for fresh analyses (Calcola, link): a pinned moment or an applied option is the user's own choice.
+   * About 1 offer in 5 gets its flagged test variation, the same one every time the offer is re-analysed this month.
+   */
+  const runAnalysis = (nextForm, preferredSendAt, { explore = false } = {}) => {
+    const at = new Date()
+    const options = engineOptions(preferredSendAt ? { preferredSendAt } : {})
+    let outcome = analyzeOffer(nextForm, at, options)
+    if (outcome.ok && explore && learning.exploration) {
+      const key = explorationKey(nextForm)
+      const arm = skipExploreRef.current.has(key) ? null : explorationArmFor(key, monthKeyOf(at))
+      const varied = arm ? exploreOffer(nextForm, outcome, arm, at, options) : null
+      if (varied) outcome = varied.result
+    }
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
@@ -102,6 +143,14 @@ function Main() {
   const analyze = () => {
     setPlan(null)
     setPinnedSendAt(null)
+    runAnalysis(form, null, { explore: true })
+  }
+
+  /** «Usa il piano migliore»: this offer skips its test variation (until the app restarts). */
+  const skipExploration = () => {
+    skipExploreRef.current.add(explorationKey(form))
+    setPlan(null)
+    setPinnedSendAt(null)
     runAnalysis(form, null)
   }
 
@@ -111,7 +160,7 @@ function Main() {
   const optimize = () => {
     setOptimizing(true)
     setTimeout(() => {
-      setPlan(optimizeOffer(form, new Date(), { targetProbability: goal }))
+      setPlan(optimizeOffer(form, new Date(), engineOptions({ targetProbability: goal })))
       setOptimizing(false)
     }, 20)
   }
@@ -186,11 +235,12 @@ function Main() {
         setExtraction({ ok: false, message: EXTRACT_ERRORS.empty })
         return
       }
-      const built = buildFormFromExtraction(ex, { link, targetDiscountPct: DEFAULT_TARGET_DISCOUNT, previousForm: { ...EMPTY_FORM, link } })
+      // Default ask: −20% (the "medium risk" band), or the starting discount learned from the user's own outcomes.
+      const built = buildFormFromExtraction(ex, { link, targetDiscountPct: defaultDiscountFor(learning.profile), previousForm: { ...EMPTY_FORM, link } })
       setForm(built.form)
       setPlan(null)
       setPinnedSendAt(null)
-      const outcome = runAnalysis(built.form, null)
+      const outcome = runAnalysis(built.form, null, { explore: true })
       setExtraction({ ok: true, summary: built.summary, link, at: Date.now() })
       if (!outcome) {
         showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
@@ -228,7 +278,7 @@ function Main() {
 
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
-    const { item, reminder } = await watchlist.addFromAnalysis({ result, link: form.link, form })
+    const { item, reminder } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
     const messages = {
       scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${result.verdict.headline.replace("Invia l'offerta ", '')}.` },
       too_soon: { tone: 'warn', message: 'Salvato. Il momento consigliato è troppo vicino per una notifica: invia l\'offerta adesso.' },
@@ -313,9 +363,9 @@ function Main() {
     scrollTop()
   }
 
-  const saveCounter = async (counterResult) => {
+  const saveCounter = async (counterResult, rawCounter = null) => {
     const ctx = counterContext
-    const { item, reminder } = await watchlist.addCounter({ itemId: ctx.itemId, result: counterResult, link: ctx.link, form: ctx.form })
+    const { item, reminder } = await watchlist.addCounter({ itemId: ctx.itemId, result: counterResult, link: ctx.link, form: ctx.form, raw: rawCounter })
     setCounterContext((prev) => (prev ? { ...prev, itemId: item.id, history: item.negotiation } : prev))
     // Link the first-offer result to the new item, so reopening or «Salva» does not create a duplicate.
     if (ctx.source === 'analysis' && !ctx.itemId) setSaveState({ saved: true, itemId: item.id, tone: 'neutral', message: 'Salvato nella lista con la controproposta.' })
@@ -356,6 +406,9 @@ function Main() {
       : `Registrato: hai proposto ${price}.`, 4000)
   }
 
+  /** Failure risk of the offer on screen, calibrated on the user's outcomes when there are any. */
+  const risk = useMemo(() => (result && result.ok && result.kind !== 'no_offer_needed' ? failureRiskFor(result, { profile: learning.engineProfile, records: learning.records }) : null), [result, learning.engineProfile, learning.records])
+
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
   const bottomInset = Math.max(insets.bottom, 8)
 
@@ -380,6 +433,7 @@ function Main() {
               onSave={saveCounter}
               onCalendar={counterCalendar}
               calendarBusy={calendarBusy}
+              profile={learning.engineProfile}
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />
           )}
@@ -411,6 +465,8 @@ function Main() {
                   extraction={extraction}
                   onEditData={scrollToForm}
                   onCounter={openCounterFromAnalysis}
+                  risk={risk}
+                  onSkipExploration={result.exploration ? skipExploration : null}
                 />
               )}
               <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
@@ -441,7 +497,7 @@ function Main() {
               onCounterSent={counterSent}
             />
           )}
-          {!counterContext && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.items} />}
+          {!counterContext && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>
 

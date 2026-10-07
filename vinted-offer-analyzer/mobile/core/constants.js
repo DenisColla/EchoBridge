@@ -275,3 +275,70 @@ export const SELLER_STANCES = {
   moving: { label: 'Tratta', why: 'È sceso, ma meno della media.' },
   flexible: { label: 'Flessibile', why: 'È sceso almeno quanto fa di solito chi vuole chiudere.' },
 }
+
+/* ───────── monthly learning loop (calibration from the user's own outcomes) ───────── */
+
+/** Stamped on every decision snapshot, so the monthly report knows which engine produced each estimate. */
+export const ENGINE_VERSION = '1.3.0'
+
+/**
+ * The 16 time windows pooled into 5 groups: with a handful of offers a month a single window never collects enough
+ * outcomes, a group does. Holidays fall into the Sunday windows, so into the same groups.
+ */
+export const LEARNING_TIME_GROUPS = [
+  { id: 'prime_evening', label: 'Sere migliori (dom e lun–gio 21–23)', windows: ['sunday_night', 'weeknight_late', 'weeknight_early', 'weeknight_end'] },
+  { id: 'weekend', label: 'Weekend (ven–sab sera, sab–dom di giorno)', windows: ['friday_night', 'saturday_night', 'sunday_afternoon', 'sunday_morning', 'saturday_morning'] },
+  { id: 'evening_other', label: 'Ora di cena e fasce neutre', windows: ['after_dinner', 'neutral'] },
+  { id: 'daytime', label: 'Giorno lavorativo (7–18)', windows: ['commute', 'work_morning', 'pre_lunch', 'lunch', 'work_afternoon'] },
+  { id: 'night', label: 'Notte (0–7)', windows: ['night'] },
+]
+
+export const LEARNING_BANDS = [
+  { id: 'low', label: 'Sconto sotto il 15%' },
+  { id: 'medium', label: 'Sconto 15–30%' },
+  { id: 'high', label: 'Sconto oltre il 30%' },
+]
+
+/**
+ * Parameters of the monthly learning loop (src/core/learning.js). All H (heuristic) unless noted: they are tuned for
+ * a buyer with fewer than 15 offers a month, so every learned value starts at the engine default and moves slowly.
+ * Logit units unless noted. The fit uses all history, older months weighted by a half-life.
+ */
+export const LEARNING = {
+  HALF_LIFE_MONTHS: 6,
+  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, band: 0.35, counter: 0.5 },
+  /** Weighted outcomes a parameter needs before it may move at all. */
+  MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, band: 6, counter: 6, discount: 10 },
+  /** Largest change applied in one month (the fit may want more: the rest waits for next month). */
+  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, band: 0.2, counter: 0.3, discountPct: 1 },
+  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], band: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30] },
+  /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
+  MIN_CHANGE: 0.02,
+  MIN_CHANGE_DISCOUNT_PCT: 0.5,
+  DEFAULT_DISCOUNT_PCT: 20,
+  /** An offer sent with no outcome after this many days counts as "no reply" (Vinted offers lapse well before). */
+  NO_REPLY_AFTER_DAYS: 7,
+  /** A counter of ours with no outcome after this many days counts as not accepted. */
+  COUNTER_NO_REPLY_AFTER_DAYS: 4,
+  /** Exploration: share of first offers that get a small, flagged variation (user choice: about 1 in 5). */
+  EXPLORE_SHARE: 0.2,
+  EXPLORE_TIME_MINUTES: 60,
+  EXPLORE_DISCOUNT_PTS: 2,
+  /** A variation is skipped when it would cost more than this in estimated acceptance (probability points). */
+  EXPLORE_MAX_COST: 0.06,
+  /** Reliability table bins for the calibration sheet. */
+  RELIABILITY_BINS: [0, 0.2, 0.4, 0.6, 0.8, 1.0001],
+  /** Months of reports caught up at once when the app was not opened for a while. */
+  MAX_CATCH_UP_MONTHS: 6,
+  /**
+   * Starting-discount objective (share of list price): ES(d) = p(d)·d + (1 − p(d))·[q(d)·ρ·d − (1 − q(d))·LOSS].
+   * q = chance a failed first offer still ends in a deal, ρ = saving of those deals relative to the first discount,
+   * LOSS = cost of losing the item (buying elsewhere at list price + 5%, as COUNTER.LOSS_PREMIUM). Priors with weight.
+   * Aggressive openers (27–33%) halve q: an irritated seller rarely keeps negotiating (blockRiskAt's ramp).
+   */
+  CLOSE_AFTER_FAIL_PRIOR: 0.4,
+  CONTINUATION_RATIO_PRIOR: 0.5,
+  CONTINUATION_PRIOR_WEIGHT: 4,
+  LOSS_COST_SHARE: 0.05,
+  AGGRESSIVE_RAMP_PCT: [27, 33],
+}

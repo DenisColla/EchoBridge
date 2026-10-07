@@ -38,10 +38,10 @@ const describeSlot = (slot, now) =>
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
  */
-export function optimizeOffer(raw, now = new Date(), { targetProbability = null } = {}) {
+export function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  let input = normalized.input
+  let input = profile ? { ...normalized.input, profile } : normalized.input
   if (input.discountPct <= 0) return { ok: false, reason: 'no_offer_needed' }
   let capped = false
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {

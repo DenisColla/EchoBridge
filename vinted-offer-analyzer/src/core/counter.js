@@ -23,6 +23,7 @@ import { buildVerdict } from './reasoning.js'
 import { avoidWindowsOn } from './scheduler.js'
 import { ageCurve, attributeFactors, effectiveWeekday, monthWindowAt, sellerWeight, timeWeight, timeWindowAt, uncertaintyFor } from './scoring.js'
 import { buildWarnings, normalizeInput, parsePrice, priceStepFor } from './analyze.js'
+import { learnedCounterRow } from './profile.js'
 
 const CTR_EPS = 1e-9
 const ctrR2 = (v) => Math.round(v * 100) / 100
@@ -185,7 +186,7 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   }
   if (Object.keys(errors).length) return { ok: false, errors, warnings, state: null }
 
-  const input = base.input
+  const input = options.profile ? { ...base.input, profile: options.profile } : base.input
   const L = input.listPrice
   const buyers = useHistory ? buyerEntries.map((h) => h.price) : [B0]
   const sellers = useHistory ? sellerEntries.map((h) => h.price) : [S0]
@@ -345,9 +346,13 @@ export function counterAcceptance(state, side, price, sendDate = null) {
   const negScale = sumNeg < NEGATIVE_CAP ? NEGATIVE_CAP / sumNeg : 1
   const capped = mods.map((m) => ({ ...m, rawWeight: m.weight, weight: m.weight > 0 ? m.weight * posScale : m.weight * negScale }))
   const factors = [{ id: 'split', group: 'split', label: 'Metà strada esatta', weight: split }, ...capped]
-  const logit = core + factors.reduce((s, f) => s + f.weight, 0)
+  const rawLogit = core + factors.reduce((s, f) => s + f.weight, 0)
+  // Learned from this user's counters (monthly profile), after the caps like the first-offer correction.
+  const learned = learnedCounterRow(input.profile, { windowId: timeWindow ? timeWindow.id : null })
+  if (learned) factors.push(learned)
+  const logit = learned ? rawLogit + learned.weight : rawLogit
   return {
-    gapShare, core, isSplit, split, base: core, pBase: squash(core), logit, pAccept: squash(logit), factors,
+    gapShare, core, isSplit, split, base: core, pBase: squash(core), logit, rawLogit, learnedWeight: learned ? learned.weight : 0, pAccept: squash(logit), factors,
     capped: posScale < 1 || negScale < 1, timeWindow, monthWindow, hoursAfter,
   }
 }
@@ -571,7 +576,7 @@ function ctrAcceptOption(state, { stale = false, recommended = false } = {}) {
 }
 
 const ctrNegotiation = (state) => ({
-  listPrice: state.L, previousOffer: state.B, firstOffer: state.buyers[0], sellerCounter: state.S, sellerCounterEntered: state.enteredAs,
+  listPrice: state.L, previousOffer: state.B, firstOffer: state.buyers[0], sellerCounter: state.S, sellerCounterRaw: state.lastSeller, sellerCounterEntered: state.enteredAs,
   round: state.k, buyerCountersSent: state.n, sellerStepEur: state.sigma, sellerStepPct: state.Sprev > 0 ? (state.sigma / state.Sprev) * 100 : 0,
   sellerConcessionShare: state.share, sellerConcessionShareNorm: state.shareNorm, sellerStance: state.stance, sellerStanceLabel: SELLER_STANCES[state.stance].label,
   sellerRaised: state.raised, counterOverOfferPct: (state.S / state.B - 1) * 100, gapEur: ctrR2(state.S - state.B), midpoint: (state.B + state.S) / 2,
@@ -844,6 +849,8 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
       expectedPrice: row.expectedPrice, expectedSaving: S <= state.Wcap + CTR_EPS ? S - row.expectedPrice : null, totalWithFee: buyerTotal(row.price),
       landingPoint: (row.price + S) / 2, overBudget: false, next: row.isFinal ? { final: true, ifHolds: null, ifMoves: null } : { final: false, ifHolds, ifMoves },
       apply: { counterPrice: row.price, preferredSendAt: optimal.date },
+      // For the monthly learning loop: the engine's logit before the learned correction, at the planned moment.
+      learning: { rawLogit: row.score.rawLogit, learnedWeight: row.score.learnedWeight, pRead: row.pRead, windowId: row.score.timeWindow ? row.score.timeWindow.id : null },
     }
   }
   const balancedOption = optionFrom(balanced, 'balanced')

@@ -20,6 +20,7 @@ const ORDER = [
   'src/core/math.js',
   'src/core/dates.js',
   'src/core/constants.js',
+  'src/core/profile.js',
   'src/core/scoring.js',
   'src/core/scheduler.js',
   'src/core/messages.js',
