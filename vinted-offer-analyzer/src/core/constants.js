@@ -9,12 +9,23 @@
 
 /* ───────── Vinted mechanics (verified October 2026; keep configurable) ───────── */
 export const VINTED = {
-  /** The "Fai un'offerta" button refuses anything below 60% of the listing price. */
+  /** The "Fai un'offerta" button refuses anything below 60% of the listing price (seller counters included). */
   MAX_DISCOUNT_PCT: 40,
   /** Per-account daily cap on buyer offers. */
   OFFERS_PER_DAY: 25,
-  /** The seller typically has this long to answer before the offer lapses. */
+  /** Heuristic, not a Vinted rule: Vinted states no official expiry for offers. Used to plan around a prudent 24 hours. */
   OFFER_VALIDITY_HOURS: 24,
+  /** Buyer fee ("Commissione Vinted", formerly buyer protection): 5% of the price + 0,70 €, shipping excluded. */
+  BUYER_FEE_PCT: 5,
+  BUYER_FEE_FIXED: 0.7,
+}
+
+/** Assumptions about counter-offers that Vinted does not document: configurable, and the plans stay sensible either way. */
+export const VINTED_ASSUMED = {
+  /** Shortest public claim for a seller counter; null = assume no expiry. Users report that counters do not lapse. */
+  COUNTER_VALIDITY_HOURS: 24,
+  /** Users report that only the latest offer counts: a new buyer offer may cancel the seller's personal price. */
+  NEW_OFFER_REPLACES_COUNTER: true,
 }
 
 export const CATEGORIES = [
@@ -158,3 +169,109 @@ export const SUGGESTED_PRICE_TARGET_HIGH_BLOCK = 0.6
 export const UNCERTAINTY_PER_UNKNOWN = 0.04
 export const UNCERTAINTY_MAX = 0.08
 export const NEGLIGIBLE_DISCOUNT_PCT = 5
+
+/* ───────── counter-offers (buyer's reply to a seller's "Fai il tuo prezzo") ───────── */
+
+/**
+ * Parameters of the counter-offer engine (src/core/counter.js). E = evidence, H = heuristic.
+ * Core acceptance: Backus, Blake, Larsen & Tadelis 2020 (eBay Best Offer, Table 5), logistic on the share of the
+ * remaining gap we concede, +0,36 at the exact split (Backus; Keniston). Delay: Fong & Waisman 2025. Response
+ * latency: Cotet, Zhao & Krajbich 2025. Messages: Backus et al. 2025, Kuno 2026. Shrinking steps: Tey et al. 2021.
+ * Precise numbers: Mason et al. 2013 (halved). Seller reply table: Backus Fig. 4, Keniston Table 1.
+ */
+export const COUNTER = {
+  CORE_INTERCEPT: -0.34, // E
+  CORE_SLOPE: 4.94, // E
+  SPLIT_BONUS: 0.36, // E
+  SPLIT_TOLERANCE_SHARE: 0.005, // E (Backus: γ = 0,50 ± 0,005)
+  SPLIT_RATIO_RAMP: [0.6, 0.75], // H on E direction: the split norm fades at low offer ratios
+  STANCE_CURVE: [[0, -0.5], [0.1, -0.4], [0.2, -0.25], [0.42, 0], [0.6, 0.15], [0.8, 0.25]], // H on E direction
+  STANCE_THRESHOLDS: { hold: 0.02, firm: 0.2, moving: 0.45 }, // E/H
+  ROUND_MEAN_SHARE: [0.42, 0.23, 0.15], // E (third extrapolated)
+  PRIOR_DAMPING: 0.5, // H: the counter already reveals most of the seller's type
+  DELAY_PER_DOUBLING: 0.06, // E
+  DELAY_REF_HOURS: 6,
+  DELAY_MIN_HOURS: 1,
+  DELAY_MAX_HOURS: 20, // H: saturation
+  COOLING: -0.25, // H
+  COOLING_FROM_HOURS: 20,
+  COOLING_TO_HOURS: 30,
+  HABIT: 0.1, // H: reply at the clock time he was on the app
+  HABIT_TOLERANCE_MINUTES: 60,
+  HABIT_MIN_DELAY_HOURS: 12,
+  HABIT_MAX_UNCERTAINTY_MINUTES: 30,
+  LATENCY_COEF: 0.06, // E (halved)
+  LATENCY_REF_HOURS: 1.5,
+  LATENCY_MIN: -0.1,
+  LATENCY_MAX: 0.15,
+  MESSAGE_BONUS: 0.2, // E (conservative)
+  LATE_PENALTY: -0.1, // H
+  NEXT_ROUND_WINDOW: 0.25, // H: a typical good window for the next round
+  COUNTER_SHARE: { hold: 0.45, firm: 0.55, moving: 0.66, flexible: 0.72 }, // E base 0,66, tilts H
+  HOLD_PROB: { hold: 0.7, firm: 0.55, moving: 0.35, flexible: 0.25 }, // E/H
+  MOVE_SHARE: { hold: 0.25, firm: 0.3, moving: 0.35, flexible: 0.4 }, // E/H
+  EAGER_RAMP: [0.35, 0.5], // H on Lawler & MacMurray 1980 direction
+  EAGER_HOLD: 0.15,
+  EAGER_MOVE: 0.3,
+  HOLD_PROB_MAX: 0.9,
+  PRECISION_PULL: 0.07, // E (Mason 2013) halved
+  RECOVER_PROB: 0.8, // H: chance he still sells at his price if we re-offer it after a breakdown
+  LOSS_PREMIUM: 0.05, // H: losing the item costs a substitute at list price + search
+  SELLER_REPLY_HOURS: 2, // E (Cotet medians)
+  COMPETITION_MULT: 2, // H
+  PUBLIC_PRICE_MULT: 1.5, // H
+  RECIPROCITY_GAP_SHARE: 0.25, // E
+  MIN_FIRST_SHARE: 0.15, // H: no token steps
+  HOLD_MAX_SHARE: 0.35, // E
+  SHRINK_MIN: 0.6, // E (Tey 2021)
+  SHRINK_MAX: 0.75,
+  FINAL_STEP: 0.5,
+  MAX_BUYER_COUNTERS: 3, // E (Backus: 1,66 offers per thread)
+  CLOSE_GAP_EUR: 2, // H: fixed cost of bargaining
+  CLOSE_GAP_PCT: 5,
+  MIN_SAVING_EUR: 1, // H
+  MIN_SAVING_EUR_SMALL: 0.5,
+  SMALL_ITEM_EUR: 20,
+  MIN_SAVING_PCT: 2,
+  BOLD_BAND_SHARE: 0.25, // H
+  BOLD_MIN_SHARE: 0.25, // E
+  MIN_DELAY_MINUTES: 60, // E (Fong & Waisman)
+  MIN_DELAY_INACTIVE_MINUTES: 30, // H
+  DEADLINE_MARGIN_MINUTES: 30, // H
+  PLAN_HORIZON_HOURS: 30,
+  STALE_AFTER_HOURS: 30,
+  STALE_PLAN_HOURS: 72,
+  NEAR_TIE_EUR: 0.02, // H (mirrors NEAR_TIE_REL)
+  NEAR_TIE_SHARE: 0.03,
+  TIGHT_GAIN_EUR: 0.15, // H
+  TIGHT_GAIN_SHARE: 0.05,
+  LATE_GAIN_EUR: 0.3,
+  LATE_GAIN_SHARE: 0.1,
+  QUIET_FROM_MINUTES: 23 * 60, // H: no sends or reminders at night
+  QUIET_TO_MINUTES: 7 * 60,
+  INACTIVE_READ_FLOOR: 0.5, // H
+  INACTIVE_READ_TAU_HOURS: 2,
+  DAILY_QUOTA_WARN: 20, // official cap 25
+  FOLLOWUP_HOURS: 24, // H
+  GIVEUP_HOURS: 72, // H
+}
+
+/** "Quando l'hai ricevuta?" chips: midpoint and half-width of the uncertainty, in minutes. */
+export const COUNTER_RECEIVED_AGO = [
+  { id: 'just_now', label: 'Adesso', minutes: 2, halfWidth: 2 },
+  { id: 'within_hour', label: 'Meno di un\'ora fa', minutes: 30, halfWidth: 30 },
+  { id: 'hours_1_3', label: '1–3 ore fa', minutes: 120, halfWidth: 60 },
+  { id: 'hours_3_8', label: '3–8 ore fa', minutes: 330, halfWidth: 150 },
+  { id: 'hours_8_16', label: '8–16 ore fa', minutes: 720, halfWidth: 240 },
+  { id: 'over_16', label: 'Più di 16 ore fa', minutes: 1080, halfWidth: 120 },
+]
+
+export const COUNTER_OPTION_LABELS = { bold: 'Tiro sul prezzo', balanced: 'Consigliata', split: 'A metà strada', accept: 'Accetta e compra' }
+
+/** How the seller moved, from the share of the gap he conceded (normalised to the first round). */
+export const SELLER_STANCES = {
+  hold: { label: 'Non si è mosso', why: 'Ha risposto con il prezzo pieno.' },
+  firm: { label: 'Rigido', why: 'È sceso pochissimo rispetto alla distanza.' },
+  moving: { label: 'Tratta', why: 'È sceso, ma meno della media.' },
+  flexible: { label: 'Flessibile', why: 'È sceso almeno quanto fa di solito chi vuole chiudere.' },
+}

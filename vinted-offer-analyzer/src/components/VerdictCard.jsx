@@ -62,7 +62,7 @@ export function VerdictCard({ result }) {
         </div>
         <p className="mt-3 flex items-center gap-1.5 text-xs text-teal-100">
           <Hourglass className="h-3.5 w-3.5" aria-hidden="true" />
-          Resta valida circa 24 ore: fino a {verdict.expiresLabel}
+          Conta su circa 24 ore per la risposta: fino a {verdict.expiresLabel}
           {verdict.isHoliday ? ' · giorno festivo, si comporta come una domenica' : ''}
         </p>
       </div>

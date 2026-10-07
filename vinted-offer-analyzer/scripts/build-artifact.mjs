@@ -26,6 +26,7 @@ const ORDER = [
   'src/core/reasoning.js',
   'src/core/analyze.js',
   'src/core/optimize.js',
+  'src/core/counter.js',
   'src/core/extract.js',
   'src/theme.js',
   'src/platform/clipboard.js',
@@ -114,6 +115,11 @@ import React, { ${[...reactImports].sort().join(', ')} } from 'react'
 import { ${[...lucideImports].sort().join(', ')} } from 'lucide-react'
 `
 const jsx = `${header}\n${bodies.join('\n')}\nexport default VintedOfferAnalyzer\n`
+// `--check`: run every bundling check (collisions, dangling imports) without writing the artifact.
+if (process.argv.includes('--check')) {
+  console.log(`bundle ok: ${ORDER.length} modules, ${declared.size} top-level names`)
+  process.exit(0)
+}
 mkdirSync(join(root, 'artifact'), { recursive: true })
 writeFileSync(join(root, 'artifact/VintedOfferAnalyzer.jsx'), jsx)
 

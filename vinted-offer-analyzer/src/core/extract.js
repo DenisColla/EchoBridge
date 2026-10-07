@@ -136,7 +136,7 @@ export function parseVintedItemHtml(html) {
 
 /* ───────── mapping onto the analyzer ───────── */
 
-const DECORATION = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}\u{2300}-\u{23FF}]/gu
+const DECORATION = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}]|\u{FE0F}|\u{200D}/gu
 
 /** Listing titles are quoted in the message to the seller: drop emoji and cut at a word boundary, never mid-word. */
 export function cleanTitle(title, max = 90) {

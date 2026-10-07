@@ -23,7 +23,8 @@ const dayPart = (date) => {
  * now → "adesso", today → "stasera/oggi alle ore", tomorrow → "domani sera, lunedì 5 ottobre, alle ore",
  * later → "giovedì 29 ottobre alle ore 21:45" + "tra 5 giorni".
  */
-export function buildVerdict(chosen, sendNow, now, best = null) {
+export function buildVerdict(chosen, sendNow, now, best = null, { subject = "l'offerta" } = {}) {
+  const lead = `Invia ${subject}`
   const k = calendarDaysBetween(now, chosen.date)
   const time = formatTime(chosen.date)
   const dateLabel = formatLongDate(chosen.date, now)
@@ -34,7 +35,7 @@ export function buildVerdict(chosen, sendNow, now, best = null) {
   let headline
   let sublabel
   if (chosen.kind === 'now') {
-    headline = "Invia l'offerta adesso"
+    headline = `${lead} adesso`
     const gain = best && best !== chosen ? Math.round((best.pOverall - chosen.pOverall) * 100) : 0
     if (window.weight > 0 && ['S', 'A', 'B'].includes(window.tier)) {
       sublabel = `Sei nella finestra giusta: dura fino alle ${formatTime(sendNow.windowEndsAt)}`
@@ -47,17 +48,19 @@ export function buildVerdict(chosen, sendNow, now, best = null) {
       sublabel = 'Aspettare non migliorerebbe le probabilità'
     }
   } else if (k === 0) {
-    headline = `Invia l'offerta ${chosen.date.getHours() >= 17 ? 'stasera' : 'oggi'} alle ore ${time}`
+    headline = `${lead} ${chosen.date.getHours() >= 17 ? 'stasera' : 'oggi'} alle ore ${time}`
     sublabel = capitalize(dateLabel)
   } else if (k === 1) {
-    headline = `Invia l'offerta domani ${dayPart(chosen.date)}, ${dateLabel}, alle ore ${time}`
+    headline = `${lead} domani ${dayPart(chosen.date)}, ${dateLabel}, alle ore ${time}`
     sublabel = 'Domani'
   } else {
-    headline = `Invia l'offerta ${dateLabel} alle ore ${time}`
+    headline = `${lead} ${dateLabel} alle ore ${time}`
     sublabel = capitalize(formatRelativeDay(chosen.date, now))
   }
 
-  return { headline, sublabel, when: formatRelativeDay(chosen.date, now), dateLabel, timeLabel: time, windowLabel, expiresLabel, isHoliday: isItalianHoliday(chosen.date) }
+  // `action` is the headline without "Invia <subject> ", for UIs that compose their own sentence.
+  const action = headline.slice(lead.length + 1)
+  return { headline, action, sublabel, when: formatRelativeDay(chosen.date, now), dateLabel, timeLabel: time, windowLabel, expiresLabel, isHoliday: isItalianHoliday(chosen.date) }
 }
 
 /** Opening sentence keyed by risk band (and by whether timing actually moves the needle). */
@@ -148,7 +151,7 @@ export function buildTips({ input, blockRisk, twoStep, chosen, now, messageBefor
   const tips = []
   const { riskBand, discountPct, sellerProfile, listingAge, targetPrice, listPrice } = input
 
-  tips.push(`L'offerta resta valida circa ${VINTED.OFFER_VALIDITY_HOURS} ore e Vinted consente al massimo ${VINTED.OFFERS_PER_DAY} offerte al giorno: usa la prima nel momento giusto.`)
+  tips.push(`Conta su circa ${VINTED.OFFER_VALIDITY_HOURS} ore per la risposta (Vinted non indica una scadenza ufficiale) e ricorda che puoi fare al massimo ${VINTED.OFFERS_PER_DAY} offerte al giorno: usa la prima nel momento giusto.`)
   if (discountPct < 5) {
     tips.push('Sconto quasi simbolico: valuta di comprare a prezzo pieno o di chiedere la spedizione inclusa invece di un\'offerta.')
   }

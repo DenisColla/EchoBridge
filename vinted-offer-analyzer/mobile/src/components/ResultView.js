@@ -128,7 +128,7 @@ function VerdictCard({ result }) {
           {optimal.score.monthWindow.weight !== 0 ? ` · ${optimal.score.monthWindow.label}` : ''} · {toPercent(optimal.pOverall)}% complessivo
         </Text>
         <Text style={[styles.heroMeta, { color: t.onAccent }]}>
-          Resta valida circa 24 ore: fino a {verdict.expiresLabel}{verdict.isHoliday ? ' · giorno festivo, si comporta come una domenica' : ''}
+          Conta su circa 24 ore per la risposta: fino a {verdict.expiresLabel}{verdict.isHoliday ? ' · giorno festivo, si comporta come una domenica' : ''}
         </Text>
       </View>
       <Body style={{ fontWeight: '600' }}>{opening}</Body>

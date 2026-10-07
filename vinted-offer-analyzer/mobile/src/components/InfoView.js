@@ -110,7 +110,7 @@ export function InfoView({ stats, items }) {
         <Body>• Sconto sotto il 15% rischio basso, 15–30% medio, oltre il 30% alto. Oltre il {VINTED.MAX_DISCOUNT_PCT}% Vinted non accetta l'offerta.</Body>
         <Body>• Domenica sera 21–23 è la finestra migliore, poi la tarda serata infrasettimanale. Pausa pranzo e mattina lavorativa sono le peggiori. Fine mese aiuta, inizio mese penalizza.</Body>
         <Body>• Categoria, differenza in euro, anzianità dell'annuncio, tipo di venditore e testo dell'annuncio spostano la probabilità; il risultato tiene conto anche del rischio che l'articolo venga venduto mentre aspetti.</Body>
-        <Body>• L'offerta vale circa {VINTED.OFFER_VALIDITY_HOURS} ore e puoi inviarne al massimo {VINTED.OFFERS_PER_DAY} al giorno.</Body>
+        <Body>• Conta su circa {VINTED.OFFER_VALIDITY_HOURS} ore per la risposta (Vinted non indica una scadenza ufficiale) e puoi inviare al massimo {VINTED.OFFERS_PER_DAY} offerte al giorno.</Body>
         <Body muted small>Stime euristiche basate su psicologia della negoziazione e abitudini d'uso di Vinted, non su dati ufficiali. Tutti i dati restano sul telefono.</Body>
       </Card>
     </View>
