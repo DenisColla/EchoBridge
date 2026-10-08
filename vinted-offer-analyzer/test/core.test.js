@@ -5,7 +5,7 @@ import {
   formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatTime, isItalianHoliday, monthWindowAt, normalizeInput,
   parsePrice, riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
   nextGoalFor, optimizeOffer, parseVintedItemHtml, parseRelativeItalian, buildFormFromExtraction, categoryGuess, signalFromText, cleanTitle,
-  sellerProfileGuess, listingAgeGuess, findPriceInText,
+  sellerProfileGuess, listingAgeGuess, findPriceInText, detectVintedChallenge,
 } from '../src/core/index.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -463,6 +463,55 @@ test('extractor: a real Vinted item page yields title, price, brand, upload age 
   assert.ok(ex.sellerLastSeenText.includes('26 min'))
   assert.ok(ex.sellerLastSeenDays < 0.05)
   assert.ok(ex.found.includes('prezzo') && ex.found.includes('data di caricamento'))
+})
+
+const fixture = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
+
+test('extractor: the October 2026 page (Next.js, streamed sections) still yields every field; an empty brand is null', () => {
+  const ex = parseVintedItemHtml(fixture('vinted-item-2026-10.html'))
+  assert.equal(ex.title, 'Charles Burns, Black Hole')
+  assert.equal(ex.listPrice, 22)
+  assert.equal(ex.currency, 'EUR')
+  assert.equal(ex.brand, null, 'JSON-LD brand {"@type":"Brand","name":""} must not become "[object Object]"')
+  assert.equal(ex.condition, 'usato')
+  assert.ok(ex.categoryText.startsWith('Libri e media'))
+  assert.equal(ex.uploadedText, '3 settimane fa')
+  assert.equal(ex.uploadedDays, 21)
+  assert.equal(ex.sellerUsername, 'venditore_test')
+  assert.equal(ex.sellerRating, 4.9)
+  assert.equal(ex.sellerFeedbackCount, 144)
+  assert.equal(ex.sellerBusiness, false)
+  assert.deepEqual(ex.sellerBadges, ['ACTIVE_LISTER'])
+  assert.ok(ex.sellerLastSeenText.includes('14 ore'))
+  assert.deepEqual(ex.missing, ['marca'])
+  const built = buildFormFromExtraction(ex, { link: 'https://www.vinted.it/items/9964852697-charles-burns-black-hole' })
+  assert.equal(built.form.listPrice, '22')
+  assert.ok(!JSON.stringify(built).includes('[object Object]'))
+})
+
+test('extractor: brand as a plain string, a named Brand object or missing', () => {
+  const page = (brand) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'Product', name: 'Felpa', ...(brand === undefined ? {} : { brand }), offers: { price: 10, priceCurrency: 'EUR' } })}</script>`
+  assert.equal(parseVintedItemHtml(page('Nike')).brand, 'Nike')
+  assert.equal(parseVintedItemHtml(page({ '@type': 'Brand', name: 'Levi&#39;s' })).brand, "Levi's")
+  assert.equal(parseVintedItemHtml(page({ '@type': 'Brand', name: '  ' })).brand, null)
+  assert.equal(parseVintedItemHtml(page({ '@type': 'Brand' })).brand, null)
+  assert.equal(parseVintedItemHtml(page(undefined)).brand, null)
+})
+
+test('extractor: Cloudflare and DataDome challenge pages are recognised, real pages never are', () => {
+  const cf = fixture('vinted-cloudflare-challenge.html')
+  assert.equal(detectVintedChallenge(cf), 'cloudflare')
+  const ex = parseVintedItemHtml(cf)
+  assert.equal(ex.title, null)
+  assert.equal(ex.listPrice, null)
+  assert.equal(detectVintedChallenge('<html><head><title>Just a moment...</title></head><body></body></html>'), 'cloudflare')
+  assert.equal(detectVintedChallenge('<html><body><script>var dd={\'rt\':\'c\',\'host\':\'geo.captcha-delivery.com\'}</script></body></html>'), 'datadome')
+  // Real pages load DataDome's and Cloudflare's scripts too: the listing data wins.
+  assert.equal(detectVintedChallenge(fixture('vinted-item-2026-10.html')), null)
+  assert.equal(detectVintedChallenge(FIXTURE), null)
+  assert.equal(detectVintedChallenge(fixture('vinted-item-2026-10.html') + '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script><script>datadome captcha</script>'), null)
+  assert.equal(detectVintedChallenge(''), null)
+  assert.equal(detectVintedChallenge('<html><body>Pagina non trovata</body></html>'), null)
 })
 
 test('extractor: relative Italian times', () => {

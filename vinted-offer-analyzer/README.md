@@ -142,7 +142,10 @@ Il motore include un estrattore (`src/core/extract.js`) che legge la pagina pubb
 e frammenti server-side: titolo, prezzo, marca, condizioni, categoria, "caricato … fa", "ultima visita … fa",
 stelle, numero di recensioni, distintivi del venditore) e compila il modulo da solo, con un target al −20% (o lo
 sconto di partenza appreso dai tuoi esiti).
-L'app Android lo usa da "Estrai e calcola": basta il link. Nel browser le pagine di Vinted non sono leggibili per
+L'app Android lo usa da "Estrai e calcola": basta il link. Da ottobre 2026 www.vinted.it è dietro Cloudflare, che a
+un download diretto risponde spesso con una verifica anti-robot (`detectVintedChallenge` la riconosce): in quel caso
+l'app apre l'annuncio con un browser interno nascosto (WebView), che supera la verifica automatica come Chrome e
+restituisce la pagina allo stesso estrattore; se la verifica chiede un tocco, la mostra a schermo intero. Nel browser le pagine di Vinted non sono leggibili per
 via del CORS, quindi la versione web offre "Leggi segnali dal testo": incolla il testo dell'annuncio e ricava
 prezzo e segnali ("prezzo fisso", "accetto offerte", "svuoto l'armadio").
 

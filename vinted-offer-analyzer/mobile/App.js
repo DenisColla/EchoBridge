@@ -11,11 +11,12 @@ import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
 import { CounterView } from './src/components/CounterView.js'
+import { VintedPageLoader } from './src/components/VintedPageLoader.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
-import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
+import { fetchVintedItemPage, normalizeVintedLink, quickFetchLikelyBlocked, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 
 const TABS = [
@@ -31,8 +32,19 @@ const EXTRACT_ERRORS = {
   not_a_vinted_link: 'Serve un link a un articolo Vinted, del tipo vinted.it/items/… .',
   timeout: 'Vinted non ha risposto in tempo. Controlla la connessione e riprova.',
   network: 'Nessuna connessione: non riesco a scaricare l\'annuncio. Puoi compilare i dati a mano.',
-  blocked: 'Vinted ha bloccato la lettura automatica di questa pagina. Compila i dati a mano: il link resta salvato per il promemoria.',
-  empty: 'Pagina scaricata ma senza i dati dell\'annuncio: forse è stato venduto o riservato. Compila i dati a mano.',
+  challenge: 'Vinted ha chiesto una verifica anti-robot che non si è completata. Riprova tra poco o compila i dati a mano: il link resta salvato per il promemoria.',
+  cancelled: 'Verifica annullata. Puoi riprovare con «Estrai e calcola» o compilare i dati a mano.',
+  empty: 'Ho aperto la pagina ma non contiene i dati dell\'annuncio: forse è stato rimosso o nascosto. Compila i dati a mano.',
+}
+
+/** Message for a failed download: the quick one or the in-app browser. */
+const extractErrorFor = (page) => {
+  if (page.reason === 'http') {
+    return page.status === 404 || page.status === 410
+      ? 'L\'annuncio non esiste più o è stato rimosso.'
+      : `Vinted ha risposto con un errore (${page.status}). Riprova tra poco o compila i dati a mano.`
+  }
+  return EXTRACT_ERRORS[page.reason] || EXTRACT_ERRORS.network
 }
 
 export default function App() {
@@ -58,6 +70,9 @@ function Main() {
   const [highlightId, setHighlightId] = useState(null)
   const [toast, setToast] = useState(null)
   const [extracting, setExtracting] = useState(false)
+  /** null | 'browser' (in-app browser passing Vinted's check) | 'verify' (the check is shown to the user) */
+  const [extractPhase, setExtractPhase] = useState(null)
+  const pageLoaderRef = useRef(null)
   const [extraction, setExtraction] = useState(null)
   const [clipboardLink, setClipboardLink] = useState(null)
   const [counterContext, setCounterContext] = useState(null)
@@ -226,15 +241,24 @@ function Main() {
     setExtraction(null)
     setField('link', link)
     try {
-      const page = await fetchVintedItemPage(link)
+      // Quick download first; when Vinted's anti-bot check refuses it (Cloudflare since October 2026), or the page
+      // comes back without the listing, the in-app browser opens the same page the way Chrome would.
+      let page = quickFetchLikelyBlocked() ? { ok: false, reason: 'challenge', skipped: true } : await fetchVintedItemPage(link)
+      let ex = page.ok ? parseVintedItemHtml(page.html) : null
+      const refused = page.ok ? !ex.title && !ex.listPrice : page.reason === 'challenge' || (page.reason === 'http' && page.status !== 404 && page.status !== 410)
+      if (refused && pageLoaderRef.current) {
+        setExtractPhase('browser')
+        const viaBrowser = await pageLoaderRef.current.load(link, { onVisible: () => setExtractPhase('verify') })
+        if (viaBrowser.ok) {
+          page = viaBrowser
+          ex = parseVintedItemHtml(viaBrowser.html)
+        } else if (viaBrowser.reason !== 'unsupported') page = viaBrowser
+        setExtractPhase(null)
+      }
       if (!page.ok) {
-        const message = page.reason === 'http'
-          ? (page.status === 404 ? 'L\'annuncio non esiste più o è stato rimosso.' : `Vinted ha risposto con un errore (${page.status}). Riprova tra poco o compila i dati a mano.`)
-          : EXTRACT_ERRORS[page.reason] || EXTRACT_ERRORS.network
-        setExtraction({ ok: false, message })
+        setExtraction({ ok: false, message: extractErrorFor(page) })
         return
       }
-      const ex = parseVintedItemHtml(page.html)
       if (!ex.title && !ex.listPrice) {
         setExtraction({ ok: false, message: EXTRACT_ERRORS.empty })
         return
@@ -254,6 +278,7 @@ function Main() {
       setExtraction({ ok: false, message: `Errore inatteso durante la lettura: ${String(error && error.message ? error.message : error)}` })
     } finally {
       setExtracting(false)
+      setExtractPhase(null)
     }
   }
 
@@ -484,6 +509,7 @@ function Main() {
                   onExtract={extractFromLink}
                   onPasteLink={pasteLink}
                   extracting={extracting}
+                  extractPhase={extractPhase}
                   extraction={extraction}
                 />
               </View>
@@ -523,6 +549,8 @@ function Main() {
           )
         })}
       </View>
+
+      <VintedPageLoader ref={pageLoaderRef} />
     </View>
   )
 }

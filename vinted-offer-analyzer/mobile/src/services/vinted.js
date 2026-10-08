@@ -1,4 +1,5 @@
 import * as Clipboard from 'expo-clipboard'
+import { detectVintedChallenge } from '../../core/index.js'
 
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36'
 
@@ -12,8 +13,19 @@ export const normalizeVintedLink = (text) => {
 }
 
 /**
+ * Since October 2026 www.vinted.it sits behind Cloudflare, which answers a plain HTTP client (OkHttp) with a
+ * JavaScript challenge instead of the listing. After one challenge the quick download is skipped for a while and the
+ * caller goes straight to the in-app browser (VintedPageLoader), which passes the check like Chrome does.
+ */
+const CHALLENGE_MEMORY_MS = 30 * 60_000
+let challengedAt = 0
+
+export const quickFetchLikelyBlocked = (now = Date.now()) => challengedAt > 0 && now - challengedAt < CHALLENGE_MEMORY_MS
+
+/**
  * Downloads the public item page the way a phone browser would. Returns { ok, html, status } and never throws.
  * The page is server-rendered: title, price, brand, condition, upload age and seller activity are in the HTML.
+ * Failure reasons: not_a_vinted_link, http (with status), challenge (Cloudflare/DataDome page), timeout, network.
  */
 export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
   const url = normalizeVintedLink(link)
@@ -32,10 +44,15 @@ export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
       },
     })
     const html = await response.text()
-    if (!response.ok) return { ok: false, reason: 'http', status: response.status, html }
-    if (/captcha|datadome|verifica di essere umano/i.test(html) && !/application\/ld\+json/.test(html)) {
-      return { ok: false, reason: 'blocked', status: response.status, html }
+    // Cloudflare answers 403 (sometimes 503 or 200) with its challenge page: never read that as "item removed".
+    const mitigated = response.headers && typeof response.headers.get === 'function' ? response.headers.get('cf-mitigated') : null
+    const challenge = mitigated === 'challenge' ? 'cloudflare' : detectVintedChallenge(html)
+    if (challenge) {
+      challengedAt = Date.now()
+      return { ok: false, reason: 'challenge', challenge, status: response.status, html }
     }
+    if (!response.ok) return { ok: false, reason: 'http', status: response.status, html }
+    challengedAt = 0
     return { ok: true, html, status: response.status, url: response.url || url }
   } catch (error) {
     return { ok: false, reason: error && error.name === 'AbortError' ? 'timeout' : 'network', error: String(error && error.message ? error.message : error) }

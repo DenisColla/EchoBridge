@@ -22,7 +22,7 @@ export const EMPTY_FORM = {
  * Two ways in, in this order: paste a Vinted link and let the app read the listing ("Estrai e calcola"),
  * or fill the fields by hand. After an extraction the same fields show what was read, so the user can correct them.
  */
-export function OfferForm({ form, errors, onChange, onSubmit, onReset, onExtract, onPasteLink, extracting = false, extraction = null }) {
+export function OfferForm({ form, errors, onChange, onSubmit, onReset, onExtract, onPasteLink, extracting = false, extractPhase = null, extraction = null }) {
   const t = useTheme()
   const linkOk = isVintedItemLink(form.link)
   const preview = useMemo(() => {
@@ -52,6 +52,13 @@ export function OfferForm({ form, errors, onChange, onSubmit, onReset, onExtract
           <Button label={extracting ? 'Leggo l\'annuncio…' : 'Estrai e calcola'} onPress={() => onExtract(form.link)} disabled={extracting || !linkOk} />
           <Button label="Incolla dagli appunti" variant="secondary" onPress={onPasteLink} disabled={extracting} />
         </ButtonRow>
+        {extracting && extractPhase && (
+          <Note>
+            {extractPhase === 'verify'
+              ? 'Vinted chiede una verifica: completala nella schermata che si è aperta.'
+              : 'Vinted sta facendo un controllo anti-robot: apro l\'annuncio con il browser interno, ci vuole qualche secondo…'}
+          </Note>
+        )}
         {extraction && !extraction.ok && <Note tone="warn">{extraction.message}</Note>}
         {extraction && extraction.ok && (
           <Note tone="good">
