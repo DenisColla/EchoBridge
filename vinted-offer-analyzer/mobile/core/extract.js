@@ -145,7 +145,8 @@ export function detectVintedChallenge(html) {
   const src = String(html || '')
   if (!src) return null
   if (/application\/ld\+json[^>]*>\s*\{[^<]{0,200}"@type"\s*:\s*"Product"/i.test(src) || /<meta[^>]+property="og:title"[^>]+content="[^"]{2,}/i.test(src)) return null
-  if (/_cf_chl_opt|\/cdn-cgi\/challenge-platform\/|challenges\.cloudflare\.com|cf-browser-verification|<title>\s*Just a moment/i.test(src)) return 'cloudflare'
+  // Not the bare /cdn-cgi/challenge-platform/ path: every page (404s included) loads its scripts/jsd/ bot snippet.
+  if (/_cf_chl_opt|\/cdn-cgi\/challenge-platform\/h\/|challenges\.cloudflare\.com|cf-browser-verification|<title>\s*Just a moment/i.test(src)) return 'cloudflare'
   if (/captcha-delivery\.com|geo\.captcha|interstitial\.captcha|datadome[\s\S]{0,200}captcha|verifica di essere umano/i.test(src)) return 'datadome'
   return null
 }

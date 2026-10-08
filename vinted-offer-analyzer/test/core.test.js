@@ -510,6 +510,10 @@ test('extractor: Cloudflare and DataDome challenge pages are recognised, real pa
   assert.equal(detectVintedChallenge(fixture('vinted-item-2026-10.html')), null)
   assert.equal(detectVintedChallenge(FIXTURE), null)
   assert.equal(detectVintedChallenge(fixture('vinted-item-2026-10.html') + '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script><script>datadome captcha</script>'), null)
+  // Every Vinted page (a 404 too) loads Cloudflare's bot snippet from /cdn-cgi/challenge-platform/scripts/jsd/.
+  const jsd = '<script>(function(){var b=document.createElement("iframe");b.style.display="none";document.body.appendChild(b);var a=b.contentDocument.createElement("script");a.src="/cdn-cgi/challenge-platform/scripts/jsd/main.js";b.contentDocument.head.appendChild(a)})()</script>'
+  assert.equal(detectVintedChallenge(`<html><head><title>Pagina non trovata | Vinted</title></head><body>404${jsd}</body></html>`), null)
+  assert.equal(detectVintedChallenge(`<html><body><script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=1"></script></body></html>`), 'cloudflare')
   assert.equal(detectVintedChallenge(''), null)
   assert.equal(detectVintedChallenge('<html><body>Pagina non trovata</body></html>'), null)
 })

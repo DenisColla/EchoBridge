@@ -13,19 +13,12 @@ export const normalizeVintedLink = (text) => {
 }
 
 /**
- * Since October 2026 www.vinted.it sits behind Cloudflare, which answers a plain HTTP client (OkHttp) with a
- * JavaScript challenge instead of the listing. After one challenge the quick download is skipped for a while and the
- * caller goes straight to the in-app browser (VintedPageLoader), which passes the check like Chrome does.
- */
-const CHALLENGE_MEMORY_MS = 30 * 60_000
-let challengedAt = 0
-
-export const quickFetchLikelyBlocked = (now = Date.now()) => challengedAt > 0 && now - challengedAt < CHALLENGE_MEMORY_MS
-
-/**
  * Downloads the public item page the way a phone browser would. Returns { ok, html, status } and never throws.
  * The page is server-rendered: title, price, brand, condition, upload age and seller activity are in the HTML.
  * Failure reasons: not_a_vinted_link, http (with status), challenge (Cloudflare/DataDome page), timeout, network.
+ * Since October 2026 www.vinted.it sits behind Cloudflare, which often answers a plain HTTP client (OkHttp) with a
+ * JavaScript challenge: the caller then opens the page in the in-app browser (VintedPageLoader). The quick download is
+ * always tried first (about a second): it still works part of the time and tells a removed listing (404) apart.
  */
 export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
   const url = normalizeVintedLink(link)
@@ -44,15 +37,13 @@ export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
       },
     })
     const html = await response.text()
-    // Cloudflare answers 403 (sometimes 503 or 200) with its challenge page: never read that as "item removed".
+    // A removed listing is final, whatever scripts its page carries.
+    if (response.status === 404 || response.status === 410) return { ok: false, reason: 'http', status: response.status, html }
+    // Cloudflare answers 403 (sometimes 503 or 200) with its challenge page: never read that as an error of Vinted.
     const mitigated = response.headers && typeof response.headers.get === 'function' ? response.headers.get('cf-mitigated') : null
     const challenge = mitigated === 'challenge' ? 'cloudflare' : detectVintedChallenge(html)
-    if (challenge) {
-      challengedAt = Date.now()
-      return { ok: false, reason: 'challenge', challenge, status: response.status, html }
-    }
+    if (challenge) return { ok: false, reason: 'challenge', challenge, status: response.status, html }
     if (!response.ok) return { ok: false, reason: 'http', status: response.status, html }
-    challengedAt = 0
     return { ok: true, html, status: response.status, url: response.url || url }
   } catch (error) {
     return { ok: false, reason: error && error.name === 'AbortError' ? 'timeout' : 'network', error: String(error && error.message ? error.message : error) }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { BackHandler, Platform, StyleSheet, View } from 'react-native'
+import { BackHandler, Keyboard, Platform, StatusBar, StyleSheet, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { WebView } from 'react-native-webview'
 import { space, useTheme } from '../theme.js'
 import { Body, Button, Title } from './ui.js'
@@ -36,10 +37,17 @@ export const PAGE_PROBE = `(function () {
     var og = document.querySelector('meta[property="og:title"]');
     return !!(og && og.getAttribute('content') && og.getAttribute('content').length > 1);
   };
+  // Every Vinted page loads Cloudflare's /cdn-cgi/challenge-platform/scripts/jsd/ snippet: only the challenge
+  // itself (window._cf_chl_opt, the /h/ orchestrator, the Turnstile iframe) counts.
   var isChallenge = function () {
-    return !!(window._cf_chl_opt || document.querySelector('script[src*="challenge-platform"], iframe[src*="challenges.cloudflare.com"], #challenge-form, #cf-wrapper')
+    return !!(window._cf_chl_opt || document.querySelector('script[src*="/cdn-cgi/challenge-platform/h/"], iframe[src*="challenges.cloudflare.com"], #challenge-form')
       || /^(just a moment|un momento|please wait)/i.test(document.title || '')
       || document.querySelector('iframe[src*="captcha-delivery.com"]'));
+  };
+  // Cloudflare's own error and block pages (5xx, 1015 rate limit, 1020 "you have been blocked"): no check to pass.
+  var isCfError = function () {
+    return !!(document.querySelector('#cf-error-details, .cf-error-details')
+      || /attention required|you have been blocked|access denied|\\| 5\\d\\d:/i.test(document.title || ''));
   };
   var tick = function () {
     var ready = document.readyState !== 'loading';
@@ -48,7 +56,8 @@ export const PAGE_PROBE = `(function () {
       post({ type: 'html', url: location.href, html: html.length > ${MAX_HTML_CHARS} ? html.slice(0, ${MAX_HTML_CHARS}) : html });
       return;
     }
-    post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: isChallenge(), title: (document.title || '').slice(0, 80) });
+    var challenge = isChallenge();
+    post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: challenge, cfError: !challenge && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
     setTimeout(tick, 700);
   };
   tick();
@@ -63,10 +72,12 @@ const ALLOWED_SCHEMES = /^(https?:|about:|data:|blob:)/i
  * behind the app. If the check wants a tap, the WebView is shown full screen with a short explanation and «Annulla».
  *
  * Imperative API through `ref`: `load(url, { onVisible })` → Promise<{ ok, html, url } | { ok: false, reason, status }>
- * with reason one of challenge, timeout, network, http (404/410), empty, cancelled, unsupported. Never rejects.
+ * with reason one of challenge, timeout, network, crashed, cferror, http (404/410), empty, cancelled, unsupported.
+ * Never rejects.
  */
 export function VintedPageLoader({ ref }) {
   const t = useTheme()
+  const insets = useSafeAreaInsets()
   const [job, setJob] = useState(null)
   const jobRef = useRef(null)
   const webRef = useRef(null)
@@ -91,6 +102,7 @@ export function VintedPageLoader({ ref }) {
     const current = jobRef.current
     if (!current || current.id !== id || current.visible) return
     current.visible = true
+    Keyboard.dismiss()
     setJob((j) => (j && j.id === id ? { ...j, visible: true } : j))
     if (current.onVisible) current.onVisible()
     timersRef.current.push(setTimeout(() => finish({ ok: false, reason: 'challenge' }, id), VISIBLE_MS))
@@ -186,6 +198,10 @@ export function VintedPageLoader({ ref }) {
     }
     if (msg.type !== 'state') return
     stateRef.current = msg
+    if (msg.cfError) {
+      finish({ ok: false, reason: 'cferror' }, id)
+      return
+    }
     if (msg.challenge) {
       current.noDataSince = null
       return
@@ -204,6 +220,8 @@ export function VintedPageLoader({ ref }) {
   }
 
   const onError = () => finish({ ok: false, reason: 'network' }, id)
+  // Android may kill the WebView's renderer (low memory, app in background): the view is dead, end this attempt.
+  const onRenderProcessGone = () => finish({ ok: false, reason: 'crashed' }, id)
 
   // Also injected at every load end, right away rather than at the next tick.
   const onLoadEnd = () => {
@@ -213,7 +231,9 @@ export function VintedPageLoader({ ref }) {
   return (
     <View
       pointerEvents={visible ? 'auto' : 'none'}
-      style={visible ? [StyleSheet.absoluteFill, styles.visible, { backgroundColor: t.bg }] : styles.hidden}
+      style={visible
+        ? [StyleSheet.absoluteFill, styles.visible, { backgroundColor: t.bg, paddingTop: insets.top || StatusBar.currentHeight || 24, paddingBottom: insets.bottom }]
+        : styles.hidden}
       accessibilityElementsHidden={!visible}
       importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
     >
@@ -234,6 +254,7 @@ export function VintedPageLoader({ ref }) {
         onLoadEnd={onLoadEnd}
         onHttpError={onHttpError}
         onError={onError}
+        onRenderProcessGone={onRenderProcessGone}
         onShouldStartLoadWithRequest={(req) => ALLOWED_SCHEMES.test(req.url || '')}
         originWhitelist={['https://*', 'http://*']}
         javaScriptEnabled
@@ -256,7 +277,9 @@ export function VintedPageLoader({ ref }) {
 const styles = StyleSheet.create({
   // Behind everything, clipped to 2×2 px and transparent: the page runs normally but is never seen or touched.
   hidden: { position: 'absolute', left: 0, bottom: 0, width: 2, height: 2, overflow: 'hidden', opacity: 0.01 },
-  webHidden: { width: 360, height: 640 },
+  // flex: 0 overrides the library's own flex: 1, which would otherwise shrink the page to the 2 px parent (a 2 px
+  // viewport throttles Cloudflare's iframe and looks like a bot).
+  webHidden: { flex: 0, width: 360, height: 640 },
   visible: { zIndex: 100, elevation: 100 },
   header: { padding: space.lg, gap: space.sm, borderBottomWidth: StyleSheet.hairlineWidth },
   webVisible: { flex: 1 },

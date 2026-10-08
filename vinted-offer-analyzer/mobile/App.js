@@ -16,7 +16,7 @@ import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
-import { fetchVintedItemPage, normalizeVintedLink, quickFetchLikelyBlocked, readVintedLinkFromClipboard } from './src/services/vinted.js'
+import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 
 const TABS = [
@@ -34,6 +34,8 @@ const EXTRACT_ERRORS = {
   network: 'Nessuna connessione: non riesco a scaricare l\'annuncio. Puoi compilare i dati a mano.',
   challenge: 'Vinted ha chiesto una verifica anti-robot che non si è completata. Riprova tra poco o compila i dati a mano: il link resta salvato per il promemoria.',
   cancelled: 'Verifica annullata. Puoi riprovare con «Estrai e calcola» o compilare i dati a mano.',
+  crashed: 'Il browser interno si è chiuso all\'improvviso. Riprova con «Estrai e calcola» o compila i dati a mano.',
+  cferror: 'Vinted ha risposto con una pagina di errore di Cloudflare (blocco o sito non raggiungibile). Riprova tra poco, magari passando da Wi-Fi a dati mobili, oppure compila i dati a mano.',
   empty: 'Ho aperto la pagina ma non contiene i dati dell\'annuncio: forse è stato rimosso o nascosto. Compila i dati a mano.',
 }
 
@@ -73,6 +75,8 @@ function Main() {
   /** null | 'browser' (in-app browser passing Vinted's check) | 'verify' (the check is shown to the user) */
   const [extractPhase, setExtractPhase] = useState(null)
   const pageLoaderRef = useRef(null)
+  /** Set synchronously: a second tap (link button, banner, «Incolla») never starts a parallel extraction. */
+  const extractingRef = useRef(false)
   const [extraction, setExtraction] = useState(null)
   const [clipboardLink, setClipboardLink] = useState(null)
   const [counterContext, setCounterContext] = useState(null)
@@ -229,6 +233,7 @@ function Main() {
    * never in a silent no-op, and the link stays in the form so the manual path still works.
    */
   const extractFromLink = async (rawLink) => {
+    if (extractingRef.current) return
     const link = normalizeVintedLink(rawLink)
     offeredLinkRef.current = link || rawLink
     setClipboardLink(null)
@@ -236,14 +241,14 @@ function Main() {
       setExtraction({ ok: false, message: EXTRACT_ERRORS.not_a_vinted_link })
       return
     }
-    if (extracting) return
+    extractingRef.current = true
     setExtracting(true)
     setExtraction(null)
     setField('link', link)
     try {
       // Quick download first; when Vinted's anti-bot check refuses it (Cloudflare since October 2026), or the page
       // comes back without the listing, the in-app browser opens the same page the way Chrome would.
-      let page = quickFetchLikelyBlocked() ? { ok: false, reason: 'challenge', skipped: true } : await fetchVintedItemPage(link)
+      let page = await fetchVintedItemPage(link)
       let ex = page.ok ? parseVintedItemHtml(page.html) : null
       const refused = page.ok ? !ex.title && !ex.listPrice : page.reason === 'challenge' || (page.reason === 'http' && page.status !== 404 && page.status !== 410)
       if (refused && pageLoaderRef.current) {
@@ -252,7 +257,10 @@ function Main() {
         if (viaBrowser.ok) {
           page = viaBrowser
           ex = parseVintedItemHtml(viaBrowser.html)
-        } else if (viaBrowser.reason !== 'unsupported') page = viaBrowser
+        } else if (viaBrowser.reason !== 'unsupported' && !(page.reason === 'http' && (viaBrowser.reason === 'empty' || viaBrowser.reason === 'timeout'))) {
+          // An HTTP error of the quick download stays the explanation when the browser found nothing better.
+          page = viaBrowser
+        }
         setExtractPhase(null)
       }
       if (!page.ok) {
@@ -277,6 +285,7 @@ function Main() {
     } catch (error) {
       setExtraction({ ok: false, message: `Errore inatteso durante la lettura: ${String(error && error.message ? error.message : error)}` })
     } finally {
+      extractingRef.current = false
       setExtracting(false)
       setExtractPhase(null)
     }
@@ -469,7 +478,7 @@ function Main() {
           )}
           {!counterContext && tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
-              {clipboardLink && (
+              {clipboardLink && !extracting && (
                 <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
                   <Text style={{ color: t.accentInk, fontSize: 14, flex: 1, minWidth: 0 }} numberOfLines={2}>Hai copiato un link Vinted: lo leggo e calcolo subito?</Text>
                   <View style={{ flexDirection: 'row', gap: space.sm }}>
