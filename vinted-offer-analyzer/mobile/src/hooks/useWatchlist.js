@@ -199,8 +199,32 @@ export function useWatchlist() {
     }
     const history = Array.isArray(target.negotiation) ? target.negotiation : []
     const hasSeller = history.some((e) => e.by === 'seller')
-    const neverSent = !target.sentAt && target.status === 'planned'
-    if (status === 'sent' && !target.sentAt) {
+    // Never sent: judged from the history, not the status (a plan marked «Lasciato perdere» was never sent either).
+    const neverSent = !target.sentAt && !hasSeller && history.length > 0 && Boolean(history[history.length - 1].planned)
+    const REFUSALS = ['declined', 'no_reply', 'sold_other', 'abandoned']
+
+    // Back to «Da inviare» with no counter: a correction. Undo the send and the outcome, re-plan the first offer.
+    if (status === 'planned' && !hasSeller) {
+      const plannedAt = (target.decision && target.decision.recommendedAt) || target.sendAt || (history[0] && history[0].at) || null
+      patch.sentAt = null
+      patch.sentAtSource = null
+      patch.firstOutcome = null
+      patch.firstOutcomeAt = null
+      patch.finalPrice = null
+      patch.negotiation = history.length ? [{ ...history[0], at: plannedAt, planned: true }, ...history.slice(1)] : history
+      if (plannedAt && new Date(plannedAt).getTime() > Date.now() + 15 * 60000 && !target.notificationId) {
+        try {
+          if (await ensureNotificationPermission()) patch.notificationId = (await scheduleOfferReminder({ ...target, sendAt: plannedAt })) || null
+        } catch {
+          // the item is corrected anyway
+        }
+      }
+      await update(id, patch, { type: 'status', data: { from: target.status, to: status, correction: true } })
+      return
+    }
+
+    // «Inviata» refers to the first offer only before any counter; later it is a later round.
+    if (status === 'sent' && !target.sentAt && !hasSeller) {
       patch.sentAt = now
       patch.sentAtSource = 'tap'
       patch.negotiation = history.map((e, i) => (i === history.length - 1 && e.planned ? { ...e, at: now, planned: false } : e))
@@ -215,19 +239,23 @@ export function useWatchlist() {
       patch.sentAtSource = 'imputed'
       patch.negotiation = history.map((e, i) => (i === history.length - 1 && e.planned ? { ...e, at: imputed, planned: false } : e))
     }
-    // First outcome: set once; a late answer after «Nessuna risposta» (no counter recorded) replaces it.
+    // First outcome: set once. Replaced by a late answer after «Nessuna risposta», or when the user corrects a reply to
+    // the same offer (accepted ↔ declined ↔ no reply) with no counter in between. accepted → sold/abandoned/bought are
+    // later events, not corrections.
+    const replies = ['accepted', 'declined', 'no_reply']
     const lateAnswer = target.firstOutcome === 'no_reply' && !hasSeller && ['accepted', 'declined', 'sold_other'].includes(status)
-    if (OUTCOMES.includes(status) && !boughtWithoutOffer && (!target.firstOutcome || lateAnswer)) {
-      // «Comprato» after a refusal or silence is a purchase at list price, never an accepted offer.
-      if (!(status === 'bought' && ['declined', 'no_reply', 'sold_other'].includes(target.status))) {
+    const correction = !hasSeller && target.firstOutcome && target.status === target.firstOutcome && replies.includes(target.firstOutcome) && replies.includes(status) && status !== target.firstOutcome
+    if (OUTCOMES.includes(status) && !boughtWithoutOffer && (!target.firstOutcome || lateAnswer || correction)) {
+      // «Comprato» after a refusal, silence or giving up is a purchase at list price, never an accepted offer.
+      if (!(status === 'bought' && REFUSALS.includes(target.status))) {
         patch.firstOutcome = status
         patch.firstOutcomeAt = now
       }
     }
     // Final price of «Accettata»/«Comprato»: the last number on the table (his counter if he made one and we took it),
-    // the list price when bought after a refusal or without any offer.
+    // the list price when bought after a refusal, after giving up or without any offer.
     const last = (patch.negotiation || history)[(patch.negotiation || history).length - 1]
-    const atList = status === 'bought' && (boughtWithoutOffer || ['declined', 'no_reply', 'sold_other'].includes(target.status))
+    const atList = status === 'bought' && (boughtWithoutOffer || REFUSALS.includes(target.status))
     patch.finalPrice = status === 'accepted' || status === 'bought' ? (atList ? target.listPrice : last ? last.price : null) : null
     await update(id, patch, { type: 'status', data: { from: target.status, to: status, finalPrice: patch.finalPrice } })
   }, [update])
@@ -264,12 +292,14 @@ export function useWatchlist() {
       const firstChanged = iB === 0 && Math.abs(existing.targetPrice - n.previousOffer) > 0.004
       item = {
         ...existing, negotiation, status: 'countered', outcomeAt: new Date().toISOString(), notificationId: null, calendarOpenedAt: null, finalPrice: null, counterPlan: plan,
-        firstOutcomeAt: existing.firstOutcomeAt || (existing.firstOutcome ? existing.outcomeAt : sellerEntry.at),
+        firstOutcomeAt: existing.firstOutcome === 'no_reply' && !(existing.negotiation || []).some((e) => e.by === 'seller') ? sellerEntry.at
+          : existing.firstOutcomeAt || (existing.firstOutcome ? existing.outcomeAt : sellerEntry.at),
         ...(firstChanged ? {
           targetPrice: n.previousOffer, discountPct: ((existing.listPrice - n.previousOffer) / existing.listPrice) * 100,
           form: existing.form ? { ...existing.form, targetPrice: String(n.previousOffer).replace('.', ',') } : existing.form,
         } : {}),
-        firstOutcome: existing.firstOutcome || 'countered',
+        // A counter after «Nessuna risposta» means he did answer: the first outcome becomes the counter.
+        firstOutcome: !existing.firstOutcome || (existing.firstOutcome === 'no_reply' && !(existing.negotiation || []).some((e) => e.by === 'seller')) ? 'countered' : existing.firstOutcome,
         ...(existing.sentAt ? {} : { sentAt: imputedSentAt, sentAtSource: imputedSentAt ? 'imputed' : null }),
         message: plan.message || existing.message, sendAt: plan.sendAt || existing.sendAt, windowLabel: plan.windowLabel || existing.windowLabel,
       }

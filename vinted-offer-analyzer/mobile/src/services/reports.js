@@ -50,7 +50,9 @@ export async function chooseReportFolder() {
     if (dir && dir.uri) return { ok: true, uri: dir.uri, label: folderLabel(dir.uri) }
     return { ok: false, reason: 'cancelled' }
   } catch (error) {
-    // Older providers or a cancelled picker: try the legacy SAF picker once.
+    // Backing out of the picker is an answer, not a failure: never open a second picker.
+    if ((error && error.code) === 'ERR_PICKER_CANCELLED' || /cancel/i.test(errorText(error))) return { ok: false, reason: 'cancelled' }
+    // A provider the new API cannot handle: try the legacy SAF picker once.
     try {
       const res = await SAF.requestDirectoryPermissionsAsync(initial)
       if (!res.granted) return { ok: false, reason: 'cancelled' }

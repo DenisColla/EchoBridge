@@ -70,13 +70,14 @@ export const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 2
  * target overall probability. Probes the top of the range first so that an
  * unreachable target costs one scheduler run, then bisects the price grid.
  */
-export function suggestPrice(input, now, targetProbability) {
+export function suggestPrice(input, now, targetProbability, { exactSendAt = null } = {}) {
   const step = priceStepFor(input.listPrice)
   const steps = Math.floor((input.listPrice - input.targetPrice) / step) - (Number.isInteger((input.listPrice - input.targetPrice) / step) ? 1 : 0)
   if (steps < 1) return null
   const evaluate = (i) => {
     const candidate = withPrices(input, input.listPrice, Math.round((input.targetPrice + i * step) * 100) / 100)
-    const moments = pickMoments(candidate, now)
+    // Same moment as the analysis on screen (a test variation pins its own moment).
+    const moments = pickMoments(candidate, now, { exactSendAt })
     return { candidate, moments, ok: moments.chosen.pOverall >= targetProbability }
   }
   let hi = evaluate(steps)
@@ -131,7 +132,7 @@ function buildAnalysis(input, now, options = {}) {
   const twoStep = twoStepFor(input, chosen)
   // The read probability is the one factor a higher price cannot change, so the price target is scaled by it.
   const targetProbability = (blockRisk.level === 'high' ? SUGGESTED_PRICE_TARGET_HIGH_BLOCK : SUGGESTED_PRICE_TARGET) * readProbability(input)
-  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability) : null
+  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability, { exactSendAt: chosen.exact ? chosen.date : null }) : null
   const ambition = moments.maxAccept < 0.15 ? 'unrealistic' : moments.maxAccept < 0.3 ? 'ambitious' : null
   const messageBeforeOffer = blockRisk.level === 'high' || input.sellerProfile === 'inactive'
 

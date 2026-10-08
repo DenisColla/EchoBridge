@@ -11,6 +11,14 @@ export const articleFor = (n) => {
   return r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89) ? "dell'" : 'del '
 }
 
+/** Preposition + article before a percentage: dell'8%, all'85%, nell'11%, dal 64%, del 30%. */
+export const prepArticleFor = (prep, n) => {
+  const r = Math.round(n)
+  const elided = r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89)
+  const forms = { di: ["dell'", 'del ', 'dello '], a: ["all'", 'al ', 'allo '], in: ["nell'", 'nel ', 'nello '], da: ["dall'", 'dal ', 'dallo '] }[prep] || ["dell'", 'del ', 'dello ']
+  return r === 0 ? forms[2] : elided ? forms[0] : forms[1]
+}
+
 const dayPart = (date) => {
   const hour = date.getHours()
   if (hour >= 17) return 'sera'

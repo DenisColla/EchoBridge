@@ -437,7 +437,9 @@ test('failure risk: complement of the estimate, a range, reasons, failure mix an
   const items = syntheticItems({ months: 4, shift: -0.5 })
   const now = new Date(2026, 7, 1)
   const report = monthlyReport({ items, month: '2026-07', now })
-  const profile = report.nextProfile
+  // «Calibrated» needs a moved first-offer correction: force one if this sample did not move it.
+  const profile = normalizeProfile({ ...report.nextProfile, intercept: report.nextProfile.intercept || -0.4 })
+  assert.equal(failureRiskFor(analyzeOffer({ ...FORM, targetPrice: '48' }, now, { profile: { ...profile, intercept: 0, slope: 1, time: {}, disc: {} } }), { profile: { ...profile, intercept: 0, slope: 1, time: {}, disc: {} } }).basis, 'engine', 'counter-only changes do not calibrate the first offer')
   const r2 = analyzeOffer({ ...FORM, targetPrice: '48' }, now, { profile })
   const risk2 = failureRiskFor(r2, { profile, records: report.records, now })
   assert.equal(risk2.basis, 'history')
@@ -561,7 +563,7 @@ test('report: month numbers, counters, workbook, deterministic output', () => {
   assert.deepEqual(Buffer.from(a), Buffer.from(b), 'same inputs → same bytes')
   const files = unzip(a)
   const names = [...files['xl/workbook.xml'].matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1])
-  assert.deepEqual(names, ['Riepilogo', 'Offerte', 'Trattative', 'Controproposte', 'Fasce orarie', 'Sconti', 'Calibrazione', 'Varianti di test', 'Modifiche motore', 'Andamento', 'Note'])
+  assert.deepEqual(names, ['Riepilogo', 'Offerte', 'Aggiornamenti', 'Trattative', 'Controproposte', 'Fasce orarie', 'Sconti', 'Calibrazione', 'Varianti di test', 'Modifiche motore', 'Andamento', 'Note'])
   const offers = files['xl/worksheets/sheet2.xml']
   assert.equal((offers.match(/<row /g) || []).length, 1 + rep.inMonth.length)
   for (const xml of Object.values(files)) assert.ok(!/undefined|NaN|\[object Object\]/.test(xml), xml.slice(0, 120))
@@ -660,4 +662,44 @@ test('review fixes: risk shows «calibrated» only with a real profile; iso-acce
   // The slope pivots around SLOPE_CENTER: at that logit only the intercept acts.
   const row = learnedOfferRow(normalizeProfile({ slope: 1.2, intercept: -0.1 }), { logit: LEARNING.SLOPE_CENTER, windowId: 'sunday_night', discountPct: 20 })
   near(row.weight, -0.1, 1e-12)
+})
+
+test('workbook review: late outcomes reach the next file, unknown send times stay blank, previews say «proposta»', () => {
+  const sent = new Date(2026, 7, 30, 21, 45)
+  const item = {
+    id: 'late', createdAt: new Date(2026, 7, 30, 12).toISOString(), title: 'Felpa', listPrice: 60, targetPrice: 45, discountPct: 25, form: FORM, sentAt: sent.toISOString(), sentAtSource: 'tap',
+    status: 'accepted', firstOutcome: 'countered', firstOutcomeAt: new Date(2026, 8, 2, 10).toISOString(), finalPrice: 52, outcomeAt: new Date(2026, 8, 4, 20).toISOString(),
+    negotiation: [{ by: 'buyer', price: 45, at: sent.toISOString() }, { by: 'seller', price: 58, at: new Date(2026, 8, 2, 10).toISOString() }, { by: 'buyer', price: 52, at: new Date(2026, 8, 2, 21, 30).toISOString() }],
+  }
+  const counterOnly = {
+    id: 'cs', createdAt: new Date(2026, 8, 20, 21, 40).toISOString(), title: 'Borsa', listPrice: 60, targetPrice: 45, form: FORM, sentAt: null, status: 'countered', firstOutcome: 'countered',
+    negotiation: [{ by: 'buyer', price: 45, at: null, planned: false }, { by: 'seller', price: 58.5, at: new Date(2026, 8, 20, 21, 40).toISOString() }],
+  }
+  const rep = monthlyReport({ items: [item, counterOnly], month: '2026-09', now: new Date(2026, 9, 1, 9) })
+  assert.equal(rep.touched.length, 1)
+  assert.ok(rep.roundsThisMonth.length >= 2, 'September rounds of an August offer are in September')
+  assert.equal(rep.summary.unknownStart, 1)
+  const files = unzip(reportWorkbook(rep))
+  const upd = files['xl/worksheets/sheet3.xml']
+  assert.ok(upd.includes('Felpa') && upd.includes('Affare concluso'))
+  const offers = files['xl/worksheets/sheet2.xml']
+  assert.ok(offers.includes('sconosciuto'))
+  assert.ok(files['xl/worksheets/sheet1.xml'].includes('Generato il 01/10/2026'))
+  // Preview (manual export / caught-up month): nothing is called applied.
+  const preview = monthlyReport({ items: [item, counterOnly], month: '2026-09', now: new Date(2026, 9, 1, 9), applied: false })
+  assert.ok(preview.changes.every((c) => c.status !== 'applied' && c.status !== 'capped'))
+  const pf = unzip(reportWorkbook(preview))
+  assert.ok(!Object.values(pf).some((x) => x.includes('>Applicata<')))
+  assert.ok(pf['xl/worksheets/sheet10.xml'].includes('Correzioni proposte (non applicate)'))
+})
+
+test('engine review: a test variation never says «send now», and the price suggestion uses the same moment', () => {
+  const base = analyzeOffer(FORM, NOW)
+  for (let i = 0; i < 200; i++) {
+    const out = explorationPlan(FORM, base, NOW, { key: `t${i}`, month: '2026-10', share: 1 })
+    if (!out || out.exploration.kind !== 'time') continue
+    assert.equal(out.result.sendNow.ok, false)
+    assert.equal(out.result.sendNow.reason, 'exploration')
+    if (out.result.suggestedPrice) near(out.result.suggestedPrice.date.getTime(), out.result.optimal.date.getTime(), 6 * 60000)
+  }
 })

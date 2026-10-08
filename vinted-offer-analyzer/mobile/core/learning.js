@@ -22,8 +22,9 @@
 import { COUNTER, ENGINE_VERSION, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, VINTED } from './constants.js'
 import { analyzeOffer, normalizeInput, priceStepFor, withPrices } from './analyze.js'
 import { MONTHS_IT, WEEKDAYS_IT, calendarDaysBetween, minutesOfDay, pad2 } from './dates.js'
-import { clamp, formatSignedPoints, hashString, squash } from './math.js'
+import { clamp, formatPoints, hashString, squash } from './math.js'
 import { formatEuro } from './messages.js'
+import { prepArticleFor } from './reasoning.js'
 import {
   DEFAULT_PROFILE, discKnotOf, discKnotWeights, discOffset, monotoneDisc, normalizeProfile, profileIsActive, profileParams, timeGroupOf,
 } from './profile.js'
@@ -305,6 +306,8 @@ export function learningRecord(item, now) {
     implicit,
     y,
     latencyFirstH: firstOutcomeAt && sentKnown && item.sentAtSource !== 'imputed' ? Math.max(0, (firstOutcomeAt.getTime() - sentAt.getTime()) / 3_600_000) : null,
+    firstOutcomeAt,
+    outcomeAt: lrnDate(item.outcomeAt),
     status,
     closed,
     lost,
@@ -848,8 +851,10 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   if (rollback) {
     const keys = ['intercept', 'slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct']
     for (const key of keys) {
-      const from = getParam(prev, key)
-      const to = getParam(start, key)
+      // null reply time = the engine default (2 h): show the number, not «null».
+      const orDefault = (v) => (key === 'sellerReplyHours' && v == null ? COUNTER.SELLER_REPLY_HOURS : v)
+      const from = orDefault(getParam(prev, key))
+      const to = orDefault(getParam(start, key))
       if (from === to || (from != null && to != null && Math.abs(from - to) < 1e-9)) continue
       rolledBack.add(key)
       changes.push({ key, label: paramLabel(key), from: from == null ? null : lrnR4(from), to: to == null ? null : lrnR4(to), target: null, nEff: null, minEffective: null, status: 'rollback', reason: 'Le correzioni in uso prevedevano peggio di quelle di prima (log Bayes factor sotto −2): torno al valore precedente.' })
@@ -1077,7 +1082,10 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
   let hi = result.probabilityRange ? result.probabilityRange[1] : p
   const P = profile ? normalizeProfile(profile) : null
   let basis = 'engine'
-  if (P && profileIsActive(P) && P.basedOn >= LEARNING.MIN_EFFECTIVE.intercept && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
+  // «Calibrated» only when the FIRST-OFFER correction moved (counter-side changes do not touch this estimate).
+  const firstOfferCorrected = P && (Math.abs(P.intercept) > 1e-9 || Math.abs(P.slope - 1) > 1e-9
+    || Object.values(P.time).some((v) => Math.abs(v) > 1e-9) || Object.values(P.disc).some((v) => Math.abs(v) > 1e-9))
+  if (firstOfferCorrected && P.basedOn >= LEARNING.MIN_EFFECTIVE.intercept && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
     const r = { rawLogit: optimal.score.rawLogit ?? z, timeGroup: timeGroupOf(optimal.score.timeWindow.id), discW: discKnotWeights(input.discountPct) }
     const x = P.paramKeys.map((key) => lrnFeature(key, r))
     let v = 0
@@ -1095,10 +1103,10 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
   }
   const reasons = []
   const negatives = (result.factors && result.factors.rows ? result.factors.rows : []).filter((f) => f.deltaPoints < 0).sort((a, b) => a.deltaPoints - b.deltaPoints)
-  if (input.discountPct >= 15) reasons.push({ id: 'discount', text: `Sconto del ${Math.round(input.discountPct)}%: parte da ${result.factors.basePct}% di accettazione` })
-  for (const f of negatives.slice(0, 3)) reasons.push({ id: f.id, text: `${f.label}: ${formatSignedPoints(f.deltaPoints)} punti` })
-  if (A < 0.9) reasons.push({ id: 'available', text: `Può essere venduto ad altri prima: resta disponibile al ${Math.round(A * 100)}%` })
-  if (R < 0.99) reasons.push({ id: 'read', text: `Venditore inattivo: potrebbe non leggere l'offerta (${Math.round(R * 100)}%)` })
+  if (input.discountPct >= 15) reasons.push({ id: 'discount', text: `Sconto ${prepArticleFor('di', input.discountPct)}${Math.round(input.discountPct)}%: parte ${prepArticleFor('da', result.factors.basePct)}${result.factors.basePct}% di accettazione` })
+  for (const f of negatives.slice(0, 3)) reasons.push({ id: f.id, text: `${f.label}: ${formatPoints(f.deltaPoints)}` })
+  if (A < 0.9) reasons.push({ id: 'available', text: `Può essere venduto ad altri prima: resta disponibile ${prepArticleFor('a', A * 100)}${Math.round(A * 100)}%` })
+  if (R < 0.99) reasons.push({ id: 'read', text: `Venditore inattivo: legge l'offerta solo ${Math.round(R * 100) === 50 ? 'una volta su due' : `nel ${Math.round(R * 100)}% dei casi`}` })
   if (result.blockRisk && result.blockRisk.level !== 'low') reasons.push({ id: 'block', text: `Rischio di rifiuto secco ${result.blockRisk.label.toLowerCase()}` })
 
   // How a failure happens: engine shares for this offer, smoothed with the user's own mix of failed first offers.
@@ -1173,7 +1181,7 @@ const groupStats = (records, keyOf, ids, profileBefore, profileAfter, kind) => i
  * month. The fit uses ALL history up to `now` (late outcomes of earlier months included); the month's numbers use the
  * offers sent in that month. Returns everything the workbook and the app's report card show.
  */
-export function monthlyReport({ items, month, now, previous = null, profileHistory = [], explorationEnabled = true }) {
+export function monthlyReport({ items, month, now, previous = null, profileHistory = [], explorationEnabled = true, applied = true }) {
   const records = buildDataset(items, now)
   const inMonth = records.filter((r) => r.month === month)
   const prev = normalizeProfile(previous)
@@ -1185,6 +1193,12 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
   const next = proposal.profile
   const discountFit = proposal.discountFit
 
+  // Negotiations sent in earlier months that moved this month (a counter, our reply, the outcome): reported again with
+  // their current state, so no deal or counter falls between two monthly files.
+  const inThisMonth = (d) => d && monthKeyOf(d) === month
+  const touched = records.filter((r) => r.month < month && (inThisMonth(r.outcomeAt) || inThisMonth(r.firstOutcomeAt)
+    || r.rounds.some((x) => inThisMonth(x.receivedAt) || inThisMonth(x.replyAt))))
+  const roundsThisMonth = records.flatMap((r) => r.rounds.filter((x) => inThisMonth(x.receivedAt) || inThisMonth(x.replyAt) || (r.month === month && !x.receivedAt)).map((x) => ({ ...x, record: r })))
   const decided = inMonth.filter((r) => r.y != null)
   const pairsShown = decided.filter((r) => r.pShown != null).map((r) => [r.pShown, r.y])
   const pairsRaw = decided.filter((r) => Number.isFinite(r.rawLogit)).map((r) => [predictWith(null, r), r.y])
@@ -1220,7 +1234,8 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     avgSellerGapShare: lrnMean(rounds.map((x) => x.sellerGapShare).filter(Number.isFinite)),
     avgOurRaisePct: lrnMean(replies.map((x) => x.replyRaisePct).filter(Number.isFinite)),
     avgRoundsClosed: closed.length ? lrnMean(closed.map((r) => r.rounds.length)) : null,
-    medianLatencyH: lrnMedian([...inMonth.map((r) => r.latencyFirstH), ...rounds.map((x) => x.latencyH)].filter(Number.isFinite)),
+    // Seller timestamps only (his counters): outcome taps measure the user, not the seller.
+    medianLatencyH: lrnMedian(rounds.map((x) => x.latencyH).filter(Number.isFinite)),
     totalSavedEur: lrnR2(closed.reduce((s, r) => s + r.savingEur, 0)),
     avgSavingEur: closed.length ? lrnR2(lrnMean(closed.map((r) => r.savingEur))) : null,
     avgSavingPct: closed.length ? lrnMean(closed.map((r) => r.savingShare)) : null,
@@ -1258,12 +1273,13 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
 
   const notes = []
   if (!records.length) notes.push('Nessuna offerta inviata finora: segna «Inviata» e l\'esito di ogni offerta, il motore impara solo dai tuoi esiti.')
-  else if (firstFit.n < LEARNING.MIN_EFFECTIVE.intercept) notes.push(`Esiti ancora pochi (${firstFit.n}): il motore resta quello di base finché non ne raccoglie almeno ${LEARNING.MIN_EFFECTIVE.intercept}.`)
+  else if (firstFit.n < LEARNING.MIN_EFFECTIVE.intercept) notes.push(`Esiti ancora pochi (${firstFit.n}): la probabilità della prima offerta resta quella di base finché non ne raccolgo almeno ${LEARNING.MIN_EFFECTIVE.intercept}.`)
   if (summary.pending) notes.push(`${summary.pending} ${summary.pending === 1 ? 'trattativa è ancora aperta' : 'trattative sono ancora aperte'}: gli esiti che arriveranno entrano nel calcolo del mese prossimo.`)
   const young = inMonth.filter((r) => r.y != null && !lrnMature(r, now)).length
   if (young) notes.push(`${young} ${young === 1 ? 'offerta inviata negli ultimi 7 giorni entra' : 'offerte inviate negli ultimi 7 giorni entrano'} nella correzione del mese prossimo (orizzonte fisso, per non contare solo le risposte veloci).`)
   if (summary.noReplyImplicit) notes.push(`${summary.noReplyImplicit} ${summary.noReplyImplicit === 1 ? 'offerta senza esito da oltre 7 giorni è contata' : 'offerte senza esito da oltre 7 giorni sono contate'} come «nessuna risposta».`)
-  if (proposal.rollback) notes.push('Le correzioni in uso prevedevano peggio di quelle di prima: sono tornato ai valori precedenti e le ho bloccate per un mese.')
+  if (proposal.rollback) notes.push('Le correzioni in uso prevedevano peggio di quelle di prima: ho ripristinato i valori precedenti e li blocco per un mese.')
+  if (!applied) notes.push('Correzioni solo proposte: questo report non modifica il motore (anteprima o mese recuperato).')
   if (!explorationEnabled) notes.push('Le varianti di test sono spente: il motore impara più lentamente sugli orari e sugli sconti.')
 
   return {
@@ -1280,15 +1296,18 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     counterFit,
     counterStats,
     firstFit: { keys: firstFit.keys, theta: firstFit.theta, nEff: firstFit.nEff, n: firstFit.n, ladder: firstFit.ladder, df: firstFit.df },
-    changes: proposal.changes,
+    changes: applied ? proposal.changes : proposal.changes.map((c) => (c.status === 'applied' || c.status === 'capped' || c.status === 'rollback' ? { ...c, status: 'proposed' } : c)),
     rollback: proposal.rollback,
+    applied,
     previousProfile: prev,
     nextProfile: next,
     profileHistory,
     records,
     inMonth,
+    touched,
+    roundsThisMonth,
     notes,
-    trend: monthlyTrend(records, proposal.changes.some((c) => c.status === 'applied' || c.status === 'capped') ? [...profileHistory, next] : profileHistory),
+    trend: monthlyTrend(records, applied && proposal.changes.some((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback') ? [...profileHistory, next] : profileHistory),
   }
 }
 
@@ -1312,7 +1331,7 @@ export function monthlyTrend(records, profileHistory = []) {
       closeRate: closed.length + lost.length ? closed.length / (closed.length + lost.length) : null,
       avgSavingPct: closed.length ? lrnMean(closed.map((r) => r.savingShare)) : null,
       totalSavedEur: lrnR2(closed.reduce((s, r) => s + r.savingEur, 0)),
-      changesApplied: applied && Array.isArray(applied.changes) ? applied.changes.length : 0,
+      changesApplied: applied && !applied.reverted && Array.isArray(applied.changes) ? applied.changes.length : 0,
     }
   })
 }
@@ -1323,7 +1342,10 @@ export function reportHeadline(report) {
   const moved = report.changes.filter((c) => c.status === 'applied' || c.status === 'capped')
   const parts = [`${s.offersSent} ${s.offersSent === 1 ? 'offerta' : 'offerte'}`]
   if (s.closedDeals) parts.push(`${s.closedDeals} ${s.closedDeals === 1 ? 'affare' : 'affari'} (${formatEuro(s.totalSavedEur)} risparmiati)`)
-  parts.push(report.rollback ? 'tornato alle correzioni precedenti' : moved.length ? `${moved.length} ${moved.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato')
+  if (report.applied === false) {
+    const proposed = report.changes.filter((c) => c.status === 'proposed').length
+    parts.push(proposed ? `${proposed} ${proposed === 1 ? 'correzione proposta' : 'correzioni proposte'} (motore non modificato)` : 'motore non modificato')
+  } else parts.push(report.rollback ? 'tornato alle correzioni precedenti' : moved.length ? `${moved.length} ${moved.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato')
   return parts.join(' · ')
 }
 
@@ -1335,7 +1357,8 @@ const yesNo = (b) => (b == null ? '' : b ? 'Sì' : 'No')
 const lrnTyped = (value, format) => (value == null || format == null || format === 'text' ? value : { value, format })
 const num4 = (x) => (x == null || !Number.isFinite(x) ? null : lrnR4(x))
 const pm = (v, se) => (v == null ? null : `${String(lrnR4(v)).replace('.', ',')}${se != null ? ` ± ${String(lrnR4(se)).replace('.', ',')}` : ''}`)
-const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata', rollback: 'Tornata al valore precedente' }
+const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata', rollback: 'Tornata al valore precedente', proposed: 'Proposta, non applicata' }
+const SENT_SOURCE_LABELS = { tap: 'toccato «Inviata»', imputed: 'stimato', unknown: 'sconosciuto' }
 
 /** The month's .xlsx: summary, offers, negotiations, counter analysis, time and discount groups, calibration, tests, engine changes, trend, notes. */
 export function reportWorkbook(report) {
@@ -1348,7 +1371,8 @@ export function reportWorkbook(report) {
     ['Accettate subito', s.accepted, 'int'],
     ['Controproposte ricevute alla prima offerta', s.countered, 'int'],
     ['Rifiutate', s.declined, 'int'],
-    ['Nessuna risposta (di cui presunte)', `${s.noReply} (${s.noReplyImplicit})`, 'text'],
+    ['Nessuna risposta', s.noReply, 'int'],
+    ['   di cui presunte (7 giorni senza notizie)', s.noReplyImplicit, 'int'],
     ['Vendute ad altri', s.soldOther, 'int'],
     ['Trattative iniziate dalla controproposta (orario della prima offerta sconosciuto)', s.unknownStart, 'int'],
     ['Trattative ancora aperte', s.pending, 'int'],
@@ -1365,7 +1389,8 @@ export function reportWorkbook(report) {
     ['Tue controproposte accettate', s.ourCountersAccepted, 'int'],
     ['Tua salita media nelle controproposte', pctOrNull(s.avgOurRaisePct == null ? null : s.avgOurRaisePct / 100), 'pct'],
     ['Giri medi di controproposta negli affari conclusi', s.avgRoundsClosed == null ? null : lrnR2(s.avgRoundsClosed), 'num'],
-    ['Tempo di risposta mediano (ore)', s.medianLatencyH == null ? null : lrnR2(s.medianLatencyH), 'num'],
+    ['Tempo mediano della controproposta del venditore (ore)', s.medianLatencyH == null ? null : lrnR2(s.medianLatencyH), 'num'],
+    ['Trattative dei mesi precedenti aggiornate in questo mese', report.touched ? report.touched.length : 0, 'int'],
     ['Sconto medio della prima offerta', pctOrNull(s.avgFirstDiscountPct), 'pct'],
     ['Risparmio medio sugli affari conclusi', pctOrNull(s.avgSavingPct), 'pct'],
     ['Risparmio medio per affare', s.avgSavingEur, 'eur'],
@@ -1376,36 +1401,50 @@ export function reportWorkbook(report) {
     ['Errore delle stime (Brier, più basso è meglio)', num4(c.shown.brier), 'num'],
     ['Errore delle stime con le nuove correzioni (Brier)', num4(c.next.brier), 'num'],
   ]
+  const offerColumns = [
+    { header: 'Articolo', width: 34 }, { header: 'Mese di invio', width: 14 }, { header: 'Categoria', width: 14 }, { header: 'Listino', format: 'eur' }, { header: 'Prima offerta', format: 'eur' },
+    { header: 'Sconto', format: 'pct' }, { header: 'Inviata', format: 'datetime', width: 17 }, { header: 'Orario di invio', width: 18 }, { header: 'Consigliata', format: 'datetime', width: 17 },
+    { header: 'Scarto (min)', format: 'int' }, { header: 'Giorno', width: 11 }, { header: 'Fascia', width: 30 }, { header: 'Stima mostrata', format: 'pct' },
+    { header: 'Stima motore oggi', format: 'pct' }, { header: 'Stima corretta', format: 'pct' }, { header: 'Prima risposta', width: 18 }, { header: 'Ore alla controproposta', format: 'num' },
+    { header: 'Controproposte', format: 'int' }, { header: 'Prima controproposta', format: 'eur' }, { header: 'Salita controproposta', format: 'pct' },
+    { header: 'Prezzo finale', format: 'eur' }, { header: 'Risparmio', format: 'eur' }, { header: 'Risparmio %', format: 'pct' }, { header: 'Esito', width: 30 },
+    { header: 'Variante di test', width: 26 }, { header: 'Propensione', format: 'pct' }, { header: 'Venditore', width: 12 }, { header: 'Link', width: 40 },
+  ]
+  // Send time, weekday and window only when the send time is known (not the seller's counter time); its source is said.
+  const offerRow = (r) => {
+    const firstRound = r.rounds[0]
+    const group = LEARNING_TIME_GROUPS.find((g) => g.id === r.timeGroup)
+    return [
+      r.title || 'Senza titolo', monthLabel(r.month), r.category, r.listPrice, r.price, r.discountPct / 100, r.sentKnown ? r.sentAt : null, SENT_SOURCE_LABELS[r.sentAtSource] || r.sentAtSource,
+      r.recommendedAt, r.delayMinutes, r.sentKnown ? WEEKDAYS_IT[r.weekday] : null, r.sentKnown ? (group ? group.label : r.timeGroup) : null,
+      r.pShown, Number.isFinite(r.rawLogit) ? predictWith(null, r) : null, Number.isFinite(r.rawLogit) ? predictWith(report.nextProfile, r) : null,
+      r.first ? `${OUTCOME_LABELS[r.first] || r.first}${r.implicit ? ' (presunta)' : ''}` : 'In attesa', r.first === 'countered' && r.latencyFirstH != null ? lrnR2(r.latencyFirstH) : null,
+      r.rounds.length, firstRound ? firstRound.sellerPrice : null, firstRound && Number.isFinite(firstRound.sellerRaisePct) ? firstRound.sellerRaisePct / 100 : null,
+      r.finalPrice, r.savingEur, r.savingShare, finalLabel(r), r.exploration ? r.exploration.label : '', r.exploration && Number.isFinite(r.exploration.propensity) ? r.exploration.propensity : null, r.sellerProfile, r.link,
+    ]
+  }
+  const g = lrnDate(report.generatedAt) || new Date(0)
+  const kmEmpty = !cs.latency.events && !cs.latency.censored
   const sheets = [
     {
       name: 'Riepilogo',
       title: `Offerte Vinted · ${report.label}`,
-      note: `Generato il ${String(report.generatedAt).slice(0, 10)} · motore ${report.engine} · ${reportHeadline(report)}`,
-      columns: [{ header: 'Voce', width: 60 }, { header: 'Valore', width: 18 }],
+      note: `Generato il ${pad2(g.getDate())}/${pad2(g.getMonth() + 1)}/${g.getFullYear()} · motore ${report.engine} · ${reportHeadline(report)}`,
+      columns: [{ header: 'Voce', width: 64 }, { header: 'Valore', width: 18 }],
       rows: summaryRows.map((r) => [r[0], lrnTyped(r[1], r[2])]),
+      filter: false,
     },
     {
       name: 'Offerte',
-      columns: [
-        { header: 'Articolo', width: 34 }, { header: 'Categoria', width: 14 }, { header: 'Listino', format: 'eur' }, { header: 'Prima offerta', format: 'eur' },
-        { header: 'Sconto', format: 'pct' }, { header: 'Inviata', format: 'datetime', width: 17 }, { header: 'Consigliata', format: 'datetime', width: 17 },
-        { header: 'Scarto (min)', format: 'int' }, { header: 'Giorno', width: 11 }, { header: 'Fascia', width: 30 }, { header: 'Stima mostrata', format: 'pct' },
-        { header: 'Stima motore oggi', format: 'pct' }, { header: 'Stima corretta', format: 'pct' }, { header: 'Prima risposta', width: 18 }, { header: 'Ore alla risposta', format: 'num' },
-        { header: 'Controproposte', format: 'int' }, { header: 'Prima controproposta', format: 'eur' }, { header: 'Salita controproposta', format: 'pct' },
-        { header: 'Prezzo finale', format: 'eur' }, { header: 'Risparmio', format: 'eur' }, { header: 'Risparmio %', format: 'pct' }, { header: 'Esito', width: 30 },
-        { header: 'Variante di test', width: 26 }, { header: 'Propensione', format: 'pct' }, { header: 'Venditore', width: 12 }, { header: 'Link', width: 40 },
-      ],
-      rows: report.inMonth.map((r) => {
-        const firstRound = r.rounds[0]
-        const group = LEARNING_TIME_GROUPS.find((g) => g.id === r.timeGroup)
-        return [
-          r.title || 'Senza titolo', r.category, r.listPrice, r.price, r.discountPct / 100, r.sentAt, r.recommendedAt, r.delayMinutes, WEEKDAYS_IT[r.weekday],
-          group ? group.label : r.timeGroup, r.pShown, Number.isFinite(r.rawLogit) ? predictWith(null, r) : null, Number.isFinite(r.rawLogit) ? predictWith(report.nextProfile, r) : null,
-          r.first ? `${OUTCOME_LABELS[r.first] || r.first}${r.implicit ? ' (presunta)' : ''}` : 'In attesa', r.latencyFirstH == null ? null : lrnR2(r.latencyFirstH),
-          r.rounds.length, firstRound ? firstRound.sellerPrice : null, firstRound && Number.isFinite(firstRound.sellerRaisePct) ? firstRound.sellerRaisePct / 100 : null,
-          r.finalPrice, r.savingEur, r.savingShare, finalLabel(r), r.exploration ? r.exploration.label : '', r.exploration && Number.isFinite(r.exploration.propensity) ? r.exploration.propensity : null, r.sellerProfile, r.link,
-        ]
-      }),
+      columns: offerColumns,
+      rows: report.inMonth.map(offerRow),
+    },
+    {
+      name: 'Aggiornamenti',
+      title: 'Trattative dei mesi precedenti aggiornate in questo mese',
+      note: 'Offerte inviate prima di questo mese che hanno avuto una controproposta, una tua risposta o un esito in questo mese, con lo stato attuale.',
+      columns: offerColumns,
+      rows: (report.touched || []).map(offerRow),
     },
     {
       name: 'Trattative',
@@ -1415,14 +1454,16 @@ export function reportWorkbook(report) {
         { header: 'Ricevuta', format: 'datetime', width: 17 }, { header: 'Tua risposta', format: 'eur' }, { header: 'Tua salita', format: 'pct' }, { header: 'Quota della distanza', format: 'pct' },
         { header: 'Metà strada', width: 12 }, { header: 'Ultima offerta', width: 14 }, { header: 'Stima accettazione', format: 'pct' }, { header: 'Accettata', width: 22 }, { header: 'Inviata', format: 'datetime', width: 17 },
       ],
-      rows: report.inMonth.flatMap((r) => r.rounds.map((x) => [
+      // Rounds that happened this month, whatever the month the offer was sent.
+      rows: (report.roundsThisMonth || []).map(({ record: r, ...x }) => [
         r.title || 'Senza titolo', x.index, x.buyerPrice, x.sellerPrice, Number.isFinite(x.sellerRaisePct) ? x.sellerRaisePct / 100 : null, x.sellerGapShare, x.latencyH == null ? null : lrnR2(x.latencyH),
         x.receivedAt ? new Date(x.receivedAt) : null, x.replyPrice, Number.isFinite(x.replyRaisePct) ? x.replyRaisePct / 100 : null, x.replyGapShare, yesNo(x.replyIsSplit), yesNo(x.replyIsFinal),
         x.replyPAccept, x.replyAccepted == null ? (x.replyPrice == null ? '' : 'In attesa') : x.replyAccepted ? 'Sì' : x.replyImplicit ? 'No (nessuna risposta)' : 'No', x.replyAt ? new Date(x.replyAt) : null,
-      ])),
+      ]),
     },
     {
       name: 'Controproposte',
+      filter: false,
       title: 'Come rispondono i tuoi venditori',
       note: 'Tutto lo storico, i mesi vecchi pesano meno e i giri della stessa trattativa contano meno di trattative diverse.',
       columns: [{ header: 'Voce', width: 56 }, { header: 'Valore', width: 16 }, { header: 'Dettaglio', width: 16 }, { header: 'Dettaglio 2', width: 16 }, { header: 'Dettaglio 3', width: 16 }],
@@ -1442,8 +1483,8 @@ export function reportWorkbook(report) {
         ...cs.roundsToClose.map((x) => [x.rounds < 3 ? `${x.rounds} ${x.rounds === 1 ? 'giro' : 'giri'} di controproposta` : '3 giri o più', lrnTyped(x.deals, 'int')]),
         [],
         ['Tempo di risposta con una controproposta (Kaplan–Meier; i silenzi contano come attese)', 'Ancora senza risposta', 'Offerte in attesa'],
-        ...cs.latency.table.map((t) => [`Dopo ${t.hours} ${t.hours === 1 ? 'ora' : 'ore'}`, lrnTyped(t.survival, 'pct'), lrnTyped(t.atRisk, 'int')]),
-        ['Mediana (ore)', cs.latency.median == null ? 'oltre il periodo osservato' : lrnTyped(lrnR2(cs.latency.median), 'num')],
+        ...cs.latency.table.map((t) => [`Dopo ${t.hours} ${t.hours === 1 ? 'ora' : 'ore'}`, kmEmpty ? 'nessun dato' : lrnTyped(t.survival, 'pct'), lrnTyped(t.atRisk, 'int')]),
+        ['Mediana (ore)', kmEmpty ? 'nessun dato' : cs.latency.median == null ? 'oltre il periodo osservato' : lrnTyped(lrnR2(cs.latency.median), 'num')],
         ['Risposte osservate / silenzi', lrnTyped(cs.latency.events, 'int'), lrnTyped(cs.latency.censored, 'int')],
         ['Ore di attesa usate dal motore: prima → dopo', lrnTyped(report.previousProfile.sellerReplyHours ?? COUNTER.SELLER_REPLY_HOURS, 'num'), lrnTyped(report.nextProfile.sellerReplyHours ?? COUNTER.SELLER_REPLY_HOURS, 'num')],
       ],
@@ -1451,6 +1492,7 @@ export function reportWorkbook(report) {
     {
       name: 'Fasce orarie',
       title: 'Fasce orarie',
+      filterRows: report.byTimeGroup.length,
       note: 'Tutto lo storico, i mesi vecchi pesano meno. Osservate − attese > 0: la fascia rende più di quanto il motore stimava.',
       columns: [{ header: 'Fascia', width: 44 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' },
         { header: 'Tasso reale', format: 'pct' }, { header: 'Tasso stimato', format: 'pct' }, { header: 'Correzione prima', format: 'num' }, { header: 'Correzione ora', format: 'num' }],
@@ -1459,7 +1501,8 @@ export function reportWorkbook(report) {
     {
       name: 'Sconti',
       title: 'Sconti e sconto di partenza',
-      note: `Sconto di partenza: ${report.previousProfile.discountPct}% → ${report.nextProfile.discountPct}%: lo sconto più profondo al quale i tuoi venditori accettano ancora quanto il motore prevede al −20% (${report.discount.iso && report.discount.iso.targetAcceptance != null ? `${Math.round(report.discount.iso.targetAcceptance * 100)}%` : 'nessun dato'}). Il risparmio atteso è solo indicativo: probabilità × sconto + (1 − probabilità) × (affari chiusi dopo un primo no: ${Math.round(report.discount.closeAfterFail * 100)}%, con il ${Math.round(report.discount.continuationRatio * 100)}% del risparmio iniziale; un affare perso costa il ${Math.round(LEARNING.LOSS_COST_SHARE * 100)}%).`,
+      filterRows: report.byKnot.length,
+      note: `Tutto lo storico, i mesi vecchi pesano meno. Sconto di partenza: ${report.previousProfile.discountPct}% → ${report.nextProfile.discountPct}%: lo sconto più profondo al quale i tuoi venditori accettano ancora quanto il motore prevede al −20% (${report.discount.iso && report.discount.iso.targetAcceptance != null ? `${Math.round(report.discount.iso.targetAcceptance * 100)}%` : 'nessun dato'}). Il risparmio atteso è solo indicativo: probabilità × sconto + (1 − probabilità) × (affari chiusi dopo un primo no: ${Math.round(report.discount.closeAfterFail * 100)}%, con il ${Math.round(report.discount.continuationRatio * 100)}% del risparmio iniziale; un affare perso costa il ${Math.round(LEARNING.LOSS_COST_SHARE * 100)}%).`,
       columns: [{ header: 'Voce', width: 28 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' },
         { header: 'Correzione prima', format: 'num' }, { header: 'Correzione ora', format: 'num' }],
       rows: [
@@ -1472,6 +1515,7 @@ export function reportWorkbook(report) {
     {
       name: 'Calibrazione',
       title: 'Quanto sono affidabili le stime',
+      filterRows: c.shown.bins.length,
       note: 'Offerte del mese ordinate per stima e divise in gruppi di pari numerosità: stima media contro accettate davvero, con l\'intervallo al 90%.',
       columns: [{ header: 'Stima da', format: 'pct' }, { header: 'Stima a', format: 'pct' }, { header: 'Offerte', format: 'int' }, { header: 'Stima media', format: 'pct' },
         { header: 'Accettate davvero', format: 'pct' }, { header: 'Intervallo 90% da', format: 'pct' }, { header: 'Intervallo 90% a', format: 'pct' }],
@@ -1498,14 +1542,16 @@ export function reportWorkbook(report) {
     {
       name: 'Varianti di test',
       title: 'Varianti di test (1 offerta su 5)',
-      note: 'Osservate − attese confronta ogni variante con la stima del motore per le stesse offerte. Con poche offerte è solo un indizio: le varianti servono a coprire fasce e sconti poco provati.',
+      note: 'Tutto lo storico. Osservate − attese confronta ogni variante con la stima del motore per le stesse offerte. Con poche offerte è solo un indizio: le varianti servono a coprire fasce e sconti poco provati.',
       columns: [{ header: 'Variante', width: 36 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' }, { header: 'Risparmio medio', format: 'pct' }],
       rows: report.exploration.map((a) => [a.label, a.n, a.successes, a.expected, a.oe, a.avgSavingPct]),
     },
     {
       name: 'Modifiche motore',
-      title: `Correzioni per ${monthLabel(shiftMonth(report.month, 1))}`,
-      note: report.rollback ? 'Ritorno ai valori precedenti: le correzioni in uso prevedevano peggio. Le famiglie toccate restano bloccate per un mese.' : 'Ogni valore si muove solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al mese.',
+      title: report.applied === false ? 'Correzioni proposte (non applicate)' : `Correzioni per ${monthLabel(shiftMonth(report.month, 1))}`,
+      note: report.applied === false
+        ? 'Anteprima o mese recuperato: il motore non è stato modificato. Le correzioni valgono solo nel report dell\'ultimo mese chiuso.'
+        : report.rollback ? 'Ritorno ai valori precedenti: le correzioni in uso prevedevano peggio. Le famiglie toccate restano bloccate per un mese.' : 'Ogni valore si muove solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al mese.',
       columns: [{ header: 'Parametro', width: 46 }, { header: 'Prima', format: 'num' }, { header: 'Dopo', format: 'num' }, { header: 'Obiettivo dai dati', format: 'num' }, { header: 'Esiti pesati', format: 'num' },
         { header: 'Minimo richiesto', format: 'int' }, { header: 'Stato', width: 18 }, { header: 'Motivo', width: 64 }],
       rows: report.changes.map((x) => [x.label, x.from, x.to, x.target, x.nEff, x.minEffective, STATUS_LABELS[x.status] || x.status, x.reason]),
@@ -1514,7 +1560,7 @@ export function reportWorkbook(report) {
       name: 'Andamento',
       title: 'Mese dopo mese',
       columns: [{ header: 'Mese', width: 16 }, { header: 'Offerte', format: 'int' }, { header: 'Accettazione reale', format: 'pct' }, { header: 'Stimata', format: 'pct' }, { header: 'Conclusi', format: 'int' },
-        { header: 'Persi', format: 'int' }, { header: 'Tasso di chiusura', format: 'pct' }, { header: 'Risparmio medio', format: 'pct' }, { header: 'Risparmio totale', format: 'eur' }, { header: 'Correzioni applicate', format: 'int' }],
+        { header: 'Persi', format: 'int' }, { header: 'Tasso di chiusura', format: 'pct' }, { header: 'Risparmio medio', format: 'pct' }, { header: 'Risparmio totale', format: 'eur' }, { header: 'Correzioni decise a fine mese (in vigore dal mese dopo)', format: 'int', width: 24 }],
       rows: report.trend.map((t) => [t.label, t.offers, t.firstAcceptRate, t.predicted, t.closed, t.lost, t.closeRate, t.avgSavingPct, t.totalSavedEur, t.changesApplied]),
     },
     {

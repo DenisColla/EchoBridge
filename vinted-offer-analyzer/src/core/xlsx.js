@@ -217,7 +217,7 @@ function xlsxCell(ref, value, format) {
 }
 
 /**
- * Sheet XML. `sheet` = { columns: [{ header, format, width }], rows: [[...values]], title?: string, note?: string }.
+ * Sheet XML. `sheet` = { columns: [{ header, format, width }], rows: [[...values]], title?, note?, filter?, filterRows? }.
  * With `title` the sheet starts with a title row (and an optional note row) above the header.
  * The header row is frozen and gets an autofilter.
  */
@@ -252,7 +252,12 @@ function xlsxSheetXml(sheet) {
   const pane = headerRow
     ? `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow}" topLeftCell="A${headerRow + 1}" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView></sheetViews>`
     : '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
-  const filterRef = headerRow && (sheet.rows || []).length ? { from: `$A$${headerRow}`, to: `$${xlsxColumn(columns.length - 1)}$${lastRow}`, ref: `A${headerRow}:${xlsxColumn(columns.length - 1)}${lastRow}` } : null
+  // `filter: false` → no autofilter; `filterRows: n` → the filter covers only the first n data rows (sheets that stack
+  // a second table below the first must not sort the two together).
+  const filterLast = sheet.filterRows != null ? Math.min(lastRow, (headerRow || 0) + sheet.filterRows) : lastRow
+  const filterRef = headerRow && sheet.filter !== false && (sheet.rows || []).length && filterLast > headerRow
+    ? { from: `$A$${headerRow}`, to: `$${xlsxColumn(columns.length - 1)}$${filterLast}`, ref: `A${headerRow}:${xlsxColumn(columns.length - 1)}${filterLast}` }
+    : null
   const filter = filterRef ? `<autoFilter ref="${filterRef.ref}"/>` : ''
   const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
     + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'

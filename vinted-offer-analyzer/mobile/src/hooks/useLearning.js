@@ -60,10 +60,12 @@ export function useLearning({ items, ready }) {
 
   useEffect(() => {
     loadLearningState().then((saved) => {
-      const s = saved && saved.version === 1 ? saved : initialState(new Date())
+      // An unreadable state was copied aside by the loader; start fresh but keep that copy.
+      const usable = saved && !saved.unreadable && saved.version === 1
+      const s = usable ? saved : initialState(new Date())
       stateRef.current = s
       setState(s)
-      if (!saved) saveLearningState(s)
+      if (!usable) saveLearningState(s)
     })
   }, [])
 
@@ -108,11 +110,11 @@ export function useLearning({ items, ready }) {
         await new Promise((resolve) => setTimeout(resolve, 0))
         const month = months[i]
         const isLast = i === months.length - 1
-        const report = monthlyReport({ items: itemsRef.current, month, now, previous: current, profileHistory: history, explorationEnabled: s.exploration !== false })
+        // Catch-up after months away: one profile step only (the newest month); older months are reports, not changes.
+        const report = monthlyReport({ items: itemsRef.current, month, now, previous: current, profileHistory: history, explorationEnabled: s.exploration !== false, applied: isLast })
         const fileName = reportFileName(report)
         const file = await writeReport({ bytes: reportWorkbook(report), fileName, folderUri: s.folder ? s.folder.uri : null })
         if (file.error) lastError = file.error
-        // Catch-up after months away: one profile step only (the newest month), older months are reported as they were.
         const applied = isLast ? report.changes.filter((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback') : []
         produced.push({
           month, label: report.label, generatedAt: report.generatedAt, fileName, savedTo: file.savedTo, localUri: file.localUri, folderUri: file.folderUri, error: file.error,
@@ -124,14 +126,16 @@ export function useLearning({ items, ready }) {
           if (applied.length || report.rollback) history = [...history, { ...report.nextProfile, cov: null }].slice(-PROFILES_KEPT)
         }
       }
+      // Merge into the CURRENT state: the user may have changed the folder or the exploration switch meanwhile.
+      const cur = stateRef.current || s
       const next = await ensureMonthlyReminder({
-        ...s, profile: current, history, undo, reports: [...produced.reverse(), ...(s.reports || [])].slice(0, REPORTS_KEPT),
+        ...cur, profile: current, history, undo, reports: [...produced.reverse(), ...(cur.reports || [])].slice(0, REPORTS_KEPT),
         lastProcessed: months[months.length - 1], lastRunAt: iso(now), lastError,
       })
-      await persist(next)
+      await persist({ ...next, folder: (stateRef.current || next).folder, exploration: (stateRef.current || next).exploration })
       return produced[0]
     } catch (error) {
-      await persist({ ...s, lastError: String(error && error.message ? error.message : error) })
+      await persist({ ...(stateRef.current || s), lastError: String(error && error.message ? error.message : error) })
       return null
     } finally {
       runningRef.current = false
@@ -143,8 +147,12 @@ export function useLearning({ items, ready }) {
   const undoLast = useCallback(async () => {
     const s = stateRef.current
     if (!s || !s.undo) return false
-    const reports = (s.reports || []).map((r) => (r.month === s.undo.month ? { ...r, reverted: true } : r))
-    await persist({ ...s, profile: s.undo.profile, undo: null, reports })
+    const reports = (s.reports || []).map((r) => (r.month === s.undo.month
+      ? { ...r, reverted: true, headline: r.headline.replace(/[^·]*$/, ' correzioni annullate').replace(/\s+/g, ' ').trim() }
+      : r))
+    // The undone profile stays in the history only as «reverted»: later trends count no corrections for that month.
+    const history = (s.history || []).map((p) => (p.month === s.undo.month ? { ...p, changes: [], reverted: true } : p))
+    await persist({ ...s, profile: s.undo.profile, undo: null, reports, history })
     return true
   }, [persist])
 
@@ -174,7 +182,7 @@ export function useLearning({ items, ready }) {
     setBusy(true)
     try {
       const month = monthKeyOf(now)
-      const report = monthlyReport({ items: itemsRef.current, month, now, previous: s.profile, profileHistory: s.history || [], explorationEnabled: s.exploration !== false })
+      const report = monthlyReport({ items: itemsRef.current, month, now, previous: s.profile, profileHistory: s.history || [], explorationEnabled: s.exploration !== false, applied: false })
       const fileName = reportFileName(report).replace('.xlsx', '-ad-oggi.xlsx')
       const file = await writeReport({ bytes: reportWorkbook(report), fileName, folderUri: s.folder ? s.folder.uri : null })
       return { ...file, fileName, label: report.label, headline: reportHeadline(report) }

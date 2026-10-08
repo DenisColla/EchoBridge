@@ -38,7 +38,7 @@ const describeSlot = (slot, now) =>
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
  */
-export function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null } = {}) {
+export function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, exactSendAt = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
   let input = profile ? { ...normalized.input, profile } : normalized.input
@@ -49,7 +49,8 @@ export function optimizeOffer(raw, now = new Date(), { targetProbability = null,
     capped = true
   }
 
-  const current = pickMoments(input, now)
+  // `exactSendAt`: the test variation on screen is the starting point, so "go back to the best moment" is an option.
+  const current = pickMoments(input, now, { exactSendAt })
   const currentP = current.chosen.pOverall
   const target = targetProbability || nextGoalFor(currentP)
   const step = priceStepFor(input.listPrice)

@@ -1111,10 +1111,12 @@ function pickMoments(input, now, { preferredSendAt = null, exactSendAt = null } 
   const nowSlot = evaluated.find((s) => s.kind === 'now')
   const nowEligible = eligible.includes(nowSlot)
   const closeEnough = nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE
+  // A test variation must go out at its own moment: "send now" is never fine, or the variation would not happen.
+  const exploring = Boolean(chosen.exact)
   const sendNow = {
     slot: nowSlot,
-    ok: chosen.kind === 'now' || (nowEligible && closeEnough),
-    reason: chosen.kind === 'now' ? 'chosen' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
+    ok: chosen.kind === 'now' || (!exploring && nowEligible && closeEnough),
+    reason: chosen.kind === 'now' ? 'chosen' : exploring ? 'exploration' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
     deltaPoints: Math.round((nowSlot.pOverall - chosen.pOverall) * 100),
     window: nowSlot.score.timeWindow,
     windowEndsAt: addMinutes(startOfDay(nowSlot.date), nowSlot.score.timeWindow.to),
@@ -1335,6 +1337,14 @@ const articleFor = (n) => {
   const r = Math.round(n)
   if (r === 0) return 'dello '
   return r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89) ? "dell'" : 'del '
+}
+
+/** Preposition + article before a percentage: dell'8%, all'85%, nell'11%, dal 64%, del 30%. */
+const prepArticleFor = (prep, n) => {
+  const r = Math.round(n)
+  const elided = r === 1 || r === 8 || r === 11 || (r >= 80 && r <= 89)
+  const forms = { di: ["dell'", 'del ', 'dello '], a: ["all'", 'al ', 'allo '], in: ["nell'", 'nel ', 'nello '], da: ["dall'", 'dal ', 'dallo '] }[prep] || ["dell'", 'del ', 'dello ']
+  return r === 0 ? forms[2] : elided ? forms[0] : forms[1]
 }
 
 const dayPart = (date) => {
@@ -1567,13 +1577,14 @@ const priceStepFor = (listPrice) => (listPrice < 20 ? 0.5 : listPrice < 200 ? 1 
  * target overall probability. Probes the top of the range first so that an
  * unreachable target costs one scheduler run, then bisects the price grid.
  */
-function suggestPrice(input, now, targetProbability) {
+function suggestPrice(input, now, targetProbability, { exactSendAt = null } = {}) {
   const step = priceStepFor(input.listPrice)
   const steps = Math.floor((input.listPrice - input.targetPrice) / step) - (Number.isInteger((input.listPrice - input.targetPrice) / step) ? 1 : 0)
   if (steps < 1) return null
   const evaluate = (i) => {
     const candidate = withPrices(input, input.listPrice, Math.round((input.targetPrice + i * step) * 100) / 100)
-    const moments = pickMoments(candidate, now)
+    // Same moment as the analysis on screen (a test variation pins its own moment).
+    const moments = pickMoments(candidate, now, { exactSendAt })
     return { candidate, moments, ok: moments.chosen.pOverall >= targetProbability }
   }
   let hi = evaluate(steps)
@@ -1628,7 +1639,7 @@ function buildAnalysis(input, now, options = {}) {
   const twoStep = twoStepFor(input, chosen)
   // The read probability is the one factor a higher price cannot change, so the price target is scaled by it.
   const targetProbability = (blockRisk.level === 'high' ? SUGGESTED_PRICE_TARGET_HIGH_BLOCK : SUGGESTED_PRICE_TARGET) * readProbability(input)
-  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability) : null
+  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability, { exactSendAt: chosen.exact ? chosen.date : null }) : null
   const ambition = moments.maxAccept < 0.15 ? 'unrealistic' : moments.maxAccept < 0.3 ? 'ambitious' : null
   const messageBeforeOffer = blockRisk.level === 'high' || input.sellerProfile === 'inactive'
 
@@ -1750,7 +1761,7 @@ const describeSlot = (slot, now) =>
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
  */
-function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null } = {}) {
+function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, exactSendAt = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
   let input = profile ? { ...normalized.input, profile } : normalized.input
@@ -1761,7 +1772,8 @@ function optimizeOffer(raw, now = new Date(), { targetProbability = null, profil
     capped = true
   }
 
-  const current = pickMoments(input, now)
+  // `exactSendAt`: the test variation on screen is the starting point, so "go back to the best moment" is an option.
+  const current = pickMoments(input, now, { exactSendAt })
   const currentP = current.chosen.pOverall
   const target = targetProbability || nextGoalFor(currentP)
   const step = priceStepFor(input.listPrice)

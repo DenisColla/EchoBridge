@@ -119,10 +119,12 @@ export function pickMoments(input, now, { preferredSendAt = null, exactSendAt = 
   const nowSlot = evaluated.find((s) => s.kind === 'now')
   const nowEligible = eligible.includes(nowSlot)
   const closeEnough = nowSlot.pOverall >= chosen.pOverall - SEND_NOW_TOLERANCE
+  // A test variation must go out at its own moment: "send now" is never fine, or the variation would not happen.
+  const exploring = Boolean(chosen.exact)
   const sendNow = {
     slot: nowSlot,
-    ok: chosen.kind === 'now' || (nowEligible && closeEnough),
-    reason: chosen.kind === 'now' ? 'chosen' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
+    ok: chosen.kind === 'now' || (!exploring && nowEligible && closeEnough),
+    reason: chosen.kind === 'now' ? 'chosen' : exploring ? 'exploration' : !nowEligible ? 'avoid_window' : closeEnough ? 'close_enough' : 'worse',
     deltaPoints: Math.round((nowSlot.pOverall - chosen.pOverall) * 100),
     window: nowSlot.score.timeWindow,
     windowEndsAt: addMinutes(startOfDay(nowSlot.date), nowSlot.score.timeWindow.to),

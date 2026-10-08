@@ -19,7 +19,7 @@ const priceText = (v) => (Math.abs(v - Math.round(v)) > 0.004 ? v.toFixed(2) : S
 export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null }) {
   const t = useTheme()
   const pendingScroll = useRef(false)
-  const history = Array.isArray(context.history) ? context.history : []
+  const history = useMemo(() => (Array.isArray(context.history) ? context.history : []), [context.history])
   const last = history[history.length - 1]
   // Our last offer: the latest buyer entry of a saved negotiation, else the analysed target price.
   const lastBuyer = [...history].reverse().find((e) => e.by === 'buyer')

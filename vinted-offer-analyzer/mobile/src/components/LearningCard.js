@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { View } from 'react-native'
-import { LEARNING, MONTHS_IT, formatEuro, monthLabel, profileIsActive } from '../../core/index.js'
+import { COUNTER, LEARNING, MONTHS_IT, formatEuro, monthLabel, prepArticleFor, profileIsActive } from '../../core/index.js'
 import { openReport, shareReport } from '../services/reports.js'
 import { space } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title, Toggle } from './ui.js'
@@ -15,7 +15,7 @@ export function describeChange(c) {
   const dec = (v) => String(v).replace('.', ',')
   if (c.key === 'discountPct') return `${c.label}: ${dec(c.from)}% → ${dec(c.to)}%`
   if (c.key === 'slope' || c.key === 'counterShare') return `${c.label}: ×${dec(c.from)} → ×${dec(c.to)}`
-  if (c.key === 'sellerReplyHours') return `${c.label}: ${dec(c.from)} → ${dec(c.to)} ore`
+  if (c.key === 'sellerReplyHours') return `${c.label}: ${dec(c.from ?? COUNTER.SELLER_REPLY_HOURS)} → ${dec(c.to ?? COUNTER.SELLER_REPLY_HOURS)} ore`
   const pts = (v) => signed(Math.round(v * POINTS_PER_LOGIT))
   return `${c.label}: ${pts(c.from)} → ${pts(c.to)} punti`
 }
@@ -52,6 +52,7 @@ export function LearningCard({ learning, onToast }) {
   const pickFolder = () => run(async () => {
     const res = await learning.chooseFolder()
     if (res.ok) onToast(`Cartella scelta: ${res.label}. Ogni mese l'Excel finisce lì da solo.`)
+    else if (res.reason === 'cancelled') return
     else if (res.reason === 'unsupported') onToast('La cartella si sceglie dall\'app Android.')
     else if (res.reason !== 'cancelled') onToast('Non riesco ad accedere a quella cartella: scegline un\'altra (non la radice di Download).')
   })
@@ -61,10 +62,10 @@ export function LearningCard({ learning, onToast }) {
     if (!file) return
     if (file.savedTo === 'folder') onToast(`Excel di ${file.label} (fino a oggi) salvato in ${folder ? folder.label : 'cartella'}.`)
     else if (file.savedTo === 'app') {
-      onToast('Excel pronto: scegli dove mandarlo.')
+      onToast(file.error ? `${file.error} Intanto scegli dove mandarlo.` : 'Excel pronto: scegli dove mandarlo.')
       await shareReport(file.localUri, `Offerte ${file.label}`)
     } else if (file.savedTo === 'download') onToast('Excel scaricato.')
-    else onToast(file.error || 'Non sono riuscito a creare il file.')
+    else onToast(file.error || 'Non riesco a creare il file.')
   })
 
   return (
@@ -80,20 +81,20 @@ export function LearningCard({ learning, onToast }) {
       ) : (
         <Note tone="warn">Scegli una volta la cartella dove salvare l'Excel ogni mese, per esempio Documents/Offerte Vinted (Android non permette la radice di Download).</Note>
       )}
-      <Button label={folder ? 'Cambia cartella' : 'Scegli la cartella'} variant={folder ? 'secondary' : 'primary'} small onPress={pickFolder} disabled={busy} />
+      <Button label={folder ? 'Cambia cartella' : 'Scegli la cartella'} variant={folder ? 'secondary' : 'primary'} small onPress={pickFolder} disabled={busy || learning.busy} />
 
       {last && (
         <View style={{ gap: space.sm }}>
           <Body style={{ fontWeight: '700' }}>Ultimo report: {last.label}</Body>
           <Body small>{last.headline}</Body>
           <Body muted small>
-            Accettazione reale {pct(last.summary.firstAcceptRate)} contro una stima del {pct(last.summary.predictedFirstAccept)}
-            {last.summary.sellerCounters ? ` · ${last.summary.sellerCounters} controproposte, salita media ${last.summary.avgSellerRaisePct == null ? '—' : `${Math.round(last.summary.avgSellerRaisePct)}%`}` : ''}
+            {last.summary.firstAcceptRate != null ? `Accettazione reale ${pct(last.summary.firstAcceptRate)}` : 'Nessuna prima offerta con esito'}
+            {last.summary.firstAcceptRate != null && last.summary.predictedFirstAccept != null ? ` contro una stima ${prepArticleFor('di', last.summary.predictedFirstAccept * 100)}${pct(last.summary.predictedFirstAccept)}` : ''}
+            {last.summary.sellerCounters ? ` · ${last.summary.sellerCounters} ${last.summary.sellerCounters === 1 ? 'controproposta' : 'controproposte'}, salita media ${last.summary.avgSellerRaisePct == null ? '—' : `${Math.round(last.summary.avgSellerRaisePct)}%`}` : ''}
             {last.summary.totalSavedEur ? ` · risparmiati ${formatEuro(last.summary.totalSavedEur)}` : ''}
           </Body>
           <Body muted small>{(SAVED_TO[last.savedTo] || SAVED_TO.none)(folder)}</Body>
           {last.error ? <Note tone="warn">{last.error}</Note> : null}
-          {last.rollback ? <Note tone="warn">Le correzioni del mese prima prevedevano peggio di quelle precedenti: sono tornato ai valori di prima.</Note> : null}
           {last.changes.length > 0 ? (
             <View style={{ gap: 2 }}>
               <Body small style={{ fontWeight: '700' }}>{last.reverted ? 'Correzioni annullate:' : 'Correzioni applicate:'}</Body>
@@ -108,12 +109,12 @@ export function LearningCard({ learning, onToast }) {
             {last.localUri ? <Button label="Condividi" variant="secondary" small onPress={() => shareReport(last.localUri, `Offerte ${last.label}`)} /> : null}
           </ButtonRow>
           {canUndo && last.changes.length > 0 && !last.reverted ? (
-            <Button label="Annulla le correzioni di questo mese" variant="ghostDanger" small onPress={() => run(async () => { if (await learning.undoLast()) onToast('Correzioni annullate: torno al motore del mese prima.') })} />
+            <Button label="Annulla le correzioni di questo mese" variant="ghostDanger" small disabled={learning.busy} onPress={() => run(async () => { if (await learning.undoLast()) onToast('Correzioni annullate: torno al motore del mese prima.') })} />
           ) : null}
         </View>
       )}
 
-      <Toggle label={`Varianti di test: circa 1 offerta su ${Math.round(1 / LEARNING.EXPLORE_SHARE)} esce ±1 ora o ±2 punti di sconto, sempre segnalata`} value={exploration} onChange={(v) => learning.setExploration(v)} />
+      <Toggle label={`Varianti di test: circa 1 offerta su ${Math.round(1 / LEARNING.EXPLORE_SHARE)} esce ±1 ora o circa ±2 punti di sconto, sempre segnalata`} value={exploration} onChange={(v) => { if (!learning.busy) learning.setExploration(v) }} />
       <Body muted small>Le varianti costano al massimo {Math.round(LEARNING.EXPLORE_MAX_COST * 100)} punti di probabilità e servono a capire se orari e sconti vicini rendono di più. Puoi sempre scegliere «Usa il piano migliore».</Body>
       <Button label={busy || learning.busy ? 'Preparo l\'Excel…' : 'Esporta adesso il mese in corso'} variant="secondary" small onPress={exportNow} disabled={busy || learning.busy} />
       <Body muted small>Per imparare servono gli esiti: segna «Inviata» quando mandi l'offerta e poi com'è andata, anche «Venduto ad altri» o «Lasciato perdere».</Body>

@@ -10,16 +10,57 @@ const ARCHIVE_MAX = 1000
  * when the offer was saved) and the time of the first outcome. Schema 2 added the negotiation history, a raw form
  * snapshot for re-scoring, the counter plan and the final price. Older items are upgraded in place.
  */
+const REPLIES = ['accepted', 'countered', 'declined', 'no_reply', 'sold_other']
+const AFTER_REFUSAL = ['declined', 'no_reply', 'sold_other', 'abandoned']
+const ms = (v) => (v ? new Date(v).getTime() : NaN)
+
 export function normalizeItem(item) {
   if (!item || typeof item !== 'object') return null
   if (item.schema === 3) return item
-  const v2 = item.schema === 2 ? item : upgradeToV2(item)
+  const legacyV1 = item.schema !== 2
+  const v2 = legacyV1 ? upgradeToV2(item) : item
+  const negotiation = Array.isArray(v2.negotiation) ? v2.negotiation.map((e) => ({ ...e })) : []
+  const seller = negotiation.find((e) => e.by === 'seller')
+  const first = negotiation[0]
+  let sentAt = v2.sentAt || null
+  let sentAtSource = v2.sentAtSource || null
+  let finalPrice = v2.finalPrice ?? null
+  if (sentAt && !sentAtSource) {
+    if (seller && ms(sentAt) >= ms(seller.at) && (!first || first.at !== sentAt)) {
+      // 1.2.0 stored the seller's counter time as the send time when «Inviata» was never tapped: unknown, not real.
+      sentAt = null
+    } else if (legacyV1 || (first && first.at !== sentAt && REPLIES.includes(v2.status))) {
+      // 1.0/1.1 used the outcome tap as the send time: the planned moment when it came first, flagged as an estimate.
+      const planned = ms(v2.sendAt)
+      sentAt = Number.isFinite(planned) && planned <= ms(sentAt) ? new Date(planned).toISOString() : sentAt
+      sentAtSource = 'imputed'
+    } else {
+      sentAtSource = 'tap' // 1.2.0 «Inviata»: the entry and sentAt were written together
+    }
+  }
+  if (!sentAt && !seller && first && first.planned && REPLIES.includes(v2.firstOutcome)) {
+    // 1.2.0 outcomes tapped straight from «Da inviare»: the offer was sent, at the planned moment if before the tap.
+    const planned = ms(first.at)
+    const tapped = ms(v2.outcomeAt)
+    const at = Number.isFinite(planned) && (!Number.isFinite(tapped) || planned <= tapped) ? planned : tapped
+    if (Number.isFinite(at)) {
+      sentAt = new Date(at).toISOString()
+      sentAtSource = 'imputed'
+      negotiation[0] = { ...first, at: sentAt, planned: false }
+    }
+  }
+  // 1.2.0 «Comprato» after a refusal kept the offer price: it was a purchase at list price.
+  if (v2.status === 'bought' && AFTER_REFUSAL.includes(v2.firstOutcome) && !seller && v2.listPrice != null) finalPrice = v2.listPrice
   return {
     ...v2,
     schema: 3,
+    negotiation,
+    sentAt,
+    sentAtSource,
+    finalPrice,
     events: Array.isArray(v2.events) ? v2.events : [],
     decision: v2.decision || null,
-    firstOutcomeAt: v2.firstOutcomeAt || (v2.firstOutcome ? (((v2.negotiation || []).find((e) => e.by === 'seller') || {}).at || v2.outcomeAt || null) : null),
+    firstOutcomeAt: v2.firstOutcomeAt || (v2.firstOutcome ? ((seller || {}).at || v2.outcomeAt || null) : null),
   }
 }
 
@@ -65,11 +106,13 @@ export async function saveItems(items) {
 
 /** Deleted items that had been sent: they leave the list but keep feeding the monthly analysis. */
 export async function loadArchive() {
+  let raw = null
   try {
-    const raw = await AsyncStorage.getItem(ARCHIVE_KEY)
+    raw = await AsyncStorage.getItem(ARCHIVE_KEY)
     const items = raw ? JSON.parse(raw) : []
     return Array.isArray(items) ? items.map(normalizeItem).filter(Boolean) : []
   } catch {
+    if (raw) await AsyncStorage.setItem(`${ARCHIVE_KEY}.corrupt.${Date.now()}`, raw).catch(() => {})
     return []
   }
 }
@@ -84,13 +127,16 @@ export async function saveArchive(items) {
 }
 
 /** Learning state: active profile, profile history, reports, export folder, exploration switch, last month processed. */
+/** Returns the state, null when there is none yet, or { unreadable: true } (raw text kept aside) when it is broken. */
 export async function loadLearningState() {
+  let raw = null
   try {
-    const raw = await AsyncStorage.getItem(LEARNING_KEY)
+    raw = await AsyncStorage.getItem(LEARNING_KEY)
     const state = raw ? JSON.parse(raw) : null
     return state && typeof state === 'object' ? state : null
   } catch {
-    return null
+    if (raw) await AsyncStorage.setItem(`${LEARNING_KEY}.corrupt.${Date.now()}`, raw).catch(() => {})
+    return raw ? { unreadable: true } : null
   }
 }
 

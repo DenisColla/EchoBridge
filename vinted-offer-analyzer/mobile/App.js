@@ -95,8 +95,9 @@ function Main() {
   const runMonthly = useCallback(async () => {
     const entry = await learning.runDue(new Date())
     if (!entry) return
-    const where = entry.savedTo === 'folder' ? `salvato in ${learning.folder ? learning.folder.label : 'cartella'}` : entry.savedTo === 'app' ? 'pronto nella scheda Info' : 'pronto'
-    showToast(`Report di ${entry.label} ${where}: ${entry.changes.length ? `${entry.changes.length} ${entry.changes.length === 1 ? 'correzione applicata' : 'correzioni applicate'}` : 'motore invariato'}.`, 5000)
+    const where = entry.savedTo === 'folder' ? `salvato in ${learning.folder ? learning.folder.label : 'cartella'}` : entry.savedTo === 'app' ? 'pronto nella scheda Info'
+      : entry.savedTo === 'download' ? 'scaricato' : 'non salvato (dettagli nella scheda Info)'
+    showToast(`Report di ${entry.label} ${where}: ${entry.headline.split(' · ').pop()}.`, 5000)
   }, [learning, showToast])
   const runMonthlyRef = useRef(runMonthly)
   useEffect(() => { runMonthlyRef.current = runMonthly }, [runMonthly])
@@ -160,7 +161,10 @@ function Main() {
   const optimize = () => {
     setOptimizing(true)
     setTimeout(() => {
-      setPlan(optimizeOffer(form, new Date(), engineOptions({ targetProbability: goal })))
+      // The optimizer starts from the offer on screen: with a test variation, its price and its moment.
+      const ex = result && result.exploration
+      const src = ex ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form
+      setPlan(optimizeOffer(src, new Date(), engineOptions({ targetProbability: goal, exactSendAt: ex && ex.kind === 'time' ? ex.at : null })))
       setOptimizing(false)
     }, 20)
   }

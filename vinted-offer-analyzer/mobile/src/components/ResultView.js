@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
   GOAL_CHOICES, TONES, articleFor, capitalize, formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatSignedPoints, formatTime,
-  isSameDay, toPercent,
+  isSameDay, prepArticleFor, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneColors, toneForLevel, toneForProbability, useTheme } from '../theme.js'
@@ -110,7 +110,8 @@ function VerdictCard({ result }) {
   let nowText = null
   if (optimal.kind !== 'now') {
     const name = sendNow.window.label.toLowerCase()
-    if (sendNow.ok) nowText = `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : formatPoints(sendNow.deltaPoints)}): ${name}.`
+    if (sendNow.reason === 'exploration') nowText = 'No: è una variante di test, inviala all\'orario indicato (oppure usa il piano migliore).'
+    else if (sendNow.ok) nowText = `Sì, anche subito va bene (${sendNow.deltaPoints === 0 ? 'stesse probabilità' : formatPoints(sendNow.deltaPoints)}): ${name}.`
     else if (nowInAvoid || sendNow.reason === 'avoid_window') nowText = `No: sei in una fascia sfavorevole (${name}, ${formatPoints(sendNow.deltaPoints)}${blockRiskNow.level !== 'low' ? ', rischio di rifiuto secco più alto' : ''}). Aspetta.`
     else nowText = `No: ${name} (${formatPoints(sendNow.deltaPoints)} rispetto al momento consigliato). Aspetta.`
   }
@@ -134,7 +135,8 @@ function VerdictCard({ result }) {
       <Body style={{ fontWeight: '600' }}>{opening}</Body>
       {reasons.map((r) => <Body key={r}>• {r}</Body>)}
       {timingNote && <Body muted small>{timingNote}</Body>}
-      {alsoGood && (
+      {/* With a test variation the better plan is offered by «Usa il piano migliore», not as «se puoi aspettare». */}
+      {alsoGood && !result.exploration && (
         <Note>
           <Text style={{ fontWeight: '700' }}>{sameDay ? 'Ancora meglio: ' : 'Pari merito: '}</Text>
           {sameDay ? `alle ${formatTime(alsoGood.date)}` : `${formatLongDate(alsoGood.date, now)} alle ${formatTime(alsoGood.date)} (${formatRelativeDay(alsoGood.date, now)})`}
@@ -288,7 +290,7 @@ function RiskCard({ risk }) {
       <Title>Anche nel momento giusto può andare male</Title>
       <Row>
         <Badge tone={tone}>{pct(risk.pFail)}% di rischio · tra {pct(risk.range[0])} e {pct(risk.range[1])}%</Badge>
-        <Badge tone="neutral">{risk.basis === 'history' ? 'Calibrato sui tuoi esiti' : 'Stima del motore, non ancora calibrata'}</Badge>
+        <Badge tone="neutral">{risk.basis === 'history' ? 'Calibrato sui tuoi esiti' : 'Stima del motore, non ancora corretta dai tuoi esiti'}</Badge>
       </Row>
       {risk.reasons.length > 0 && (
         <View style={{ gap: 2 }}>
@@ -300,7 +302,7 @@ function RiskCard({ risk }) {
         <View style={{ gap: 2 }}>
           <Body small style={{ fontWeight: '700' }}>Se non passa, di solito è</Body>
           {risk.failureMix.filter((m) => m.share >= 0.05).map((m) => (
-            <Body key={m.id} small>• {m.label}: {pct(m.share)}% dei casi{m.closeAfter >= 0.05 ? `, poi l'affare si chiude comunque nel ${pct(m.closeAfter)}%` : ''}</Body>
+            <Body key={m.id} small>• {m.label}: {pct(m.share)}% dei casi{m.closeAfter >= 0.05 ? `, poi l'affare si chiude comunque ${prepArticleFor('in', m.closeAfter * 100)}${pct(m.closeAfter)}%` : ''}</Body>
           ))}
         </View>
       )}
@@ -308,23 +310,26 @@ function RiskCard({ risk }) {
         Probabilità di chiudere l'affare, anche dopo controproposte: {pct(risk.pClose)}% (tra {pct(risk.pCloseRange[0])} e {pct(risk.pCloseRange[1])}%).
       </Note>
       {risk.similar ? (
-        <Body muted small>Nel tuo storico, con uno sconto simile: {risk.similar.successes} accettate su {risk.similar.n} offerte.</Body>
+        <Body muted small>Nel tuo storico, con uno sconto simile: {risk.similar.successes} {risk.similar.successes === 1 ? 'accettata' : 'accettate'} su {risk.similar.n} offerte.</Body>
       ) : null}
       {risk.plan.map((p) => <Note key={p}>{p}</Note>)}
     </Card>
   )
 }
 
-/** The flagged test variation (about 1 offer in 5) and the way out of it. */
+/** The flagged test variation (about 1 offer in 5) and the way out of it: a real button, reachable with TalkBack. */
 function ExplorationNote({ exploration, onSkip }) {
   if (!exploration) return null
-  const what = exploration.kind === 'time' ? `invio ${exploration.label}` : `${exploration.label} (${String(exploration.price).replace('.', ',')} € invece di ${String(exploration.base.price).replace('.', ',')} €)`
+  const what = exploration.kind === 'time'
+    ? `invio ${exploration.label}`
+    : `${exploration.label} (${formatEuro(exploration.price)} invece di ${formatEuro(exploration.base.price)}${exploration.price > exploration.base.price ? `: paghi ${formatEuro(exploration.price - exploration.base.price)} in più` : ''})`
+  const n = exploration.costPoints
+  const cost = n > 0 ? `Costo stimato: ${n} ${n === 1 ? 'punto' : 'punti'} di probabilità.` : 'Nessun costo in probabilità.'
   return (
-    <Note tone="warn">
-      Variante di test: {what}. Costo stimato {exploration.costPoints > 0 ? `${exploration.costPoints} ${exploration.costPoints === 1 ? 'punto' : 'punti'}` : 'nessuno'} di probabilità: serve al motore per capire se orari e sconti vicini rendono di più.
-      {onSkip ? '\n' : ''}
-      {onSkip ? <Text style={{ fontWeight: '700', textDecorationLine: 'underline' }} onPress={onSkip} accessibilityRole="button">Usa il piano migliore</Text> : null}
-    </Note>
+    <View style={{ gap: space.sm }}>
+      <Note tone="warn">Variante di test: {what}. {cost} Serve al motore per capire se orari e sconti vicini rendono di più; inviala proprio così.</Note>
+      {onSkip ? <Button label="Usa il piano migliore" variant="secondary" small onPress={onSkip} /> : null}
+    </View>
   )
 }
 
