@@ -310,13 +310,14 @@ export function labRecheck(runs, pairs, minAnswers = 3) {
   for (const list of groups.values()) {
     const matches = list.filter((p) => p.label !== 'different')
     const disputedMatches = matches.filter((p) => flagged.has(p.id)).length
-    // A wrong reference makes every result "another object": no Stesso/Variante pair of the save may be confirmed by
-    // most models, and at least 3 must be disputed (two hard variants are not enough to call a whole save wrong).
+    // A wrong reference makes every result "another object": at least 3 and at least half of the save's Stesso/Variante
+    // pairs are disputed by every model, and none is confirmed by most models (a few hard variants in a correct save,
+    // or a save only partly answered, are not enough).
     const confirmed = matches.some((p) => answered(p.id) && foundBy(p.id) * 2 > answered(p.id))
-    if (disputedMatches >= 3 && !confirmed) {
+    if (disputedMatches >= 3 && disputedMatches * 2 >= matches.length && !confirmed) {
       wrongGroups++
-      // Only pairs the models also see as another object; a Diverso pair some model matched is left alone.
-      for (const p of list) if (flagged.has(p.id) || (p.label === 'different' && answered(p.id) >= minAnswers && foundBy(p.id) === 0)) wrongReference.push(p.id)
+      // Every Stesso/Variante pair goes (none is confirmed); a Diverso pair only if no model matched it.
+      for (const p of list) if (p.label !== 'different' || (answered(p.id) >= minAnswers && foundBy(p.id) === 0)) wrongReference.push(p.id)
     }
   }
   const wrong = new Set(wrongReference)

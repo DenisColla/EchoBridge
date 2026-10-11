@@ -168,6 +168,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
   if (!ready) return <Card><Body>Carico il laboratorio…</Body></Card>
 
   const wrongIds = recheck.wrongReference
+  const wrongSet = new Set(wrongIds)
   // A filter whose list became empty (all fixed) falls back to every pair.
   const filterIds = filter === 'wrong' ? new Set(wrongIds) : filter === 'disputed' ? new Set(recheck.disputed) : null
   const activeFilter = filterIds && filterIds.size ? filterIds : null
@@ -235,7 +236,8 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
           <View key={p.id} style={[styles.pairRow, { borderColor: t.line }]}>
             <Text style={{ color: t.ink, fontSize: 13 }} numberOfLines={1}>Rif.: {p.source.title}</Text>
             <Text style={{ color: t.ink2, fontSize: 13 }} numberOfLines={1}>Cand.: {p.candidate.title}</Text>
-            {filter === 'wrong' && activeFilter ? null : <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, alignItems: 'center' }}>
+            {/* A wrong-reference save is removed as a whole, from the banner: no relabel or single delete here. */}
+            {wrongSet.has(p.id) ? <Text style={{ color: t.ink3, fontSize: 12 }}>Riferimento sbagliato: si elimina con il resto del salvataggio.</Text> : <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, alignItems: 'center' }}>
               {PAIR_LABELS.map((l) => (
                 <Pressable key={l.id} onPress={() => labState.relabel(p.id, l.id)} style={[styles.miniChip, { borderColor: p.label === l.id ? t.accent : t.line, backgroundColor: p.label === l.id ? t.accent : t.card }]}>
                   <Text style={{ color: p.label === l.id ? t.onAccent : t.ink, fontSize: 12, fontWeight: '700' }}>{l.label}</Text>

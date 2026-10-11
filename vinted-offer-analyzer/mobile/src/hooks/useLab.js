@@ -110,7 +110,7 @@ export function useLab({ folderUri = null } = {}) {
   }), [persist])
 
   // A new label is checked again by the models' answers (a previous «Sono sicuro» no longer applies).
-  const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label, keep: false } : p)) })), [persist])
+  const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label, keep: p.label === label ? p.keep : false } : p)) })), [persist])
   const keepPair = useCallback((id) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, keep: true } : p)) })), [persist])
   // A psychology case id is the pair id: its texts and blind ratings go with it.
   const removePairs = useCallback((ids) => {

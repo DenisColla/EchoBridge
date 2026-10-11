@@ -205,3 +205,21 @@ test('lab: a save is never called wrong-reference when models confirm part of it
   r = labRecheck(['v1', 'v2'].flatMap((id) => answer(id, 'different')), [{ ...mk('v1', 'variant'), keep: true }, mk('v2', 'variant')])
   assert.deepEqual(r.disputed, ['v2'])
 })
+
+test('lab: wrong-reference needs most of the save disputed, and then takes every Stesso/Variante pair of it', () => {
+  const ref = { id: 'r', title: 'Ref' }
+  const models = ['a', 'b', 'c', 'd']
+  const mk = (id, label) => ({ id, label, source: ref, candidate: { id, title: id }, query: 'q', labelledAt: 't' })
+  const ans = (id, verdicts) => verdicts.map((v, i) => ({ pairId: id, modelKey: models[i], ok: true, verdict: v }))
+  const D = ['different', 'different', 'different', 'different']
+  // Correct save, 10 variants: 3 hard ones unanimous "different", the rest split or unanswered → never wrong-reference.
+  const save = [...Array.from({ length: 10 }, (_, i) => mk(`v${i}`, 'variant')), mk('d', 'different')]
+  let runs = [...ans('v0', D), ...ans('v1', D), ...ans('v2', D)]
+  assert.deepEqual(labRecheck(runs, save).wrongReference, [])
+  runs = [...runs, ...[3, 4, 5, 6, 7, 8, 9].flatMap((i) => ans(`v${i}`, ['variant', 'variant', 'different', 'different'])), ...ans('d', D)]
+  assert.deepEqual(labRecheck(runs, save).wrongReference, [])
+  // Wrong reference: 4 unanimous + 1 with a stray "variant" → the whole save, t5 included, goes in one delete.
+  const wrong = [mk('t1', 'same'), mk('t2', 'same'), mk('t3', 'same'), mk('t4', 'same'), mk('t5', 'same'), mk('x', 'different')]
+  const wr = [...['t1', 't2', 't3', 't4', 'x'].flatMap((id) => ans(id, D)), ...ans('t5', ['variant', 'different', 'different', 'different'])]
+  assert.deepEqual(labRecheck(wr, wrong).wrongReference.sort(), ['t1', 't2', 't3', 't4', 't5', 'x'])
+})
