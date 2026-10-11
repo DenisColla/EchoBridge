@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Alert, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useEffect, useMemo, useState } from 'react'
+import { Alert, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { LLM_MODELS, LLM_PROVIDERS, PAIR_LABELS, blindOrder, estimateCallCost, formatEuro, vintedSearchQuery } from '../../../core/index.js'
 import { radius, space, useTheme } from '../../theme.js'
 import { Body, Button, ButtonRow, Card, Meter, Note, SectionLabel, Title, Toggle } from '../ui.js'
@@ -12,6 +12,15 @@ const usd = (v) => (v == null ? '—' : (v < 0.01 ? `${(v * 100).toFixed(2)} cen
 const ratio = (n, d) => (d ? ` (${n}/${d})` : '')
 const secs = (ms) => (ms == null ? '—' : `${(ms / 1000).toFixed(1).replace('.', ',')} s`)
 const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`)
+
+/** Destructive confirmation; react-native-web has no Alert dialogs, so the web preview uses the browser's. */
+const confirmAction = (title, message, action, onConfirm) => {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm(`${title}\n${message}`)) onConfirm()
+    return
+  }
+  Alert.alert(title, message, [{ text: 'Annulla', style: 'cancel' }, { text: action, style: 'destructive', onPress: onConfirm }])
+}
 
 function KeyRow({ provider, masked, onSave, onTest }) {
   const t = useTheme()
@@ -34,10 +43,10 @@ function KeyRow({ provider, masked, onSave, onTest }) {
     setEditing(false)
     setStatus(null)
   }
-  const remove = () => Alert.alert('Eliminare la chiave?', 'Per usarla di nuovo dovrai crearne una sul sito del fornitore.', [
-    { text: 'Annulla', style: 'cancel' },
-    { text: 'Elimina', style: 'destructive', onPress: async () => { await onSave(provider, ''); setStatus(null) } },
-  ])
+  const remove = () => confirmAction('Eliminare la chiave?', 'Per usarla di nuovo dovrai crearne una sul sito del fornitore.', 'Elimina', async () => {
+    await onSave(provider, '')
+    setStatus(null)
+  })
   const test = async () => {
     setBusy(true)
     setStatus(null)
@@ -133,7 +142,7 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
  * the photo-verification test, the blind psychology test, spend and the Excel report. The state lives in App
  * (useLab) so a running test survives closing this screen.
  */
-export function LabView({ labState, onClose, reference = null, onToast = () => {} }) {
+export function LabView({ labState, onClose, reference = null, onToast = () => {}, onCollectingChange = () => {} }) {
   const t = useTheme()
   const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated } = labState
   const [collecting, setCollecting] = useState(false)
@@ -141,6 +150,11 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
   const [rating, setRating] = useState(false)
   const [showPairs, setShowPairs] = useState(false)
   const [pairLimit, setPairLimit] = useState(PAIR_PAGE)
+  // App needs to know: a reminder tap must not close the lab under an open collection with unsaved labels.
+  useEffect(() => {
+    onCollectingChange(collecting)
+    return () => onCollectingChange(false)
+  }, [collecting, onCollectingChange])
 
   const activeModels = useMemo(() => LLM_MODELS.filter((m) => selected[m.key] && keys[m.provider]).map((m) => m.key), [selected, keys])
   const counts = useMemo(() => {
@@ -262,10 +276,10 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
 
       <Card>
         <SectionLabel>5 · Report</SectionLabel>
-        <Body muted small>Excel con riepilogo, tutte le risposte, i voti e i prezzi usati per i costi.</Body>
+        <Body muted small>Excel con riepilogo, tutte le risposte, i voti e i prezzi usati per i costi. La parte di psicologia entra quando hai votato tutti i testi.</Body>
         <ButtonRow>
-          <Button label="Esporta Excel" onPress={async () => { const f = await labState.exportReport(); if (f) onToast(f.savedTo === 'folder' ? 'Report salvato nella cartella scelta.' : f.localUri ? 'Report pronto: scegli dove mandarlo.' : f.error || 'Report non salvato.') }} disabled={!verification.length && !psychology.length} />
-          <Button label="Azzera il test" variant="ghostDanger" onPress={() => Alert.alert('Azzerare il test?', 'Cancello coppie, risposte e voti. Le chiavi restano.', [{ text: 'Annulla', style: 'cancel' }, { text: 'Azzera', style: 'destructive', onPress: () => labState.reset() }])} disabled={Boolean(job)} />
+          <Button label="Esporta Excel" onPress={async () => { const f = await labState.exportReport(); if (f) onToast(f.savedTo === 'folder' ? 'Report salvato nella cartella scelta.' : f.localUri ? 'Report pronto: scegli dove mandarlo.' : f.error || 'Report non salvato.') }} disabled={!verification.length && !(psychology.length && allRated)} />
+          <Button label="Azzera il test" variant="ghostDanger" onPress={() => confirmAction('Azzerare il test?', 'Cancello coppie, risposte e voti. Le chiavi restano.', 'Azzera', () => labState.reset())} disabled={Boolean(job) || loadFailed} />
         </ButtonRow>
       </Card>
 

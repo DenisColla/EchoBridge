@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, engineFactsFor, labWorkbook, psychPrompt, scorePsychology, scoreVerification, verifyPrompt,
+  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, NOT_MODEL_KINDS, engineFactsFor, labWorkbook, psychPrompt, scorePsychology, scoreVerification, verifyPrompt,
 } from '../../core/index.js'
 import { emptyLab, loadLab, saveLab } from '../services/labStore.js'
 import { getApiKey, maskKey, setApiKey } from '../services/secrets.js'
@@ -162,7 +162,9 @@ export function useLab({ folderUri = null } = {}) {
         done++
         cost += rec.costUsd || 0
         if (!rec.ok) failed++
-        record(task, rec, rec.kind !== 'photo')
+        // Photo, network, key, balance and limit failures are not answers: kept out of the runs so they never
+        // replace an earlier answer of that model.
+        record(task, rec, !NOT_MODEL_KINDS.includes(rec.kind))
         setJob({ kind, done, total: tasks.length, cost, failed })
         // A missing key, a rejected key or an empty balance will not fix itself: stop that provider's remaining work.
         if (rec.kind === 'auth' || rec.kind === 'balance') {
@@ -261,12 +263,13 @@ export function useLab({ folderUri = null } = {}) {
     const models = Object.fromEntries(LLM_MODELS.map((m) => [m.key, m.label]))
     const caseTitle = new Map(l.pairs.map((p) => [p.id, p.candidate ? p.candidate.title : '']))
     const textOf = new Map(psychRuns.filter((r) => r.ok).map((r) => [runKey(r.modelKey, r.caseId), r.value]))
-    const ratings = scoredRatings.map((r) => {
+    // Until every text has its stars the export carries no per-model psychology, so the rating stays blind.
+    const ratings = !allRated ? [] : scoredRatings.map((r) => {
       const v = textOf.get(runKey(r.modelKey, r.caseId))
       return { ...r, caseTitle: caseTitle.get(r.caseId) || '', text: v ? [v.why, ...(v.leverage || []).map((x) => `• ${x}`), v.sellerProfile, ...(v.risks || []).map((x) => `Rischio: ${x}`)].join('\n') : '' }
     })
     const bytes = labWorkbook({
-      generatedAt: new Date(), models, verification, psychology, runs: verifyRuns, pairs: l.pairs, ratings,
+      generatedAt: new Date(), models, verification, psychology: allRated ? psychology : [], runs: verifyRuns, pairs: l.pairs, ratings,
       prices: LLM_MODELS.map((m) => ({ provider: LLM_PROVIDERS[m.provider].label, model: m.model, input: m.pricing.input, output: m.pricing.output, note: m.priceNote })),
       method: LLM_MODELS.map((m) => ({ provider: `${LLM_PROVIDERS[m.provider].label} · ${m.label}`, ...LLM_METHOD[m.provider] })),
     })
@@ -274,9 +277,10 @@ export function useLab({ folderUri = null } = {}) {
     const file = await writeReport({ bytes, fileName: `Laboratorio-AI-${day}.xlsx`, folderUri })
     if (file.localUri) await shareReport(file.localUri, `Laboratorio AI ${day}`)
     return file
-  }, [folderUri, psychRuns, psychology, scoredRatings, verification, verifyRuns])
+  }, [allRated, folderUri, psychRuns, psychology, scoredRatings, verification, verifyRuns])
 
-  const reset = useCallback(() => persist({ ...emptyLab(), spend: (labRef.current && labRef.current.spend) || {} }), [persist])
+  // Not while the stored data could not be read: the empty lab would overwrite it, spend history included.
+  const reset = useCallback(() => (labRef.current && labRef.current.loadFailed ? null : persist({ ...emptyLab(), spend: (labRef.current && labRef.current.spend) || {} })), [persist])
 
   return {
     ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated,

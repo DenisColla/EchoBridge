@@ -131,3 +131,14 @@ test('lab: runs that never reached the provider do not count against the model',
   assert.equal(row.validRate, 1)
   assert.equal(row.latencyP50, 4000)
 })
+
+test('lab: infrastructure failures are not scored and blind letters ignore storage order', () => {
+  const pairs = [{ id: 'a', label: 'same' }]
+  for (const kind of ['network', 'auth', 'balance', 'rate', 'server', 'cancelled', 'photo']) {
+    assert.deepEqual(scoreVerification([{ modelKey: 'm', pairId: 'a', ok: false, kind, costUsd: 0, latencyMs: 0 }], pairs), [], kind)
+  }
+  const [row] = scoreVerification([{ modelKey: 'm', pairId: 'a', ok: false, kind: 'schema', costUsd: 0.001, latencyMs: 900 }], pairs)
+  assert.equal(row.validRate, 0, 'an off-schema answer is the model\'s fault')
+  const keys = ['qwen:q', 'anthropic:a', 'openai:o', 'deepseek:d']
+  assert.deepEqual(blindOrder('c', keys, 3), blindOrder('c', [...keys].reverse(), 3))
+})

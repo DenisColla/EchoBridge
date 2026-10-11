@@ -43,17 +43,42 @@ export function compactRuns(runs) {
   return [...map.values()]
 }
 
+/**
+ * Keeps the stored value under MAX_CHARS. Order of sacrifice: the reasons of the oldest photo-test answers (the
+ * verdicts stay), then the oldest photo-test answers, and only as a last resort the oldest psychology texts together
+ * with their ratings (a regenerated text must never inherit a vote given to another text).
+ */
+function fitInStorage(stored) {
+  let json = JSON.stringify(stored)
+  const isVerify = (r) => r.task === 'verify'
+  let slim = 0
+  while (json.length > MAX_CHARS) {
+    const verify = stored.runs.filter(isVerify)
+    if (slim < verify.length) {
+      // runs are oldest first (compactRuns keeps recency order)
+      slim = Math.min(verify.length, slim + Math.ceil(verify.length / 10))
+      const strip = new Set(verify.slice(0, slim))
+      stored.runs = stored.runs.map((r) => (strip.has(r) && (r.reason || r.redFlags || r.tokens) ? { ...r, reason: null, redFlags: null, tokens: null } : r))
+    } else if (verify.length) {
+      const drop = new Set(verify.slice(0, Math.ceil(verify.length / 10)))
+      stored.runs = stored.runs.filter((r) => !drop.has(r))
+      slim = Math.max(0, slim - drop.size)
+    } else if (stored.runs.length) {
+      const drop = stored.runs.slice(0, Math.ceil(stored.runs.length / 10))
+      const gone = new Set(drop.map((r) => `${r.modelKey}|${r.caseId}`))
+      stored.runs = stored.runs.slice(drop.length)
+      stored.ratings = stored.ratings.filter((r) => !gone.has(`${r.modelKey}|${r.caseId}`))
+    } else break
+    json = JSON.stringify(stored)
+  }
+  return json
+}
+
 export async function saveLab(lab) {
   if (!lab || lab.loadFailed) return false
   try {
-    const stored = { ...lab, loadFailed: undefined, pairs: lab.pairs.slice(-MAX_PAIRS), runs: compactRuns(lab.runs) }
-    let json = JSON.stringify(stored)
-    // Still too large (many pairs and long answers): drop the oldest runs until it fits.
-    while (json.length > MAX_CHARS && stored.runs.length) {
-      stored.runs = stored.runs.slice(Math.ceil(stored.runs.length / 10))
-      json = JSON.stringify(stored)
-    }
-    await AsyncStorage.setItem(KEY, json)
+    const stored = { ...lab, loadFailed: undefined, pairs: lab.pairs.slice(-MAX_PAIRS), runs: compactRuns(lab.runs), ratings: lab.ratings || [] }
+    await AsyncStorage.setItem(KEY, fitInStorage(stored))
     return true
   } catch {
     return false

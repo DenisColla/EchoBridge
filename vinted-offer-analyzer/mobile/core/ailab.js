@@ -191,6 +191,9 @@ export function readModelJson(text, schema) {
 
 /* ───────── scoring ───────── */
 
+/** Failure kinds that are not the model's answer: they are shown in the progress but never stored or scored. */
+export const NOT_MODEL_KINDS = ['photo', 'cancelled', 'network', 'auth', 'balance', 'rate', 'server']
+
 const quantile = (values, q) => {
   if (!values.length) return null
   const s = [...values].sort((a, b) => a - b)
@@ -210,8 +213,8 @@ export function scoreVerification(runs, pairs) {
   const labelOf = new Map(pairs.filter((p) => LABEL_IDS.includes(p.label)).map((p) => [p.id, p.label]))
   const byModel = new Map()
   for (const r of runs) {
-    // Runs that never reached the provider (photo not ready, cancelled) say nothing about the model.
-    if (!labelOf.has(r.pairId) || r.kind === 'photo' || r.kind === 'cancelled') continue
+    // Runs that failed for reasons outside the model (photo, network, key, balance, limits) say nothing about it.
+    if (!labelOf.has(r.pairId) || NOT_MODEL_KINDS.includes(r.kind)) continue
     if (!byModel.has(r.modelKey)) byModel.set(r.modelKey, [])
     byModel.get(r.modelKey).push(r)
   }
@@ -275,7 +278,8 @@ const hashString = (s) => {
 /** Letters A, B, C… assigned to the models of one case in a shuffled, seeded order. */
 export function blindOrder(caseId, modelKeys, seed = 1) {
   const rand = mulberry32(hashString(`${caseId}|${seed}`))
-  const order = [...modelKeys]
+  // Sorted first: the letters depend only on which models answered, not on the order their runs were stored in.
+  const order = [...modelKeys].sort()
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1))
     ;[order[i], order[j]] = [order[j], order[i]]

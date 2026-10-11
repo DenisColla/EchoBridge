@@ -84,6 +84,8 @@ function Main() {
   const [counterContext, setCounterContext] = useState(null)
   /** «Laboratorio AI» open in place of the tab content. */
   const [labOpen, setLabOpen] = useState(false)
+  const collectingRef = useRef(false)
+  const onCollectingChange = useCallback((v) => { collectingRef.current = v }, [])
   /** The last listing read from a link: reference and starting search of the lab's pair collection. */
   const [lastListing, setLastListing] = useState(null)
   const scrollRef = useRef(null)
@@ -105,15 +107,15 @@ function Main() {
   }, [])
 
   useEffect(() => listenToReminderTaps((data) => {
+    // An open pair collection may hold unsaved labels: the lab stays, the tab underneath is ready when it closes.
+    if (!collectingRef.current) setLabOpen(false)
     if (data && data.kind === 'monthly') {
       setCounterContext(null)
-      setLabOpen(false)
       setTab('info')
       return
     }
     if (data && data.itemId) {
       setCounterContext(null)
-      setLabOpen(false)
       setTab('lista')
       setHighlightId(data.itemId)
     }
@@ -562,7 +564,7 @@ function Main() {
             />
           )}
           {!counterContext && !labOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} />}
-          {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
+          {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} onCollectingChange={onCollectingChange} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>
 
