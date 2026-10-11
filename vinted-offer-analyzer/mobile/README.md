@@ -15,6 +15,18 @@ App Android (Expo / React Native) dell'analizzatore di offerte Vinted. Usa lo **
 - **Rischio di fallimento e varianti di test**: ogni risultato mostra quanto l'offerta può fallire anche nel momento giusto, con i motivi, come falliscono di solito le tue offerte e la probabilità di chiudere comunque l'affare; circa un'offerta su cinque è una variante di test (±1 ora o circa ±2 punti di sconto, solo se costa poco) segnalata, con «Usa il piano migliore» per evitarla.
 - Tutto resta sul telefono: nessun server, nessun account.
 
+## Laboratorio AI (scheda Info)
+
+Serve a scegliere, con un test sui tuoi annunci, il modello AI per la prossima fase (ricerca dello stesso prodotto su più canali). Confronta **Claude Haiku 5.5**, **OpenAI GPT-6 Luna**, **DeepSeek V4.1 Flash** e **Qwen 3.8 Flash** (prezzi di listino all'11/10/2026 nel report).
+
+1. **Chiavi**: creane una per fornitore (Anthropic console, OpenAI platform, DeepSeek platform, Alibaba Cloud Model Studio internazionale, regione Singapore) e incollala in «Inserisci». Restano cifrate nel telefono (Keystore), non finiscono nell'APK né nel report. Imposta sul sito di ogni fornitore un **tetto di spesa mensile** o una ricarica prepagata piccola: è la protezione se il telefono finisce in mani sbagliate. «Prova» fa una chiamata minima per controllare la chiave.
+2. **Coppie**: analizza un annuncio dal link (diventa il riferimento), poi «Raccogli coppie» apre la ricerca Vinted in un browser **visibile**; i risultati si leggono solo quando tocchi «Usa questi risultati». Etichetta ogni candidato: Stesso, Variante (stesso modello, colore/taglia/edizione diversi) o Diverso. Circa 10 ricerche da 10 annunci = 100 coppie.
+3. **Test delle foto**: ogni modello confronta le due foto (ridotte a 768 px, uguali per tutti) e i testi; misura accuratezza, falsi «stesso», risposte valide, costo reale e tempi. Si può interrompere e riprendere.
+4. **Test di psicologia**: per fino a 10 coppie Stesso/Variante ogni modello spiega perché conviene, su cosa fare leva e com'è il venditore, usando i numeri del motore; tu voti i testi **alla cieca** (lettere mescolate) e segnali se inventano dati.
+5. **Report**: Excel con riepilogo, tutte le risposte, i voti, i prezzi e il foglio «Metodo» (come è stato chiamato ogni fornitore).
+
+Costo indicativo: meno di un centesimo per coppia per modello; il test completo (100 coppie × 4 modelli + psicologia) resta sotto 1 $ a listino. Dati inviati ai fornitori: testi e foto pubbliche degli annunci, mai le chiavi né i nomi dei venditori. DeepSeek tratta e conserva i dati in Cina (provvedimento del Garante del 30/1/2025 ancora pubblicato): usalo solo se ti sta bene.
+
 ## Installare subito: APK precompilato
 
 In `dist/OffertaVintedTiming-arm64.apk` c'è un APK già compilato (28 MB, architettura arm64, cioè qualsiasi telefono

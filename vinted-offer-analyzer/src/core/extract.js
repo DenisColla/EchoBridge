@@ -58,7 +58,7 @@ const firstMatch = (html, re) => {
 export function parseVintedItemHtml(html) {
   const src = String(html || '').replace(/<!--[\s\S]*?-->/g, '')
   const out = {
-    title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null,
+    title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null, photo: null,
     uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
     sellerBusiness: null, sellerBadges: [],
     found: [], missing: [],
@@ -77,6 +77,8 @@ export function parseVintedItemHtml(html) {
       out.brand = typeof brand === 'string' && brand.trim() ? decodeEntities(brand).trim() : null
       out.categoryText = product.category ? decodeEntities(product.category).trim() : null
       out.color = product.color ? decodeEntities(product.color).trim() : null
+      const image = Array.isArray(product.image) ? product.image[0] : product.image
+      out.photo = typeof image === 'string' && /^https?:\/\//.test(image) ? image : (image && typeof image.url === 'string' ? image.url : null)
       const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers
       if (offer) {
         const price = Number(String(offer.price).replace(',', '.'))
@@ -94,6 +96,10 @@ export function parseVintedItemHtml(html) {
   if (!out.title) {
     const og = firstMatch(src, /<meta property="og:title" content="([^"]*)"/i)
     if (og) out.title = decodeEntities(og).replace(/\s*\|\s*Vinted\s*$/i, '').trim()
+  }
+  if (!out.photo) {
+    const og = firstMatch(src, /<meta property="og:image" content="([^"]*)"/i)
+    if (og && /^https?:\/\//.test(decodeEntities(og))) out.photo = decodeEntities(og)
   }
   if (!out.description) {
     const og = firstMatch(src, /<meta property="og:description" content="([^"]*)"/i)

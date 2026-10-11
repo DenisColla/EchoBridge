@@ -2978,7 +2978,7 @@ function buildCounterReminders(result, { sentAt = null, title = null } = {}) {
  * Extraction from a Vinted item page and mapping onto the analyzer's form.
  * Pure string parsing (no DOM): works in Node, the browser and React Native.
  *
- * What a public item page contains server-side (verified October 2026):
+ * What a public item page contains server-side (verified October 2026, also in a browser's DOM after hydration):
  * - JSON-LD Product: name, description, brand, price, currency, condition, category path, color.
  * - data-testid="seller-last-logged-in": "Ultima visita 26 min fa".
  * - data-testid="profile-username" and a rating aria-label "valutazione di 5 su 5 stelle".
@@ -3033,7 +3033,7 @@ const firstMatch = (html, re) => {
 function parseVintedItemHtml(html) {
   const src = String(html || '').replace(/<!--[\s\S]*?-->/g, '')
   const out = {
-    title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null,
+    title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null, photo: null,
     uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
     sellerBusiness: null, sellerBadges: [],
     found: [], missing: [],
@@ -3047,9 +3047,13 @@ function parseVintedItemHtml(html) {
       if (!product) continue
       out.title = product.name ? decodeEntities(product.name).trim() : null
       out.description = product.description ? decodeEntities(product.description).trim() : null
-      out.brand = product.brand && (product.brand.name || product.brand) ? decodeEntities(product.brand.name || product.brand).trim() : null
+      // brand is a Brand object ({"@type":"Brand","name":""} when the seller left it empty) or, on older pages, a string.
+      const brand = product.brand && typeof product.brand === 'object' ? product.brand.name : product.brand
+      out.brand = typeof brand === 'string' && brand.trim() ? decodeEntities(brand).trim() : null
       out.categoryText = product.category ? decodeEntities(product.category).trim() : null
       out.color = product.color ? decodeEntities(product.color).trim() : null
+      const image = Array.isArray(product.image) ? product.image[0] : product.image
+      out.photo = typeof image === 'string' && /^https?:\/\//.test(image) ? image : (image && typeof image.url === 'string' ? image.url : null)
       const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers
       if (offer) {
         const price = Number(String(offer.price).replace(',', '.'))
@@ -3067,6 +3071,10 @@ function parseVintedItemHtml(html) {
   if (!out.title) {
     const og = firstMatch(src, /<meta property="og:title" content="([^"]*)"/i)
     if (og) out.title = decodeEntities(og).replace(/\s*\|\s*Vinted\s*$/i, '').trim()
+  }
+  if (!out.photo) {
+    const og = firstMatch(src, /<meta property="og:image" content="([^"]*)"/i)
+    if (og && /^https?:\/\//.test(decodeEntities(og))) out.photo = decodeEntities(og)
   }
   if (!out.description) {
     const og = firstMatch(src, /<meta property="og:description" content="([^"]*)"/i)
@@ -3107,6 +3115,21 @@ function parseVintedItemHtml(html) {
   ]
   for (const [key, label] of labels) (out[key] !== null && out[key] !== undefined ? out.found : out.missing).push(label)
   return out
+}
+
+/**
+ * Anti-bot pages served instead of the listing (October 2026: Cloudflare in front of www.vinted.it, DataDome behind it).
+ * Returns 'cloudflare' | 'datadome' | null. A real item page also loads DataDome's script, so a page that carries the
+ * listing data (JSON-LD Product or og:title) is never reported as a challenge.
+ */
+function detectVintedChallenge(html) {
+  const src = String(html || '')
+  if (!src) return null
+  if (/application\/ld\+json[^>]*>\s*\{[^<]{0,200}"@type"\s*:\s*"Product"/i.test(src) || /<meta[^>]+property="og:title"[^>]+content="[^"]{2,}/i.test(src)) return null
+  // Not the bare /cdn-cgi/challenge-platform/ path: every page (404s included) loads its scripts/jsd/ bot snippet.
+  if (/_cf_chl_opt|\/cdn-cgi\/challenge-platform\/h\/|challenges\.cloudflare\.com|cf-browser-verification|<title>\s*Just a moment/i.test(src)) return 'cloudflare'
+  if (/captcha-delivery\.com|geo\.captcha|interstitial\.captcha|datadome[\s\S]{0,200}captcha|verifica di essere umano/i.test(src)) return 'datadome'
+  return null
 }
 
 /* ───────── mapping onto the analyzer ───────── */

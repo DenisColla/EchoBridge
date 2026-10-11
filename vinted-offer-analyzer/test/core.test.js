@@ -484,6 +484,7 @@ test('extractor: the October 2026 page (Next.js, streamed sections) still yields
   assert.deepEqual(ex.sellerBadges, ['ACTIVE_LISTER'])
   assert.ok(ex.sellerLastSeenText.includes('14 ore'))
   assert.deepEqual(ex.missing, ['marca'])
+  assert.equal(ex.photo, 'https://images1.vinted.net/t/sample.webp', 'the listing photo comes from JSON-LD or og:image')
   const built = buildFormFromExtraction(ex, { link: 'https://www.vinted.it/items/9964852697-charles-burns-black-hole' })
   assert.equal(built.form.listPrice, '22')
   assert.ok(!JSON.stringify(built).includes('[object Object]'))

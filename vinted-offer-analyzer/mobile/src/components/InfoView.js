@@ -56,7 +56,7 @@ function CalendarSection() {
   )
 }
 
-export function InfoView({ stats, items, learning = null, onToast = () => {} }) {
+export function InfoView({ stats, items, learning = null, onToast = () => {}, onOpenLab = null }) {
   const [status, setStatus] = useState('undetermined')
   useEffect(() => {
     getNotificationStatus().then(setStatus)
@@ -75,6 +75,15 @@ export function InfoView({ stats, items, learning = null, onToast = () => {} }) 
   return (
     <View style={{ gap: space.lg }}>
       <LearningCard learning={learning} onToast={onToast} />
+
+      {onOpenLab ? (
+        <Card>
+          <SectionLabel>Laboratorio AI</SectionLabel>
+          <Title>Scegli il modello AI con un test reale</Title>
+          <Body muted small>Confronta Claude Haiku 5.5, GPT-6 Luna, DeepSeek V4.1 Flash e Qwen 3.8 Flash su annunci veri: riconoscere lo stesso prodotto dalle foto e spiegare come trattare. Ti servono le chiavi dei fornitori.</Body>
+          <Button label="Apri il laboratorio" onPress={onOpenLab} />
+        </Card>
+      ) : null}
 
       <Card>
         <SectionLabel>Promemoria</SectionLabel>

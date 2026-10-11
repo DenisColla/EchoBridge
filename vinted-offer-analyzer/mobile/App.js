@@ -12,8 +12,10 @@ import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
 import { CounterView } from './src/components/CounterView.js'
 import { VintedPageLoader } from './src/components/VintedPageLoader.js'
+import { LabView } from './src/components/lab/LabView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
+import { useLab } from './src/hooks/useLab.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
@@ -80,6 +82,10 @@ function Main() {
   const [extraction, setExtraction] = useState(null)
   const [clipboardLink, setClipboardLink] = useState(null)
   const [counterContext, setCounterContext] = useState(null)
+  /** «Laboratorio AI» open in place of the tab content. */
+  const [labOpen, setLabOpen] = useState(false)
+  /** The last listing read from a link: reference and starting search of the lab's pair collection. */
+  const [lastListing, setLastListing] = useState(null)
   const scrollRef = useRef(null)
   const formYRef = useRef(0)
   const formViewRef = useRef(null)
@@ -87,6 +93,7 @@ function Main() {
   const offeredLinkRef = useRef(null)
   const watchlist = useWatchlist()
   const learning = useLearning({ items: watchlist.allItems, ready: watchlist.ready })
+  const lab = useLab({ folderUri: learning.folder ? learning.folder.uri : null })
   const skipExploreRef = useRef(new Set())
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -278,6 +285,8 @@ function Main() {
       setPinnedSendAt(null)
       const outcome = runAnalysis(built.form, null, { explore: true })
       setExtraction({ ok: true, summary: built.summary, link, at: Date.now() })
+      const idMatch = String(link).match(/\/items\/(\d+)/)
+      setLastListing({ source: 'vinted', id: idMatch ? idMatch[1] : link, url: link, title: ex.title, brand: ex.brand, size: null, condition: ex.condition, price: ex.listPrice, photo: ex.photo || null, thumb: ex.photo || null })
       if (!outcome) {
         showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
         setTimeout(scrollToForm, 80)
@@ -476,7 +485,7 @@ function Main() {
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />
           )}
-          {!counterContext && tab === 'calcola' && (
+          {!counterContext && !labOpen && tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
               {clipboardLink && !extracting && (
                 <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
@@ -524,7 +533,7 @@ function Main() {
               </View>
             </View>
           )}
-          {!counterContext && tab === 'lista' && (
+          {!counterContext && !labOpen && tab === 'lista' && (
             <WatchlistView
               items={watchlist.items}
               ready={watchlist.ready}
@@ -537,7 +546,8 @@ function Main() {
               onCounterSent={counterSent}
             />
           )}
-          {!counterContext && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} />}
+          {!counterContext && !labOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={() => setLabOpen(true)} />}
+          {!counterContext && labOpen && <LabView labState={lab} onClose={() => setLabOpen(false)} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -550,7 +560,7 @@ function Main() {
           const active = tab === item.id
           const count = item.id === 'lista' ? watchlist.stats.planned : 0
           return (
-            <Pressable key={item.id} onPress={() => { setCounterContext(null); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
+            <Pressable key={item.id} onPress={() => { setCounterContext(null); setLabOpen(false); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
               <Text style={[styles.tabLabel, { color: active ? t.accent : t.ink3, fontWeight: active ? '700' : '500' }]}>
                 {item.label}{count ? ` (${count})` : ''}
               </Text>
