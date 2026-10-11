@@ -184,3 +184,24 @@ test('lab: a whole batch labelled against the wrong reference is flagged, Divers
   const bytes = labWorkbook({ pairs: [...tablets, ...books], runs: runs.map((x) => ({ ...x, task: 'verify' })), recheck: r })
   assert.ok(bytes.length > 1000)
 })
+
+test('lab: a save is never called wrong-reference when models confirm part of it, or for two hard variants', () => {
+  const ref = { id: 'r', title: 'Ref' }
+  const models = ['a', 'b', 'c', 'd']
+  const mk = (id, label) => ({ id, label, source: ref, candidate: { id, title: id }, query: 'q', labelledAt: 't' })
+  const answer = (id, verdict) => models.map((m) => ({ pairId: id, modelKey: m, ok: true, verdict }))
+  // Mixed save: 2 confirmed matches + 4 disputed tablets + 1 Diverso → only single disputes, nothing to bulk-delete.
+  const mixed = [mk('ok1', 'same'), mk('ok2', 'variant'), mk('t1', 'same'), mk('t2', 'same'), mk('t3', 'variant'), mk('t4', 'variant'), mk('d1', 'different')]
+  const mixedRuns = [...answer('ok1', 'same'), ...answer('ok2', 'variant'), ...['t1', 't2', 't3', 't4', 'd1'].flatMap((id) => answer(id, 'different'))]
+  let r = labRecheck(mixedRuns, mixed)
+  assert.deepEqual(r.wrongReference, [])
+  assert.deepEqual(r.disputed.sort(), ['t1', 't2', 't3', 't4'])
+  // Two genuinely hard variants in a correct save: disputed, the Diverso pairs untouched.
+  const hard = [mk('v1', 'variant'), mk('v2', 'variant'), mk('x1', 'different'), mk('x2', 'different')]
+  r = labRecheck(['v1', 'v2', 'x1', 'x2'].flatMap((id) => answer(id, 'different')), hard)
+  assert.deepEqual(r.wrongReference, [])
+  assert.deepEqual(r.disputed.sort(), ['v1', 'v2'])
+  // «Sono sicuro»: a confirmed hard case is no longer disputed.
+  r = labRecheck(['v1', 'v2'].flatMap((id) => answer(id, 'different')), [{ ...mk('v1', 'variant'), keep: true }, mk('v2', 'variant')])
+  assert.deepEqual(r.disputed, ['v2'])
+})

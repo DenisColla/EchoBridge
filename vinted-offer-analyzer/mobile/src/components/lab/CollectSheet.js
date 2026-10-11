@@ -116,6 +116,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
   const [parsedUrl, setParsedUrl] = useState(null)
   const [nav, setNav] = useState({ url: null, canGoBack: false })
   const [pendingLabel, setPendingLabel] = useState(false)
+  const [savedNote, setSavedNote] = useState(null)
 
   const candidates = useMemo(() => (found || []).filter((c) => !ref || c.id !== ref.id), [found, ref])
   const labelled = Object.values(labels).filter((v) => v && (!ref || v.candidate.id !== ref.id))
@@ -152,8 +153,13 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     ])
   }
   // Android back: from the labels to the search, then back inside the page, then out (asking if labels would be lost).
+  // Back to the page whose results were read (the WebView remounts on `url`, which in-page navigation does not change).
+  const backToSearch = () => {
+    if (parsedUrl) setUrl(parsedUrl)
+    setPhase('browse')
+  }
   const onBack = () => {
-    if (phase === 'label') setPhase('browse')
+    if (phase === 'label') backToSearch()
     else if (nav.canGoBack && webRef.current) webRef.current.goBack()
     else leave()
   }
@@ -175,6 +181,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     setFound(null)
     setChallenge(false)
     setPendingLabel(false)
+    setSavedNote(null)
     setPhase('browse')
     setSearched(q)
     setUrl(vintedSearchUrl(q))
@@ -194,6 +201,11 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
       const { items } = parseVintedCatalog(msg.text)
       setFound(items)
       setParsedUrl(msg.url)
+      // The analysed listing has no size: fill its missing fields from its own entry as soon as it shows up.
+      setRef((r) => {
+        const own = r && items.find((c) => c.id === r.id)
+        return own ? Object.fromEntries(Object.keys({ ...own, ...r }).map((k) => [k, r[k] ?? own[k] ?? null])) : r
+      })
       // What was really loaded decides: a page without words never inherits the previous search.
       setSearched(searchTextOf(msg.url) || browseKey(msg.url))
       setChallenge(false)
@@ -204,14 +216,15 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     } else if (msg && msg.type === 'state') setChallenge(Boolean(msg.challenge))
   }
 
-  const save = () => {
+  const save = async () => {
     const now = new Date().toISOString()
     // The analysed listing has no size: take the missing fields from its own entry in the results, when it is there.
     const own = (found || []).find((c) => c.id === ref.id)
     const source = own ? Object.fromEntries(Object.keys({ ...own, ...ref }).map((k) => [k, ref[k] ?? own[k] ?? null])) : ref
     const pairs = labelled.map(({ label, candidate }) => ({ id: `${ref.id || ref.url || 'ref'}~${candidate.id}`, source, candidate, label, labelledAt: now, query: refQuery }))
     setLabels({})
-    onSave(pairs)
+    const total = await onSave(pairs)
+    setSavedNote(`${pairs.length} ${pairs.length === 1 ? 'coppia salvata' : 'coppie salvate'}${total ? ` (totale ${total})` : ''}. Puoi fare un'altra ricerca qui sopra, con il suo riferimento.`)
   }
   const confirmRef = () => setRefQuery(searched)
 
@@ -227,6 +240,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
           {phase === 'browse' ? (
             <Body muted small>Leggo i risultati della ricerca caricata, solo nel telefono. Se cambi filtri nella pagina, li ricarico quando tocchi «Usa questi risultati».</Body>
           ) : null}
+          {savedNote ? <Note tone="good">{savedNote}</Note> : null}
         </View>
 
         {phase === 'browse' ? (
@@ -302,7 +316,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
             <View style={[styles.footer, { borderTopColor: t.line, backgroundColor: t.card }]}>
               {ref ? <Text style={{ color: t.ink2, fontSize: 12 }} numberOfLines={1}>Confronti con: {ref.title}</Text> : null}
               <ButtonRow>
-                <Button label="Torna alla ricerca" variant="secondary" onPress={() => setPhase('browse')} />
+                <Button label="Torna alla ricerca" variant="secondary" onPress={backToSearch} />
                 <Button label={labelled.length ? `Salva ${labelled.length} ${labelled.length === 1 ? 'coppia' : 'coppie'}` : 'Etichetta qualche annuncio'} onPress={save} disabled={!ref || !labelled.length} />
               </ButtonRow>
             </View>

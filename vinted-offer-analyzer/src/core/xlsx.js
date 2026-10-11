@@ -234,8 +234,10 @@ function xlsxSheetXml(sheet) {
     }
     r++ // blank spacer row
   }
-  const headerRow = columns.length ? r : null
-  if (columns.length) {
+  // Columns given only for their widths (no header text) add no header row, frozen pane or filter.
+  const hasHeader = columns.some((c) => c && c.header != null)
+  const headerRow = hasHeader ? r : null
+  if (hasHeader) {
     lines.push(`<row r="${r}">${columns.map((c, i) => xlsxCell(`${xlsxColumn(i)}${r}`, c.header, 'header')).join('')}</row>`)
     r++
   }

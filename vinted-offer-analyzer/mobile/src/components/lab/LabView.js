@@ -217,7 +217,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         <Button label="Raccogli coppie" onPress={() => setCollecting(true)} disabled={Boolean(job)} />
         {wrongIds.length ? (
           <View style={{ gap: space.xs }}>
-            <Note tone="warn">{wrongIds.length} coppie ({recheck.wrongGroups} {recheck.wrongGroups === 1 ? 'salvataggio' : 'salvataggi'}) sono state confrontate con il riferimento sbagliato: per tutti i modelli i risultati erano un altro oggetto. Vanno eliminate, non corrette in «Diverso».{wrongIds.length * 3 > totalPairs ? ' Sono tante: è più semplice «Azzera il test» qui sotto e rifare le ricerche.' : ''}</Note>
+            <Note tone="warn">{wrongIds.length} coppie ({recheck.wrongGroups} {recheck.wrongGroups === 1 ? 'salvataggio' : 'salvataggi'}) sono state confrontate con il riferimento sbagliato: per tutti i modelli i risultati erano un altro oggetto. Vanno eliminate tutte insieme, non corrette in «Diverso».</Note>
             <ButtonRow>
               <Button label={`Elimina queste ${wrongIds.length}`} variant="danger" small disabled={Boolean(job)} onPress={() => confirmAction(`Eliminare ${wrongIds.length} coppie?`, 'Elimino le coppie con il riferimento sbagliato e le loro risposte.', 'Elimina', () => { labState.removePairs(wrongIds); setFilter(null) })} />
               <Button label={filter === 'wrong' && showPairs ? 'Mostra tutte' : 'Mostrale'} variant="secondary" small onPress={() => toggleFilter('wrong')} />
@@ -226,7 +226,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         ) : null}
         {recheck.disputed.length ? (
           <View style={{ gap: space.xs }}>
-            <Note tone="warn">{recheck.disputed.length} {recheck.disputed.length === 1 ? 'etichetta contestata' : 'etichette contestate'}: tutti i modelli dicono il contrario. Correggila se hai sbagliato; eliminala se il riferimento era un altro oggetto; lasciala se sei sicuro (è un caso difficile).</Note>
+            <Note tone="warn">{recheck.disputed.length === 1 ? '1 etichetta contestata: tutti i modelli dicono il contrario. Correggila se hai sbagliato, eliminala se il riferimento era un altro oggetto, o tocca «Sono sicuro» se è un caso difficile.' : `${recheck.disputed.length} etichette contestate: tutti i modelli dicono il contrario. Per ognuna: correggila se hai sbagliato, eliminala se il riferimento era un altro oggetto, o tocca «Sono sicuro» se è un caso difficile.`}</Note>
             <Button label={filter === 'disputed' && showPairs ? 'Mostra tutte' : 'Mostrale'} variant="secondary" small onPress={() => toggleFilter('disputed')} />
           </View>
         ) : null}
@@ -235,14 +235,15 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
           <View key={p.id} style={[styles.pairRow, { borderColor: t.line }]}>
             <Text style={{ color: t.ink, fontSize: 13 }} numberOfLines={1}>Rif.: {p.source.title}</Text>
             <Text style={{ color: t.ink2, fontSize: 13 }} numberOfLines={1}>Cand.: {p.candidate.title}</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, alignItems: 'center' }}>
+            {filter === 'wrong' && activeFilter ? null : <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs, alignItems: 'center' }}>
               {PAIR_LABELS.map((l) => (
                 <Pressable key={l.id} onPress={() => labState.relabel(p.id, l.id)} style={[styles.miniChip, { borderColor: p.label === l.id ? t.accent : t.line, backgroundColor: p.label === l.id ? t.accent : t.card }]}>
                   <Text style={{ color: p.label === l.id ? t.onAccent : t.ink, fontSize: 12, fontWeight: '700' }}>{l.label}</Text>
                 </Pressable>
               ))}
               <Pressable onPress={() => labState.removePair(p.id)} hitSlop={6}><Text style={{ color: t.bad, fontSize: 12, fontWeight: '700' }}>Elimina</Text></Pressable>
-            </View>
+              {filter === 'disputed' && activeFilter ? <Pressable onPress={() => labState.keepPair(p.id)} hitSlop={6}><Text style={{ color: t.accentInk, fontSize: 12, fontWeight: '700' }}>Sono sicuro</Text></Pressable> : null}
+            </View>}
           </View>
         )) : null}
         {showPairs && listed.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, listed.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
@@ -319,9 +320,9 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
           reference={hasRef ? reference : null}
           onClose={() => setCollecting(false)}
           onSave={async (pairs) => {
+            // The collector stays open: the next search can follow right away.
             const next = await labState.addPairs(pairs)
-            setCollecting(false)
-            onToast(`${pairs.length} ${pairs.length === 1 ? 'coppia salvata' : 'coppie salvate'}. Totale ${next ? next.pairs.length : totalPairs + pairs.length}.`)
+            return next ? next.pairs.length : totalPairs + pairs.length
           }}
         />
       ) : null}

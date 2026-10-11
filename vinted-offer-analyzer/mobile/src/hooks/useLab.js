@@ -109,7 +109,9 @@ export function useLab({ folderUri = null } = {}) {
     return { ...l, pairs: [...byId.values()] }
   }), [persist])
 
-  const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label } : p)) })), [persist])
+  // A new label is checked again by the models' answers (a previous «Sono sicuro» no longer applies).
+  const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label, keep: false } : p)) })), [persist])
+  const keepPair = useCallback((id) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, keep: true } : p)) })), [persist])
   // A psychology case id is the pair id: its texts and blind ratings go with it.
   const removePairs = useCallback((ids) => {
     const gone = new Set(ids)
@@ -292,6 +294,6 @@ export function useLab({ folderUri = null } = {}) {
 
   return {
     ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck, flagged,
-    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
+    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, keepPair, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }

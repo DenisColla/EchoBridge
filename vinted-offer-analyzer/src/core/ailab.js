@@ -263,7 +263,8 @@ export function scoreVerification(runs, pairs) {
  * in labelling, not four models wrong together. `runs` = latest verify run per (model, pair).
  */
 export function pairsToRecheck(runs, pairs, minAnswers = 3) {
-  const labelOf = new Map(pairs.filter((p) => LABEL_IDS.includes(p.label)).map((p) => [p.id, p.label]))
+  // A pair the user confirmed («Sono sicuro») is a known hard case, not a slip.
+  const labelOf = new Map(pairs.filter((p) => LABEL_IDS.includes(p.label) && !p.keep).map((p) => [p.id, p.label]))
   const answers = new Map()
   for (const r of runs) {
     if (!labelOf.has(r.pairId) || !r.ok || !LABEL_IDS.includes(r.verdict)) continue
@@ -295,14 +296,27 @@ export function labRecheck(runs, pairs, minAnswers = 3) {
     if (!groups.has(k)) groups.set(k, [])
     groups.get(k).push(p)
   }
+  // Answers per pair (same filter as pairsToRecheck), to tell confirmed pairs from disputed ones.
+  const answers = new Map()
+  for (const r of runs) {
+    if (!r.ok || !LABEL_IDS.includes(r.verdict)) continue
+    if (!answers.has(r.pairId)) answers.set(r.pairId, [])
+    answers.get(r.pairId).push(r.verdict)
+  }
+  const foundBy = (id) => (answers.get(id) || []).filter((v) => v !== 'different').length
+  const answered = (id) => (answers.get(id) || []).length
   const wrongReference = []
   let wrongGroups = 0
   for (const list of groups.values()) {
     const matches = list.filter((p) => p.label !== 'different')
     const disputedMatches = matches.filter((p) => flagged.has(p.id)).length
-    if (disputedMatches >= 2 && disputedMatches * 2 >= matches.length) {
+    // A wrong reference makes every result "another object": no Stesso/Variante pair of the save may be confirmed by
+    // most models, and at least 3 must be disputed (two hard variants are not enough to call a whole save wrong).
+    const confirmed = matches.some((p) => answered(p.id) && foundBy(p.id) * 2 > answered(p.id))
+    if (disputedMatches >= 3 && !confirmed) {
       wrongGroups++
-      for (const p of list) wrongReference.push(p.id)
+      // Only pairs the models also see as another object; a Diverso pair some model matched is left alone.
+      for (const p of list) if (flagged.has(p.id) || (p.label === 'different' && answered(p.id) >= minAnswers && foundBy(p.id) === 0)) wrongReference.push(p.id)
     }
   }
   const wrong = new Set(wrongReference)
@@ -383,6 +397,7 @@ export function labWorkbook({ generatedAt = new Date(), models = {}, verificatio
   const wrongRef = new Set(recheck.wrongReference || [])
   const disputed = new Set(recheck.disputed || [])
   const recheckCell = (id) => (wrongRef.has(id) ? 'riferimento sbagliato' : disputed.has(id) ? 'etichetta contestata' : '')
+  const labelIt = (id) => (PAIR_LABELS.find((l) => l.id === id) || {}).label || id || ''
   const found = (verdict, label) => (verdict ? ((verdict !== 'different') === (label !== 'different') ? 'sì' : 'no') : '')
   const references = new Set(pairs.map((p) => (p.source && (p.source.id || p.source.title)) || '')).size
   const sheets = [
@@ -408,37 +423,37 @@ export function labWorkbook({ generatedAt = new Date(), models = {}, verificatio
     },
     {
       name: 'Verifiche',
-      columns: [{ width: 22 }, { width: 34 }, { width: 34 }, { width: 11 }, { width: 11 }, { width: 12 }, { width: 9 }, { width: 10 }, { width: 12 }, { width: 10 }, { width: 40 }, { width: 20 }],
+      columns: [
+        { header: 'Modello', width: 22 }, { header: 'Riferimento', width: 34 }, { header: 'Candidato', width: 34 }, { header: 'Etichetta', width: 11 },
+        { header: 'Risposta', width: 11 }, { header: 'Trova l\'articolo', width: 14 }, { header: 'Esatta', width: 9 }, { header: 'Fiducia', width: 10 },
+        { header: 'Costo $', width: 12 }, { header: 'Latenza s', width: 10 }, { header: 'Motivo o errore', width: 40 }, { header: 'Da ricontrollare', width: 20 },
+      ],
       rows: [
-        ['Modello', 'Riferimento', 'Candidato', 'Etichetta', 'Risposta', 'Trova l\'articolo', 'Esatta', 'Fiducia', 'Costo $', 'Latenza s', 'Motivo o errore', 'Da ricontrollare'],
         ...runs.filter((r) => r.task === 'verify').map((r) => {
           const p = pairById.get(r.pairId) || {}
-          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', p.label || '', r.verdict || '', found(r.verdict, p.label), r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '', recheckCell(r.pairId)]
+          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', labelIt(p.label), labelIt(r.verdict), found(r.verdict, p.label), r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '', recheckCell(r.pairId)]
         }),
       ],
     },
     {
       name: 'Psicologia',
-      columns: [{ width: 22 }, { width: 34 }, { width: 8 }, { width: 10 }, { width: 60 }],
+      columns: [{ header: 'Modello', width: 22 }, { header: 'Annuncio', width: 34 }, { header: 'Voto', width: 8 }, { header: 'Inventa', width: 10 }, { header: 'Testo', width: 60 }],
       rows: [
-        ['Modello', 'Annuncio', 'Voto', 'Inventa', 'Testo'],
         ...ratings.map((r) => [name(r.modelKey), r.caseTitle || '', r.score ?? '', r.invented ? 'sì' : 'no', r.text || '']),
       ],
     },
     {
       name: 'Prezzi',
-      columns: [{ width: 22 }, { width: 22 }, { width: 14 }, { width: 14 }, { width: 50 }],
+      columns: [{ header: 'Fornitore', width: 22 }, { header: 'Modello', width: 22 }, { header: 'Input $/M', width: 14 }, { header: 'Output $/M', width: 14 }, { header: 'Fonte e note', width: 50 }],
       rows: [
-        ['Fornitore', 'Modello', 'Input $/M', 'Output $/M', 'Fonte e note'],
         ...prices.map((p) => [p.provider, p.model, p.input, p.output, p.note || '']),
       ],
       filter: false,
     },
     {
       name: 'Metodo',
-      columns: [{ width: 22 }, { width: 60 }, { width: 50 }],
+      columns: [{ header: 'Fornitore', width: 22 }, { header: 'Test delle foto', width: 60 }, { header: 'Psicologia', width: 50 }],
       rows: [
-        ['Fornitore', 'Test delle foto', 'Psicologia'],
         ...method.map((m) => [m.provider, m.verify, m.psych]),
         [],
         ['Foto ridotte a 768 px sul lato lungo, JPEG, uguali per tutti i modelli. Ogni risposta è controllata con lo stesso schema dall\'app.'],
