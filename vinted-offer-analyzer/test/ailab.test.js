@@ -223,3 +223,29 @@ test('lab: wrong-reference needs most of the save disputed, and then takes every
   const wr = [...['t1', 't2', 't3', 't4', 'x'].flatMap((id) => ans(id, D)), ...ans('t5', ['variant', 'different', 'different', 'different'])]
   assert.deepEqual(labRecheck(wr, wrong).wrongReference.sort(), ['t1', 't2', 't3', 't4', 't5', 'x'])
 })
+
+test('lab: wrong-reference verdict is stable on the edge cases (lenient model, kept pairs, half answered, splits)', () => {
+  const ref = { id: 'r', title: 'Ref' }
+  const models = ['a', 'b', 'c', 'd']
+  const mk = (id, label, extra = {}) => ({ id, label, source: ref, candidate: { id, title: id }, query: 'q', labelledAt: 't', ...extra })
+  const ans = (id, verdicts) => verdicts.map((v, i) => ({ pairId: id, modelKey: models[i], ok: true, verdict: v }))
+  const D = ['different', 'different', 'different', 'different']
+  const lenient = ['different', 'different', 'different', 'variant']
+  const split = ['variant', 'variant', 'different', 'different']
+  // One lenient model on a fully answered wrong save: still detected.
+  const save = [...Array.from({ length: 7 }, (_, i) => mk(`p${i}`, 'same')), mk('x', 'different')]
+  const runs = [...[0, 1, 2].flatMap((i) => ans(`p${i}`, D)), ...[3, 4, 5, 6].flatMap((i) => ans(`p${i}`, lenient)), ...ans('x', D)]
+  assert.equal(labRecheck(runs, save).wrongReference.length, 8)
+  // A pair marked «Sono sicuro» means the reference was right: the save is not wrong-reference.
+  assert.deepEqual(labRecheck(runs, save.map((p) => (p.id === 'p0' ? { ...p, keep: true } : p))).wrongReference, [])
+  // 3 hard variants + 3 split, or + 3 unanswered: not wrong; relabelling one split pair does not flip it.
+  const v = Array.from({ length: 6 }, (_, i) => mk(`v${i}`, 'variant'))
+  const hard = [0, 1, 2].flatMap((i) => ans(`v${i}`, D))
+  assert.deepEqual(labRecheck([...hard, ...[3, 4, 5].flatMap((i) => ans(`v${i}`, split))], v).wrongReference, [])
+  assert.deepEqual(labRecheck(hard, v).wrongReference, [])
+  assert.deepEqual(labRecheck([...hard, ...[3, 4].flatMap((i) => ans(`v${i}`, split))], v.filter((p) => p.id !== 'v5')).wrongReference, [])
+  // «Il riferimento era giusto» marks the rejected pairs kept: verdict and single disputes both go away.
+  const r = labRecheck(runs, save)
+  const kept = save.map((p) => (r.rejectedInWrong.includes(p.id) ? { ...p, keep: true } : p))
+  assert.deepEqual(labRecheck(runs, kept), { wrongReference: [], wrongGroups: 0, rejectedInWrong: [], disputed: [] })
+})

@@ -281,10 +281,14 @@ export function pairsToRecheck(runs, pairs, minAnswers = 3) {
 
 /**
  * Splits the disputed pairs into two cases.
- * - `wrongReference`: a whole labelling batch (same reference, same search, same save) where at least 2 pairs labelled
- *   Stesso/Variante, and at least half of them, are disputed by every model. The reference was another object: every
- *   pair of the batch is meaningless, the ones labelled Diverso included, and the fix is to delete them, not relabel.
- * - `disputed`: single pairs where every model contradicts the label (a slip, or a genuinely hard case).
+ * - `wrongReference`: a whole labelling batch (same reference, same search, same save) whose reference was another
+ *   object. Every label in it is meaningless, Diverso included, so the fix is to delete the batch, not relabel it.
+ *   A batch qualifies only on strong, consistent evidence about its Stesso/Variante pairs: at least 80% of them have
+ *   `minAnswers` answers; of those, at least 3 and at least 80% are rejected by most models (majority "different");
+ *   none is confirmed by most models; none was marked «Sono sicuro» (`keep`). A few hard variants, a half-answered
+ *   batch or one lenient model do not change the verdict.
+ * - `disputed`: single pairs where every model contradicts the label (pairsToRecheck), outside those batches.
+ * `candidates` (per batch) lists the rejected Stesso/Variante pairs, so «Il riferimento era giusto» can mark them kept.
  */
 export function labRecheck(runs, pairs, minAnswers = 3) {
   const flagged = new Set(pairsToRecheck(runs, pairs, minAnswers))
@@ -296,32 +300,33 @@ export function labRecheck(runs, pairs, minAnswers = 3) {
     if (!groups.has(k)) groups.set(k, [])
     groups.get(k).push(p)
   }
-  // Answers per pair (same filter as pairsToRecheck), to tell confirmed pairs from disputed ones.
   const answers = new Map()
   for (const r of runs) {
     if (!r.ok || !LABEL_IDS.includes(r.verdict)) continue
     if (!answers.has(r.pairId)) answers.set(r.pairId, [])
     answers.get(r.pairId).push(r.verdict)
   }
-  const foundBy = (id) => (answers.get(id) || []).filter((v) => v !== 'different').length
   const answered = (id) => (answers.get(id) || []).length
+  const foundBy = (id) => (answers.get(id) || []).filter((v) => v !== 'different').length
   const wrongReference = []
+  const rejectedInWrong = []
   let wrongGroups = 0
   for (const list of groups.values()) {
     const matches = list.filter((p) => p.label !== 'different')
-    const disputedMatches = matches.filter((p) => flagged.has(p.id)).length
-    // A wrong reference makes every result "another object": at least 3 and at least half of the save's Stesso/Variante
-    // pairs are disputed by every model, and none is confirmed by most models (a few hard variants in a correct save,
-    // or a save only partly answered, are not enough).
-    const confirmed = matches.some((p) => answered(p.id) && foundBy(p.id) * 2 > answered(p.id))
-    if (disputedMatches >= 3 && disputedMatches * 2 >= matches.length && !confirmed) {
+    if (!matches.length || matches.some((p) => p.keep)) continue
+    const withAnswers = matches.filter((p) => answered(p.id) >= minAnswers)
+    const rejected = withAnswers.filter((p) => foundBy(p.id) * 2 < answered(p.id))
+    const confirmed = withAnswers.some((p) => foundBy(p.id) * 2 > answered(p.id))
+    const mostlyAnswered = withAnswers.length * 5 >= matches.length * 4
+    const mostlyRejected = rejected.length >= 3 && rejected.length * 5 >= withAnswers.length * 4
+    if (mostlyAnswered && mostlyRejected && !confirmed) {
       wrongGroups++
-      // Every Stesso/Variante pair goes (none is confirmed); a Diverso pair only if no model matched it.
-      for (const p of list) if (p.label !== 'different' || (answered(p.id) >= minAnswers && foundBy(p.id) === 0)) wrongReference.push(p.id)
+      for (const p of list) wrongReference.push(p.id)
+      for (const p of rejected) rejectedInWrong.push(p.id)
     }
   }
   const wrong = new Set(wrongReference)
-  return { wrongReference, wrongGroups, disputed: [...flagged].filter((id) => !wrong.has(id)) }
+  return { wrongReference, wrongGroups, rejectedInWrong, disputed: [...flagged].filter((id) => !wrong.has(id)) }
 }
 
 /* ───────── blind comparison of the psychology texts ───────── */

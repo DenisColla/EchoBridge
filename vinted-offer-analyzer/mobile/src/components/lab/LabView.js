@@ -145,7 +145,7 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
 export function LabView({ labState, onClose, reference = null, onToast = () => {}, onCollectingChange = () => {} }) {
   const t = useTheme()
   const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated, psychCases = 6 } = labState
-  const recheck = labState.recheck || { wrongReference: [], wrongGroups: 0, disputed: [] }
+  const recheck = labState.recheck || { wrongReference: [], wrongGroups: 0, rejectedInWrong: [], disputed: [] }
   const [collecting, setCollecting] = useState(false)
   const [selected, setSelected] = useState(() => Object.fromEntries(LLM_MODELS.map((m) => [m.key, true])))
   const [rating, setRating] = useState(false)
@@ -218,11 +218,12 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         <Button label="Raccogli coppie" onPress={() => setCollecting(true)} disabled={Boolean(job)} />
         {wrongIds.length ? (
           <View style={{ gap: space.xs }}>
-            <Note tone="warn">{wrongIds.length} coppie ({recheck.wrongGroups} {recheck.wrongGroups === 1 ? 'salvataggio' : 'salvataggi'}) sono state confrontate con il riferimento sbagliato: per tutti i modelli i risultati erano un altro oggetto. Vanno eliminate tutte insieme, non corrette in «Diverso».</Note>
+            <Note tone="warn">{wrongIds.length} coppie ({recheck.wrongGroups} {recheck.wrongGroups === 1 ? 'salvataggio' : 'salvataggi'}) sembrano confrontate con il riferimento sbagliato: per quasi tutte le coppie Stesso/Variante la maggior parte dei modelli vede un altro oggetto. Se è così, elimina il salvataggio intero (non correggere in «Diverso»). Se invece il riferimento era giusto, dillo qui sotto.</Note>
             <ButtonRow>
               <Button label={`Elimina queste ${wrongIds.length}`} variant="danger" small disabled={Boolean(job)} onPress={() => confirmAction(`Eliminare ${wrongIds.length} coppie?`, 'Elimino le coppie con il riferimento sbagliato e le loro risposte.', 'Elimina', () => { labState.removePairs(wrongIds); setFilter(null) })} />
               <Button label={filter === 'wrong' && showPairs ? 'Mostra tutte' : 'Mostrale'} variant="secondary" small onPress={() => toggleFilter('wrong')} />
             </ButtonRow>
+            <Button label="Il riferimento era giusto" variant="ghost" small disabled={Boolean(job)} onPress={() => { labState.keepPairs(recheck.rejectedInWrong); setFilter(null) }} />
           </View>
         ) : null}
         {recheck.disputed.length ? (

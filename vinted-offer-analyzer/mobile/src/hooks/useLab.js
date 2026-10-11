@@ -111,7 +111,11 @@ export function useLab({ folderUri = null } = {}) {
 
   // A new label is checked again by the models' answers (a previous «Sono sicuro» no longer applies).
   const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label, keep: p.label === label ? p.keep : false } : p)) })), [persist])
-  const keepPair = useCallback((id) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, keep: true } : p)) })), [persist])
+  const keepPairs = useCallback((ids) => {
+    const keep = new Set(ids)
+    return persist((l) => ({ ...l, pairs: l.pairs.map((p) => (keep.has(p.id) ? { ...p, keep: true } : p)) }))
+  }, [persist])
+  const keepPair = useCallback((id) => keepPairs([id]), [keepPairs])
   // A psychology case id is the pair id: its texts and blind ratings go with it.
   const removePairs = useCallback((ids) => {
     const gone = new Set(ids)
@@ -221,7 +225,7 @@ export function useLab({ folderUri = null } = {}) {
   }, [job, runPool])
 
   const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
-  const recheck = useMemo(() => (lab ? labRecheck(verifyRuns, lab.pairs) : { wrongReference: [], wrongGroups: 0, disputed: [] }), [lab, verifyRuns])
+  const recheck = useMemo(() => (lab ? labRecheck(verifyRuns, lab.pairs) : { wrongReference: [], wrongGroups: 0, rejectedInWrong: [], disputed: [] }), [lab, verifyRuns])
   const flagged = useMemo(() => new Set([...recheck.wrongReference, ...recheck.disputed]), [recheck])
   const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed, lab.caseIds, flagged) : []), [lab, flagged])
 
@@ -294,6 +298,6 @@ export function useLab({ folderUri = null } = {}) {
 
   return {
     ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck, flagged,
-    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, keepPair, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
+    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, keepPair, keepPairs, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }
