@@ -64,3 +64,19 @@ test('catalog: search words keep brand and product, drop sale words, sizes and e
   assert.equal(vintedSearchQuery({ title: '', brand: '[object Object]' }), '')
   assert.equal(vintedSearchUrl('Charles Burns Black Hole'), 'https://www.vinted.it/catalog?search_text=Charles%20Burns%20Black%20Hole')
 })
+
+test('catalog: seller text with out-of-range entities, odd urls and foreign photo hosts is handled', () => {
+  const entry = (id, extra) => ({ productItem: { id, title: 'Felpa', price: { amount: '8.0', currencyCode: 'EUR' }, url: `/items/${id}`, photos: [{ url: `https://images1.vinted.net/t/${id}.jpg` }], ...extra } })
+  const html = `"items":{"items":${JSON.stringify([
+    entry(1, { title: 'Felpa &#99999999; nuova &#x110000; &#233;' }),
+    entry(2, { url: 5 }),
+    entry(3, { photos: [{ url: 'https://evil.example/x.jpg' }], thumbnailUrl: 'http://images1.vinted.net/t/3.jpg' }),
+    entry(4, { title: { bad: true } }),
+  ])}}`
+  const { items } = parseVintedCatalog(html)
+  assert.deepEqual(items.map((c) => c.id), ['1', '2', '3'])
+  assert.equal(items[0].title, 'Felpa &#99999999; nuova &#x110000; é')
+  assert.equal(items[1].url, null)
+  assert.equal(items[2].photo, null, 'only https images from vinted.net are downloaded and sent to the models')
+  assert.deepEqual(items[2].photos, [])
+})

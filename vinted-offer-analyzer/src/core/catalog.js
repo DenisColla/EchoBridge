@@ -122,16 +122,20 @@ function labelFields(label) {
   return { brand: field('Brand') || field('Marca'), condition: field('Condizioni'), size: field('Taglia') }
 }
 
+// Photos are downloaded and sent to the models: only Vinted's own image CDN is accepted.
+const photoUrl = (u) => typeof u === 'string' && /^https:\/\/[a-z0-9.-]+\.vinted\.net\//i.test(u)
+
 /** One catalog entry → the candidate shape used by the search and the AI lab. */
 export function catalogCandidate(entry) {
   const p = entry && (entry.productItem || entry)
-  if (!p || p.id == null || !p.title) return null
+  if (!p || p.id == null || typeof p.title !== 'string' || !p.title.trim()) return null
   const box = p.itemBox || {}
   const fromLabel = labelFields(undef(box.accessibilityLabel))
   // secondLine is "40 · Buone" (size · condition) or just the condition.
   const second = String(undef(box.secondLine) || '').split('·').map((s) => s.trim()).filter(Boolean)
-  const photos = Array.isArray(p.photos) ? p.photos.map((ph) => ph && ph.url).filter(Boolean) : []
-  const url = undef(p.url)
+  const photos = Array.isArray(p.photos) ? p.photos.map((ph) => ph && ph.url).filter(photoUrl) : []
+  const thumb = photoUrl(undef(p.thumbnailUrl)) ? p.thumbnailUrl : null
+  const url = typeof p.url === 'string' ? p.url : null
   return {
     source: 'vinted',
     id: String(p.id),
@@ -147,9 +151,9 @@ export function catalogCandidate(entry) {
     condition: fromLabel.condition || (second.length ? second[second.length - 1] : null),
     favourites: Number.isFinite(p.favouriteCount) ? p.favouriteCount : null,
     promoted: Boolean(p.isPromoted),
-    photo: photos[0] || undef(p.thumbnailUrl) || null,
+    photo: photos[0] || thumb,
     photos,
-    thumb: undef(p.thumbnailUrl) || photos[0] || null,
+    thumb: thumb || photos[0] || null,
     sellerId: p.user && p.user.id != null ? String(p.user.id) : null,
     sellerBusiness: p.user ? Boolean(p.user.isBusiness) : null,
   }
@@ -195,7 +199,12 @@ export function parseVintedCatalog(html) {
   const items = []
   const ids = new Set()
   for (const entry of entries) {
-    const c = catalogCandidate(entry)
+    let c = null
+    try {
+      c = catalogCandidate(entry)
+    } catch {
+      c = null // one malformed listing must not lose the others
+    }
     if (!c || ids.has(c.id)) continue
     ids.add(c.id)
     items.push(c)

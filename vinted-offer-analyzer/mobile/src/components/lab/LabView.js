@@ -6,6 +6,7 @@ import { Body, Button, ButtonRow, Card, Meter, Note, SectionLabel, Title, Toggle
 import { CollectSheet } from './CollectSheet.js'
 
 const TARGET_PAIRS = 100
+const PAIR_PAGE = 30
 /** Italian decimals: "0,59 cent", "1,20 $". */
 const usd = (v) => (v == null ? '—' : (v < 0.01 ? `${(v * 100).toFixed(2)} cent` : `${v.toFixed(2)} $`).replace('.', ','))
 const ratio = (n, d) => (d ? ` (${n}/${d})` : '')
@@ -23,12 +24,20 @@ function KeyRow({ provider, masked, onSave, onTest }) {
 
   const save = async () => {
     setBusy(true)
-    await onSave(provider, value)
+    const ok = await onSave(provider, value)
+    setBusy(false)
+    if (!ok) {
+      setStatus({ tone: 'warn', text: 'Chiave non salvata: riprova.' })
+      return
+    }
     setValue('')
     setEditing(false)
     setStatus(null)
-    setBusy(false)
   }
+  const remove = () => Alert.alert('Eliminare la chiave?', 'Per usarla di nuovo dovrai crearne una sul sito del fornitore.', [
+    { text: 'Annulla', style: 'cancel' },
+    { text: 'Elimina', style: 'destructive', onPress: async () => { await onSave(provider, ''); setStatus(null) } },
+  ])
   const test = async () => {
     setBusy(true)
     setStatus(null)
@@ -43,7 +52,7 @@ function KeyRow({ provider, masked, onSave, onTest }) {
       <Text style={{ color: t.ink3, fontSize: 12 }}>{info.note}</Text>
       {editing ? (
         <View style={{ gap: space.xs }}>
-          <TextInput value={value} onChangeText={setValue} placeholder={info.keyHint} placeholderTextColor={t.ink3} secureTextEntry autoCapitalize="none" autoCorrect={false} style={[styles.input, { color: t.ink, borderColor: t.line, backgroundColor: t.bg }]} />
+          <TextInput value={value} onChangeText={setValue} placeholder={info.keyHint} placeholderTextColor={t.ink3} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" importantForAutofill="no" style={[styles.input, { color: t.ink, borderColor: t.line, backgroundColor: t.bg }]} />
           <ButtonRow>
             <Button label="Salva" small onPress={save} disabled={busy || !value.trim()} />
             <Button label="Annulla" variant="secondary" small onPress={() => { setEditing(false); setValue('') }} />
@@ -53,7 +62,7 @@ function KeyRow({ provider, masked, onSave, onTest }) {
         <ButtonRow>
           <Button label={masked ? 'Cambia' : 'Inserisci'} variant="secondary" small onPress={() => setEditing(true)} />
           {masked ? <Button label={busy ? 'Provo…' : 'Prova'} variant="secondary" small onPress={test} disabled={busy} /> : <Button label="Crea la chiave" variant="ghost" small onPress={() => Linking.openURL(info.console).catch(() => {})} />}
-          {masked ? <Button label="Elimina" variant="ghostDanger" small onPress={() => onSave(provider, '')} disabled={busy} /> : null}
+          {masked ? <Button label="Elimina" variant="ghostDanger" small onPress={remove} disabled={busy} /> : null}
         </ButtonRow>
       )}
       {status ? <Note tone={status.tone}>{status.text}</Note> : null}
@@ -82,9 +91,11 @@ function Stars({ value, onChange }) {
 
 function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
   const t = useTheme()
-  const [index, setIndex] = useState(0)
+  const [wanted, setIndex] = useState(0)
+  // The case list can shrink while rating (a pair relabelled or deleted): stay on a valid case.
+  const index = Math.min(wanted, Math.max(0, cases.length - 1))
   const c = cases[index]
-  if (!c) return null
+  if (!c) return <Note>Nessun caso da valutare.</Note>
   const outputs = psychRuns.filter((r) => r.caseId === c.caseId && r.ok)
   const order = blindOrder(c.caseId, outputs.map((r) => r.modelKey), seed)
   const ratingOf = (modelKey) => lab.ratings.find((r) => r.caseId === c.caseId && r.modelKey === modelKey) || { score: 0, invented: false }
@@ -110,8 +121,8 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
         )
       })}
       <ButtonRow>
-        <Button label="Precedente" variant="secondary" small onPress={() => setIndex((i) => Math.max(0, i - 1))} disabled={index === 0} />
-        <Button label="Successivo" variant="secondary" small onPress={() => setIndex((i) => Math.min(cases.length - 1, i + 1))} disabled={index >= cases.length - 1} />
+        <Button label="Precedente" variant="secondary" small onPress={() => setIndex(Math.max(0, index - 1))} disabled={index === 0} />
+        <Button label="Successivo" variant="secondary" small onPress={() => setIndex(Math.min(cases.length - 1, index + 1))} disabled={index >= cases.length - 1} />
       </ButtonRow>
     </View>
   )
@@ -124,11 +135,12 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
  */
 export function LabView({ labState, onClose, reference = null, onToast = () => {} }) {
   const t = useTheme()
-  const { ready, lab, keys, job, cases, psychRuns, verification, psychology } = labState
+  const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated } = labState
   const [collecting, setCollecting] = useState(false)
   const [selected, setSelected] = useState(() => Object.fromEntries(LLM_MODELS.map((m) => [m.key, true])))
   const [rating, setRating] = useState(false)
   const [showPairs, setShowPairs] = useState(false)
+  const [pairLimit, setPairLimit] = useState(PAIR_PAGE)
 
   const activeModels = useMemo(() => LLM_MODELS.filter((m) => selected[m.key] && keys[m.provider]).map((m) => m.key), [selected, keys])
   const counts = useMemo(() => {
@@ -157,6 +169,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         <Title>Quale modello lavora meglio per te</Title>
         <Body muted small>Confronto quattro modelli sugli stessi annunci: riconoscere lo stesso prodotto dalle foto e spiegare perché conviene trattare. Le chiavi restano cifrate nel telefono; i testi e le foto degli annunci vengono inviati ai fornitori che scegli.</Body>
         <Body small>Spesa stimata finora: {usd(spendTotal)}{spendTotal ? ` (${Object.entries(lab.spend).filter(([, v]) => v > 0).map(([p, v]) => `${LLM_PROVIDERS[p] ? LLM_PROVIDERS[p].label : p} ${usd(v)}`).join(', ')})` : ''}</Body>
+        {loadFailed ? <Note tone="warn">Non riesco a leggere i dati salvati del laboratorio. Per non cancellarli non salvo nulla: chiudi e riapri l'app.</Note> : null}
         <Button label="Chiudi il laboratorio" variant="secondary" small onPress={onClose} />
       </Card>
 
@@ -175,7 +188,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         {!hasRef ? <Note>Suggerimento: analizza prima un annuncio dal link (scheda Calcola): lo uso come riferimento e come ricerca di partenza.</Note> : null}
         <Button label="Raccogli coppie" onPress={() => setCollecting(true)} disabled={Boolean(job)} />
         {totalPairs ? <Button label={showPairs ? 'Nascondi le coppie' : 'Mostra e correggi le coppie'} variant="ghost" small onPress={() => setShowPairs((v) => !v)} /> : null}
-        {showPairs ? lab.pairs.slice().reverse().map((p) => (
+        {showPairs ? lab.pairs.slice().reverse().slice(0, pairLimit).map((p) => (
           <View key={p.id} style={[styles.pairRow, { borderColor: t.line }]}>
             <Text style={{ color: t.ink, fontSize: 13 }} numberOfLines={1}>Rif.: {p.source.title}</Text>
             <Text style={{ color: t.ink2, fontSize: 13 }} numberOfLines={1}>Cand.: {p.candidate.title}</Text>
@@ -189,6 +202,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
             </View>
           </View>
         )) : null}
+        {showPairs && lab.pairs.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, lab.pairs.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
       </Card>
 
       <Card>
@@ -233,7 +247,8 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
           </ButtonRow>
         ) : null}
         {rating ? <BlindRating lab={lab} cases={cases} psychRuns={psychRuns} onRate={labState.rate} seed={lab.seed} /> : null}
-        {psychology.length ? (
+        {psychology.length && !allRated ? <Note>I risultati per modello compaiono quando hai votato tutti i testi: così il test resta alla cieca.</Note> : null}
+        {psychology.length && allRated && !rating ? (
           <View style={{ gap: space.xs }}>
             {psychology.map((p) => (
               <View key={p.modelKey} style={[styles.resultRow, { borderColor: t.line }]}>

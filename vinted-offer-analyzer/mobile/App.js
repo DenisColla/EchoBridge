@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
+import { AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
@@ -107,11 +107,13 @@ function Main() {
   useEffect(() => listenToReminderTaps((data) => {
     if (data && data.kind === 'monthly') {
       setCounterContext(null)
+      setLabOpen(false)
       setTab('info')
       return
     }
     if (data && data.itemId) {
       setCounterContext(null)
+      setLabOpen(false)
       setTab('lista')
       setHighlightId(data.itemId)
     }
@@ -389,6 +391,19 @@ function Main() {
   /* ───────── counter-offers ───────── */
 
   const scrollTop = () => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
+  const openLab = () => { setLabOpen(true); scrollTop() }
+  const closeLab = () => { setLabOpen(false); scrollTop() }
+
+  // The lab is a screen of its own: Android back closes it instead of leaving the app.
+  useEffect(() => {
+    if (!labOpen) return undefined
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setLabOpen(false)
+      setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
+      return true
+    })
+    return () => sub.remove()
+  }, [labOpen])
 
   const openCounterFromItem = (item) => {
     const fallbackForm = {
@@ -546,8 +561,8 @@ function Main() {
               onCounterSent={counterSent}
             />
           )}
-          {!counterContext && !labOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={() => setLabOpen(true)} />}
-          {!counterContext && labOpen && <LabView labState={lab} onClose={() => setLabOpen(false)} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
+          {!counterContext && !labOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} />}
+          {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>
 

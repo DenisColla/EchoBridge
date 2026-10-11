@@ -254,7 +254,8 @@ export function parseLlmResponse(provider, status, json, rawText = '', headers =
       output: u.output_tokens || 0,
       reasoning: null,
     }
-    return { ok: finish === 'complete' && Boolean(text), text, finish, usage, error: finish === 'complete' ? null : `Risposta ${finish === 'truncated' ? 'troncata' : finish === 'refused' ? 'rifiutata dal modello' : 'incompleta'}`, retryable: false, kind: null }
+    const ok = finish === 'complete' && Boolean(text)
+    return { ok, text, finish, usage, error: ok ? null : finish === 'complete' ? 'Risposta vuota' : `Risposta ${finish === 'truncated' ? 'troncata' : finish === 'refused' ? 'rifiutata dal modello' : 'incompleta'}`, retryable: false, kind: null }
   }
 
   if (provider === 'openai') {
@@ -298,7 +299,9 @@ export function parseLlmResponse(provider, status, json, rawText = '', headers =
       output: u.completion_tokens || 0, // includes reasoning tokens
       reasoning: (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) ?? null,
     }
-    const retryable = !text || reason === 'insufficient_system_resource' || reason === 'aborted'
+    // An empty answer is retried (DeepSeek json mode can return nothing), but not when it was cut off by the token
+    // limit or blocked by the filter: the same request would fail the same way and be billed again.
+    const retryable = partial || (!text && reason !== 'length' && reason !== 'content_filter') || reason === 'insufficient_system_resource' || reason === 'aborted'
     const ok = finish === 'complete' && Boolean(text)
     return { ok, text, finish, usage, error: ok ? null : !text ? 'Risposta vuota' : `Risposta ${finish === 'truncated' ? 'troncata' : finish === 'filtered' ? 'bloccata dal filtro' : 'incompleta'}`, retryable: !ok && retryable, kind: null }
   }

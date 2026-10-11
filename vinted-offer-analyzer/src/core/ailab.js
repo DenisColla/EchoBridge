@@ -107,6 +107,10 @@ export function engineFactsFor(candidate, source = {}, now = new Date()) {
   const { form } = buildFormFromExtraction(ex, { link: candidate.url || '' })
   const result = analyzeOffer(form, now)
   if (!result || !result.ok) return null
+  if (result.kind !== 'analysis' || !Number.isFinite(result.probability)) {
+    // Cheap listings ('no_offer_needed') or a target over Vinted's cap: no engine numbers to pass on.
+    return { listPrice: candidate.price, buyerTotal: candidate.total, target: null, discountPct: null, probability: null, sendAt: null, sendLabel: null, note: result.message || null }
+  }
   return {
     listPrice: candidate.price,
     buyerTotal: candidate.total,
@@ -131,10 +135,11 @@ export function psychPrompt(caseItem) {
     `- annuncio in evidenza a pagamento: ${c.promoted ? 'sì' : 'no'}`,
     `- verifica foto rispetto all'articolo cercato: ${caseItem.label === 'same' ? 'stesso prodotto' : caseItem.label === 'variant' ? 'variante dello stesso modello' : 'n.d.'}`,
     'Numeri del motore:',
-    `- offerta consigliata: ${f.target != null ? formatEuro(f.target) : 'n.d.'}${f.discountPct != null ? ` (−${f.discountPct}%)` : ''}`,
-    `- probabilità stimata che la accetti: ${f.probability != null ? `${f.probability}%` : 'n.d.'}`,
+    `- offerta consigliata: ${Number.isFinite(f.target) ? formatEuro(f.target) : 'n.d.'}${Number.isFinite(f.discountPct) ? ` (−${f.discountPct}%)` : ''}`,
+    `- probabilità stimata che la accetti: ${Number.isFinite(f.probability) ? `${f.probability}%` : 'n.d.'}`,
     `- momento consigliato: ${f.sendLabel || 'n.d.'}`,
   ]
+  if (f.note) lines.push(`- nota del motore: ${f.note}`)
   return { system: PSYCH_SYSTEM, text: lines.join('\n'), schema: PSYCH_SCHEMA, schemaName: 'analisi_trattativa' }
 }
 
@@ -180,7 +185,7 @@ export function readModelJson(text, schema) {
     return { ok: false, value: null, problems: ['JSON non valido'] }
   }
   const problems = schemaProblems(value, schema)
-  if (schema === VERIFY_SCHEMA && typeof value.confidence === 'number' && (value.confidence < 0 || value.confidence > 1)) problems.push('$.confidence: fuori da 0–1')
+  if (schema === VERIFY_SCHEMA && value && typeof value === 'object' && typeof value.confidence === 'number' && (value.confidence < 0 || value.confidence > 1)) problems.push('$.confidence: fuori da 0–1')
   return { ok: problems.length === 0, value, problems }
 }
 
@@ -205,7 +210,8 @@ export function scoreVerification(runs, pairs) {
   const labelOf = new Map(pairs.filter((p) => LABEL_IDS.includes(p.label)).map((p) => [p.id, p.label]))
   const byModel = new Map()
   for (const r of runs) {
-    if (!labelOf.has(r.pairId)) continue
+    // Runs that never reached the provider (photo not ready, cancelled) say nothing about the model.
+    if (!labelOf.has(r.pairId) || r.kind === 'photo' || r.kind === 'cancelled') continue
     if (!byModel.has(r.modelKey)) byModel.set(r.modelKey, [])
     byModel.get(r.modelKey).push(r)
   }
@@ -231,7 +237,7 @@ export function scoreVerification(runs, pairs) {
       if (truth === 'different') { different++; if (answer === 'same') falseMatch++ }
       if (truth === 'same') { same++; if (answer === 'different') miss++ }
       if (Number.isFinite(r.costUsd)) cost += r.costUsd
-      if (Number.isFinite(r.latencyMs)) latencies.push(r.latencyMs)
+      if (Number.isFinite(r.latencyMs) && r.latencyMs > 0) latencies.push(r.latencyMs)
     }
     const n = list.length
     rows.push({

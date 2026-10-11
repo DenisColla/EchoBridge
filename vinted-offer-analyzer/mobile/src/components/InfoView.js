@@ -80,7 +80,7 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
         <Card>
           <SectionLabel>Laboratorio AI</SectionLabel>
           <Title>Scegli il modello AI con un test reale</Title>
-          <Body muted small>Confronta Claude Haiku 5.5, GPT-6 Luna, DeepSeek V4.1 Flash e Qwen 3.8 Flash su annunci veri: riconoscere lo stesso prodotto dalle foto e spiegare come trattare. Ti servono le chiavi dei fornitori.</Body>
+          <Body muted small>Confronta Claude Haiku 5.5, GPT-6 Luna, DeepSeek V4.1 Flash e Qwen 3.8 Flash su annunci veri: riconoscere lo stesso prodotto dalle foto e spiegare come trattare. Ti servono le chiavi dei fornitori; testi e foto degli annunci vanno a loro (DeepSeek: dati in Cina).</Body>
           <Button label="Apri il laboratorio" onPress={onOpenLab} />
         </Card>
       ) : null}
@@ -128,7 +128,7 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
         <Body>• Domenica sera 21–23 è la finestra migliore, poi la tarda serata infrasettimanale. Pausa pranzo e mattina lavorativa sono le peggiori. Fine mese aiuta, inizio mese penalizza.</Body>
         <Body>• Categoria, differenza in euro, anzianità dell'annuncio, tipo di venditore e testo dell'annuncio spostano la probabilità; il risultato tiene conto anche del rischio che l'articolo venga venduto mentre aspetti.</Body>
         <Body>• Conta su circa {VINTED.OFFER_VALIDITY_HOURS} ore per la risposta (Vinted non indica una scadenza ufficiale) e puoi inviare al massimo {VINTED.OFFERS_PER_DAY} offerte al giorno.</Body>
-        <Body muted small>Stime euristiche basate su psicologia della negoziazione e abitudini d'uso di Vinted, non su dati ufficiali. Tutti i dati restano sul telefono.</Body>
+        <Body muted small>Stime euristiche basate su psicologia della negoziazione e abitudini d'uso di Vinted, non su dati ufficiali. Tutti i dati restano sul telefono, tranne nel Laboratorio AI (facoltativo): lì testi e foto degli annunci vanno ai fornitori che scegli.</Body>
       </Card>
     </View>
   )

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Alert, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { WebView } from 'react-native-webview'
 import { PAIR_LABELS, formatEuro, parseVintedCatalog, vintedSearchUrl } from '../../../core/index.js'
@@ -33,7 +33,29 @@ const CATALOG_PROBE = `(function () {
 })();
 true;`
 
-const ALLOWED = /^(https?:|about:|data:|blob:)/i
+const hostOf = (u) => {
+  try {
+    return new URL(u).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+const isVintedHost = (h) => h === 'vinted.it' || h.endsWith('.vinted.it')
+const isCatalogUrl = (u) => isVintedHost(hostOf(u)) && /^https:\/\/[^/]+\/catalog(\?|\/|$)/i.test(u)
+// Same search? Vinted may stamp the address with its own ids (time, search_id): compare the rest, order-free.
+const searchKey = (u) => {
+  const [base, query = ''] = String(u || '').split('#')[0].split('?')
+  const params = query.split('&').filter((kv) => kv && !/^(time|search_id|search_session_id)=/i.test(kv)).sort()
+  return `${base.replace(/\/$/, '')}?${params.join('&')}`
+}
+// Main-frame navigation stays on Vinted (plus Cloudflare's check), without login or sign-up pages.
+const NO_LOGIN = /^https:\/\/[^/]+\/(member\/(general\/)?(login|signup|register)|oauth|auth)(\/|\?|$)/i
+const allowNavigation = (u) => {
+  if (u === 'about:blank') return true
+  if (!/^https:\/\//i.test(u || '')) return false
+  const h = hostOf(u)
+  return (isVintedHost(h) && !NO_LOGIN.test(u)) || h === 'challenges.cloudflare.com'
+}
 const describe = (c) => [c.brand, c.size, c.condition].filter(Boolean).join(' · ')
 
 function ListingRow({ item, children, highlight }) {
@@ -52,8 +74,9 @@ function ListingRow({ item, children, highlight }) {
 }
 
 /**
- * «Raccogli coppie»: the user searches Vinted in a VISIBLE in-app browser (read only when they tap «Usa questi
- * risultati»), picks or keeps the reference listing and labels candidates with one tap. Returns labelled pairs.
+ * «Raccogli coppie»: the user searches Vinted in a VISIBLE in-app browser. The results of each loaded search page are
+ * read on the phone; when the user changed filters inside the page, «Usa questi risultati» reloads that search first.
+ * The user picks or keeps the reference listing and labels candidates with one tap. Returns labelled pairs.
  */
 export function CollectSheet({ visible, initialQuery = '', reference = null, onClose, onSave }) {
   const t = useTheme()
@@ -65,17 +88,47 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
   const [challenge, setChallenge] = useState(false)
   const [phase, setPhase] = useState('browse')
   const [ref, setRef] = useState(reference)
+  // id → { label, candidate }: a label keeps its listing, so it survives a new search.
   const [labels, setLabels] = useState({})
   const [loadKey, setLoadKey] = useState(0)
+  const [parsedUrl, setParsedUrl] = useState(null)
+  const [nav, setNav] = useState({ url: null, canGoBack: false })
+  const [pendingLabel, setPendingLabel] = useState(false)
 
   const candidates = useMemo(() => (found || []).filter((c) => !ref || c.id !== ref.id), [found, ref])
-  const labelled = Object.entries(labels).filter(([, v]) => v)
+  const labelled = Object.values(labels).filter((v) => v && (!ref || v.candidate.id !== ref.id))
+
+  const leave = () => {
+    if (!labelled.length) return onClose()
+    Alert.alert('Uscire?', 'Le etichette non salvate andranno perse.', [
+      { text: 'Annulla', style: 'cancel' },
+      { text: 'Esci', style: 'destructive', onPress: onClose },
+    ])
+  }
+  // Android back: from the labels to the search, then back inside the page, then out (asking if labels would be lost).
+  const onBack = () => {
+    if (phase === 'label') setPhase('browse')
+    else if (nav.canGoBack && webRef.current) webRef.current.goBack()
+    else leave()
+  }
+  const takeResults = () => {
+    // Filters and pages changed inside Vinted's page do not load a new document: load that search to read it.
+    if (nav.url && isCatalogUrl(nav.url) && searchKey(nav.url) !== searchKey(parsedUrl)) {
+      setFound(null)
+      setPendingLabel(true)
+      setUrl(nav.url)
+      setLoadKey((k) => k + 1)
+      return
+    }
+    setPhase('label')
+  }
 
   const search = () => {
     const q = query.trim()
     if (!q) return
     setFound(null)
     setChallenge(false)
+    setPendingLabel(false)
     setPhase('browse')
     setUrl(vintedSearchUrl(q))
     setLoadKey((k) => k + 1)
@@ -88,25 +141,32 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     } catch {
       return
     }
-    if (msg && msg.type === 'catalog' && typeof msg.text === 'string') {
+    // Only Vinted's own search pages are read (any frame can post: ads and other sites are ignored).
+    if (!isVintedHost(hostOf(event.nativeEvent.url))) return
+    if (msg && msg.type === 'catalog' && typeof msg.text === 'string' && isCatalogUrl(String(msg.url || ''))) {
       const { items } = parseVintedCatalog(msg.text)
       setFound(items)
+      setParsedUrl(msg.url)
       setChallenge(false)
+      if (pendingLabel) {
+        setPendingLabel(false)
+        if (items.length) setPhase('label')
+      }
     } else if (msg && msg.type === 'state') setChallenge(Boolean(msg.challenge))
   }
 
   const save = () => {
     const now = new Date().toISOString()
-    const pairs = labelled.map(([id, label]) => {
-      const candidate = candidates.find((c) => c.id === id)
-      return candidate ? { id: `${ref.id || ref.url || 'ref'}~${candidate.id}`, source: ref, candidate, label, labelledAt: now, query: query.trim() } : null
-    }).filter(Boolean)
-    onSave(pairs)
+    // The analysed listing has no size: take the missing fields from its own entry in the results, when it is there.
+    const own = (found || []).find((c) => c.id === ref.id)
+    const source = own ? Object.fromEntries(Object.keys({ ...own, ...ref }).map((k) => [k, ref[k] ?? own[k] ?? null])) : ref
+    const pairs = labelled.map(({ label, candidate }) => ({ id: `${ref.id || ref.url || 'ref'}~${candidate.id}`, source, candidate, label, labelledAt: now, query: query.trim() }))
     setLabels({})
+    onSave(pairs)
   }
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible} animationType="slide" onRequestClose={onBack} statusBarTranslucent>
       <View style={[styles.sheet, { backgroundColor: t.bg, paddingTop: insets.top || 24, paddingBottom: insets.bottom }]}>
         <View style={[styles.header, { borderBottomColor: t.line, backgroundColor: t.card }]}>
           <Title>Raccogli coppie</Title>
@@ -115,7 +175,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
             <Button label="Cerca" small onPress={search} disabled={!query.trim()} />
           </View>
           {phase === 'browse' ? (
-            <Body muted small>Scorri pure la pagina: leggo i risultati solo quando tocchi «Usa questi risultati». Per una nuova ricerca usa il campo qui sopra.</Body>
+            <Body muted small>Leggo i risultati della ricerca caricata, solo nel telefono. Se cambi filtri nella pagina, li ricarico quando tocchi «Usa questi risultati».</Body>
           ) : null}
         </View>
 
@@ -130,8 +190,9 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
                 injectedJavaScript={CATALOG_PROBE}
                 onLoadEnd={() => webRef.current && webRef.current.injectJavaScript(CATALOG_PROBE)}
                 onMessage={onMessage}
-                onShouldStartLoadWithRequest={(req) => ALLOWED.test(req.url || '')}
-                originWhitelist={['https://*', 'http://*']}
+                onNavigationStateChange={(s) => setNav({ url: s.url || null, canGoBack: Boolean(s.canGoBack) })}
+                onShouldStartLoadWithRequest={(req) => allowNavigation(req.url || '')}
+                originWhitelist={['https://*']}
                 javaScriptEnabled
                 domStorageEnabled
                 thirdPartyCookiesEnabled
@@ -145,8 +206,8 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
             <View style={[styles.footer, { borderTopColor: t.line, backgroundColor: t.card }]}>
               {challenge ? <Body small>Vinted sta facendo un controllo anti-robot: se compare una casella, toccala.</Body> : null}
               <ButtonRow>
-                <Button label="Chiudi" variant="secondary" onPress={onClose} />
-                <Button label={found ? `Usa questi risultati (${found.length})` : 'In attesa dei risultati…'} onPress={() => setPhase('label')} disabled={!found || !found.length} />
+                <Button label="Chiudi" variant="secondary" onPress={leave} />
+                <Button label={found ? `Usa questi risultati (${found.length})` : 'In attesa dei risultati…'} onPress={takeResults} disabled={!found || !found.length} />
               </ButtonRow>
             </View>
           </View>
@@ -157,11 +218,14 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
                 <View style={{ gap: space.xs }}>
                   <Text style={{ color: t.ink3, fontSize: 12, fontWeight: '700' }}>ANNUNCIO DI RIFERIMENTO</Text>
                   <ListingRow item={ref} highlight>
-                    {!reference ? <Pressable onPress={() => { setRef(null); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Cambia riferimento</Text></Pressable> : null}
+                    <Pressable onPress={() => { setRef(null); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Cambia riferimento</Text></Pressable>
                   </ListingRow>
                 </View>
               ) : (
-                <Note tone="warn">Tocca «Riferimento» sull'annuncio che vorresti comprare: gli altri li confronti con quello.</Note>
+                <View style={{ gap: space.xs }}>
+                  <Note tone="warn">Tocca «Riferimento» sull'annuncio che vorresti comprare: gli altri li confronti con quello.</Note>
+                  {reference ? <Pressable onPress={() => { setRef(reference); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Usa l'annuncio analizzato: {reference.title}</Text></Pressable> : null}
+                </View>
               )}
               {ref ? <Body small muted>Per ogni candidato: Stesso, Variante (stesso modello ma colore, taglia o edizione diversi) o Diverso. Etichetta anche quelli diversi: servono a misurare i falsi «stesso».</Body> : null}
               {candidates.map((c) => (
@@ -170,7 +234,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
                     {!ref ? (
                       <Chip t={t} label="Riferimento" active={false} onPress={() => setRef(c)} />
                     ) : PAIR_LABELS.map((l) => (
-                      <Chip key={l.id} t={t} label={l.label} active={labels[c.id] === l.id} onPress={() => setLabels((s) => ({ ...s, [c.id]: s[c.id] === l.id ? null : l.id }))} />
+                      <Chip key={l.id} t={t} label={l.label} active={Boolean(labels[c.id]) && labels[c.id].label === l.id} onPress={() => setLabels((s) => ({ ...s, [c.id]: s[c.id] && s[c.id].label === l.id ? null : { label: l.id, candidate: c } }))} />
                     ))}
                   </View>
                 </ListingRow>

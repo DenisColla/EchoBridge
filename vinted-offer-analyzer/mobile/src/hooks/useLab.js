@@ -26,8 +26,12 @@ const hash = (s) => {
   return h >>> 0
 }
 
-/** Up to 10 distinct candidates labelled same/variant, in a stable shuffled order: the psychology cases. */
-function pickCases(pairs, seed) {
+/**
+ * Up to 10 distinct candidates labelled same/variant: the psychology cases. Cases already used (`caseIds`, saved at the
+ * first psychology run) keep their place while still usable, so later pairs do not push rated cases out; free slots
+ * are filled in a stable shuffled order.
+ */
+function pickCases(pairs, seed, caseIds = []) {
   const seen = new Set()
   const usable = []
   for (const p of pairs) {
@@ -35,12 +39,19 @@ function pickCases(pairs, seed) {
     seen.add(p.candidate.id)
     usable.push(p)
   }
-  return usable
+  const byId = new Map(usable.map((p) => [p.id, p]))
+  const kept = caseIds.map((id) => byId.get(id)).filter(Boolean).slice(0, PSYCH_CASES)
+  const keptIds = new Set(kept.map((p) => p.id))
+  const fill = usable
+    .filter((p) => !keptIds.has(p.id))
     .map((p) => ({ p, k: hash(`${p.id}|${seed}`) }))
     .sort((a, b) => a.k - b.k)
-    .slice(0, PSYCH_CASES)
-    .map(({ p }) => ({ caseId: p.id, pairId: p.id, candidate: p.candidate, source: p.source, label: p.label }))
+    .slice(0, PSYCH_CASES - kept.length)
+    .map(({ p }) => p)
+  return [...kept, ...fill].map((p) => ({ caseId: p.id, pairId: p.id, candidate: p.candidate, source: p.source, label: p.label }))
 }
+
+const pairExists = (l, id) => l.pairs.some((p) => p.id === id)
 
 /**
  * State and actions of the AI lab: keys, labelled pairs, the verification test, the psychology test with blind
@@ -97,7 +108,14 @@ export function useLab({ folderUri = null } = {}) {
   }), [persist])
 
   const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label } : p)) })), [persist])
-  const removePair = useCallback((id) => persist((l) => ({ ...l, pairs: l.pairs.filter((p) => p.id !== id), runs: l.runs.filter((r) => r.pairId !== id) })), [persist])
+  // A psychology case id is the pair id: its texts and blind ratings go with it.
+  const removePair = useCallback((id) => persist((l) => ({
+    ...l,
+    pairs: l.pairs.filter((p) => p.id !== id),
+    runs: l.runs.filter((r) => r.pairId !== id && r.caseId !== id),
+    ratings: l.ratings.filter((r) => r.caseId !== id),
+    caseIds: (l.caseIds || []).filter((c) => c !== id),
+  })), [persist])
 
   /** Runs a list of tasks with a small worker pool, recording each result as it lands. */
   const runPool = useCallback(async (kind, tasks, work) => {
@@ -108,11 +126,15 @@ export function useLab({ folderUri = null } = {}) {
     let failed = 0
     setJob({ kind, done, total: tasks.length, cost, failed })
     let next = 0
-    // Results update the screen at once; storage is written every few results and at the end (the lab can be large).
-    const record = (task, rec) => {
+    const addSpend = (l, task, usd) => {
       const provider = task.modelKey.split(':')[0]
-      const l = labRef.current || emptyLab()
-      const nextLab = { ...l, runs: [...l.runs, rec], spend: { ...l.spend, [provider]: (l.spend[provider] || 0) + (rec.costUsd || 0) } }
+      return usd ? { ...l, spend: { ...l.spend, [provider]: (l.spend[provider] || 0) + usd } } : l
+    }
+    // Results update the screen at once; storage is written every few results and at the end (the lab can be large).
+    // A result is stored as a run only when the model was actually asked and its pair still exists.
+    const record = (task, rec, keep) => {
+      let nextLab = addSpend(labRef.current || emptyLab(), task, rec.costUsd || 0)
+      if (keep && (!rec.pairId || pairExists(nextLab, rec.pairId)) && (!rec.caseId || pairExists(nextLab, rec.caseId))) nextLab = { ...nextLab, runs: [...nextLab.runs, rec] }
       labRef.current = nextLab
       setLab(nextLab)
       if (done % 8 === 0) saveLab(nextLab)
@@ -120,13 +142,27 @@ export function useLab({ folderUri = null } = {}) {
     const worker = async () => {
       while (next < tasks.length && !controller.signal.aborted) {
         const task = tasks[next++]
-        if (task.skip) continue
-        const rec = await work(task, controller.signal)
-        if (rec.kind === 'cancelled') continue
+        // Skipped after an auth/balance error, or its pair was deleted while the test was running.
+        const id = task.pair ? task.pair.id : task.c ? task.c.caseId : null
+        if (task.skip || (id && !pairExists(labRef.current || emptyLab(), id))) continue
+        let rec
+        try {
+          rec = await work(task, controller.signal)
+        } catch (e) {
+          rec = { task: kind, modelKey: task.modelKey, ok: false, error: String(e && e.message ? e.message : e), kind: 'request', costUsd: 0, latencyMs: 0 }
+        }
+        if (rec.kind === 'cancelled') {
+          // Attempts billed before the cancel still count in the spend.
+          if (rec.costUsd) {
+            cost += rec.costUsd
+            record(task, rec, false)
+          }
+          continue
+        }
         done++
         cost += rec.costUsd || 0
         if (!rec.ok) failed++
-        record(task, rec)
+        record(task, rec, rec.kind !== 'photo')
         setJob({ kind, done, total: tasks.length, cost, failed })
         // A missing key, a rejected key or an empty balance will not fix itself: stop that provider's remaining work.
         if (rec.kind === 'auth' || rec.kind === 'balance') {
@@ -134,10 +170,13 @@ export function useLab({ folderUri = null } = {}) {
         }
       }
     }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker))
-    if (labRef.current) await saveLab(labRef.current)
-    abortRef.current = null
-    setJob(null)
+    try {
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker))
+    } finally {
+      if (labRef.current) await saveLab(labRef.current)
+      abortRef.current = null
+      setJob(null)
+    }
     return { done, cost, failed, cancelled: controller.signal.aborted }
   }, [])
 
@@ -158,7 +197,8 @@ export function useLab({ folderUri = null } = {}) {
       try {
         images = await Promise.all([prepareImage(pair.source.photo), prepareImage(pair.candidate.photo)])
       } catch (e) {
-        return { ...base, ok: false, error: `Foto: ${String(e.message || e)}`, costUsd: 0, latencyMs: 0 }
+        // Not the model's fault: counted as failed in the progress, never stored as the model's answer.
+        return { ...base, ok: false, error: `Foto: ${String(e.message || e)}`, kind: 'photo', costUsd: 0, latencyMs: 0 }
       }
       const res = await callModel(modelKey, verifyPrompt(pair), images, { effort: 'low', maxTokens: 1500, timeoutMs: 90_000, signal })
       return {
@@ -170,7 +210,7 @@ export function useLab({ folderUri = null } = {}) {
     })
   }, [job, runPool])
 
-  const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed) : []), [lab])
+  const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed, lab.caseIds) : []), [lab])
 
   /** Psychology test: each selected model writes the explanation for each case (grounded on the engine numbers). */
   const runPsychology = useCallback(async (modelKeys, { rerun = false } = {}) => {
@@ -180,6 +220,12 @@ export function useLab({ folderUri = null } = {}) {
     const now = new Date()
     const tasks = []
     for (const c of cases) for (const modelKey of modelKeys) if (rerun || !answered.has(runKey(modelKey, c.caseId))) tasks.push({ modelKey, c })
+    // Fix the case list from now on, so pairs collected later do not replace cases that already have texts.
+    const ids = cases.map((c) => c.caseId)
+    if (ids.join('|') !== (l.caseIds || []).join('|')) {
+      labRef.current = { ...labRef.current, caseIds: ids }
+      setLab(labRef.current)
+    }
     return runPool('psych', tasks, async ({ modelKey, c }, signal) => {
       const facts = engineFactsFor(c.candidate, c.source || {}, now)
       const res = await callModel(modelKey, psychPrompt({ ...c, facts }), [], { effort: 'medium', maxTokens: 3000, timeoutMs: 120_000, signal })
@@ -196,18 +242,26 @@ export function useLab({ folderUri = null } = {}) {
     return { ...l, ratings: [...others, { ...current, ...patch, at: new Date().toISOString() }] }
   }), [persist])
 
-  const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify') : []), [lab])
+  const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
   const psychRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'psych') : []), [lab])
   const verification = useMemo(() => (lab ? scoreVerification(verifyRuns, lab.pairs) : []), [lab, verifyRuns])
-  const psychology = useMemo(() => (lab ? scorePsychology(lab.ratings.filter((r) => r.score > 0)) : []), [lab])
+  const caseSet = useMemo(() => new Set(cases.map((c) => c.caseId)), [cases])
+  const scoredRatings = useMemo(() => (lab ? lab.ratings.filter((r) => r.score > 0 && caseSet.has(r.caseId)) : []), [lab, caseSet])
+  const psychology = useMemo(() => scorePsychology(scoredRatings), [scoredRatings])
+  // The blind test stays blind: per-model results are shown only once every text of every case has its stars.
+  const allRated = useMemo(() => {
+    const outputs = psychRuns.filter((r) => r.ok && caseSet.has(r.caseId))
+    const rated = new Set(scoredRatings.map((r) => runKey(r.modelKey, r.caseId)))
+    return outputs.length > 0 && outputs.every((r) => rated.has(runKey(r.modelKey, r.caseId)))
+  }, [psychRuns, scoredRatings, caseSet])
 
   const exportReport = useCallback(async () => {
     const l = labRef.current
     if (!l) return null
     const models = Object.fromEntries(LLM_MODELS.map((m) => [m.key, m.label]))
-    const caseTitle = new Map(cases.map((c) => [c.caseId, c.candidate.title]))
+    const caseTitle = new Map(l.pairs.map((p) => [p.id, p.candidate ? p.candidate.title : '']))
     const textOf = new Map(psychRuns.filter((r) => r.ok).map((r) => [runKey(r.modelKey, r.caseId), r.value]))
-    const ratings = l.ratings.filter((r) => r.score > 0).map((r) => {
+    const ratings = scoredRatings.map((r) => {
       const v = textOf.get(runKey(r.modelKey, r.caseId))
       return { ...r, caseTitle: caseTitle.get(r.caseId) || '', text: v ? [v.why, ...(v.leverage || []).map((x) => `• ${x}`), v.sellerProfile, ...(v.risks || []).map((x) => `Rischio: ${x}`)].join('\n') : '' }
     })
@@ -220,12 +274,12 @@ export function useLab({ folderUri = null } = {}) {
     const file = await writeReport({ bytes, fileName: `Laboratorio-AI-${day}.xlsx`, folderUri })
     if (file.localUri) await shareReport(file.localUri, `Laboratorio AI ${day}`)
     return file
-  }, [cases, folderUri, psychRuns, psychology, verification, verifyRuns])
+  }, [folderUri, psychRuns, psychology, scoredRatings, verification, verifyRuns])
 
   const reset = useCallback(() => persist({ ...emptyLab(), spend: (labRef.current && labRef.current.spend) || {} }), [persist])
 
   return {
-    ready: Boolean(lab), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology,
+    ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated,
     saveKey, checkKey, addPairs, relabel, removePair, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }

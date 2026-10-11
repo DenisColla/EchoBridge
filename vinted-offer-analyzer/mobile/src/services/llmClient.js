@@ -6,7 +6,17 @@ import { getApiKey } from './secrets.js'
  * on rate limits / server errors / empty answers (honouring Retry-After), then schema validation of the answer.
  * Never throws: returns { ok, value, text, problems, usage, costUsd, latencyMs, error, kind }.
  */
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+/** A wait that ends early when the run is cancelled (Retry-After can ask for up to 30 s). */
+const sleep = (ms, signal) => new Promise((resolve) => {
+  if (signal && signal.aborted) return resolve()
+  const done = () => {
+    clearTimeout(timer)
+    if (signal) signal.removeEventListener('abort', done)
+    resolve()
+  }
+  const timer = setTimeout(done, ms)
+  if (signal) signal.addEventListener('abort', done)
+})
 
 function retryDelay(response, attempt) {
   const header = response && response.headers && typeof response.headers.get === 'function' ? response.headers.get('retry-after') : null
@@ -56,11 +66,16 @@ export async function callModel(modelKey, prompt, images = [], { effort = 'low',
     // A call that produced tokens is billed even when its answer is unusable.
     if (last.usage) spent += llmCost(modelKey, last.usage, new Date()) || 0
     if (last.ok || !last.retryable || attempt === 2) break
-    await sleep(retryDelay(response, attempt))
+    await sleep(retryDelay(response, attempt), signal)
   }
   const latencyMs = Date.now() - started
   if (!last.ok) return { ok: false, text: last.text || '', error: last.error, kind: last.kind, usage: last.usage, costUsd: spent, latencyMs }
-  const parsed = readModelJson(last.text, prompt.schema)
+  let parsed
+  try {
+    parsed = readModelJson(last.text, prompt.schema)
+  } catch (e) {
+    parsed = { ok: false, value: null, problems: [String(e && e.message ? e.message : e)] }
+  }
   return { ok: parsed.ok, value: parsed.value, text: last.text, problems: parsed.problems, error: parsed.ok ? null : `Risposta fuori schema: ${parsed.problems.slice(0, 3).join('; ')}`, kind: parsed.ok ? null : 'schema', usage: last.usage, costUsd: spent, latencyMs }
 }
 

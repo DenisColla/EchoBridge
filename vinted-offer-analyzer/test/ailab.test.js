@@ -109,3 +109,25 @@ test('lab: the report workbook is a valid zip with the five sheets', () => {
   const text = new TextDecoder().decode(bytes)
   for (const name of ['Riepilogo', 'Verifiche', 'Psicologia', 'Prezzi', 'Metodo']) assert.ok(text.includes(name), name)
 })
+
+test('lab: hostile or odd inputs never throw and never feed NaN to the models', () => {
+  // A cheap listing: the engine says no offer is needed, so the prompt has no made-up numbers.
+  const cheap = engineFactsFor({ ...items[0], price: 1, total: 1.75 }, {}, new Date('2026-10-11T10:00:00Z'))
+  assert.equal(cheap.probability, null)
+  const text = psychPrompt({ candidate: { ...items[0], price: 1 }, facts: cheap, label: 'same' }).text
+  assert.doesNotMatch(text, /NaN/)
+  assert.match(text, /probabilità stimata che la accetti: n\.d\./)
+  // A json_object provider answering a bare null is an invalid answer, not a crash.
+  for (const raw of ['null', '```json\nnull\n```', '[]', '42']) assert.equal(readModelJson(raw, VERIFY_SCHEMA).ok, false)
+})
+
+test('lab: runs that never reached the provider do not count against the model', () => {
+  const pairs = [{ id: 'a', label: 'same' }, { id: 'b', label: 'same' }]
+  const [row] = scoreVerification([
+    { modelKey: 'm', pairId: 'a', ok: true, verdict: 'same', costUsd: 0.001, latencyMs: 4000 },
+    { modelKey: 'm', pairId: 'b', ok: false, kind: 'photo', error: 'Foto: rete', costUsd: 0, latencyMs: 0 },
+  ], pairs)
+  assert.equal(row.n, 1)
+  assert.equal(row.validRate, 1)
+  assert.equal(row.latencyP50, 4000)
+})
