@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  PSYCH_SCHEMA, VERIFY_SCHEMA, blindOrder, engineFactsFor, labWorkbook, pairsToRecheck, parseVintedCatalog, psychPrompt, readModelJson,
+  PSYCH_SCHEMA, VERIFY_SCHEMA, blindOrder, engineFactsFor, labRecheck, labWorkbook, pairsToRecheck, parseVintedCatalog, psychPrompt, readModelJson,
   schemaProblems, scorePsychology, scoreVerification, verifyPrompt,
 } from '../src/core/index.js'
 
@@ -158,6 +158,29 @@ test('lab: pairs where every model contradicts the label are flagged (the wrong-
     run('two', 'different', 'a'), run('two', 'different', 'b'), // only two answers: not enough to flag
   ]
   assert.deepEqual(pairsToRecheck(runs, pairs).sort(), ['diff', 'tab', 'tab2'])
-  const bytes = labWorkbook({ pairs: [{ id: 'tab', label: 'same', source: { id: 'r', title: 'Black Hole' }, candidate: { title: 'Galaxy Tab S9' } }], runs: [{ task: 'verify', modelKey: 'a', pairId: 'tab', verdict: 'different', ok: true }], recheck: ['tab'] })
+})
+
+test('lab: a whole batch labelled against the wrong reference is flagged, Diverso pairs included; single slips stay single', () => {
+  const comic = { id: 'comic', title: 'Black hole Charles Burns' }
+  const models = ['a', 'b', 'c', 'd']
+  const pair = (id, label, extra = {}) => ({ id, label, source: comic, candidate: { id, title: id }, query: 'samsung galaxy tab s9', labelledAt: 't2', ...extra })
+  const tablets = [pair('s9', 'same'), pair('s9fe', 'variant'), pair('s9u', 'variant'), pair('pen', 'different'), pair('cover', 'different')]
+  const books = [
+    pair('bh1', 'same', { query: 'black hole charles burns', labelledAt: 't1' }),
+    pair('bh2', 'variant', { query: 'black hole charles burns', labelledAt: 't1' }),
+    pair('bh3', 'different', { query: 'black hole charles burns', labelledAt: 't1' }),
+  ]
+  const runs = []
+  for (const m of models) {
+    for (const p of tablets) runs.push({ pairId: p.id, modelKey: m, ok: true, verdict: 'different' })
+    runs.push({ pairId: 'bh1', modelKey: m, ok: true, verdict: 'variant' })
+    runs.push({ pairId: 'bh2', modelKey: m, ok: true, verdict: 'variant' })
+    runs.push({ pairId: 'bh3', modelKey: m, ok: true, verdict: 'variant' }) // every model disagrees with this one label
+  }
+  const r = labRecheck(runs, [...tablets, ...books])
+  assert.deepEqual(r.wrongReference.sort(), ['cover', 'pen', 's9', 's9fe', 's9u'])
+  assert.equal(r.wrongGroups, 1)
+  assert.deepEqual(r.disputed, ['bh3'])
+  const bytes = labWorkbook({ pairs: [...tablets, ...books], runs: runs.map((x) => ({ ...x, task: 'verify' })), recheck: r })
   assert.ok(bytes.length > 1000)
 })

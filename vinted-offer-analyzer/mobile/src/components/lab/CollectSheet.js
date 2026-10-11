@@ -66,6 +66,13 @@ const searchTextOf = (u) => {
     return m[1]
   }
 }
+// A page without search words (a category, only filters): its address minus paging and Vinted's own ids, so two
+// different category pages never look like the same search, and none looks like a typed search.
+const browseKey = (u) => {
+  const [base, q = ''] = String(u || '').split('#')[0].split('?')
+  return `${base.replace(/\/$/, '')}?${q.split('&').filter((kv) => kv && !/^(time|search_id|search_session_id|page)=/i.test(kv)).sort().join('&')}`
+}
+const searchLabel = (s) => (/^https?:\/\//i.test(String(s || '')) ? 'una categoria o dei filtri di Vinted' : `«${s}»`)
 const sameSearch = (a, b) => String(a || '').trim().toLowerCase().replace(/\s+/g, ' ') === String(b || '').trim().toLowerCase().replace(/\s+/g, ' ')
 const describe = (c) => [c.brand, c.size, c.condition].filter(Boolean).join(' · ')
 
@@ -113,11 +120,29 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
   const candidates = useMemo(() => (found || []).filter((c) => !ref || c.id !== ref.id), [found, ref])
   const labelled = Object.values(labels).filter((v) => v && (!ref || v.candidate.id !== ref.id))
   const refMismatch = Boolean(ref) && !sameSearch(searched, refQuery)
+  // Changing the reference makes the labels meaningless: ask first when there are some.
+  const withLabelsGone = (action) => {
+    if (!labelled.length) return action()
+    Alert.alert('Cambiare riferimento?', `Le ${labelled.length} etichette non salvate andranno perse. Salvale prima, se erano giuste.`, [
+      { text: 'Annulla', style: 'cancel' },
+      { text: 'Cambia', style: 'destructive', onPress: action },
+    ])
+  }
   const pickRef = (r) => {
     setRef(r)
     setRefQuery(searched)
     setLabels({})
   }
+  // The analysed listing belongs to its own search: on another search the mismatch question still comes up.
+  const pickAnalysed = () => withLabelsGone(() => {
+    setRef(reference)
+    setRefQuery(initialQuery)
+    setLabels({})
+  })
+  const dropRef = () => withLabelsGone(() => {
+    setRef(null)
+    setLabels({})
+  })
 
   const leave = () => {
     if (!labelled.length) return onClose()
@@ -169,7 +194,8 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
       const { items } = parseVintedCatalog(msg.text)
       setFound(items)
       setParsedUrl(msg.url)
-      setSearched((s) => searchTextOf(msg.url) || s)
+      // What was really loaded decides: a page without words never inherits the previous search.
+      setSearched(searchTextOf(msg.url) || browseKey(msg.url))
       setChallenge(false)
       if (pendingLabel) {
         setPendingLabel(false)
@@ -183,7 +209,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     // The analysed listing has no size: take the missing fields from its own entry in the results, when it is there.
     const own = (found || []).find((c) => c.id === ref.id)
     const source = own ? Object.fromEntries(Object.keys({ ...own, ...ref }).map((k) => [k, ref[k] ?? own[k] ?? null])) : ref
-    const pairs = labelled.map(({ label, candidate }) => ({ id: `${ref.id || ref.url || 'ref'}~${candidate.id}`, source, candidate, label, labelledAt: now, query: query.trim() }))
+    const pairs = labelled.map(({ label, candidate }) => ({ id: `${ref.id || ref.url || 'ref'}~${candidate.id}`, source, candidate, label, labelledAt: now, query: refQuery }))
     setLabels({})
     onSave(pairs)
   }
@@ -242,14 +268,14 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
                 <View style={{ gap: space.xs }}>
                   <Text style={{ color: t.ink3, fontSize: 12, fontWeight: '700' }}>ANNUNCIO DI RIFERIMENTO</Text>
                   <ListingRow item={ref} highlight>
-                    <Pressable onPress={() => { setRef(null); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Cambia riferimento</Text></Pressable>
+                    <Pressable onPress={dropRef}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Cambia riferimento</Text></Pressable>
                   </ListingRow>
                   {refMismatch ? (
                     <View style={{ gap: space.xs }}>
-                      <Note tone="warn">Hai cercato «{searched}», ma il riferimento è «{ref.title}». Confronti i risultati con l'oggetto giusto?</Note>
+                      <Note tone="warn">Stai guardando {searchLabel(searched)}, ma il riferimento è «{ref.title}». Confronti questi risultati con l'oggetto giusto?{labelled.length ? ` Le ${labelled.length} etichette già fatte con questo riferimento puoi salvarle subito.` : ''}</Note>
                       <ButtonRow>
                         <Button label="Sì, con questo" small onPress={confirmRef} />
-                        <Button label="Scegli tra i risultati" variant="secondary" small onPress={() => { setRef(null); setLabels({}) }} />
+                        <Button label="Scegli tra i risultati" variant="secondary" small onPress={dropRef} />
                       </ButtonRow>
                     </View>
                   ) : null}
@@ -257,7 +283,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
               ) : (
                 <View style={{ gap: space.xs }}>
                   <Note tone="warn">Tocca «Riferimento» sull'annuncio che vorresti comprare: gli altri li confronti con quello.</Note>
-                  {reference ? <Pressable onPress={() => pickRef(reference)}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Usa l'annuncio analizzato: {reference.title}</Text></Pressable> : null}
+                  {reference ? <Pressable onPress={pickAnalysed}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Usa l'annuncio analizzato: {reference.title}</Text></Pressable> : null}
                 </View>
               )}
               {ref && !refMismatch ? <Body small muted>Per ogni annuncio, rispetto al riferimento qui sopra: Stesso (lo stesso articolo), Variante (stesso modello ma colore, taglia, capacità o edizione diversi) o Diverso. Etichetta anche quelli diversi: servono a misurare i falsi «stesso».</Body> : null}
@@ -277,7 +303,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
               {ref ? <Text style={{ color: t.ink2, fontSize: 12 }} numberOfLines={1}>Confronti con: {ref.title}</Text> : null}
               <ButtonRow>
                 <Button label="Torna alla ricerca" variant="secondary" onPress={() => setPhase('browse')} />
-                <Button label={labelled.length ? `Salva ${labelled.length} ${labelled.length === 1 ? 'coppia' : 'coppie'}` : 'Etichetta qualche annuncio'} onPress={save} disabled={!ref || refMismatch || !labelled.length} />
+                <Button label={labelled.length ? `Salva ${labelled.length} ${labelled.length === 1 ? 'coppia' : 'coppie'}` : 'Etichetta qualche annuncio'} onPress={save} disabled={!ref || !labelled.length} />
               </ButtonRow>
             </View>
           </View>

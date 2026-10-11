@@ -144,13 +144,15 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
  */
 export function LabView({ labState, onClose, reference = null, onToast = () => {}, onCollectingChange = () => {} }) {
   const t = useTheme()
-  const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated, recheck = [] } = labState
+  const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated, psychCases = 6 } = labState
+  const recheck = labState.recheck || { wrongReference: [], wrongGroups: 0, disputed: [] }
   const [collecting, setCollecting] = useState(false)
   const [selected, setSelected] = useState(() => Object.fromEntries(LLM_MODELS.map((m) => [m.key, true])))
   const [rating, setRating] = useState(false)
   const [showPairs, setShowPairs] = useState(false)
   const [pairLimit, setPairLimit] = useState(PAIR_PAGE)
-  const [onlyRecheck, setOnlyRecheck] = useState(false)
+  // null = all pairs, 'wrong' = wrong reference, 'disputed' = labels every model contradicts
+  const [filter, setFilter] = useState(null)
   // App needs to know: a reminder tap must not close the lab under an open collection with unsaved labels.
   useEffect(() => {
     onCollectingChange(collecting)
@@ -164,6 +166,17 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
     return c
   }, [lab])
   if (!ready) return <Card><Body>Carico il laboratorio…</Body></Card>
+
+  const wrongIds = recheck.wrongReference
+  // A filter whose list became empty (all fixed) falls back to every pair.
+  const filterIds = filter === 'wrong' ? new Set(wrongIds) : filter === 'disputed' ? new Set(recheck.disputed) : null
+  const activeFilter = filterIds && filterIds.size ? filterIds : null
+  const listed = activeFilter ? lab.pairs.filter((p) => activeFilter.has(p.id)) : lab.pairs
+  const toggleFilter = (kind) => {
+    setFilter((f) => (f === kind && showPairs ? null : kind))
+    setShowPairs(true)
+    setPairLimit(PAIR_PAGE)
+  }
 
   const totalPairs = counts.same + counts.variant + counts.different
   const spendTotal = Object.values(lab.spend || {}).reduce((a, b) => a + b, 0)
@@ -202,14 +215,23 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         <Body muted small>Ogni ricerca ha il suo annuncio di riferimento: l'oggetto che vorresti comprare. Gli altri risultati li confronti con quello. Bastano 5–6 ricerche di prodotti diversi (elettronica, libri, abbigliamento, collezionismo) da 10–15 annunci, includendo modelli simili ma diversi.</Body>
         {!hasRef ? <Note>Suggerimento: analizza prima un annuncio dal link (scheda Calcola): lo uso come riferimento e come ricerca di partenza.</Note> : null}
         <Button label="Raccogli coppie" onPress={() => setCollecting(true)} disabled={Boolean(job)} />
-        {recheck.length ? (
+        {wrongIds.length ? (
           <View style={{ gap: space.xs }}>
-            <Note tone="warn">{recheck.length} {recheck.length === 1 ? 'coppia' : 'coppie'} da ricontrollare: tutti i modelli dicono il contrario della tua etichetta. Di solito il riferimento era un altro oggetto, o l'etichetta va corretta.</Note>
-            <Button label={onlyRecheck && showPairs ? 'Mostra tutte le coppie' : 'Mostra quelle da ricontrollare'} variant="secondary" small onPress={() => { setOnlyRecheck((v) => !(v && showPairs)); setShowPairs(true) }} />
+            <Note tone="warn">{wrongIds.length} coppie ({recheck.wrongGroups} {recheck.wrongGroups === 1 ? 'salvataggio' : 'salvataggi'}) sono state confrontate con il riferimento sbagliato: per tutti i modelli i risultati erano un altro oggetto. Vanno eliminate, non corrette in «Diverso».{wrongIds.length * 3 > totalPairs ? ' Sono tante: è più semplice «Azzera il test» qui sotto e rifare le ricerche.' : ''}</Note>
+            <ButtonRow>
+              <Button label={`Elimina queste ${wrongIds.length}`} variant="danger" small disabled={Boolean(job)} onPress={() => confirmAction(`Eliminare ${wrongIds.length} coppie?`, 'Elimino le coppie con il riferimento sbagliato e le loro risposte.', 'Elimina', () => { labState.removePairs(wrongIds); setFilter(null) })} />
+              <Button label={filter === 'wrong' && showPairs ? 'Mostra tutte' : 'Mostrale'} variant="secondary" small onPress={() => toggleFilter('wrong')} />
+            </ButtonRow>
           </View>
         ) : null}
-        {totalPairs ? <Button label={showPairs ? 'Nascondi le coppie' : 'Mostra e correggi le coppie'} variant="ghost" small onPress={() => { setShowPairs((v) => !v); setOnlyRecheck(false) }} /> : null}
-        {showPairs ? lab.pairs.filter((p) => !onlyRecheck || recheck.includes(p.id)).reverse().slice(0, pairLimit).map((p) => (
+        {recheck.disputed.length ? (
+          <View style={{ gap: space.xs }}>
+            <Note tone="warn">{recheck.disputed.length} {recheck.disputed.length === 1 ? 'etichetta contestata' : 'etichette contestate'}: tutti i modelli dicono il contrario. Correggila se hai sbagliato; eliminala se il riferimento era un altro oggetto; lasciala se sei sicuro (è un caso difficile).</Note>
+            <Button label={filter === 'disputed' && showPairs ? 'Mostra tutte' : 'Mostrale'} variant="secondary" small onPress={() => toggleFilter('disputed')} />
+          </View>
+        ) : null}
+        {totalPairs ? <Button label={showPairs ? 'Nascondi le coppie' : 'Mostra e correggi le coppie'} variant="ghost" small onPress={() => { setShowPairs((v) => !v); setFilter(null); setPairLimit(PAIR_PAGE) }} /> : null}
+        {showPairs ? listed.slice().reverse().slice(0, pairLimit).map((p) => (
           <View key={p.id} style={[styles.pairRow, { borderColor: t.line }]}>
             <Text style={{ color: t.ink, fontSize: 13 }} numberOfLines={1}>Rif.: {p.source.title}</Text>
             <Text style={{ color: t.ink2, fontSize: 13 }} numberOfLines={1}>Cand.: {p.candidate.title}</Text>
@@ -223,12 +245,12 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
             </View>
           </View>
         )) : null}
-        {showPairs && !onlyRecheck && lab.pairs.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, lab.pairs.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
+        {showPairs && listed.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, listed.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
       </Card>
 
       <Card>
         <SectionLabel>3 · Test delle foto</SectionLabel>
-        <Body muted small>Ogni modello confronta foto e testo di ogni coppia e risponde Stesso, Variante o Diverso. Misuro accuratezza, falsi «stesso» (l'errore che costa di più), risposte valide, costo e tempi.</Body>
+        <Body muted small>Ogni modello confronta foto e testo di ogni coppia e risponde Stesso, Variante o Diverso. Misuro quanto spesso trova l'articolo giusto, i falsi «stesso» (l'errore che costa di più), le risposte valide, il costo e i tempi.</Body>
         <ModelPicker keys={keys} selected={selected} onToggle={(k, v) => setSelected((s) => ({ ...s, [k]: v }))} />
         {totalPairs && activeModels.length ? <Body muted small>Stima per tutte le coppie: {usd(verifyEstimate)} ({totalPairs} coppie × {activeModels.length} modelli; il costo reale è nel report).</Body> : null}
         {job ? (
@@ -258,7 +280,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
 
       <Card>
         <SectionLabel>4 · Test di psicologia (alla cieca)</SectionLabel>
-        <Body muted small>Per {cases.length || 'fino a 10'} annunci etichettati Stesso o Variante, ogni modello spiega perché conviene, su cosa fare leva e com'è il venditore, usando i numeri del motore. Tu voti i testi senza sapere chi li ha scritti.</Body>
+        <Body muted small>Per {cases.length || `fino a ${psychCases}`} annunci etichettati Stesso o Variante, ogni modello spiega perché conviene, su cosa fare leva e com'è il venditore, usando i numeri del motore. Tu voti i testi senza sapere chi li ha scritti.</Body>
         {!cases.length ? <Note>Servono coppie etichettate Stesso o Variante.</Note> : null}
         {cases.length && activeModels.length ? <Body muted small>Stima: {usd(psychEstimate)} ({cases.length} casi × {activeModels.length} modelli).</Body> : null}
         {!job ? (

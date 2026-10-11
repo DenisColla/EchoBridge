@@ -278,6 +278,37 @@ export function pairsToRecheck(runs, pairs, minAnswers = 3) {
   return out
 }
 
+/**
+ * Splits the disputed pairs into two cases.
+ * - `wrongReference`: a whole labelling batch (same reference, same search, same save) where at least 2 pairs labelled
+ *   Stesso/Variante, and at least half of them, are disputed by every model. The reference was another object: every
+ *   pair of the batch is meaningless, the ones labelled Diverso included, and the fix is to delete them, not relabel.
+ * - `disputed`: single pairs where every model contradicts the label (a slip, or a genuinely hard case).
+ */
+export function labRecheck(runs, pairs, minAnswers = 3) {
+  const flagged = new Set(pairsToRecheck(runs, pairs, minAnswers))
+  const groupOf = (p) => `${(p.source && (p.source.id || p.source.url || p.source.title)) || ''}|${String(p.query || '').trim().toLowerCase()}|${p.labelledAt || ''}`
+  const groups = new Map()
+  for (const p of pairs) {
+    if (!LABEL_IDS.includes(p.label)) continue
+    const k = groupOf(p)
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k).push(p)
+  }
+  const wrongReference = []
+  let wrongGroups = 0
+  for (const list of groups.values()) {
+    const matches = list.filter((p) => p.label !== 'different')
+    const disputedMatches = matches.filter((p) => flagged.has(p.id)).length
+    if (disputedMatches >= 2 && disputedMatches * 2 >= matches.length) {
+      wrongGroups++
+      for (const p of list) wrongReference.push(p.id)
+    }
+  }
+  const wrong = new Set(wrongReference)
+  return { wrongReference, wrongGroups, disputed: [...flagged].filter((id) => !wrong.has(id)) }
+}
+
 /* ───────── blind comparison of the psychology texts ───────── */
 
 /** Small deterministic PRNG so a round's letters stay stable when the screen is reopened. */
@@ -346,10 +377,13 @@ const pctCell = (v) => (v == null ? '' : { value: v, format: XLSX_FORMATS.pct })
 const usdCell = (v) => (v == null || !Number.isFinite(v) ? '' : Math.round(v * 1e6) / 1e6)
 
 /** Workbook bytes for the lab results. `models` maps modelKey → label. */
-export function labWorkbook({ generatedAt = new Date(), models = {}, verification = [], psychology = [], runs = [], pairs = [], ratings = [], prices = [], method = [], recheck = [] }) {
+export function labWorkbook({ generatedAt = new Date(), models = {}, verification = [], psychology = [], runs = [], pairs = [], ratings = [], prices = [], method = [], recheck = { wrongReference: [], disputed: [] } }) {
   const name = (k) => models[k] || k
   const pairById = new Map(pairs.map((p) => [p.id, p]))
-  const toRecheck = new Set(recheck)
+  const wrongRef = new Set(recheck.wrongReference || [])
+  const disputed = new Set(recheck.disputed || [])
+  const recheckCell = (id) => (wrongRef.has(id) ? 'riferimento sbagliato' : disputed.has(id) ? 'etichetta contestata' : '')
+  const found = (verdict, label) => (verdict ? ((verdict !== 'different') === (label !== 'different') ? 'sì' : 'no') : '')
   const references = new Set(pairs.map((p) => (p.source && (p.source.id || p.source.title)) || '')).size
   const sheets = [
     {
@@ -359,8 +393,10 @@ export function labWorkbook({ generatedAt = new Date(), models = {}, verificatio
         ['Verifica delle foto'],
         ['Modello', 'Coppie', 'JSON valido', 'Trova l\'articolo', 'Esatte (3 classi)', 'Falsi "stesso"', 'Mancati', 'Costo per coppia $', 'Latenza p50 s', 'Latenza p90 s'],
         ...verification.map((v) => [name(v.modelKey), v.n, pctCell(v.validRate), pctCell(v.matchAccuracy), pctCell(v.accuracy), pctCell(v.falseMatchRate), pctCell(v.missRate), usdCell(v.costPerPair), v.latencyP50 != null ? v.latencyP50 / 1000 : '', v.latencyP90 != null ? v.latencyP90 / 1000 : '']),
+        [],
         ['Annunci di riferimento', references],
-        ['Coppie da ricontrollare (tutti i modelli contro l\'etichetta)', toRecheck.size],
+        ['Riferimento sbagliato', wrongRef.size, 'coppie di salvataggi in cui il riferimento era un altro oggetto: da eliminare'],
+        ['Etichette contestate', disputed.size, 'coppie in cui tutti i modelli contraddicono la tua etichetta: da ricontrollare'],
         [],
         ['Psicologia (giudizio alla cieca)'],
         ['Modello', 'Valutazioni', 'Voto medio 1–5', 'Volte migliore', 'Dati inventati'],
@@ -372,12 +408,12 @@ export function labWorkbook({ generatedAt = new Date(), models = {}, verificatio
     },
     {
       name: 'Verifiche',
-      columns: [{ width: 22 }, { width: 34 }, { width: 34 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 10 }, { width: 12 }, { width: 10 }, { width: 40 }, { width: 14 }],
+      columns: [{ width: 22 }, { width: 34 }, { width: 34 }, { width: 11 }, { width: 11 }, { width: 12 }, { width: 9 }, { width: 10 }, { width: 12 }, { width: 10 }, { width: 40 }, { width: 20 }],
       rows: [
-        ['Modello', 'Riferimento', 'Candidato', 'Etichetta', 'Risposta', 'Corretto', 'Fiducia', 'Costo $', 'Latenza s', 'Motivo o errore', 'Da ricontrollare'],
+        ['Modello', 'Riferimento', 'Candidato', 'Etichetta', 'Risposta', 'Trova l\'articolo', 'Esatta', 'Fiducia', 'Costo $', 'Latenza s', 'Motivo o errore', 'Da ricontrollare'],
         ...runs.filter((r) => r.task === 'verify').map((r) => {
           const p = pairById.get(r.pairId) || {}
-          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', p.label || '', r.verdict || '', r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '', toRecheck.has(r.pairId) ? 'sì' : '']
+          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', p.label || '', r.verdict || '', found(r.verdict, p.label), r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '', recheckCell(r.pairId)]
         }),
       ],
     },

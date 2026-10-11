@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, NOT_MODEL_KINDS, engineFactsFor, labWorkbook, pairsToRecheck, psychPrompt, scorePsychology, scoreVerification,
+  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, NOT_MODEL_KINDS, engineFactsFor, labRecheck, labWorkbook, psychPrompt, scorePsychology, scoreVerification,
   verifyPrompt,
 } from '../../core/index.js'
 import { emptyLab, loadLab, saveLab } from '../services/labStore.js'
@@ -12,7 +12,7 @@ import { shareReport, writeReport } from '../services/reports.js'
 /** Parallel calls across the whole run: enough to keep a few providers busy without hitting new-account limits. */
 const CONCURRENCY = 4
 // 6 cases × 4 models = 24 texts to rate: enough to see a pattern, short enough to finish in one sitting.
-const PSYCH_CASES = 6
+export const PSYCH_CASES = 6
 const runKey = (modelKey, id) => `${modelKey}|${id}`
 
 /** Latest run per (model, pair) of a task: re-running a model replaces its old answers in the scores. */
@@ -29,15 +29,15 @@ const hash = (s) => {
 }
 
 /**
- * Up to 10 distinct candidates labelled same/variant: the psychology cases. Cases already used (`caseIds`, saved at the
- * first psychology run) keep their place while still usable, so later pairs do not push rated cases out; free slots
- * are filled in a stable shuffled order.
+ * Up to PSYCH_CASES distinct candidates labelled same/variant: the psychology cases. Cases already used (`caseIds`,
+ * saved at the first psychology run) keep their place while still usable, so later pairs do not push rated cases out;
+ * free slots are filled in a stable shuffled order. Pairs the models dispute (`flagged`) are left out.
  */
-function pickCases(pairs, seed, caseIds = []) {
+function pickCases(pairs, seed, caseIds = [], flagged = new Set()) {
   const seen = new Set()
   const usable = []
   for (const p of pairs) {
-    if ((p.label !== 'same' && p.label !== 'variant') || !p.candidate || seen.has(p.candidate.id)) continue
+    if ((p.label !== 'same' && p.label !== 'variant') || !p.candidate || seen.has(p.candidate.id) || flagged.has(p.id)) continue
     seen.add(p.candidate.id)
     usable.push(p)
   }
@@ -111,13 +111,17 @@ export function useLab({ folderUri = null } = {}) {
 
   const relabel = useCallback((id, label) => persist((l) => ({ ...l, pairs: l.pairs.map((p) => (p.id === id ? { ...p, label } : p)) })), [persist])
   // A psychology case id is the pair id: its texts and blind ratings go with it.
-  const removePair = useCallback((id) => persist((l) => ({
-    ...l,
-    pairs: l.pairs.filter((p) => p.id !== id),
-    runs: l.runs.filter((r) => r.pairId !== id && r.caseId !== id),
-    ratings: l.ratings.filter((r) => r.caseId !== id),
-    caseIds: (l.caseIds || []).filter((c) => c !== id),
-  })), [persist])
+  const removePairs = useCallback((ids) => {
+    const gone = new Set(ids)
+    return persist((l) => ({
+      ...l,
+      pairs: l.pairs.filter((p) => !gone.has(p.id)),
+      runs: l.runs.filter((r) => !gone.has(r.pairId) && !gone.has(r.caseId)),
+      ratings: l.ratings.filter((r) => !gone.has(r.caseId)),
+      caseIds: (l.caseIds || []).filter((c) => !gone.has(c)),
+    }))
+  }, [persist])
+  const removePair = useCallback((id) => removePairs([id]), [removePairs])
 
   /** Runs a list of tasks with a small worker pool, recording each result as it lands. */
   const runPool = useCallback(async (kind, tasks, work) => {
@@ -214,7 +218,10 @@ export function useLab({ folderUri = null } = {}) {
     })
   }, [job, runPool])
 
-  const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed, lab.caseIds) : []), [lab])
+  const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
+  const recheck = useMemo(() => (lab ? labRecheck(verifyRuns, lab.pairs) : { wrongReference: [], wrongGroups: 0, disputed: [] }), [lab, verifyRuns])
+  const flagged = useMemo(() => new Set([...recheck.wrongReference, ...recheck.disputed]), [recheck])
+  const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed, lab.caseIds, flagged) : []), [lab, flagged])
 
   /** Psychology test: each selected model writes the explanation for each case (grounded on the engine numbers). */
   const runPsychology = useCallback(async (modelKeys, { rerun = false } = {}) => {
@@ -246,10 +253,8 @@ export function useLab({ folderUri = null } = {}) {
     return { ...l, ratings: [...others, { ...current, ...patch, at: new Date().toISOString() }] }
   }), [persist])
 
-  const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
   const psychRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'psych') : []), [lab])
   const verification = useMemo(() => (lab ? scoreVerification(verifyRuns, lab.pairs) : []), [lab, verifyRuns])
-  const recheck = useMemo(() => (lab ? pairsToRecheck(verifyRuns, lab.pairs) : []), [lab, verifyRuns])
   const caseSet = useMemo(() => new Set(cases.map((c) => c.caseId)), [cases])
   const scoredRatings = useMemo(() => (lab ? lab.ratings.filter((r) => r.score > 0 && caseSet.has(r.caseId)) : []), [lab, caseSet])
   const psychology = useMemo(() => scorePsychology(scoredRatings), [scoredRatings])
@@ -286,7 +291,7 @@ export function useLab({ folderUri = null } = {}) {
   const reset = useCallback(() => (labRef.current && labRef.current.loadFailed ? null : persist({ ...emptyLab(), spend: (labRef.current && labRef.current.spend) || {} })), [persist])
 
   return {
-    ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck,
-    saveKey, checkKey, addPairs, relabel, removePair, runVerification, runPsychology, cancel, rate, exportReport, reset,
+    ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck, flagged,
+    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }
