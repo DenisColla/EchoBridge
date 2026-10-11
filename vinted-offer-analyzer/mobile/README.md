@@ -29,7 +29,7 @@ Costo indicativo: meno di un centesimo per coppia per modello; il test completo 
 
 ## Installare subito: APK precompilato
 
-In `dist/OffertaVintedTiming-arm64.apk` c'è un APK già compilato (28 MB, architettura arm64, cioè qualsiasi telefono
+In `dist/OffertaVintedTiming-arm64.apk` c'è un APK già compilato (29 MB, architettura arm64, cioè qualsiasi telefono
 Android degli ultimi anni). Scaricalo sul telefono, aprilo dal gestore file e consenti l'installazione da origini
 sconosciute quando Android lo chiede. Niente da installare sul PC. Per rigenerarlo, o per la versione universale con
 tutte le architetture, usa `start.bat` qui sotto.
