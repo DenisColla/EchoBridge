@@ -103,9 +103,14 @@ export function useLab({ folderUri = null } = {}) {
     return res
   }, [persist])
 
+  // Saving a pair again with the same label keeps its save and the user's decisions on it («Sono sicuro», reference
+  // confirmed); a new label makes it a new judgement.
   const addPairs = useCallback((pairs) => persist((l) => {
     const byId = new Map(l.pairs.map((p) => [p.id, p]))
-    for (const p of pairs) byId.set(p.id, p)
+    for (const p of pairs) {
+      const old = byId.get(p.id)
+      byId.set(p.id, old && old.label === p.label ? { ...p, labelledAt: old.labelledAt, query: old.query, keep: old.keep, refConfirmed: old.refConfirmed } : p)
+    }
     return { ...l, pairs: [...byId.values()] }
   }), [persist])
 
@@ -116,6 +121,11 @@ export function useLab({ folderUri = null } = {}) {
     return persist((l) => ({ ...l, pairs: l.pairs.map((p) => (keep.has(p.id) ? { ...p, keep: true } : p)) }))
   }, [persist])
   const keepPair = useCallback((id) => keepPairs([id]), [keepPairs])
+  // «Il riferimento era giusto» for one save: the save is not flagged again; its single contradictions still show.
+  const confirmReference = useCallback((ids) => {
+    const save = new Set(ids)
+    return persist((l) => ({ ...l, pairs: l.pairs.map((p) => (save.has(p.id) ? { ...p, refConfirmed: true } : p)) }))
+  }, [persist])
   // A psychology case id is the pair id: its texts and blind ratings go with it.
   const removePairs = useCallback((ids) => {
     const gone = new Set(ids)
@@ -225,7 +235,7 @@ export function useLab({ folderUri = null } = {}) {
   }, [job, runPool])
 
   const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
-  const recheck = useMemo(() => (lab ? labRecheck(verifyRuns, lab.pairs) : { wrongReference: [], wrongGroups: 0, rejectedInWrong: [], disputed: [] }), [lab, verifyRuns])
+  const recheck = useMemo(() => (lab ? labRecheck(verifyRuns, lab.pairs) : { wrongReference: [], wrongGroups: 0, groups: [], disputed: [] }), [lab, verifyRuns])
   const flagged = useMemo(() => new Set([...recheck.wrongReference, ...recheck.disputed]), [recheck])
   const cases = useMemo(() => (lab ? pickCases(lab.pairs, lab.seed, lab.caseIds, flagged) : []), [lab, flagged])
 
@@ -298,6 +308,6 @@ export function useLab({ folderUri = null } = {}) {
 
   return {
     ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck, flagged,
-    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, keepPair, keepPairs, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
+    psychCases: PSYCH_CASES, saveKey, checkKey, addPairs, relabel, keepPair, confirmReference, removePair, removePairs, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }

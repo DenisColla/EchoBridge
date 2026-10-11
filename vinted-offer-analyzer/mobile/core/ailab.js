@@ -286,9 +286,10 @@ export function pairsToRecheck(runs, pairs, minAnswers = 3) {
  *   A batch qualifies only on strong, consistent evidence about its Stesso/Variante pairs: at least 80% of them have
  *   `minAnswers` answers; of those, at least 3 and at least 80% are rejected by most models (majority "different");
  *   none is confirmed by most models; none was marked «Sono sicuro» (`keep`). A few hard variants, a half-answered
- *   batch or one lenient model do not change the verdict.
- * - `disputed`: single pairs where every model contradicts the label (pairsToRecheck), outside those batches.
- * `candidates` (per batch) lists the rejected Stesso/Variante pairs, so «Il riferimento era giusto» can mark them kept.
+ *   batch or one lenient model do not change the verdict. A batch the user declared right («Il riferimento era
+ *   giusto», `refConfirmed` on its pairs) is never flagged again; its single contradictions still show as disputed.
+ * - `disputed`: single pairs where every model contradicts the label (pairsToRecheck), outside flagged batches.
+ * `groups` lists each flagged batch ({ key, title, query, ids }) so the lab can act on one save at a time.
  */
 export function labRecheck(runs, pairs, minAnswers = 3) {
   const flagged = new Set(pairsToRecheck(runs, pairs, minAnswers))
@@ -309,24 +310,23 @@ export function labRecheck(runs, pairs, minAnswers = 3) {
   const answered = (id) => (answers.get(id) || []).length
   const foundBy = (id) => (answers.get(id) || []).filter((v) => v !== 'different').length
   const wrongReference = []
-  const rejectedInWrong = []
-  let wrongGroups = 0
-  for (const list of groups.values()) {
+  const flaggedGroups = []
+  for (const [key, list] of groups) {
     const matches = list.filter((p) => p.label !== 'different')
-    if (!matches.length || matches.some((p) => p.keep)) continue
+    if (!matches.length || list.some((p) => p.refConfirmed) || matches.some((p) => p.keep)) continue
     const withAnswers = matches.filter((p) => answered(p.id) >= minAnswers)
     const rejected = withAnswers.filter((p) => foundBy(p.id) * 2 < answered(p.id))
     const confirmed = withAnswers.some((p) => foundBy(p.id) * 2 > answered(p.id))
     const mostlyAnswered = withAnswers.length * 5 >= matches.length * 4
     const mostlyRejected = rejected.length >= 3 && rejected.length * 5 >= withAnswers.length * 4
     if (mostlyAnswered && mostlyRejected && !confirmed) {
-      wrongGroups++
-      for (const p of list) wrongReference.push(p.id)
-      for (const p of rejected) rejectedInWrong.push(p.id)
+      const ids = list.map((p) => p.id)
+      wrongReference.push(...ids)
+      flaggedGroups.push({ key, title: (list[0].source && list[0].source.title) || '', query: list[0].query || '', ids })
     }
   }
   const wrong = new Set(wrongReference)
-  return { wrongReference, wrongGroups, rejectedInWrong, disputed: [...flagged].filter((id) => !wrong.has(id)) }
+  return { wrongReference, wrongGroups: flaggedGroups.length, groups: flaggedGroups, disputed: [...flagged].filter((id) => !wrong.has(id)) }
 }
 
 /* ───────── blind comparison of the psychology texts ───────── */

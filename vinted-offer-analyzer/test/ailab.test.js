@@ -244,8 +244,29 @@ test('lab: wrong-reference verdict is stable on the edge cases (lenient model, k
   assert.deepEqual(labRecheck([...hard, ...[3, 4, 5].flatMap((i) => ans(`v${i}`, split))], v).wrongReference, [])
   assert.deepEqual(labRecheck(hard, v).wrongReference, [])
   assert.deepEqual(labRecheck([...hard, ...[3, 4].flatMap((i) => ans(`v${i}`, split))], v.filter((p) => p.id !== 'v5')).wrongReference, [])
-  // «Il riferimento era giusto» marks the rejected pairs kept: verdict and single disputes both go away.
+  // «Il riferimento era giusto» confirms the save: no verdict, but unanimous contradictions still show one by one.
   const r = labRecheck(runs, save)
-  const kept = save.map((p) => (r.rejectedInWrong.includes(p.id) ? { ...p, keep: true } : p))
-  assert.deepEqual(labRecheck(runs, kept), { wrongReference: [], wrongGroups: 0, rejectedInWrong: [], disputed: [] })
+  assert.equal(r.groups.length, 1)
+  assert.deepEqual(r.groups[0].ids.sort(), save.map((p) => p.id).sort())
+  const confirmedSave = save.map((p) => (r.groups[0].ids.includes(p.id) ? { ...p, refConfirmed: true } : p))
+  const after = labRecheck(runs, confirmedSave)
+  assert.deepEqual(after.wrongReference, [])
+  assert.deepEqual(after.disputed.sort(), ['p0', 'p1', 'p2'])
+})
+
+test('lab: flagged saves are reported one by one, so one can be confirmed and another deleted', () => {
+  const models = ['a', 'b', 'c', 'd']
+  const D = ['different', 'different', 'different', 'different']
+  const ans = (id, v) => v.map((x, i) => ({ pairId: id, modelKey: models[i], ok: true, verdict: x }))
+  const mk = (ref, id, label, t) => ({ id, label, source: { id: ref, title: ref }, candidate: { id, title: id }, query: ref, labelledAt: t })
+  const pairs = [
+    ...['a0', 'a1', 'a2', 'a3'].map((id) => mk('custodia', id, 'same', 't1')),
+    ...['h0', 'h1', 'h2'].map((id) => mk('harry', id, 'variant', 't2')),
+  ]
+  const runs = pairs.flatMap((p) => ans(p.id, D))
+  const r = labRecheck(runs, pairs)
+  assert.deepEqual(r.groups.map((g) => g.title).sort(), ['custodia', 'harry'])
+  const harry = r.groups.find((g) => g.title === 'harry')
+  const next = labRecheck(runs, pairs.map((p) => (harry.ids.includes(p.id) ? { ...p, refConfirmed: true } : p)))
+  assert.deepEqual(next.groups.map((g) => g.title), ['custodia'])
 })
