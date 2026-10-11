@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  PSYCH_SCHEMA, VERIFY_SCHEMA, blindOrder, engineFactsFor, labWorkbook, parseVintedCatalog, psychPrompt, readModelJson,
+  PSYCH_SCHEMA, VERIFY_SCHEMA, blindOrder, engineFactsFor, labWorkbook, pairsToRecheck, parseVintedCatalog, psychPrompt, readModelJson,
   schemaProblems, scorePsychology, scoreVerification, verifyPrompt,
 } from '../src/core/index.js'
 
@@ -141,4 +141,23 @@ test('lab: infrastructure failures are not scored and blind letters ignore stora
   assert.equal(row.validRate, 0, 'an off-schema answer is the model\'s fault')
   const keys = ['qwen:q', 'anthropic:a', 'openai:o', 'deepseek:d']
   assert.deepEqual(blindOrder('c', keys, 3), blindOrder('c', [...keys].reverse(), 3))
+})
+
+test('lab: pairs where every model contradicts the label are flagged (the wrong-reference case)', () => {
+  // Tablets labelled "same" against a comic-book reference: four models all answer "different".
+  const pairs = [
+    { id: 'tab', label: 'same' }, { id: 'tab2', label: 'variant' }, { id: 'book', label: 'same' }, { id: 'diff', label: 'different' }, { id: 'two', label: 'same' },
+  ]
+  const run = (pairId, verdict, modelKey) => ({ pairId, verdict, modelKey, ok: true })
+  const models = ['a', 'b', 'c', 'd']
+  const runs = [
+    ...models.map((m) => run('tab', 'different', m)),
+    ...models.map((m) => run('tab2', 'different', m)),
+    ...models.map((m, i) => run('book', i ? 'variant' : 'different', m)), // a variant answer still finds the article
+    ...models.map((m) => run('diff', 'same', m)),
+    run('two', 'different', 'a'), run('two', 'different', 'b'), // only two answers: not enough to flag
+  ]
+  assert.deepEqual(pairsToRecheck(runs, pairs).sort(), ['diff', 'tab', 'tab2'])
+  const bytes = labWorkbook({ pairs: [{ id: 'tab', label: 'same', source: { id: 'r', title: 'Black Hole' }, candidate: { title: 'Galaxy Tab S9' } }], runs: [{ task: 'verify', modelKey: 'a', pairId: 'tab', verdict: 'different', ok: true }], recheck: ['tab'] })
+  assert.ok(bytes.length > 1000)
 })

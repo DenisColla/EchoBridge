@@ -56,6 +56,17 @@ const allowNavigation = (u) => {
   const h = hostOf(u)
   return (isVintedHost(h) && !NO_LOGIN.test(u)) || h === 'challenges.cloudflare.com'
 }
+// The words of a Vinted search address (search_text=…), to compare what was searched with the reference.
+const searchTextOf = (u) => {
+  const m = String(u || '').match(/[?&]search_text=([^&#]*)/)
+  if (!m) return ''
+  try {
+    return decodeURIComponent(m[1].replace(/\+/g, ' '))
+  } catch {
+    return m[1]
+  }
+}
+const sameSearch = (a, b) => String(a || '').trim().toLowerCase().replace(/\s+/g, ' ') === String(b || '').trim().toLowerCase().replace(/\s+/g, ' ')
 const describe = (c) => [c.brand, c.size, c.condition].filter(Boolean).join(' · ')
 
 function ListingRow({ item, children, highlight }) {
@@ -88,6 +99,10 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
   const [challenge, setChallenge] = useState(false)
   const [phase, setPhase] = useState('browse')
   const [ref, setRef] = useState(reference)
+  // The search the reference belongs to. Results of another search are compared with it only after the user says so:
+  // otherwise tablets end up labelled against a comic book analysed earlier.
+  const [refQuery, setRefQuery] = useState(reference ? initialQuery : '')
+  const [searched, setSearched] = useState(initialQuery)
   // id → { label, candidate }: a label keeps its listing, so it survives a new search.
   const [labels, setLabels] = useState({})
   const [loadKey, setLoadKey] = useState(0)
@@ -97,6 +112,12 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
 
   const candidates = useMemo(() => (found || []).filter((c) => !ref || c.id !== ref.id), [found, ref])
   const labelled = Object.values(labels).filter((v) => v && (!ref || v.candidate.id !== ref.id))
+  const refMismatch = Boolean(ref) && !sameSearch(searched, refQuery)
+  const pickRef = (r) => {
+    setRef(r)
+    setRefQuery(searched)
+    setLabels({})
+  }
 
   const leave = () => {
     if (!labelled.length) return onClose()
@@ -130,6 +151,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     setChallenge(false)
     setPendingLabel(false)
     setPhase('browse')
+    setSearched(q)
     setUrl(vintedSearchUrl(q))
     setLoadKey((k) => k + 1)
   }
@@ -147,6 +169,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
       const { items } = parseVintedCatalog(msg.text)
       setFound(items)
       setParsedUrl(msg.url)
+      setSearched((s) => searchTextOf(msg.url) || s)
       setChallenge(false)
       if (pendingLabel) {
         setPendingLabel(false)
@@ -164,6 +187,7 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
     setLabels({})
     onSave(pairs)
   }
+  const confirmRef = () => setRefQuery(searched)
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onBack} statusBarTranslucent>
@@ -220,20 +244,29 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
                   <ListingRow item={ref} highlight>
                     <Pressable onPress={() => { setRef(null); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Cambia riferimento</Text></Pressable>
                   </ListingRow>
+                  {refMismatch ? (
+                    <View style={{ gap: space.xs }}>
+                      <Note tone="warn">Hai cercato «{searched}», ma il riferimento è «{ref.title}». Confronti i risultati con l'oggetto giusto?</Note>
+                      <ButtonRow>
+                        <Button label="Sì, con questo" small onPress={confirmRef} />
+                        <Button label="Scegli tra i risultati" variant="secondary" small onPress={() => { setRef(null); setLabels({}) }} />
+                      </ButtonRow>
+                    </View>
+                  ) : null}
                 </View>
               ) : (
                 <View style={{ gap: space.xs }}>
                   <Note tone="warn">Tocca «Riferimento» sull'annuncio che vorresti comprare: gli altri li confronti con quello.</Note>
-                  {reference ? <Pressable onPress={() => { setRef(reference); setLabels({}) }}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Usa l'annuncio analizzato: {reference.title}</Text></Pressable> : null}
+                  {reference ? <Pressable onPress={() => pickRef(reference)}><Text style={{ color: t.accentInk, fontSize: 13, fontWeight: '700' }}>Usa l'annuncio analizzato: {reference.title}</Text></Pressable> : null}
                 </View>
               )}
-              {ref ? <Body small muted>Per ogni candidato: Stesso, Variante (stesso modello ma colore, taglia o edizione diversi) o Diverso. Etichetta anche quelli diversi: servono a misurare i falsi «stesso».</Body> : null}
+              {ref && !refMismatch ? <Body small muted>Per ogni annuncio, rispetto al riferimento qui sopra: Stesso (lo stesso articolo), Variante (stesso modello ma colore, taglia, capacità o edizione diversi) o Diverso. Etichetta anche quelli diversi: servono a misurare i falsi «stesso».</Body> : null}
               {candidates.map((c) => (
                 <ListingRow key={c.id} item={c}>
                   <View style={styles.labelRow}>
                     {!ref ? (
-                      <Chip t={t} label="Riferimento" active={false} onPress={() => setRef(c)} />
-                    ) : PAIR_LABELS.map((l) => (
+                      <Chip t={t} label="Riferimento" active={false} onPress={() => pickRef(c)} />
+                    ) : refMismatch ? null : PAIR_LABELS.map((l) => (
                       <Chip key={l.id} t={t} label={l.label} active={Boolean(labels[c.id]) && labels[c.id].label === l.id} onPress={() => setLabels((s) => ({ ...s, [c.id]: s[c.id] && s[c.id].label === l.id ? null : { label: l.id, candidate: c } }))} />
                     ))}
                   </View>
@@ -241,9 +274,10 @@ export function CollectSheet({ visible, initialQuery = '', reference = null, onC
               ))}
             </ScrollView>
             <View style={[styles.footer, { borderTopColor: t.line, backgroundColor: t.card }]}>
+              {ref ? <Text style={{ color: t.ink2, fontSize: 12 }} numberOfLines={1}>Confronti con: {ref.title}</Text> : null}
               <ButtonRow>
                 <Button label="Torna alla ricerca" variant="secondary" onPress={() => setPhase('browse')} />
-                <Button label={labelled.length ? `Salva ${labelled.length} ${labelled.length === 1 ? 'coppia' : 'coppie'}` : 'Etichetta qualche annuncio'} onPress={save} disabled={!ref || !labelled.length} />
+                <Button label={labelled.length ? `Salva ${labelled.length} ${labelled.length === 1 ? 'coppia' : 'coppie'}` : 'Etichetta qualche annuncio'} onPress={save} disabled={!ref || refMismatch || !labelled.length} />
               </ButtonRow>
             </View>
           </View>

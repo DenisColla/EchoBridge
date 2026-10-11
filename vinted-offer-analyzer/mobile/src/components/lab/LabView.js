@@ -5,7 +5,7 @@ import { radius, space, useTheme } from '../../theme.js'
 import { Body, Button, ButtonRow, Card, Meter, Note, SectionLabel, Title, Toggle } from '../ui.js'
 import { CollectSheet } from './CollectSheet.js'
 
-const TARGET_PAIRS = 100
+const TARGET_PAIRS = 80
 const PAIR_PAGE = 30
 /** Italian decimals: "0,59 cent", "1,20 $". */
 const usd = (v) => (v == null ? '—' : (v < 0.01 ? `${(v * 100).toFixed(2)} cent` : `${v.toFixed(2)} $`).replace('.', ','))
@@ -144,12 +144,13 @@ function BlindRating({ lab, cases, psychRuns, onRate, seed }) {
  */
 export function LabView({ labState, onClose, reference = null, onToast = () => {}, onCollectingChange = () => {} }) {
   const t = useTheme()
-  const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated } = labState
+  const { ready, loadFailed, lab, keys, job, cases, psychRuns, verification, psychology, allRated, recheck = [] } = labState
   const [collecting, setCollecting] = useState(false)
   const [selected, setSelected] = useState(() => Object.fromEntries(LLM_MODELS.map((m) => [m.key, true])))
   const [rating, setRating] = useState(false)
   const [showPairs, setShowPairs] = useState(false)
   const [pairLimit, setPairLimit] = useState(PAIR_PAGE)
+  const [onlyRecheck, setOnlyRecheck] = useState(false)
   // App needs to know: a reminder tap must not close the lab under an open collection with unsaved labels.
   useEffect(() => {
     onCollectingChange(collecting)
@@ -198,11 +199,17 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
         <Title>{totalPairs} di {TARGET_PAIRS}</Title>
         <Meter value={Math.min(1, totalPairs / TARGET_PAIRS)} />
         <Body small>Stesso {counts.same} · Variante {counts.variant} · Diverso {counts.different}</Body>
-        <Body muted small>Cerca su Vinted un prodotto che ti interessa e confronta i risultati con l'annuncio di riferimento. Circa 10 ricerche da 10 annunci bastano; includi anche annunci diversi.</Body>
+        <Body muted small>Ogni ricerca ha il suo annuncio di riferimento: l'oggetto che vorresti comprare. Gli altri risultati li confronti con quello. Bastano 5–6 ricerche di prodotti diversi (elettronica, libri, abbigliamento, collezionismo) da 10–15 annunci, includendo modelli simili ma diversi.</Body>
         {!hasRef ? <Note>Suggerimento: analizza prima un annuncio dal link (scheda Calcola): lo uso come riferimento e come ricerca di partenza.</Note> : null}
         <Button label="Raccogli coppie" onPress={() => setCollecting(true)} disabled={Boolean(job)} />
-        {totalPairs ? <Button label={showPairs ? 'Nascondi le coppie' : 'Mostra e correggi le coppie'} variant="ghost" small onPress={() => setShowPairs((v) => !v)} /> : null}
-        {showPairs ? lab.pairs.slice().reverse().slice(0, pairLimit).map((p) => (
+        {recheck.length ? (
+          <View style={{ gap: space.xs }}>
+            <Note tone="warn">{recheck.length} {recheck.length === 1 ? 'coppia' : 'coppie'} da ricontrollare: tutti i modelli dicono il contrario della tua etichetta. Di solito il riferimento era un altro oggetto, o l'etichetta va corretta.</Note>
+            <Button label={onlyRecheck && showPairs ? 'Mostra tutte le coppie' : 'Mostra quelle da ricontrollare'} variant="secondary" small onPress={() => { setOnlyRecheck((v) => !(v && showPairs)); setShowPairs(true) }} />
+          </View>
+        ) : null}
+        {totalPairs ? <Button label={showPairs ? 'Nascondi le coppie' : 'Mostra e correggi le coppie'} variant="ghost" small onPress={() => { setShowPairs((v) => !v); setOnlyRecheck(false) }} /> : null}
+        {showPairs ? lab.pairs.filter((p) => !onlyRecheck || recheck.includes(p.id)).reverse().slice(0, pairLimit).map((p) => (
           <View key={p.id} style={[styles.pairRow, { borderColor: t.line }]}>
             <Text style={{ color: t.ink, fontSize: 13 }} numberOfLines={1}>Rif.: {p.source.title}</Text>
             <Text style={{ color: t.ink2, fontSize: 13 }} numberOfLines={1}>Cand.: {p.candidate.title}</Text>
@@ -216,7 +223,7 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
             </View>
           </View>
         )) : null}
-        {showPairs && lab.pairs.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, lab.pairs.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
+        {showPairs && !onlyRecheck && lab.pairs.length > pairLimit ? <Button label={`Mostra altre ${Math.min(PAIR_PAGE, lab.pairs.length - pairLimit)}`} variant="ghost" small onPress={() => setPairLimit((n) => n + PAIR_PAGE)} /> : null}
       </Card>
 
       <Card>
@@ -241,8 +248,8 @@ export function LabView({ labState, onClose, reference = null, onToast = () => {
             {verification.map((v) => (
               <View key={v.modelKey} style={[styles.resultRow, { borderColor: t.line }]}>
                 <Text style={{ color: t.ink, fontWeight: '700' }}>{nameOf(v.modelKey)}</Text>
-                <Body small>Accuratezza {pct(v.accuracy)} · falsi «stesso» {pct(v.falseMatchRate)}{ratio(v.falseMatches, v.differentPairs)} · mancati {pct(v.missRate)}{ratio(v.misses, v.samePairs)}</Body>
-                <Body small muted>Risposte valide {pct(v.validRate)} · {usd(v.costPerPair)} a coppia · {secs(v.latencyP50)} tipico · {v.n} coppie</Body>
+                <Body small>Trova l'articolo giusto {pct(v.matchAccuracy)} · falsi «stesso» {pct(v.falseMatchRate)}{ratio(v.falseMatches, v.differentPairs)} · mancati {pct(v.missRate)}{ratio(v.misses, v.samePairs)}</Body>
+                <Body small muted>Stesso/variante/diverso esatti {pct(v.accuracy)} · risposte valide {pct(v.validRate)} · {usd(v.costPerPair)} a coppia · {secs(v.latencyP50)} tipico · {v.n} coppie</Body>
               </View>
             ))}
           </View>

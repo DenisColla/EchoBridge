@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, NOT_MODEL_KINDS, engineFactsFor, labWorkbook, psychPrompt, scorePsychology, scoreVerification, verifyPrompt,
+  LLM_METHOD, LLM_MODELS, LLM_PROVIDERS, NOT_MODEL_KINDS, engineFactsFor, labWorkbook, pairsToRecheck, psychPrompt, scorePsychology, scoreVerification,
+  verifyPrompt,
 } from '../../core/index.js'
 import { emptyLab, loadLab, saveLab } from '../services/labStore.js'
 import { getApiKey, maskKey, setApiKey } from '../services/secrets.js'
@@ -10,7 +11,8 @@ import { shareReport, writeReport } from '../services/reports.js'
 
 /** Parallel calls across the whole run: enough to keep a few providers busy without hitting new-account limits. */
 const CONCURRENCY = 4
-const PSYCH_CASES = 10
+// 6 cases × 4 models = 24 texts to rate: enough to see a pattern, short enough to finish in one sitting.
+const PSYCH_CASES = 6
 const runKey = (modelKey, id) => `${modelKey}|${id}`
 
 /** Latest run per (model, pair) of a task: re-running a model replaces its old answers in the scores. */
@@ -247,6 +249,7 @@ export function useLab({ folderUri = null } = {}) {
   const verifyRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'verify').filter((r) => pairExists(lab, r.pairId)) : []), [lab])
   const psychRuns = useMemo(() => (lab ? latestRuns(lab.runs, 'psych') : []), [lab])
   const verification = useMemo(() => (lab ? scoreVerification(verifyRuns, lab.pairs) : []), [lab, verifyRuns])
+  const recheck = useMemo(() => (lab ? pairsToRecheck(verifyRuns, lab.pairs) : []), [lab, verifyRuns])
   const caseSet = useMemo(() => new Set(cases.map((c) => c.caseId)), [cases])
   const scoredRatings = useMemo(() => (lab ? lab.ratings.filter((r) => r.score > 0 && caseSet.has(r.caseId)) : []), [lab, caseSet])
   const psychology = useMemo(() => scorePsychology(scoredRatings), [scoredRatings])
@@ -269,7 +272,7 @@ export function useLab({ folderUri = null } = {}) {
       return { ...r, caseTitle: caseTitle.get(r.caseId) || '', text: v ? [v.why, ...(v.leverage || []).map((x) => `• ${x}`), v.sellerProfile, ...(v.risks || []).map((x) => `Rischio: ${x}`)].join('\n') : '' }
     })
     const bytes = labWorkbook({
-      generatedAt: new Date(), models, verification, psychology: allRated ? psychology : [], runs: verifyRuns, pairs: l.pairs, ratings,
+      generatedAt: new Date(), models, verification, psychology: allRated ? psychology : [], runs: verifyRuns, pairs: l.pairs, ratings, recheck,
       prices: LLM_MODELS.map((m) => ({ provider: LLM_PROVIDERS[m.provider].label, model: m.model, input: m.pricing.input, output: m.pricing.output, note: m.priceNote })),
       method: LLM_MODELS.map((m) => ({ provider: `${LLM_PROVIDERS[m.provider].label} · ${m.label}`, ...LLM_METHOD[m.provider] })),
     })
@@ -277,13 +280,13 @@ export function useLab({ folderUri = null } = {}) {
     const file = await writeReport({ bytes, fileName: `Laboratorio-AI-${day}.xlsx`, folderUri })
     if (file.localUri) await shareReport(file.localUri, `Laboratorio AI ${day}`)
     return file
-  }, [allRated, folderUri, psychRuns, psychology, scoredRatings, verification, verifyRuns])
+  }, [allRated, folderUri, psychRuns, psychology, recheck, scoredRatings, verification, verifyRuns])
 
   // Not while the stored data could not be read: the empty lab would overwrite it, spend history included.
   const reset = useCallback(() => (labRef.current && labRef.current.loadFailed ? null : persist({ ...emptyLab(), spend: (labRef.current && labRef.current.spend) || {} })), [persist])
 
   return {
-    ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated,
+    ready: Boolean(lab), loadFailed: Boolean(lab && lab.loadFailed), lab, keys, job, cases, verifyRuns, psychRuns, verification, psychology, allRated, recheck,
     saveKey, checkKey, addPairs, relabel, removePair, runVerification, runPsychology, cancel, rate, exportReport, reset,
   }
 }

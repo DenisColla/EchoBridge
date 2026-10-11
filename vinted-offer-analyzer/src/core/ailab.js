@@ -253,7 +253,29 @@ export function scoreVerification(runs, pairs) {
       confusion,
     })
   }
-  return rows.sort((a, b) => (b.accuracy ?? -1) - (a.accuracy ?? -1) || (a.costPerPair ?? 9) - (b.costPerPair ?? 9))
+  // Finding the right article (same or variant vs different) is what the search needs; exact labels break ties.
+  return rows.sort((a, b) => (b.matchAccuracy ?? -1) - (a.matchAccuracy ?? -1) || (b.accuracy ?? -1) - (a.accuracy ?? -1) || (a.costPerPair ?? 9) - (b.costPerPair ?? 9))
+}
+
+/**
+ * Pairs to look at again: at least `minAnswers` models answered and every one of them contradicts the label on the
+ * question that matters (same article — same or variant — versus different). Usually a wrong reference or a slip
+ * in labelling, not four models wrong together. `runs` = latest verify run per (model, pair).
+ */
+export function pairsToRecheck(runs, pairs, minAnswers = 3) {
+  const labelOf = new Map(pairs.filter((p) => LABEL_IDS.includes(p.label)).map((p) => [p.id, p.label]))
+  const answers = new Map()
+  for (const r of runs) {
+    if (!labelOf.has(r.pairId) || !r.ok || !LABEL_IDS.includes(r.verdict)) continue
+    if (!answers.has(r.pairId)) answers.set(r.pairId, [])
+    answers.get(r.pairId).push(r.verdict)
+  }
+  const out = []
+  for (const [pairId, list] of answers) {
+    const labelMatch = labelOf.get(pairId) !== 'different'
+    if (list.length >= minAnswers && list.every((v) => (v !== 'different') !== labelMatch)) out.push(pairId)
+  }
+  return out
 }
 
 /* ───────── blind comparison of the psychology texts ───────── */
@@ -324,17 +346,21 @@ const pctCell = (v) => (v == null ? '' : { value: v, format: XLSX_FORMATS.pct })
 const usdCell = (v) => (v == null || !Number.isFinite(v) ? '' : Math.round(v * 1e6) / 1e6)
 
 /** Workbook bytes for the lab results. `models` maps modelKey → label. */
-export function labWorkbook({ generatedAt = new Date(), models = {}, verification = [], psychology = [], runs = [], pairs = [], ratings = [], prices = [], method = [] }) {
+export function labWorkbook({ generatedAt = new Date(), models = {}, verification = [], psychology = [], runs = [], pairs = [], ratings = [], prices = [], method = [], recheck = [] }) {
   const name = (k) => models[k] || k
   const pairById = new Map(pairs.map((p) => [p.id, p]))
+  const toRecheck = new Set(recheck)
+  const references = new Set(pairs.map((p) => (p.source && (p.source.id || p.source.title)) || '')).size
   const sheets = [
     {
       name: 'Riepilogo',
       columns: [{ width: 26 }, { width: 10 }, { width: 12 }, { width: 12 }, { width: 14 }, { width: 14 }, { width: 12 }, { width: 14 }, { width: 12 }, { width: 12 }],
       rows: [
         ['Verifica delle foto'],
-        ['Modello', 'Coppie', 'JSON valido', 'Accuratezza', 'Stesso/diverso', 'Falsi "stesso"', 'Mancati', 'Costo per coppia $', 'Latenza p50 s', 'Latenza p90 s'],
-        ...verification.map((v) => [name(v.modelKey), v.n, pctCell(v.validRate), pctCell(v.accuracy), pctCell(v.matchAccuracy), pctCell(v.falseMatchRate), pctCell(v.missRate), usdCell(v.costPerPair), v.latencyP50 != null ? v.latencyP50 / 1000 : '', v.latencyP90 != null ? v.latencyP90 / 1000 : '']),
+        ['Modello', 'Coppie', 'JSON valido', 'Trova l\'articolo', 'Esatte (3 classi)', 'Falsi "stesso"', 'Mancati', 'Costo per coppia $', 'Latenza p50 s', 'Latenza p90 s'],
+        ...verification.map((v) => [name(v.modelKey), v.n, pctCell(v.validRate), pctCell(v.matchAccuracy), pctCell(v.accuracy), pctCell(v.falseMatchRate), pctCell(v.missRate), usdCell(v.costPerPair), v.latencyP50 != null ? v.latencyP50 / 1000 : '', v.latencyP90 != null ? v.latencyP90 / 1000 : '']),
+        ['Annunci di riferimento', references],
+        ['Coppie da ricontrollare (tutti i modelli contro l\'etichetta)', toRecheck.size],
         [],
         ['Psicologia (giudizio alla cieca)'],
         ['Modello', 'Valutazioni', 'Voto medio 1–5', 'Volte migliore', 'Dati inventati'],
@@ -346,12 +372,12 @@ export function labWorkbook({ generatedAt = new Date(), models = {}, verificatio
     },
     {
       name: 'Verifiche',
-      columns: [{ width: 22 }, { width: 34 }, { width: 34 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 10 }, { width: 12 }, { width: 10 }, { width: 40 }],
+      columns: [{ width: 22 }, { width: 34 }, { width: 34 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 10 }, { width: 12 }, { width: 10 }, { width: 40 }, { width: 14 }],
       rows: [
-        ['Modello', 'Riferimento', 'Candidato', 'Etichetta', 'Risposta', 'Corretto', 'Fiducia', 'Costo $', 'Latenza s', 'Motivo o errore'],
+        ['Modello', 'Riferimento', 'Candidato', 'Etichetta', 'Risposta', 'Corretto', 'Fiducia', 'Costo $', 'Latenza s', 'Motivo o errore', 'Da ricontrollare'],
         ...runs.filter((r) => r.task === 'verify').map((r) => {
           const p = pairById.get(r.pairId) || {}
-          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', p.label || '', r.verdict || '', r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '']
+          return [name(r.modelKey), (p.source && p.source.title) || '', (p.candidate && p.candidate.title) || '', p.label || '', r.verdict || '', r.verdict ? (r.verdict === p.label ? 'sì' : 'no') : '', r.confidence ?? '', usdCell(r.costUsd), r.latencyMs != null ? r.latencyMs / 1000 : '', r.error || r.reason || '', toRecheck.has(r.pairId) ? 'sì' : '']
         }),
       ],
     },
