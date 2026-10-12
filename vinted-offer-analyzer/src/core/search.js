@@ -1,0 +1,271 @@
+/**
+ * Phase 1 — find the same product at a better final price on Vinted, Subito and Wallapop.
+ *  1. product card: what exactly is being looked for (AI, with a deterministic fallback) and the words to search;
+ *  2. pre-filter: cheap checks on the listings read from the search pages, so the AI only sees plausible ones;
+ *  3. verification prompt: same / variant / different, plus whether a different item is an alternative of the same
+ *     product family (shown in a separate section);
+ *  4. ranking: total cost to the buyer now (price + fee + shipping) and after a realistic negotiation, adjusted for
+ *     the risks the verification found.
+ * The AI calls are made by the app (llm.js shapes, the model chosen in the lab).
+ */
+
+import { CHANNELS, buyerFee, offerFloorFor } from './channels.js'
+import { vintedSearchQuery } from './catalog.js'
+import { engineFactsFor } from './ailab.js'
+import { formatEuro } from './messages.js'
+
+const round2 = (n) => Math.round(n * 100 + 1e-7) / 100
+
+/* ───────── 1. product card ───────── */
+
+export const PRODUCT_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    brand: { type: 'string' },
+    model: { type: 'string' },
+    attributes: { type: 'array', items: { type: 'string' } },
+    category: { type: 'string' },
+    query: { type: 'string' },
+    mustWords: { type: 'array', items: { type: 'string' } },
+    accessoryWords: { type: 'array', items: { type: 'string' } },
+    family: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['name', 'brand', 'model', 'attributes', 'category', 'query', 'mustWords', 'accessoryWords', 'family'],
+  additionalProperties: false,
+}
+
+const PRODUCT_SYSTEM = [
+  'Aiuti a cercare lo stesso articolo usato su Vinted, Subito e Wallapop in Italia.',
+  'Dal titolo e dalla descrizione di un annuncio ricavi la scheda del prodotto. Usa solo ciò che c\'è nel testo: se un dato manca lascia una stringa vuota o una lista vuota, non inventare.',
+  'name: nome completo e preciso del prodotto (marca, modello, versione). brand e model separati. attributes: caratteristiche che distinguono la versione (capacità, taglia, colore, edizione), massimo 5.',
+  'query: parole da cercare sui siti, 2-5 parole, senza aggettivi né condizioni (niente "nuovo", "perfetto", "offerta").',
+  'mustWords: 1-3 parole che un annuncio dello stesso modello deve contenere (minuscole, es. ["s9","plus"] o ["black","hole"]).',
+  'accessoryWords: parole che indicano accessori o ricambi venduti per quel prodotto (es. "cover", "custodia", "pellicola", "tastiera"), massimo 8; lista vuota se il prodotto stesso è un accessorio.',
+  'family: da 0 a 4 modelli della stessa famiglia che potrebbero interessare in alternativa (es. per Galaxy Tab S9+ → "Galaxy Tab S9", "Galaxy Tab S9 FE+").',
+  'Rispondi solo con un oggetto JSON conforme allo schema, in italiano.',
+].join('\n')
+
+/** Prompt of the product-card call (text only). */
+export function productPrompt(reference) {
+  return {
+    system: PRODUCT_SYSTEM,
+    text: [
+      'Annuncio di partenza:',
+      `- titolo: ${reference.title || 'n.d.'}`,
+      `- marca: ${reference.brand || 'n.d.'}`,
+      `- taglia/misura: ${reference.size || 'n.d.'}`,
+      `- categoria: ${reference.categoryText || 'n.d.'}`,
+      `- descrizione: ${reference.description ? String(reference.description).slice(0, 800) : 'n.d.'}`,
+      'Restituisci il JSON richiesto.',
+    ].join('\n'),
+    schema: PRODUCT_SCHEMA,
+    schemaName: 'scheda_prodotto',
+  }
+}
+
+// Lower-case words without accents; "S9+" reads as "s9 plus" so it matches both spellings.
+const words = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\+/g, ' plus ').split(/[^a-z0-9]+/).filter(Boolean)
+const DEFAULT_ACCESSORIES = ['cover', 'custodia', 'pellicola', 'cavo', 'caricatore', 'ricambio', 'adesivo', 'skin']
+
+/** The card used when the AI is not available: the search words from the title, no family. */
+export function fallbackProduct(reference) {
+  const query = vintedSearchQuery(reference)
+  const must = words(query).filter((w) => w.length > 1 && (/\d/.test(w) || w.length > 3)).slice(0, 2)
+  return {
+    name: reference.title || query, brand: reference.brand || '', model: '', attributes: [], category: reference.categoryText || '',
+    query, mustWords: must, accessoryWords: DEFAULT_ACCESSORIES, family: [], fromAi: false,
+  }
+}
+
+/** Keeps the AI card within sane bounds (the schema checks types, not content). */
+export function cleanProduct(card, reference) {
+  const fb = fallbackProduct(reference)
+  if (!card || typeof card !== 'object') return fb
+  const list = (a, max) => (Array.isArray(a) ? a.map((x) => String(x || '').trim()).filter(Boolean).slice(0, max) : [])
+  const query = String(card.query || '').trim().split(/\s+/).slice(0, 6).join(' ') || fb.query
+  return {
+    name: String(card.name || '').trim() || fb.name,
+    brand: String(card.brand || '').trim(),
+    model: String(card.model || '').trim(),
+    attributes: list(card.attributes, 5),
+    category: String(card.category || '').trim(),
+    query,
+    mustWords: list(card.mustWords, 3).map((w) => w.toLowerCase()),
+    accessoryWords: list(card.accessoryWords, 8).map((w) => w.toLowerCase()),
+    family: list(card.family, 4),
+    fromAi: true,
+  }
+}
+
+/** Price window for the search pages: no accessories far below, nothing pointlessly above the reference. */
+export function priceWindow(referencePrice) {
+  const p = Number(referencePrice)
+  if (!Number.isFinite(p) || p <= 0) return { minPrice: null, maxPrice: null }
+  return { minPrice: Math.max(1, Math.floor(p * 0.3)), maxPrice: Math.ceil(p * 1.25) }
+}
+
+/* ───────── 2. pre-filter ───────── */
+
+/**
+ * Cheap checks before the AI: drops sold/reserved listings, listings without price or photo, accessories (when the
+ * reference is not one) and duplicates; ranks the rest by how many must-words they contain and by total, and keeps
+ * at most `perChannel` per channel. Returns { kept, dropped: { reason: count } }.
+ */
+export function prefilter(candidates, product, reference, { perChannel = 20 } = {}) {
+  const dropped = {}
+  const drop = (why) => { dropped[why] = (dropped[why] || 0) + 1 }
+  const refWords = new Set(words(`${reference.title || ''} ${reference.description || ''}`))
+  const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refWords.has(w.split(' ')[0]))
+  const must = (product.mustWords || []).map((w) => words(w).join(' ')).filter(Boolean)
+  const seen = new Set()
+  const scored = []
+  for (const c of candidates) {
+    const key = `${c.source}:${c.id}`
+    if (seen.has(key)) { drop('doppione'); continue }
+    seen.add(key)
+    if (reference.id && c.source === (reference.source || 'vinted') && String(c.id) === String(reference.id)) { drop('annuncio di partenza'); continue }
+    if (c.sold || c.reserved) { drop('venduto o riservato'); continue }
+    if (!Number.isFinite(c.price) || c.price <= 0) { drop('senza prezzo'); continue }
+    if (!c.photo) { drop('senza foto'); continue }
+    // An accessory sold for the product: its title starts with the accessory ("Cover Galaxy Tab S9") or names it
+    // together with "per" ("Pellicola vetro per Tab S9"). "Tab S9 con caricatore" is the product, and stays.
+    const text = ` ${words(c.title).join(' ')} `
+    const isAccessory = accessories.some((a) => text.startsWith(` ${a} `) || (text.includes(` ${a} `) && text.includes(' per ')))
+    if (isAccessory) { drop('accessorio'); continue }
+    const all = ` ${words(`${c.title} ${c.description || ''}`).join(' ')} `
+    const hits = must.length ? must.filter((m) => all.includes(` ${m} `)).length / must.length : 1
+    if (must.length && hits === 0) { drop('altro prodotto (parole chiave assenti)'); continue }
+    scored.push({ c, hits })
+  }
+  const kept = []
+  const perCh = {}
+  scored.sort((a, b) => b.hits - a.hits || (a.c.total ?? a.c.price) - (b.c.total ?? b.c.price))
+  for (const { c } of scored) {
+    perCh[c.source] = (perCh[c.source] || 0) + 1
+    if (perCh[c.source] > perChannel) { drop('oltre il limite per canale'); continue }
+    kept.push(c)
+  }
+  return { kept, dropped }
+}
+
+/* ───────── 3. verification ───────── */
+
+export const SEARCH_VERIFY_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['same', 'variant', 'different'] },
+    family: { type: 'boolean' },
+    confidence: { type: 'number' },
+    differences: { type: 'array', items: { type: 'string' } },
+    candidateCondition: { type: 'string' },
+    redFlags: { type: 'array', items: { type: 'string' } },
+    reason: { type: 'string' },
+  },
+  required: ['verdict', 'family', 'confidence', 'differences', 'candidateCondition', 'redFlags', 'reason'],
+  additionalProperties: false,
+}
+
+const SEARCH_VERIFY_SYSTEM = [
+  'Sei un perito di articoli usati. Confronti l\'articolo cercato (annuncio di riferimento) con un annuncio candidato e decidi se vendono lo stesso prodotto.',
+  'Definizioni: "same" = stesso modello e stessa versione (edizione, taglia, colore, capacità); "variant" = stesso modello ma una di queste caratteristiche diversa; "different" = un altro prodotto.',
+  'family: true solo se verdict è "different" ma il candidato è un modello diverso della stessa famiglia di prodotto, che potrebbe interessare in alternativa (es. Galaxy Tab S9 FE rispetto a Galaxy Tab S9+); altrimenti false. Accessori, ricambi e scatole vuote non sono mai family.',
+  'Usa solo ciò che vedi nelle foto e leggi nei testi. Se le foto non bastano, dillo in reason e abbassa confidence. Non inventare dettagli.',
+  'confidence è un numero tra 0 e 1. differences elenca le differenze concrete (massimo 4). candidateCondition descrive lo stato del candidato in poche parole.',
+  'redFlags elenca segnali di rischio concreti (foto prese dal web, prezzo incoerente, articolo diverso dal titolo, difetti dichiarati, richiesta di pagamenti esterni), altrimenti lista vuota.',
+  'Rispondi solo con un oggetto JSON conforme allo schema, in italiano, senza testo fuori dal JSON.',
+].join('\n')
+
+const describeListing = (who, l, extra = []) => [
+  `${who}:`,
+  `- canale: ${CHANNELS[l.source] ? CHANNELS[l.source].label : l.source || 'n.d.'}`,
+  `- titolo: ${l.title || 'n.d.'}`,
+  `- marca: ${l.brand || 'n.d.'}`,
+  `- taglia/misura: ${l.size || 'n.d.'}`,
+  `- condizioni dichiarate: ${l.condition || 'n.d.'}`,
+  `- prezzo: ${Number.isFinite(l.price) ? formatEuro(l.price) : 'n.d.'}`,
+  `- descrizione: ${l.description ? String(l.description).replace(/\s+/g, ' ').slice(0, 400) : 'n.d.'}`,
+  ...extra,
+].join('\n')
+
+/** Verification prompt for a search candidate. Images: reference first, candidate second. */
+export function searchVerifyPrompt(reference, product, candidate) {
+  return {
+    system: SEARCH_VERIFY_SYSTEM,
+    text: [
+      'Prima immagine: articolo cercato. Seconda immagine: annuncio candidato.',
+      describeListing('Articolo cercato', reference, product && product.name ? [`- prodotto: ${product.name}${product.attributes && product.attributes.length ? ` (${product.attributes.join(', ')})` : ''}`] : []),
+      describeListing('Annuncio candidato', candidate),
+      'Restituisci il JSON richiesto.',
+    ].join('\n\n'),
+    schema: SEARCH_VERIFY_SCHEMA,
+    schemaName: 'verifica_ricerca',
+  }
+}
+
+/* ───────── 4. ranking ───────── */
+
+/**
+ * Expected outcome of a negotiation on one candidate: the offer the engine suggests (within the channel's floor),
+ * its acceptance probability, and the expected price (accepted → offer, otherwise the asking price).
+ * The engine is calibrated on Vinted: on Subito and Wallapop the numbers are an estimate and are marked as such.
+ */
+export function negotiationFor(candidate, now = new Date()) {
+  const price = candidate.price
+  const floor = offerFloorFor(candidate.source, price, { sellerBusiness: candidate.sellerBusiness })
+  if (!Number.isFinite(price) || floor == null) return null
+  if (floor >= price) return { offer: price, probability: 1, expectedPrice: price, estimated: candidate.source !== 'vinted', note: 'Niente offerte su questo annuncio (venditore professionale).' }
+  const facts = engineFactsFor({ ...candidate, price }, {}, now)
+  if (!facts || !Number.isFinite(facts.target) || !Number.isFinite(facts.probability)) {
+    return { offer: price, probability: 1, expectedPrice: price, estimated: true, note: facts && facts.note ? facts.note : null }
+  }
+  const offer = round2(Math.max(floor, Math.min(price, facts.target)))
+  const p = Math.max(0, Math.min(1, facts.probability / 100))
+  return { offer, probability: p, expectedPrice: round2(p * offer + (1 - p) * price), estimated: candidate.source !== 'vinted', sendLabel: facts.sendLabel || null, note: null }
+}
+
+/**
+ * Ranks verified candidates. `results` = [{ candidate, verdict, family, confidence, redFlags, reason }].
+ * Main list: same and variant; alternatives: different with family = true. Each row has the total now, the expected
+ * total after negotiation, a risk-adjusted score (lower is better) and the reasons behind it.
+ */
+export function rankResults(results, now = new Date()) {
+  const rows = []
+  for (const r of results) {
+    const c = r.candidate
+    const group = r.verdict === 'same' || r.verdict === 'variant' ? 'main' : r.verdict === 'different' && r.family ? 'alternative' : null
+    if (!group || !Number.isFinite(c.price)) continue
+    const neg = negotiationFor(c, now)
+    const shipping = Number.isFinite(c.shippingCost) ? c.shippingCost : 0
+    const feeNow = Number.isFinite(c.buyerFee) ? c.buyerFee : 0
+    const expectedPrice = neg ? neg.expectedPrice : c.price
+    const feeAfter = buyerFee(c.source, expectedPrice).amount ?? feeNow
+    const totalNow = round2(c.price + feeNow + shipping)
+    const expectedTotal = round2(expectedPrice + feeAfter + shipping)
+    const risks = []
+    let penalty = 0
+    const confidence = Number.isFinite(r.confidence) ? Math.max(0, Math.min(1, r.confidence)) : 0.5
+    if (confidence < 0.7) { penalty += (0.7 - confidence) * 0.2; risks.push('verifica incerta') }
+    const flags = Array.isArray(r.redFlags) ? r.redFlags.filter(Boolean) : []
+    if (flags.length) { penalty += 0.05 * Math.min(3, flags.length); risks.push(...flags.slice(0, 3)) }
+    if (r.verdict === 'variant') risks.push('variante: controlla la differenza')
+    if (c.shippingEstimated) { penalty += 0.01; risks.push('spedizione stimata') }
+    if (c.feeEstimated) risks.push('commissione stimata')
+    if (c.abroad) { penalty += 0.02; risks.push('spedizione dall\'estero') }
+    if (neg && neg.estimated) risks.push('trattativa stimata con il modello Vinted')
+    rows.push({
+      group, candidate: c, verdict: r.verdict, confidence, reason: r.reason || '', differences: r.differences || [],
+      totalNow, expectedTotal, score: round2(expectedTotal * (1 + penalty)),
+      offer: neg ? neg.offer : null, probability: neg ? neg.probability : null, sendLabel: neg ? neg.sendLabel : null,
+      negotiationNote: neg ? neg.note : null, risks,
+    })
+  }
+  rows.sort((a, b) => a.score - b.score || a.totalNow - b.totalNow)
+  return { main: rows.filter((r) => r.group === 'main'), alternatives: rows.filter((r) => r.group === 'alternative') }
+}
+
+/** Saving versus the reference listing (positive = cheaper), on the same basis (total now). */
+export function savingVersus(row, referenceTotal) {
+  if (!row || !Number.isFinite(referenceTotal)) return null
+  return round2(referenceTotal - row.expectedTotal)
+}

@@ -127,9 +127,10 @@ export function psychPrompt(caseItem) {
   const c = caseItem.candidate
   const f = caseItem.facts || {}
   const lines = [
-    `Canale: ${c.source === 'vinted' ? 'Vinted (offerte fino al 40% sotto il prezzo, al massimo 25 offerte al giorno; commissione acquirente 5% + 0,70 € già nel totale)' : c.source || 'n.d.'}`,
+    `Canale: ${c.source === 'vinted' || !c.source ? 'Vinted (offerte fino al 40% sotto il prezzo, al massimo 25 offerte al giorno; commissione acquirente 5% + 0,70 € già nel totale)' : caseItem.channelRules ? `${caseItem.channelLabel || c.source} (${caseItem.channelRules})` : c.source}`,
     listingText('Annuncio', c),
-    `- totale con commissione: ${c.total != null ? formatEuro(c.total) : 'n.d.'}`,
+    `- totale con commissione: ${Number.isFinite(c.price) && Number.isFinite(c.buyerFee) ? formatEuro(c.price + c.buyerFee) : c.total != null ? formatEuro(c.total) : 'n.d.'}`,
+    ...(Number.isFinite(c.shippingCost) ? [`- spedizione: ${formatEuro(c.shippingCost)}${c.shippingEstimated ? ' (stima)' : ''}`] : []),
     `- preferiti: ${c.favourites != null ? c.favourites : 'n.d.'}`,
     `- venditore professionale: ${c.sellerBusiness == null ? 'n.d.' : c.sellerBusiness ? 'sì' : 'no'}`,
     `- annuncio in evidenza a pagamento: ${c.promoted ? 'sì' : 'no'}`,
