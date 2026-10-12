@@ -80,7 +80,7 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
         <Card>
           <SectionLabel>Cerca altrove</SectionLabel>
           <Title>Lo stesso articolo su Vinted, Subito e Wallapop</Title>
-          <Body muted small>Parti da un annuncio letto in Calcola: apri le tre ricerche, l'app legge le pagine che vedi, confronta le foto con Qwen 3.8 Flash (Claude Haiku 5.5 di riserva) e ordina gli annunci per il prezzo finale atteso. I testi della trattativa li scrive GPT-6 Luna. Titoli, descrizioni e foto degli annunci vanno a questi fornitori; nomi dei venditori no.</Body>
+          <Body muted small>Parti da un annuncio letto in Calcola: apri le tre ricerche, l'app legge le pagine che vedi, confronta le foto con Qwen 3.8 Flash (Claude Haiku 5.5 di riserva) e ordina gli annunci per il prezzo finale atteso. I testi della trattativa li scrive GPT-6 Luna. Titoli, descrizioni e foto degli annunci vanno a questi fornitori, con telefoni, e-mail e profili social sostituiti da «[contatto]»; nomi dei venditori no.</Body>
           <Button label="Apri «Cerca altrove»" onPress={onOpenSearch} />
         </Card>
       ) : null}

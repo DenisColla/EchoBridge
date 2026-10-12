@@ -11,6 +11,7 @@
 import { analyzeOffer } from './analyze.js'
 import { buildFormFromExtraction } from './extract.js'
 import { formatEuro } from './messages.js'
+import { scrubContacts } from './privacy.js'
 import { XLSX_FORMATS, buildXlsx } from './xlsx.js'
 
 export const LAB_VERSION = 1
@@ -50,7 +51,7 @@ const VERIFY_SYSTEM = [
 
 const listingText = (who, l) => [
   `${who}:`,
-  `- titolo: ${l.title || 'n.d.'}`,
+  `- titolo: ${l.title ? scrubContacts(l.title) : 'n.d.'}`,
   `- marca: ${l.brand || 'n.d.'}`,
   `- taglia/misura: ${l.size || 'n.d.'}`,
   `- condizioni dichiarate: ${l.condition || 'n.d.'}`,

@@ -13,10 +13,9 @@ import { CHANNELS, buyerFee, offerFloorFor, withCosts } from './channels.js'
 import { vintedSearchQuery } from './catalog.js'
 import { engineFactsFor } from './ailab.js'
 import { formatEuro } from './messages.js'
+import { scrubContacts } from './privacy.js'
 
 const round2 = (n) => Math.round(n * 100 + 1e-7) / 100
-// Contacts never reach the AI providers: e-mail addresses and phone-like numbers in listing texts are blanked.
-export const scrubContacts = (s) => String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[contatto]').replace(/\+?\d(?:[\s./-]?\d){7,}/g, '[contatto]')
 
 /* ───────── 1. product card ───────── */
 
@@ -54,7 +53,7 @@ export function productPrompt(reference) {
     system: PRODUCT_SYSTEM,
     text: [
       'Annuncio di partenza:',
-      `- titolo: ${reference.title || 'n.d.'}`,
+      `- titolo: ${reference.title ? scrubContacts(reference.title) : 'n.d.'}`,
       `- marca: ${reference.brand || 'n.d.'}`,
       `- taglia/misura: ${reference.size || 'n.d.'}`,
       `- categoria: ${reference.categoryText || 'n.d.'}`,
@@ -110,16 +109,23 @@ export function priceWindow(referencePrice) {
 /* ───────── 2. pre-filter ───────── */
 
 /**
- * Cheap checks before the AI: drops sold/reserved listings, listings without price or photo, accessories (when the
- * reference is not one) and duplicates; ranks the rest by how many must-words they contain and by total, and keeps
- * at most `perChannel` per channel. Returns { kept, dropped: { reason: count } }.
+ * Cheap checks before the AI: drops sold/reserved listings, listings that cannot be shipped, listings without price or
+ * photo or outside the price window (the sites' own price filters are not reliable), accessories (when the reference
+ * is not one) and duplicates; ranks the rest by how many must-words they contain and by total, and keeps at most
+ * `perChannel` per channel. Returns { kept, dropped: { reason: count } }.
  */
-export function prefilter(candidates, product, reference, { perChannel = 20 } = {}) {
+export function prefilter(candidates, product, reference, { perChannel = 20, window = null } = {}) {
   const dropped = {}
   const drop = (why) => { dropped[why] = (dropped[why] || 0) + 1 }
-  const refWords = new Set(words(`${reference.title || ''} ${reference.description || ''}`))
-  const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refWords.has(w.split(' ')[0]))
+  // An accessory word stays out of the filter only when the reference IS that accessory ("Cover per Tab S9"): the
+  // description often lists the extras ("con cover e caricatore") and must not switch the filter off.
+  const refTitle = ` ${words(reference.title).join(' ')} `
+  const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refTitle.startsWith(` ${w} `))
   const must = (product.mustWords || []).map((w) => words(w).join(' ')).filter(Boolean)
+  const target = must.length ? `( [a-z0-9]+){0,3} (${must.join('|')}) ` : ' '
+  const forProduct = (a) => new RegExp(` ${a}( [a-z0-9]+){0,2} per${target}`)
+  const minPrice = window && Number.isFinite(window.minPrice) ? window.minPrice : null
+  const maxPrice = window && Number.isFinite(window.maxPrice) ? window.maxPrice : null
   const seen = new Set()
   const scored = []
   for (const c of candidates) {
@@ -128,12 +134,15 @@ export function prefilter(candidates, product, reference, { perChannel = 20 } = 
     seen.add(key)
     if (reference.id && c.source === (reference.source || 'vinted') && String(c.id) === String(reference.id)) { drop('annuncio di partenza'); continue }
     if (c.sold || c.reserved) { drop('venduto o riservato'); continue }
+    if (c.shipping && c.shipping.available === false) { drop('senza spedizione'); continue }
     if (!Number.isFinite(c.price) || c.price <= 0) { drop('senza prezzo'); continue }
+    if ((minPrice != null && c.price < minPrice) || (maxPrice != null && c.price > maxPrice)) { drop('fuori fascia di prezzo'); continue }
     if (!c.photo) { drop('senza foto'); continue }
     // An accessory sold for the product: its title starts with the accessory ("Cover Galaxy Tab S9") or names it
-    // together with "per" ("Pellicola vetro per Tab S9"). "Tab S9 con caricatore" is the product, and stays.
+    // shortly before "per" + the product ("Pellicola vetro temperato per Tab S9"). "Tab S9 con cover, perfetto per la
+    // scuola" is the product, and stays.
     const text = ` ${words(c.title).join(' ')} `
-    const isAccessory = accessories.some((a) => text.startsWith(` ${a} `) || (text.includes(` ${a} `) && text.includes(' per ')))
+    const isAccessory = accessories.some((a) => text.startsWith(` ${a} `) || forProduct(a).test(text))
     if (isAccessory) { drop('accessorio'); continue }
     const all = ` ${words(`${c.title} ${c.description || ''}`).join(' ')} `
     const hits = must.length ? must.filter((m) => all.includes(` ${m} `)).length / must.length : 1
@@ -181,7 +190,7 @@ const SEARCH_VERIFY_SYSTEM = [
 const describeListing = (who, l, extra = []) => [
   `${who}:`,
   `- canale: ${CHANNELS[l.source] ? CHANNELS[l.source].label : l.source || 'n.d.'}`,
-  `- titolo: ${l.title || 'n.d.'}`,
+  `- titolo: ${l.title ? scrubContacts(l.title) : 'n.d.'}`,
   `- marca: ${l.brand || 'n.d.'}`,
   `- taglia/misura: ${l.size || 'n.d.'}`,
   `- condizioni dichiarate: ${l.condition || 'n.d.'}`,
@@ -217,9 +226,9 @@ export function searchVerifyPrompt(reference, product, candidate, { withReferenc
  */
 export function negotiationFor(candidate, now = new Date()) {
   const price = candidate.price
-  const floor = offerFloorFor(candidate.source, price, { sellerBusiness: candidate.sellerBusiness })
+  const floor = offerFloorFor(candidate.source, price, { sellerBusiness: candidate.sellerBusiness, refurbished: candidate.refurbished })
   if (!Number.isFinite(price) || floor == null) return null
-  if (floor >= price) return { offer: price, probability: 1, expectedPrice: price, estimated: candidate.source !== 'vinted', note: 'Niente offerte su questo annuncio (venditore professionale).' }
+  if (floor >= price) return { offer: price, probability: 1, expectedPrice: price, estimated: candidate.source !== 'vinted', note: candidate.refurbished ? 'Niente offerte su questo annuncio (ricondizionato).' : 'Niente offerte su questo annuncio (venditore professionale).' }
   const facts = engineFactsFor({ ...candidate, price }, {}, now)
   if (!facts || !Number.isFinite(facts.target) || !Number.isFinite(facts.probability)) {
     return { offer: price, probability: 1, expectedPrice: price, estimated: true, note: facts && facts.note ? facts.note : null }
@@ -257,6 +266,8 @@ export function rankResults(results, now = new Date()) {
     if (c.shippingEstimated) { penalty += 0.01; risks.push('spedizione stimata') }
     if (c.feeEstimated) risks.push('commissione stimata')
     if (c.abroad) { penalty += 0.02; risks.push('spedizione dall\'estero') }
+    // Wallapop search results do not say whether the seller is PRO (no offers allowed): the negotiation may not exist.
+    if (c.source === 'wallapop' && c.sellerBusiness == null && neg && neg.offer < c.price) risks.push('offerta possibile solo se il venditore non è PRO')
     if (neg && neg.estimated) risks.push('trattativa stimata con il modello Vinted')
     rows.push({
       group, candidate: c, verdict: r.verdict, confidence, reason: r.reason || '', differences: r.differences || [],

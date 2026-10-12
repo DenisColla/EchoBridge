@@ -45,7 +45,7 @@ function Explanation({ value }) {
   )
 }
 
-function ResultRow({ row, outlook, explanation, onExplain, canExplain }) {
+function ResultRow({ row, outlook, explanation, onExplain, canExplain, stale }) {
   const t = useTheme()
   const c = row.candidate
   const v = VERDICT[row.group === 'alternative' ? 'alternative' : row.verdict] || VERDICT.same
@@ -70,7 +70,7 @@ function ResultRow({ row, outlook, explanation, onExplain, canExplain }) {
           Prezzo {formatEuro(c.price)} + commissione {Number.isFinite(c.buyerFee) ? formatEuro(c.buyerFee) : 'n.d.'}{est(c.feeEstimated)} + spedizione {Number.isFinite(c.shippingCost) ? formatEuro(c.shippingCost) : 'n.d.'}{est(c.shippingEstimated)} = {formatEuro(row.totalNow)} subito
         </Body>
         {negotiated ? (
-          <Body small>Offri {formatEuro(row.offer)}: accettata nel {pct(row.probability)} dei casi stimati{row.sendLabel ? `, meglio ${row.sendLabel}` : ''}.</Body>
+          <Body small>Offri {formatEuro(row.offer)}: accettata nel {pct(row.probability)} dei casi stimati{row.sendLabel && !stale ? `, meglio ${row.sendLabel}` : ''}.</Body>
         ) : row.negotiationNote ? <Body small muted>{row.negotiationNote}</Body> : null}
         {saving ? (
           <Body small style={{ color: saving.expected > 0 ? t.good : t.ink3, fontWeight: '600' }}>
@@ -109,7 +109,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
 
   const keys = search.keys
   const last = search.store && search.store.last
-  const sameReference = run && reference && run.reference && run.reference.url === reference.url
+  const sameReference = run && !run.reopened && reference && run.reference && run.reference.url === reference.url
 
   if (!run) {
     return (
@@ -160,7 +160,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
   }
   const restart = () => {
     if (!reference) return
-    Alert.alert('Nuova ricerca?', 'La ricerca attuale viene chiusa: resta riapribile solo se era finita.', [
+    Alert.alert('Nuova ricerca?', 'La ricerca attuale viene chiusa. Puoi riaprire l\'ultima ricerca analizzata finché non ne analizzi un\'altra.', [
       { text: 'Annulla', style: 'cancel' },
       { text: 'Nuova ricerca', onPress: () => search.start(reference) },
     ])
@@ -184,6 +184,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
         </View>
         {!ref.photo ? <Body small muted>Senza foto: il confronto userà solo i testi e sarà meno sicuro.</Body> : null}
         {reference && !sameReference && !running ? <Button label="Nuova ricerca dall'annuncio in Calcola" small variant="secondary" onPress={restart} /> : null}
+        {last && !running && last.at !== run.finishedAt ? <Button label="Riapri l'ultima ricerca analizzata" small variant="ghost" onPress={search.reopenLast} /> : null}
       </Card>
 
       {keys && !keys.verify ? (
@@ -216,7 +217,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
           ))}
           {Number.isFinite(run.window.minPrice) ? <Body small muted>Prezzi tra {formatEuro(run.window.minPrice)} e {formatEuro(run.window.maxPrice)}, solo annunci con spedizione.</Body> : null}
           <View style={{ gap: space.xs }}>
-            <Body small>Wallapop ordina per distanza da: <Text style={{ fontWeight: '700' }}>{search.city.label}</Text> <Text style={{ color: t.accentInk, fontWeight: '700' }} onPress={() => setShowCities((v) => !v)}>{showCities ? 'chiudi' : 'cambia'}</Text></Body>
+            <Body small>Wallapop cerca intorno a: <Text style={{ fontWeight: '700' }}>{search.city.label}</Text> <Text style={{ color: t.accentInk, fontWeight: '700' }} onPress={() => setShowCities((v) => !v)}>{showCities ? 'chiudi' : 'cambia'}</Text></Body>
             {showCities ? (
               <View style={styles.badges}>
                 {ITALIAN_CITIES.map((c) => <Chip key={c.label} compact label={c.label} active={c.label === search.city.label} onPress={() => { search.setCity(c.label); setShowCities(false) }} />)}
@@ -225,7 +226,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
           </View>
           <Body small muted>Letti: {reads.map((r) => `${CHANNELS[r.id].label} ${r.read ? r.items.length : '—'}`).join(' · ')}</Body>
           <ButtonRow>
-            <Button label={totalRead ? 'Riapri le ricerche' : 'Apri le ricerche'} variant={totalRead ? 'secondary' : 'primary'} onPress={() => setSweepOpen(true)} disabled={running || run.cardLoading} />
+            <Button label={totalRead ? 'Riapri le ricerche' : 'Apri le ricerche'} variant={totalRead ? 'secondary' : 'primary'} onPress={() => setSweepOpen(true)} disabled={running} />
             {totalRead ? <Button label={`Analizza ${totalRead}`} onPress={analyze} disabled={running} /> : null}
           </ButtonRow>
           <Body small muted>Le pagine si aprono in un browser dentro l'app, senza accesso al tuo account. Leggere i siti con un'app non è previsto dalle loro condizioni d'uso: lo fai tu, su tua richiesta, una pagina alla volta.</Body>
@@ -248,7 +249,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
         <View style={{ gap: space.md }}>
           {run.summary ? (
             <Body small muted>
-              Letti {run.summary.read} · verificati {run.summary.verified} di {run.summary.kept}{run.summary.failed ? ` · ${run.summary.failed} non riusciti` : ''}{run.summary.different ? ` · ${run.summary.different} erano altri prodotti` : ''}{run.summary.cancelled ? ' · interrotta' : ''}{!run.reopened && run.cost ? ` · spesa ${usd(run.cost)}` : ''}
+              Letti {run.summary.read} · verificati {run.summary.verified} di {run.summary.kept}{run.summary.reused ? ` (${run.summary.reused} già verificati prima)` : ''}{run.summary.failed ? ` · ${run.summary.failed} non riusciti` : ''}{run.summary.different ? ` · ${run.summary.different} erano altri prodotti` : ''}{run.summary.cancelled ? ' · interrotta' : ''}{!run.reopened && run.cost ? ` · spesa ${usd(run.cost)}` : ''}
             </Body>
           ) : null}
           {run.dropped && Object.keys(run.dropped).length ? (
@@ -257,14 +258,14 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
 
           <SectionLabel>Stesso articolo, dal più conveniente</SectionLabel>
           {ranking.main.length ? ranking.main.map((row) => (
-            <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} />
+            <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
           )) : <Note>Nessun annuncio dello stesso articolo tra quelli letti. Prova altre parole o scorri di più le ricerche.</Note>}
 
           {ranking.alternatives.length ? (
             <>
               <SectionLabel>Alternative della stessa famiglia</SectionLabel>
               {ranking.alternatives.map((row) => (
-                <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} />
+                <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
               ))}
             </>
           ) : null}

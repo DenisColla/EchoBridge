@@ -135,8 +135,10 @@ export function withCosts(c) {
   const ch = CHANNELS[c.source]
   const fee = c.buyerFee != null && c.source === 'vinted' ? { amount: c.buyerFee, estimated: false } : buyerFee(c.source, c.price)
   const ship = c.shipping || {}
-  const shippingCost = ship.free ? 0 : Number.isFinite(ship.cost) ? ship.cost : ch ? ch.shippingEstimate : null
-  const shippingEstimated = !ship.free && !Number.isFinite(ship.cost)
+  // Hand delivery only: no shipping to estimate, so no total to rank on (the pre-filter drops these listings).
+  const noShipping = ship.available === false
+  const shippingCost = noShipping ? null : ship.free ? 0 : Number.isFinite(ship.cost) ? ship.cost : ch ? ch.shippingEstimate : null
+  const shippingEstimated = !noShipping && !ship.free && !Number.isFinite(ship.cost)
   const total = c.price != null && fee.amount != null && shippingCost != null ? round2(c.price + fee.amount + shippingCost) : null
   return { ...c, buyerFee: fee.amount, feeEstimated: fee.estimated, shippingCost, shippingEstimated, total }
 }
@@ -181,7 +183,9 @@ export function subitoCandidate(ad) {
   const listId = (urn.match(/:list:(\d+)$/) || url.match(/-(\d+)\.htm$/) || [])[1] || urn || url
   const price = num(featureKey(ad, '/price'))
   const images = Array.isArray(ad.images) ? ad.images.map((i) => i && (i.cdnBaseUrl || i.cdn_base_url)).filter((u) => httpsUrl(u, /^https:\/\/images\.sbito\.it\//i)) : []
-  const shippable = featureKey(ad, '/item_shippable') === '1'
+  // '1' shippable, '0' hand delivery only, missing = unknown (the search URL already asks for shippable ads).
+  const shipKey = featureKey(ad, '/item_shippable')
+  const shippable = shipKey === '1' ? true : shipKey === '0' ? false : null
   const shipCost = num(featureKey(ad, '/item_shipping_cost_tuttosubito'))
   const conditionKey = Number(featureKey(ad, '/item_condition'))
   const geo = ad.geo || {}
@@ -210,7 +214,7 @@ export function subitoCandidate(ad) {
     reserved: false,
     sold: sold || (typeKey != null && typeKey !== 's'),
     createdAt: typeof ad.date === 'string' ? ad.date : null,
-    shipping: { available: shippable, cost: shippable ? shipCost : null, free: false },
+    shipping: { available: shippable, cost: shippable !== false ? shipCost : null, free: false },
   })
 }
 
@@ -264,7 +268,9 @@ export function wallapopCandidate(it) {
   const price = it.price && typeof it.price === 'object' ? num(it.price.amount) : num(it.price)
   const imgs = Array.isArray(it.images) ? it.images.map((i) => i && i.urls && (i.urls.medium || i.urls.big || i.urls.small)).filter((u) => httpsUrl(u, /^https:\/\/cdn\.wallapop\.com\//i)) : []
   const ship = it.shipping || {}
-  const shippable = Boolean(ship.item_is_shippable && ship.user_allows_shipping)
+  // Explicit false = hand delivery only; missing fields = unknown (the search URL asks for shippable items).
+  const shippable = ship.item_is_shippable === false || ship.user_allows_shipping === false ? false
+    : ship.item_is_shippable === true && ship.user_allows_shipping === true ? true : null
   const loc = it.location || {}
   const cond = it.type_attributes && it.type_attributes.condition && it.type_attributes.condition.value
   return withCosts({
@@ -286,12 +292,13 @@ export function wallapopCandidate(it) {
     thumb: imgs[0] || null,
     sellerId: it.user_id != null ? String(it.user_id) : null,
     sellerBusiness: null, // not in search results (only on the item page)
+    refurbished: Boolean(it.is_refurbished && it.is_refurbished.flag),
     location: [loc.city, loc.country_code && loc.country_code !== 'IT' ? loc.country_code : null].filter(Boolean).join(' ') || null,
     abroad: Boolean(loc.country_code && loc.country_code !== 'IT'),
     reserved: Boolean(it.reserved && it.reserved.flag),
     sold: false,
     createdAt: Number.isFinite(it.created_at) ? new Date(it.created_at).toISOString() : null,
-    shipping: { available: shippable, cost: null, free: shippable && ship.cost_configuration_id === SELLER_PAYS },
+    shipping: { available: shippable, cost: null, free: shippable === true && ship.cost_configuration_id === SELLER_PAYS },
   })
 }
 
@@ -327,9 +334,9 @@ export function parseWallapopSearch(json) {
 }
 
 /** Highest offer floor and other limits that change what to suggest, per channel. */
-export function offerFloorFor(channelId, price, { sellerBusiness = false } = {}) {
+export function offerFloorFor(channelId, price, { sellerBusiness = false, refurbished = false } = {}) {
   const ch = CHANNELS[channelId]
   if (!ch || !Number.isFinite(price)) return null
-  if (channelId === 'wallapop' && sellerBusiness) return price // no offers to PRO sellers
+  if (channelId === 'wallapop' && (sellerBusiness || refurbished)) return price // no offers to PRO sellers or on refurbished items
   return round2(price * ch.offerFloor)
 }

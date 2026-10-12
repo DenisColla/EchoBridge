@@ -68,12 +68,18 @@ export function useSearch() {
     setRun(next)
     return next
   }, [])
-  const addSpend = useCallback((modelKey, usd) => {
+  /** Spend goes to the provider's total, and to the run's own counter only if that run is still on screen. */
+  const addSpend = useCallback((modelKey, usd, runId) => {
     if (!usd) return
     const p = providerOf(modelKey || 'altro:x')
     updateStore((s) => ({ ...s, spend: { ...s.spend, [p]: (s.spend[p] || 0) + usd } }))
-    updateRun((r) => (r ? { ...r, cost: (r.cost || 0) + usd } : r))
+    updateRun((r) => (r && r.id === runId ? { ...r, cost: (r.cost || 0) + usd } : r))
   }, [updateRun, updateStore])
+  const cardAbortRef = useRef(null)
+  const stopAll = useCallback(() => {
+    if (abortRef.current) abortRef.current.abort()
+    if (cardAbortRef.current) cardAbortRef.current.abort()
+  }, [])
 
   /** Which chains have at least one key: verification (Qwen/Haiku) and texts (GPT/Haiku). */
   const [keys, setKeys] = useState(null)
@@ -92,20 +98,24 @@ export function useSearch() {
 
   /** Starts a search from a listing: the product card is asked to the AI (falls back to the title words). */
   const start = useCallback(async (reference) => {
-    // A new search stops whatever the previous one was still verifying; late answers are ignored by run id.
-    if (abortRef.current) abortRef.current.abort()
+    // A new search stops whatever the previous one was still doing; late answers are ignored by run id.
+    stopAll()
+    const cardController = new AbortController()
+    cardAbortRef.current = cardController
     const id = ++runCounter
     const fb = fallbackProduct(reference)
     updateRun({
       id, phase: 'card', reference, product: fb, window: priceWindow(reference.price), outlook: referenceOutlook(reference, new Date()), cardLoading: true, queries: Object.fromEntries(CHANNEL_IDS.map((id) => [id, fb.query])),
-      channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false, raw: null }])), job: null, ranking: null, cost: 0, explanations: {}, error: null,
+      channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false, raw: null }])), job: null, ranking: null, cost: 0, explanations: {}, verdicts: {}, error: null,
     })
-    const res = await callChain(TEXT_CHAIN, productPrompt(reference), [], { effort: 'low', maxTokens: 1500, timeoutMs: 60_000 })
-    if (res.costUsd) addSpend(res.modelKey, res.costUsd)
+    // The fallback card is usable at once: the AI card only refines it, with one short attempt per model.
+    const res = await callChain(TEXT_CHAIN, productPrompt(reference), [], { effort: 'low', maxTokens: 1500, timeoutMs: 30_000, signal: cardController.signal })
+    if (cardAbortRef.current === cardController) cardAbortRef.current = null
+    if (res.costUsd) addSpend(res.modelKey, res.costUsd, id)
     if (!runRef.current || runRef.current.id !== id) return
     const product = res.ok ? cleanProduct(res.value, reference) : fb
     updateRun((r) => (r && r.id === id ? { ...r, product, cardLoading: false, cardError: res.ok ? null : res.error, queries: Object.fromEntries(CHANNEL_IDS.map((ch) => [ch, r.queries[ch] && r.queries[ch] !== fb.query ? r.queries[ch] : product.query])) } : r))
-  }, [addSpend, updateRun])
+  }, [stopAll, addSpend, updateRun])
 
   const setQuery = useCallback((channel, q) => updateRun((r) => (r ? { ...r, queries: { ...r.queries, [channel]: q } } : r)), [updateRun])
   const searchUrlFor = useCallback((channel) => {
@@ -117,6 +127,10 @@ export function useSearch() {
   /** Results read from a channel's page (replaces that channel's previous read). */
   const setChannelResults = useCallback((channel, items, raw) => updateRun((r) => (r ? {
     ...r, channels: { ...r.channels, [channel]: { items, read: true, raw: items.length ? null : raw || null } },
+  } : r)), [updateRun])
+  /** A new query on a channel: what it read before no longer counts. */
+  const resetChannel = useCallback((channel) => updateRun((r) => (r ? {
+    ...r, channels: { ...r.channels, [channel]: { items: [], read: false, raw: null } },
   } : r)), [updateRun])
   /** Wallapop loads more results while the user scrolls: they are added, not replaced. */
   const addChannelResults = useCallback((channel, items) => updateRun((r) => {
@@ -137,10 +151,16 @@ export function useSearch() {
     const id = r.id
     const mine = (x) => Boolean(x && x.id === id)
     const withReferencePhoto = Boolean(reference.photo)
-    const { kept, dropped } = prefilter(all, r.product, reference, { perChannel: PER_CHANNEL })
+    const { kept, dropped } = prefilter(all, r.product, reference, { perChannel: PER_CHANNEL, window: r.window })
+    // Listings already verified in this search are not paid for twice (the fresh listing data is kept).
+    const keyOf = (c) => `${c.source}:${c.id}`
+    const cache = r.verdicts || {}
+    const reused = kept.filter((c) => cache[keyOf(c)]).map((c) => ({ candidate: c, ...cache[keyOf(c)].value, model: cache[keyOf(c)].model }))
+    const todo = kept.filter((c) => !cache[keyOf(c)])
+    const fresh = {}
     const controller = new AbortController()
     abortRef.current = controller
-    updateRun((x) => ({ ...x, phase: 'analyze', dropped, job: { running: true, done: 0, total: kept.length, failed: 0 }, ranking: null }))
+    updateRun((x) => ({ ...x, phase: 'analyze', dropped, job: { running: true, done: 0, total: todo.length, failed: 0 } }))
     const results = []
     const failures = []
     let next = 0
@@ -155,36 +175,39 @@ export function useSearch() {
       return callChain(VERIFY_CHAIN, searchVerifyPrompt(reference, r.product, c, { withReferencePhoto }), images, { effort: 'low', maxTokens: 1500, timeoutMs: 90_000, signal: controller.signal })
     }
     const worker = async () => {
-      while (next < kept.length && !controller.signal.aborted) {
-        const c = kept[next++]
+      while (next < todo.length && !controller.signal.aborted) {
+        const c = todo[next++]
         let res
         try {
           res = await verifyOne(c)
         } catch (e) {
           res = { ok: false, error: String(e && e.message ? e.message : e), kind: 'request' }
         }
-        if (res.costUsd) addSpend(res.modelKey, res.costUsd)
+        if (res.costUsd) addSpend(res.modelKey, res.costUsd, id)
         if (res.kind === 'cancelled') continue
         done++
-        if (res.ok) results.push({ candidate: c, ...res.value, model: res.modelKey })
-        else failures.push({ candidate: c, error: res.error, kind: res.kind, infra: NOT_MODEL_KINDS.includes(res.kind) })
-        updateRun((x) => (mine(x) ? { ...x, job: { running: true, done, total: kept.length, failed: failures.length } } : x))
+        if (res.ok) {
+          results.push({ candidate: c, ...res.value, model: res.modelKey })
+          fresh[keyOf(c)] = { value: res.value, model: res.modelKey }
+        } else failures.push({ candidate: c, error: res.error, kind: res.kind, infra: NOT_MODEL_KINDS.includes(res.kind) })
+        updateRun((x) => (mine(x) ? { ...x, job: { running: true, done, total: todo.length, failed: failures.length } } : x))
       }
     }
     try {
-      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, kept.length) }, worker))
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker))
     } finally {
       if (abortRef.current === controller) abortRef.current = null
     }
     if (!mine(runRef.current)) return null
     const now = new Date()
-    const ranking = rankResults(results, now)
+    const verified = [...reused, ...results]
+    const ranking = rankResults(verified, now)
     const outlook = referenceOutlook(reference, now)
     const summary = {
-      read: all.length, kept: kept.length, verified: results.length, failed: failures.length, cancelled: controller.signal.aborted,
-      different: results.filter((x) => x.verdict === 'different' && !x.family).length,
+      read: all.length, kept: kept.length, verified: verified.length, reused: reused.length, failed: failures.length, cancelled: controller.signal.aborted,
+      different: verified.filter((x) => x.verdict === 'different' && !x.family).length,
     }
-    const finished = updateRun((x) => (mine(x) ? { ...x, phase: 'done', job: null, ranking, failures, summary, outlook, finishedAt: now.toISOString() } : x))
+    const finished = updateRun((x) => (mine(x) ? { ...x, phase: 'done', job: null, ranking, failures, summary, outlook, verdicts: { ...(x.verdicts || {}), ...fresh }, finishedAt: now.toISOString() } : x))
     if (finished) {
       // Keep the last search to reopen it later (no photos, no prompts).
       updateStore((s) => ({ ...s, last: { reference, product: finished.product, ranking, summary, outlook, at: now.toISOString() } }))
@@ -211,7 +234,7 @@ export function useSearch() {
     }
     const prompt = psychPrompt({ candidate: c, facts, label: row.group === 'alternative' ? 'family' : row.verdict, channelLabel: ch ? ch.label : c.source, channelRules: ch ? ch.offerRules : null })
     const res = await callChain(TEXT_CHAIN, prompt, [], { effort: 'medium', maxTokens: 3000, timeoutMs: 120_000 })
-    if (res.costUsd) addSpend(res.modelKey, res.costUsd)
+    if (res.costUsd) addSpend(res.modelKey, res.costUsd, id)
     updateRun((x) => (x && x.id === id ? { ...x, explanations: { ...x.explanations, [key]: res.ok ? { value: res.value } : { error: res.error || 'Testo non disponibile' } } } : x))
   }, [addSpend, updateRun])
 
@@ -219,18 +242,18 @@ export function useSearch() {
   const reopenLast = useCallback(() => {
     const last = storeRef.current && storeRef.current.last
     if (!last) return false
-    if (abortRef.current) abortRef.current.abort()
+    stopAll()
     updateRun({ id: ++runCounter, phase: 'done', reference: last.reference, product: last.product, ranking: last.ranking, summary: last.summary, outlook: last.outlook || null, finishedAt: last.at, channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false }])), queries: {}, explanations: {}, cost: 0, reopened: true })
     return true
-  }, [updateRun])
+  }, [stopAll, updateRun])
 
   const close = useCallback(() => {
-    if (abortRef.current) abortRef.current.abort()
+    stopAll()
     updateRun(null)
-  }, [updateRun])
+  }, [stopAll, updateRun])
 
   return {
-    ready: Boolean(store), store, run, keys, checkKeys, city, setCity, start, setQuery, searchUrlFor, setChannelResults, addChannelResults, setPhase,
+    ready: Boolean(store), store, run, keys, checkKeys, city, setCity, start, setQuery, searchUrlFor, setChannelResults, resetChannel, addChannelResults, setPhase,
     analyze, cancel, explain, reopenLast, close,
   }
 }

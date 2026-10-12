@@ -192,3 +192,50 @@ test('search: phone numbers and e-mails in listing texts never reach the provide
   const p = productPrompt({ title: 'Tab S9+', description: 'chiamami 3331234567' })
   assert.doesNotMatch(p.text, /3331234567/)
 })
+
+test('privacy: contacts are blanked in every common Italian shape and in titles; model lists, sizes, dates and prices stay', () => {
+  const blanked = ['333 - 1234567', '333  1234567', '333 . 123 . 4567', '333 / 123 45 67', '+39 (333) 1234567', 'tel 06 1234 5678', '0039 3331234567',
+    'mario.rossi @ gmail.com', 'mario.rossi(at)gmail(dot)com', 'mario chiocciola gmail punto com', 'Telegram @mario_rossi92', 'IG: mario.rossi', 'wa.me/393331234567']
+  for (const s of blanked) assert.doesNotMatch(scrubContacts(s), /\d{6,}|rossi|mario/, s)
+  assert.equal(scrubContacts('iPhone 13 3331234567'), 'iPhone 13 [contatto]')
+  for (const s of ['Cover compatibile con iPhone 11 12 13 14', 'Acquistato il 12/05/2023, garanzia fino al 03/05/2025', 'taglie 38 39 40 41 42', '30 x 40 x 50 cm', 'EAN 8806094935561', 'stagione 2023/2024']) {
+    assert.equal(scrubContacts(s), s)
+  }
+  const v = searchVerifyPrompt({ title: 'Tab S9+ wa 3331234567', price: 500 }, null, cand('1', 'iPhone 13 chiama 333 1234567', 300, { description: 'Telegram @mario_rossi92' }))
+  assert.doesNotMatch(v.text, /3331234567|333 1234567|mario_rossi92/)
+  assert.doesNotMatch(productPrompt({ title: 'Tab S9+ 333 1234567' }).text, /1234567/)
+})
+
+test('search: accessory filter ignores extras in the reference description, "per" must follow the accessory closely, price window and hand-delivery-only listings are dropped', () => {
+  const product = { mustWords: ['iphone'], accessoryWords: ['cover', 'pellicola', 'caricatore'] }
+  const ref = { source: 'vinted', id: 'r', title: 'iPhone 13 128GB con cover', description: 'Vendo con cover e pellicola in omaggio, caricatore incluso', price: 400 }
+  const list = [
+    cand('a', 'Cover iPhone 13 silicone', 150),
+    cand('b', 'Pellicola vetro temperato per iPhone 13', 130),
+    cand('c', 'iPhone 13 con cover, perfetto per la scuola', 350),
+    cand('d', 'iPhone 13 128GB', 20),
+    cand('e', 'iPhone 13 128GB ritiro a mano', 300, { shipping: { available: false } }),
+    cand('f', 'iPhone 13 Pro Max 1TB', 900),
+  ]
+  const { kept, dropped } = prefilter(list, product, ref, { window: priceWindow(400) })
+  assert.deepEqual(kept.map((c) => c.id), ['c'])
+  assert.deepEqual(dropped, { accessorio: 2, 'fuori fascia di prezzo': 2, 'senza spedizione': 1 })
+  // a reference that is itself a cover still keeps covers
+  assert.equal(prefilter([cand('a', 'Cover iPhone 13 silicone', 15)], product, { title: 'Cover iPhone 13 MagSafe', price: 20 }).kept.length, 1)
+  // hand delivery only: no shipping estimate and no total to rank on
+  const local = withCosts({ source: 'wallapop', id: 'w', title: 'x', price: 100, shipping: { available: false } })
+  assert.deepEqual([local.shippingCost, local.total], [null, null])
+})
+
+test('channels: shipping is unknown (not "hand delivery") when the page omits it; Wallapop refurbished items get no offer and PRO is flagged as a risk', () => {
+  const w = (extra) => parseWallapopSearch({ data: { section: { items: [{ id: 'x', title: 'iPhone 13', web_slug: 'iphone-13-1', price: { amount: 400, currency: 'EUR' }, images: [{ urls: { medium: 'https://cdn.wallapop.com/x.jpg' } }], ...extra }] } } }).items[0]
+  assert.equal(w({}).shipping.available, null)
+  assert.equal(w({ shipping: { item_is_shippable: false, user_allows_shipping: true } }).shipping.available, false)
+  assert.equal(w({ shipping: { item_is_shippable: true, user_allows_shipping: true } }).shipping.available, true)
+  const now = new Date('2026-10-12T10:00:00Z')
+  const refurb = negotiationFor(w({ is_refurbished: { flag: true } }), now)
+  assert.deepEqual([refurb.offer, refurb.expectedPrice], [400, 400])
+  assert.match(refurb.note, /ricondizionato/)
+  const { main } = rankResults([{ candidate: w({}), verdict: 'same', family: false, confidence: 0.9, redFlags: [], reason: '' }], now)
+  assert.ok(main[0].risks.includes('offerta possibile solo se il venditore non è PRO'))
+})

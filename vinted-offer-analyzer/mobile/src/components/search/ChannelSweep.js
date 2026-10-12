@@ -16,14 +16,18 @@ import { shareDiagnostic } from '../../services/searchStore.js'
 const VINTED_PROBE = `(function () {
   if (window.__ovtRead) return; window.__ovtRead = true;
   var post = function (m) { try { window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch (e) {} };
+  var waited = 0, n = 0;
   var tick = function () {
     var ready = document.readyState !== 'loading';
+    var challenge = !!(window._cf_chl_opt || document.querySelector('iframe[src*="challenges.cloudflare.com"]'));
     var parts = [];
     if (ready) { var s = document.querySelectorAll('script'); for (var i = 0; i < s.length; i++) { var t = s[i].textContent || ''; if (t.indexOf('self.__next_f.push') >= 0) parts.push(t); } }
     var joined = parts.join('\\n');
     if (ready && joined.indexOf('productItem') >= 0) { post({ type: 'page', channel: 'vinted', url: location.href, text: joined }); return; }
-    post({ type: 'state', channel: 'vinted', url: location.href, ready: ready, challenge: !!(window._cf_chl_opt || document.querySelector('iframe[src*="challenges.cloudflare.com"]')) });
-    setTimeout(tick, 800);
+    // No results, or a page the reader does not know: after ~12 s on a loaded page, report it (0 read + diagnosis).
+    if (ready && !challenge && ++waited >= 15) { post({ type: 'page', channel: 'vinted', url: location.href, text: joined || document.documentElement.outerHTML.slice(0, 2500000) }); return; }
+    post({ type: 'state', channel: 'vinted', url: location.href, ready: ready, challenge: challenge });
+    if (++n < 150) setTimeout(tick, 800);
   };
   tick();
 })();
@@ -32,12 +36,16 @@ true;`
 const SUBITO_PROBE = `(function () {
   if (window.__ovtRead) return; window.__ovtRead = true;
   var post = function (m) { try { window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch (e) {} };
-  var n = 0;
+  var waited = 0, n = 0;
   var tick = function () {
     var el = document.getElementById('__NEXT_DATA__');
     if (el && el.textContent) { post({ type: 'page', channel: 'subito', url: location.href, text: el.textContent }); return; }
-    post({ type: 'state', channel: 'subito', url: location.href, ready: document.readyState !== 'loading', challenge: !!document.querySelector('iframe[src*="captcha-delivery.com"]') });
-    if (++n < 60) setTimeout(tick, 800);
+    var ready = document.readyState !== 'loading';
+    var challenge = !!document.querySelector('iframe[src*="captcha-delivery.com"]');
+    // A loaded page without the data the reader expects: report it after ~12 s (0 read + diagnosis).
+    if (ready && !challenge && ++waited >= 15) { post({ type: 'page', channel: 'subito', url: location.href, text: document.documentElement.outerHTML.slice(0, 2500000) }); return; }
+    post({ type: 'state', channel: 'subito', url: location.href, ready: ready, challenge: challenge });
+    if (++n < 150) setTimeout(tick, 800);
   };
   tick();
 })();
@@ -62,10 +70,16 @@ true;`
 
 const HOSTS = {
   vinted: (h) => h === 'vinted.it' || h.endsWith('.vinted.it') || h === 'challenges.cloudflare.com',
-  subito: (h) => (h === 'subito.it' || h.endsWith('.subito.it')) && h !== 'areariservata.subito.it' || h.endsWith('captcha-delivery.com'),
+  subito: (h) => ((h === 'subito.it' || h.endsWith('.subito.it')) && h !== 'areariservata.subito.it') || h === 'captcha-delivery.com' || h.endsWith('.captcha-delivery.com'),
   wallapop: (h) => h === 'wallapop.com' || h.endsWith('.wallapop.com'),
 }
-const NO_LOGIN = /^https:\/\/[^/]+\/(member\/(general\/)?(login|signup|register)|oauth|auth|login|app\/|areariservata)(\/|\?|$)/i
+/** Pages whose messages are read: the channel's own site only (never the anti-robot check frames). */
+const OWN = {
+  vinted: (h) => h === 'vinted.it' || h.endsWith('.vinted.it'),
+  subito: (h) => (h === 'subito.it' || h.endsWith('.subito.it')) && h !== 'areariservata.subito.it',
+  wallapop: (h) => h === 'wallapop.com' || h.endsWith('.wallapop.com'),
+}
+const NO_LOGIN = /^https:\/\/[^/]+\/(member\/(general\/)?(login|signup|register)|oauth|auth|login|app|areariservata)(\/|\?|$)/i
 const SEARCH_PAGE = {
   vinted: (u) => /^https:\/\/[^/]+\/catalog(\?|\/|$)/i.test(u),
   subito: (u) => /^https:\/\/[^/]*subito\.it\/annunci-/i.test(u),
@@ -113,6 +127,8 @@ export function ChannelSweep({ search, onClose, onDone }) {
   const searchAgain = () => {
     if (!draft.trim()) return
     search.setQuery(channel, draft.trim())
+    // A new query replaces what this channel read before (Wallapop would otherwise add to the old results).
+    search.resetChannel(channel)
     setChallenge(false)
     setTimeout(() => setLoadKey((k) => k + 1), 0)
   }
@@ -129,7 +145,7 @@ export function ChannelSweep({ search, onClose, onDone }) {
   }
 
   const onMessage = (event) => {
-    if (!HOSTS[channel](hostOf(event.nativeEvent.url))) return
+    if (!OWN[channel](hostOf(event.nativeEvent.url))) return
     let msg
     try {
       msg = JSON.parse(event.nativeEvent.data)
@@ -186,7 +202,7 @@ export function ChannelSweep({ search, onClose, onDone }) {
               onMessage={onMessage}
               onNavigationStateChange={(s) => setNav({ canGoBack: Boolean(s.canGoBack) })}
               onShouldStartLoadWithRequest={(req) => allowNavigation(channel, req.url || '')}
-              originWhitelist={['https://*']}
+              originWhitelist={['*']}
               javaScriptEnabled
               domStorageEnabled
               thirdPartyCookiesEnabled
@@ -200,7 +216,7 @@ export function ChannelSweep({ search, onClose, onDone }) {
           {challenge ? <Body small>Il sito sta facendo un controllo anti-robot: se compare una casella, toccala.</Body> : null}
           {read.read && !read.items.length ? (
             <View style={{ gap: space.xs }}>
-              <Note tone="warn">Nessun annuncio letto da {CHANNELS[channel].label}. Prova a scorrere o a cambiare le parole.</Note>
+              <Note tone="warn">Nessun annuncio letto da {CHANNELS[channel].label}. {channel === 'wallapop' ? 'Prova a scorrere o a cambiare le parole.' : 'Prova a cambiare le parole.'}</Note>
               {read.raw ? <Button label="Invia la pagina per diagnosi" variant="ghost" small onPress={() => shareDiagnostic(channel, read.raw)} /> : null}
             </View>
           ) : null}

@@ -567,7 +567,7 @@ function Main() {
                   onSkipExploration={result.exploration ? skipExploration : null}
                 />
               )}
-              {(lastListing && result) || (search.run && search.run.job && search.run.job.running) ? (
+              {(lastListing && result && form.link === lastListing.url) || (search.run && search.run.job && search.run.job.running) ? (
                 <Card muted>
                   <Body small muted>{search.run && search.run.job && search.run.job.running
                     ? `Cerca altrove: verifica in corso, ${search.run.job.done} di ${search.run.job.total}.`
