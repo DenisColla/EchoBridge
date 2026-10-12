@@ -113,7 +113,8 @@ export function ChannelSweep({ search, onClose, onDone }) {
   const [challenge, setChallenge] = useState(false)
   const channel = CHANNEL_IDS[index]
   const [draft, setDraft] = useState(run ? run.queries[channel] : '')
-  const url = useMemo(() => search.searchUrlFor(channel), [search, channel, loadKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Recomputed only when the user moves or searches: a product card arriving meanwhile never reloads the page.
+  const url = useMemo(() => search.searchUrlFor(channel), [channel, loadKey]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!run) return null
   const read = run.channels[channel]
   const totalRead = CHANNEL_IDS.reduce((n, id) => n + run.channels[id].items.length, 0)
@@ -159,12 +160,12 @@ export function ChannelSweep({ search, onClose, onDone }) {
     }
     if (typeof msg.text !== 'string' || !SEARCH_PAGE[channel](String(msg.url || ''))) return
     setChallenge(false)
-    if (channel === 'vinted' && msg.type === 'page') search.setChannelResults('vinted', readVinted(msg.text), msg.text)
-    else if (channel === 'subito' && msg.type === 'page') search.setChannelResults('subito', parseSubitoSearch(msg.text).items, msg.text)
+    if (channel === 'vinted' && msg.type === 'page') search.setChannelResults('vinted', readVinted(msg.text), msg.text, url)
+    else if (channel === 'subito' && msg.type === 'page') search.setChannelResults('subito', parseSubitoSearch(msg.text).items, msg.text, url)
     else if (channel === 'wallapop' && msg.type === 'json') {
       const { items } = parseWallapopSearch(msg.text)
-      if (items.length) search.addChannelResults('wallapop', items)
-      else if (!read.items.length) search.setChannelResults('wallapop', [], msg.text)
+      if (items.length) search.addChannelResults('wallapop', items, url)
+      else if (!read.items.length || read.from !== url) search.setChannelResults('wallapop', [], msg.text, url)
     }
   }
 

@@ -57,7 +57,7 @@ export function productPrompt(reference) {
       `- marca: ${reference.brand || 'n.d.'}`,
       `- taglia/misura: ${reference.size || 'n.d.'}`,
       `- categoria: ${reference.categoryText || 'n.d.'}`,
-      `- descrizione: ${reference.description ? scrubContacts(reference.description).slice(0, 800) : 'n.d.'}`,
+      `- descrizione: ${reference.description ? scrubContacts(String(reference.description).slice(0, 1500)).slice(0, 800) : 'n.d.'}`,
       'Restituisci il JSON richiesto.',
     ].join('\n'),
     schema: PRODUCT_SCHEMA,
@@ -74,7 +74,7 @@ export function fallbackProduct(reference) {
   const query = vintedSearchQuery(reference)
   const must = words(query).filter((w) => w.length > 1 && (/\d/.test(w) || w.length > 3)).slice(0, 2)
   return {
-    name: reference.title || query, brand: reference.brand || '', model: '', attributes: [], category: reference.categoryText || '',
+    name: (reference.title ? scrubContacts(reference.title) : '') || query, brand: reference.brand || '', model: '', attributes: [], category: reference.categoryText || '',
     query, mustWords: must, accessoryWords: DEFAULT_ACCESSORIES, family: [], fromAi: false,
   }
 }
@@ -117,13 +117,19 @@ export function priceWindow(referencePrice) {
 export function prefilter(candidates, product, reference, { perChannel = 20, window = null } = {}) {
   const dropped = {}
   const drop = (why) => { dropped[why] = (dropped[why] || 0) + 1 }
-  // An accessory word stays out of the filter only when the reference IS that accessory ("Cover per Tab S9"): the
-  // description often lists the extras ("con cover e caricatore") and must not switch the filter off.
-  const refTitle = ` ${words(reference.title).join(' ')} `
-  const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refTitle.startsWith(` ${w} `))
+  // An accessory word stays out of the filter only when the reference IS that accessory ("Apple caricatore 20W",
+  // "iPhone 13 cover MagSafe"): it is named in the title before any extras clause ("iPhone 13 con cover" is a phone).
+  // The description often lists the extras and must not switch the filter off.
+  const refHead = ` ${words(reference.title).join(' ')} `.split(/ (?:con|e|incluso|inclusa|inclusi|incluse|omaggio|regalo) /)[0] + ' '
+  const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refHead.includes(` ${w} `))
   const must = (product.mustWords || []).map((w) => words(w).join(' ')).filter(Boolean)
-  const target = must.length ? `( [a-z0-9]+){0,3} (${must.join('|')}) ` : ' '
-  const forProduct = (a) => new RegExp(` ${a}( [a-z0-9]+){0,2} per${target}`)
+  // "<accessory> … per <product>" marks an accessory only when the product is not named before it ("iPad Air 5 con
+  // cover per iPad" is the iPad) and only when there are product words to look for.
+  const forProduct = must.length ? (a) => new RegExp(` ${a}( [a-z0-9]+){0,2} per( [a-z0-9]+){0,3} (${must.join('|')}) `) : null
+  const subjectFirst = (text, a) => {
+    const before = text.slice(0, text.indexOf(` ${a} `) + 1)
+    return must.some((m) => before.includes(` ${m} `))
+  }
   const minPrice = window && Number.isFinite(window.minPrice) ? window.minPrice : null
   const maxPrice = window && Number.isFinite(window.maxPrice) ? window.maxPrice : null
   const seen = new Set()
@@ -142,7 +148,7 @@ export function prefilter(candidates, product, reference, { perChannel = 20, win
     // shortly before "per" + the product ("Pellicola vetro temperato per Tab S9"). "Tab S9 con cover, perfetto per la
     // scuola" is the product, and stays.
     const text = ` ${words(c.title).join(' ')} `
-    const isAccessory = accessories.some((a) => text.startsWith(` ${a} `) || forProduct(a).test(text))
+    const isAccessory = accessories.some((a) => text.startsWith(` ${a} `) || (forProduct && !subjectFirst(text, a) && forProduct(a).test(text)))
     if (isAccessory) { drop('accessorio'); continue }
     const all = ` ${words(`${c.title} ${c.description || ''}`).join(' ')} `
     const hits = must.length ? must.filter((m) => all.includes(` ${m} `)).length / must.length : 1
@@ -195,7 +201,7 @@ const describeListing = (who, l, extra = []) => [
   `- taglia/misura: ${l.size || 'n.d.'}`,
   `- condizioni dichiarate: ${l.condition || 'n.d.'}`,
   `- prezzo: ${Number.isFinite(l.price) ? formatEuro(l.price) : 'n.d.'}`,
-  `- descrizione: ${l.description ? scrubContacts(l.description).replace(/\s+/g, ' ').slice(0, 400) : 'n.d.'}`,
+  `- descrizione: ${l.description ? scrubContacts(String(l.description).slice(0, 1500)).replace(/\s+/g, ' ').slice(0, 400) : 'n.d.'}`,
   ...extra,
 ].join('\n')
 
@@ -208,7 +214,7 @@ export function searchVerifyPrompt(reference, product, candidate, { withReferenc
     system: SEARCH_VERIFY_SYSTEM,
     text: [
       withReferencePhoto ? 'Prima immagine: articolo cercato. Seconda immagine: annuncio candidato.' : 'Unica immagine: annuncio candidato (l\'articolo cercato non ha foto: confronta i testi).',
-      describeListing('Articolo cercato', reference, product && product.name ? [`- prodotto: ${product.name}${product.attributes && product.attributes.length ? ` (${product.attributes.join(', ')})` : ''}`] : []),
+      describeListing('Articolo cercato', reference, product && product.name ? [`- prodotto: ${scrubContacts(product.name)}${product.attributes && product.attributes.length ? ` (${product.attributes.map(scrubContacts).join(', ')})` : ''}`] : []),
       describeListing('Annuncio candidato', candidate),
       'Restituisci il JSON richiesto.',
     ].join('\n\n'),
@@ -228,7 +234,7 @@ export function negotiationFor(candidate, now = new Date()) {
   const price = candidate.price
   const floor = offerFloorFor(candidate.source, price, { sellerBusiness: candidate.sellerBusiness, refurbished: candidate.refurbished })
   if (!Number.isFinite(price) || floor == null) return null
-  if (floor >= price) return { offer: price, probability: 1, expectedPrice: price, estimated: candidate.source !== 'vinted', note: candidate.refurbished ? 'Niente offerte su questo annuncio (ricondizionato).' : 'Niente offerte su questo annuncio (venditore professionale).' }
+  if (floor >= price) return { offer: price, probability: 1, expectedPrice: price, estimated: false, noOffer: true, note: candidate.refurbished ? 'Niente offerte su questo annuncio (ricondizionato).' : 'Niente offerte su questo annuncio (venditore professionale).' }
   const facts = engineFactsFor({ ...candidate, price }, {}, now)
   if (!facts || !Number.isFinite(facts.target) || !Number.isFinite(facts.probability)) {
     return { offer: price, probability: 1, expectedPrice: price, estimated: true, note: facts && facts.note ? facts.note : null }

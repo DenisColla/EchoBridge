@@ -158,6 +158,17 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
     }
     onClose()
   }
+  /** The saved search replaces the current one: ask first when the current one holds work not analysed yet. */
+  const reopen = () => {
+    if (!run.finishedAt && (totalRead || run.cardLoading)) {
+      Alert.alert('Riaprire l\'ultima ricerca?', 'La ricerca attuale non è stata analizzata: gli annunci letti andranno persi.', [
+        { text: 'Annulla', style: 'cancel' },
+        { text: 'Riapri', onPress: search.reopenLast },
+      ])
+      return
+    }
+    search.reopenLast()
+  }
   const restart = () => {
     if (!reference) return
     Alert.alert('Nuova ricerca?', 'La ricerca attuale viene chiusa. Puoi riaprire l\'ultima ricerca analizzata finché non ne analizzi un\'altra.', [
@@ -184,7 +195,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
         </View>
         {!ref.photo ? <Body small muted>Senza foto: il confronto userà solo i testi e sarà meno sicuro.</Body> : null}
         {reference && !sameReference && !running ? <Button label="Nuova ricerca dall'annuncio in Calcola" small variant="secondary" onPress={restart} /> : null}
-        {last && !running && last.at !== run.finishedAt ? <Button label="Riapri l'ultima ricerca analizzata" small variant="ghost" onPress={search.reopenLast} /> : null}
+        {last && !running && last.at !== run.finishedAt ? <Button label="Riapri l'ultima ricerca analizzata" small variant="ghost" onPress={reopen} /> : null}
       </Card>
 
       {keys && !keys.verify ? (

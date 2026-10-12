@@ -109,12 +109,12 @@ export function useSearch() {
       channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false, raw: null }])), job: null, ranking: null, cost: 0, explanations: {}, verdicts: {}, error: null,
     })
     // The fallback card is usable at once: the AI card only refines it, with one short attempt per model.
-    const res = await callChain(TEXT_CHAIN, productPrompt(reference), [], { effort: 'low', maxTokens: 1500, timeoutMs: 30_000, signal: cardController.signal })
+    const res = await callChain(TEXT_CHAIN, productPrompt(reference), [], { effort: 'low', maxTokens: 1500, timeoutMs: 30_000, maxAttempts: 1, signal: cardController.signal })
     if (cardAbortRef.current === cardController) cardAbortRef.current = null
     if (res.costUsd) addSpend(res.modelKey, res.costUsd, id)
     if (!runRef.current || runRef.current.id !== id) return
     const product = res.ok ? cleanProduct(res.value, reference) : fb
-    updateRun((r) => (r && r.id === id ? { ...r, product, cardLoading: false, cardError: res.ok ? null : res.error, queries: Object.fromEntries(CHANNEL_IDS.map((ch) => [ch, r.queries[ch] && r.queries[ch] !== fb.query ? r.queries[ch] : product.query])) } : r))
+    updateRun((r) => (r && r.id === id ? { ...r, product, cardLoading: false, cardError: res.ok ? null : res.error, queries: Object.fromEntries(CHANNEL_IDS.map((ch) => [ch, (r.queries[ch] && r.queries[ch] !== fb.query) || r.channels[ch].read ? r.queries[ch] : product.query])) } : r))
   }, [stopAll, addSpend, updateRun])
 
   const setQuery = useCallback((channel, q) => updateRun((r) => (r ? { ...r, queries: { ...r.queries, [channel]: q } } : r)), [updateRun])
@@ -124,20 +124,21 @@ export function useSearch() {
     return channelSearchUrl(channel, r.queries[channel] || r.product.query, { ...r.window, city })
   }, [city])
 
-  /** Results read from a channel's page (replaces that channel's previous read). */
-  const setChannelResults = useCallback((channel, items, raw) => updateRun((r) => (r ? {
-    ...r, channels: { ...r.channels, [channel]: { items, read: true, raw: items.length ? null : raw || null } },
+  /** Results read from a channel's page (replaces that channel's previous read). `from` = the search URL loaded. */
+  const setChannelResults = useCallback((channel, items, raw, from) => updateRun((r) => (r ? {
+    ...r, channels: { ...r.channels, [channel]: { items, read: true, raw: items.length ? null : raw || null, from: from || null } },
   } : r)), [updateRun])
   /** A new query on a channel: what it read before no longer counts. */
   const resetChannel = useCallback((channel) => updateRun((r) => (r ? {
     ...r, channels: { ...r.channels, [channel]: { items: [], read: false, raw: null } },
   } : r)), [updateRun])
-  /** Wallapop loads more results while the user scrolls: they are added, not replaced. */
-  const addChannelResults = useCallback((channel, items) => updateRun((r) => {
+  /** Wallapop loads more results while the user scrolls: added to the same search, a new search replaces them. */
+  const addChannelResults = useCallback((channel, items, from) => updateRun((r) => {
     if (!r) return r
-    const prev = r.channels[channel].items
+    const same = r.channels[channel].from === (from || null)
+    const prev = same ? r.channels[channel].items : []
     const ids = new Set(prev.map((c) => c.id))
-    return { ...r, channels: { ...r.channels, [channel]: { items: [...prev, ...items.filter((c) => !ids.has(c.id))], read: true, raw: null } } }
+    return { ...r, channels: { ...r.channels, [channel]: { items: [...prev, ...items.filter((c) => !ids.has(c.id))], read: true, raw: null, from: from || null } } }
   }), [updateRun])
 
   const setPhase = useCallback((phase) => updateRun((r) => (r ? { ...r, phase } : r)), [updateRun])
@@ -226,11 +227,16 @@ export function useSearch() {
     updateRun((x) => ({ ...x, explanations: { ...x.explanations, [key]: { loading: true } } }))
     const c = row.candidate
     const ch = CHANNELS[c.source]
-    const facts = {
+    // No offer possible (Wallapop PRO or refurbished): no numbers to negotiate with, and the text must say so.
+    const noOffer = !Number.isFinite(row.offer) || row.offer >= c.price
+    const facts = noOffer ? {
+      listPrice: c.price, buyerTotal: Number.isFinite(c.buyerFee) ? c.price + c.buyerFee : null, target: null, discountPct: null, probability: null, sendLabel: null,
+      note: `${row.negotiationNote || ''} Nessuna offerta possibile su questo annuncio: non suggerire offerte, valuta solo se conviene al prezzo pieno.`.trim(),
+    } : {
       listPrice: c.price, buyerTotal: Number.isFinite(c.buyerFee) ? c.price + c.buyerFee : null, target: row.offer,
-      discountPct: Number.isFinite(row.offer) && c.price ? Math.round((1 - row.offer / c.price) * 100) : null,
+      discountPct: c.price ? Math.round((1 - row.offer / c.price) * 100) : null,
       probability: Number.isFinite(row.probability) ? Math.round(row.probability * 100) : null, sendLabel: row.sendLabel,
-      note: c.source !== 'vinted' ? 'numeri stimati con il modello di Vinted' : null,
+      note: [row.negotiationNote, c.source !== 'vinted' ? 'numeri stimati con il modello di Vinted' : null].filter(Boolean).join(' ') || null,
     }
     const prompt = psychPrompt({ candidate: c, facts, label: row.group === 'alternative' ? 'family' : row.verdict, channelLabel: ch ? ch.label : c.source, channelRules: ch ? ch.offerRules : null })
     const res = await callChain(TEXT_CHAIN, prompt, [], { effort: 'medium', maxTokens: 3000, timeoutMs: 120_000 })

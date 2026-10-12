@@ -239,3 +239,47 @@ test('channels: shipping is unknown (not "hand delivery") when the page omits it
   const { main } = rankResults([{ candidate: w({}), verdict: 'same', family: false, confidence: 0.9, redFlags: [], reason: '' }], now)
   assert.ok(main[0].risks.includes('offerta possibile solo se il venditore non è PRO'))
 })
+
+test('search: accessory references keep their accessories, bundles named product-first stay, no «per» rule without product words, fallback names are scrubbed', () => {
+  const fb = { mustWords: [], accessoryWords: ['cover', 'custodia', 'caricatore'] }
+  // the reference is an accessory named after the brand or the product
+  for (const title of ['Apple caricatore 20W USB-C originale', 'iPhone 13 cover MagSafe silicone', 'Samsung custodia Galaxy Tab S9 con tastiera']) {
+    const kept = prefilter([cand('a', 'Caricatore Apple 20W', 15), cand('b', 'Cover MagSafe iPhone 13', 15), cand('c', 'Custodia con tastiera Galaxy Tab S9', 15)], fb, { title }).kept
+    assert.ok(kept.length >= 1, title)
+  }
+  // bundles: the product comes first
+  const ipad = { mustWords: ['ipad'], accessoryWords: ['custodia', 'cover'] }
+  const r = prefilter([cand('1', 'iPad Air 5 64GB + Apple Pencil + custodia per iPad', 420), cand('2', 'iPad Air 5 con cover per iPad Air', 400), cand('3', 'Custodia in pelle per iPad Air 5', 30)], ipad, { title: 'iPad Air 5 64GB' })
+  assert.deepEqual(r.kept.map((c) => c.id).sort(), ['1', '2'])
+  // empty must-words: only the "starts with" rule applies
+  assert.equal(prefilter([cand('1', 'Mac Pro con custodia ottimo per lavoro', 900)], { mustWords: [], accessoryWords: ['custodia'] }, { title: 'Mac Pro' }).kept.length, 1)
+  // fallback card name never carries contacts into the verification prompt
+  const ref = { title: 'Galaxy Tab S9+ 256GB wa 3331234567', price: 500 }
+  const p = searchVerifyPrompt(ref, fallbackProduct(ref), cand('1', 'Galaxy Tab S9+', 450))
+  assert.doesNotMatch(p.text, /3331234567/)
+  assert.doesNotMatch(searchVerifyPrompt(ref, cleanProduct({ name: '' }, ref), cand('1', 'x', 1)).text, /3331234567/)
+})
+
+test('search: rows without a possible offer are not flagged as estimated negotiations', () => {
+  const now = new Date('2026-10-12T10:00:00Z')
+  const w = parseWallapopSearch({ data: { section: { items: [{ id: 'x', title: 'iPhone 13', web_slug: 'iphone-13-1', price: { amount: 400 }, images: [{ urls: { medium: 'https://cdn.wallapop.com/x.jpg' } }], is_refurbished: { flag: true } }] } } }).items[0]
+  const { main } = rankResults([{ candidate: w, verdict: 'same', family: false, confidence: 0.9, redFlags: [], reason: '' }], now)
+  assert.equal(main[0].offer, 400)
+  assert.ok(!main[0].risks.includes('trattativa stimata con il modello Vinted'))
+  assert.ok(!main[0].risks.includes('offerta possibile solo se il venditore non è PRO'))
+  assert.match(main[0].negotiationNote, /ricondizionato/)
+})
+
+test('privacy: obfuscated numbers and handles are caught; codes, price lists and date ranges survive; long numeric lists stay fast', () => {
+  for (const s of ['333.123.45.67', 'cell3331234567', 'wa:3331234567', '+393331234567', '3 3 3 1 2 3 4 5 6 7', '333–123–4567', '333·123·4567', '333_123_4567', '333    -    1234567', 'IG mario.rossi', 'mario.rossi at gmail dot com', 'tel 33312 34567']) {
+    assert.doesNotMatch(scrubContacts(s), /\d{5,}|\d{3}\D{1,4}\d{3,}|rossi|\d( \d){5}/, s)
+  }
+  for (const s of ['Lego 31120 31121', 'BILLY 002.638.50', 'ISBN 978-88-04-71234-5', 'Pikachu 025/165 026/165', 'Garmin 010-02540-01', 'prezzi 300 350 400', 'garanzia 30/11/2024 - 30/11/2025', 'ricevuto 30/11/24 300€', 'Instagram story', 'tg 128GB']) {
+    assert.equal(scrubContacts(s), s)
+  }
+  assert.equal(scrubContacts('Email mario@gmail.com. iPhone 13 Pro 256GB'), 'Email [contatto]. iPhone 13 Pro 256GB')
+  const list = Array.from({ length: 165 }, (_, i) => `${String(i + 1).padStart(3, '0')}/165`).join(' ')
+  const t = Date.now()
+  assert.equal(scrubContacts(list), list)
+  assert.ok(Date.now() - t < 500)
+})

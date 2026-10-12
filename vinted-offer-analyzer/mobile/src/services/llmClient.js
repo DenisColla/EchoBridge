@@ -25,7 +25,7 @@ function retryDelay(response, attempt) {
   return Math.min(30_000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 400)
 }
 
-export async function callModel(modelKey, prompt, images = [], { effort = 'low', maxTokens = 1500, timeoutMs = 90_000, signal } = {}) {
+export async function callModel(modelKey, prompt, images = [], { effort = 'low', maxTokens = 1500, timeoutMs = 90_000, signal, maxAttempts = 3 } = {}) {
   const model = modelByKey(modelKey)
   if (!model) return { ok: false, error: `Modello sconosciuto: ${modelKey}`, kind: 'request', costUsd: 0, latencyMs: 0 }
   const key = await getApiKey(model.provider)
@@ -39,7 +39,7 @@ export async function callModel(modelKey, prompt, images = [], { effort = 'low',
   const started = Date.now()
   let spent = 0
   let last = null
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal && signal.aborted) return { ok: false, error: 'Annullato', kind: 'cancelled', costUsd: spent, latencyMs: Date.now() - started }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -65,7 +65,7 @@ export async function callModel(modelKey, prompt, images = [], { effort = 'low',
     }
     // A call that produced tokens is billed even when its answer is unusable.
     if (last.usage) spent += llmCost(modelKey, last.usage, new Date()) || 0
-    if (last.ok || !last.retryable || attempt === 2) break
+    if (last.ok || !last.retryable || attempt === maxAttempts - 1) break
     await sleep(retryDelay(response, attempt), signal)
   }
   const latencyMs = Date.now() - started
