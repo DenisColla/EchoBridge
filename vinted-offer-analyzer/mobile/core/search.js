@@ -120,7 +120,11 @@ export function prefilter(candidates, product, reference, { perChannel = 20, win
   // An accessory word stays out of the filter only when the reference IS that accessory ("Apple caricatore 20W",
   // "iPhone 13 cover MagSafe"): it is named in the title before any extras clause ("iPhone 13 con cover" is a phone).
   // The description often lists the extras and must not switch the filter off.
-  const refHead = ` ${words(reference.title).join(' ')} `.split(/ (?:con|e|incluso|inclusa|inclusi|incluse|omaggio|regalo) /)[0] + ' '
+  // Bundles ("iPhone 13 + cover", "iPhone 13, cover", "iPhone 13 cover inclusa") are the product, not the accessory.
+  const rawHead = String(reference.title || '').split(/\s\+\s?|\s?[,;(]|\s[-–—]\s|\s\/\s/)[0]
+  const refHead = ` ${words(rawHead).join(' ')} `
+    .replace(/ [a-z0-9]+ (?:in )?(?:regalo|omaggio|inclus[oaie]) /g, ' ')
+    .split(/ (?:con|e|piu|incluso|inclusa|inclusi|incluse|omaggio|regalo) /)[0] + ' '
   const accessories = (product.accessoryWords || []).map((w) => words(w).join(' ')).filter((w) => w && !refHead.includes(` ${w} `))
   const must = (product.mustWords || []).map((w) => words(w).join(' ')).filter(Boolean)
   // "<accessory> … per <product>" marks an accessory only when the product is not named before it ("iPad Air 5 con

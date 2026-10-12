@@ -283,3 +283,18 @@ test('privacy: obfuscated numbers and handles are caught; codes, price lists and
   assert.equal(scrubContacts(list), list)
   assert.ok(Date.now() - t < 500)
 })
+
+test('search and privacy: bundle references keep the accessory filter; third-round contact formats', () => {
+  const product = { mustWords: ['iphone'], accessoryWords: ['cover', 'caricatore'] }
+  for (const title of ['iPhone 13 128GB + cover + caricatore', 'iPhone 13 128GB, cover, caricatore', 'iPhone 13 cover inclusa', 'iPhone 13 + caricatore in regalo']) {
+    assert.equal(prefilter([cand('a', 'Cover MagSafe iPhone 13', 150)], product, { title, price: 400 }).kept.length, 0, title)
+  }
+  assert.equal(prefilter([cand('a', 'Cover Galaxy S9+', 15)], { mustWords: ['s9'], accessoryWords: ['cover'] }, { title: 'Galaxy S9+ cover silicone' }).kept.length, 1)
+  for (const s of ['Per info 3471234567/3389876543', 'per info 333 1234567/02 12345678', 'per info 0521.123456', 'Tel/fax 0521.123456', '02 123 45 67', '338 123 456',
+    'nome (chiocciola) gmail (punto) com', 'mario.rossi92@gmail', 'Tel 06 1234567 / 06 7654321']) {
+    assert.doesNotMatch(scrubContacts(s), /\d{5,}|\d{3}\D{1,4}\d{3,}|\d{2}\D{1,2}\d{3,}|rossi|gmail/, s)
+  }
+  for (const s of ["Jeans Levi's 501 tg W32 L34", 'Scarpe tg EU38', 'Felpa tg XXL.', 'Scarpe Nike numero 38 39 40 41 42', 'MALM 090.123.45', 'Omega 311.30.42.30.01.005', '399 449 499', 'Xbox Live Gold']) {
+    assert.equal(scrubContacts(s), s)
+  }
+})
