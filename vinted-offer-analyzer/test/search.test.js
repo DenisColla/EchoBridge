@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CHANNELS, ITALIAN_CITIES, buyerFee, channelOfUrl, channelSearchUrl, cleanProduct, fallbackProduct, negotiationFor, parseSubitoSearch,
   parseWallapopSearch, prefilter, priceWindow, productPrompt, rankResults, readVinted, readModelJson, searchVerifyPrompt, SEARCH_VERIFY_SCHEMA,
-  PRODUCT_SCHEMA, withCosts,
+  PRODUCT_SCHEMA, referenceOutlook, savingVersus, scrubContacts, withCosts,
 } from '../src/core/index.js'
 
 const fixture = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
@@ -169,4 +169,26 @@ test('search: negotiation respects channel floors and PRO sellers; ranking split
   assert.ok(riskyRow.score > riskyRow.expectedTotal, 'risk raises the score')
   assert.ok(riskyRow.risks.includes('foto dal web') && riskyRow.risks.includes('verifica incerta'))
   for (const r of [...main, ...alternatives]) assert.ok(r.expectedTotal <= r.totalNow + 0.001)
+})
+
+test('search: the reference is compared on the same basis (total now and expected after negotiation), photo-less references verify on text', () => {
+  const now = new Date('2026-10-12T10:00:00Z')
+  const ref = { source: 'vinted', id: 'r', title: 'Galaxy Tab S9+', price: 500 }
+  const out = referenceOutlook(ref, now)
+  assert.equal(out.totalNow, 500 + 25.7 + 3.5)
+  assert.ok(out.expectedTotal <= out.totalNow)
+  assert.equal(referenceOutlook({ title: 'x' }, now), null)
+  const row = { totalNow: 400, expectedTotal: 380 }
+  assert.deepEqual(savingVersus(row, { totalNow: 529.2, expectedTotal: 500 }), { now: 129.2, expected: 120 })
+  assert.equal(savingVersus(row, null), null)
+  const p = searchVerifyPrompt(ref, null, cand('1', 'Galaxy Tab S9+', 300), { withReferencePhoto: false })
+  assert.match(p.text, /^Unica immagine: annuncio candidato/)
+})
+
+test('search: phone numbers and e-mails in listing texts never reach the providers; prices, sizes and models stay', () => {
+  assert.equal(scrubContacts('scrivimi a mario.rossi@gmail.com o al 333 123 4567'), 'scrivimi a [contatto] o al [contatto]')
+  assert.equal(scrubContacts('+39 333-1234567 dopo le 18'), '[contatto] dopo le 18')
+  assert.equal(scrubContacts('Galaxy Tab S9+ 256GB, 1.200 € trattabili, SM-X816B, anno 2023'), 'Galaxy Tab S9+ 256GB, 1.200 € trattabili, SM-X816B, anno 2023')
+  const p = productPrompt({ title: 'Tab S9+', description: 'chiamami 3331234567' })
+  assert.doesNotMatch(p.text, /3331234567/)
 })

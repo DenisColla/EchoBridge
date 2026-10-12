@@ -13,13 +13,16 @@ import { InfoView } from './src/components/InfoView.js'
 import { CounterView } from './src/components/CounterView.js'
 import { VintedPageLoader } from './src/components/VintedPageLoader.js'
 import { LabView } from './src/components/lab/LabView.js'
+import { SearchView } from './src/components/search/SearchView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
+import { useSearch } from './src/hooks/useSearch.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { listenToReminderTaps } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
+import { Body, Button, Card } from './src/components/ui.js'
 
 const TABS = [
   { id: 'calcola', label: 'Calcola' },
@@ -88,6 +91,8 @@ function Main() {
   const onCollectingChange = useCallback((v) => { collectingRef.current = v }, [])
   /** The last listing read from a link: reference and starting search of the lab's pair collection. */
   const [lastListing, setLastListing] = useState(null)
+  /** «Cerca altrove» open in place of the tab content; the search itself lives in useSearch and survives closing it. */
+  const [searchOpen, setSearchOpen] = useState(false)
   const scrollRef = useRef(null)
   const formYRef = useRef(0)
   const formViewRef = useRef(null)
@@ -96,6 +101,7 @@ function Main() {
   const watchlist = useWatchlist()
   const learning = useLearning({ items: watchlist.allItems, ready: watchlist.ready })
   const lab = useLab({ folderUri: learning.folder ? learning.folder.uri : null })
+  const search = useSearch()
   const skipExploreRef = useRef(new Set())
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -108,7 +114,10 @@ function Main() {
 
   useEffect(() => listenToReminderTaps((data) => {
     // An open pair collection may hold unsaved labels: the lab stays, the tab underneath is ready when it closes.
-    if (!collectingRef.current) setLabOpen(false)
+    if (!collectingRef.current) {
+      setLabOpen(false)
+      setSearchOpen(false)
+    }
     if (data && data.kind === 'monthly') {
       setCounterContext(null)
       setTab('info')
@@ -290,7 +299,10 @@ function Main() {
       const outcome = runAnalysis(built.form, null, { explore: true })
       setExtraction({ ok: true, summary: built.summary, link, at: Date.now() })
       const idMatch = String(link).match(/\/items\/(\d+)/)
-      setLastListing({ source: 'vinted', id: idMatch ? idMatch[1] : link, url: link, title: ex.title, brand: ex.brand, size: null, condition: ex.condition, price: ex.listPrice, photo: ex.photo || null, thumb: ex.photo || null })
+      setLastListing({
+        source: 'vinted', id: idMatch ? idMatch[1] : link, url: link, title: ex.title, brand: ex.brand, size: null, condition: ex.condition, price: ex.listPrice,
+        photo: ex.photo || null, thumb: ex.photo || null, description: ex.description || null, categoryText: ex.categoryText || null,
+      })
       if (!outcome) {
         showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
         setTimeout(scrollToForm, 80)
@@ -395,6 +407,17 @@ function Main() {
   const scrollTop = () => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
   const openLab = () => { setLabOpen(true); scrollTop() }
   const closeLab = () => { setLabOpen(false); scrollTop() }
+  /** Opens «Cerca altrove»; from Calcola it starts a search on the listing just read, unless one on it is already there. */
+  const openSearch = (startFromListing = false) => {
+    const r = search.run
+    const busy = Boolean(r && r.job && r.job.running)
+    if (startFromListing && lastListing && !busy && !(r && !r.reopened && r.reference && r.reference.url === lastListing.url)) search.start(lastListing)
+    setCounterContext(null)
+    setLabOpen(false)
+    setSearchOpen(true)
+    scrollTop()
+  }
+  const closeSearch = () => { setSearchOpen(false); scrollTop() }
 
   // The lab is a screen of its own: Android back closes it instead of leaving the app.
   useEffect(() => {
@@ -406,6 +429,15 @@ function Main() {
     })
     return () => sub.remove()
   }, [labOpen])
+  useEffect(() => {
+    if (!searchOpen || labOpen) return undefined
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setSearchOpen(false)
+      setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
+      return true
+    })
+    return () => sub.remove()
+  }, [searchOpen, labOpen])
 
   const openCounterFromItem = (item) => {
     const fallbackForm = {
@@ -502,7 +534,8 @@ function Main() {
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />
           )}
-          {!counterContext && !labOpen && tab === 'calcola' && (
+          {!counterContext && !labOpen && searchOpen && <SearchView search={search} reference={lastListing} onClose={closeSearch} onOpenLab={openLab} />}
+          {!counterContext && !labOpen && !searchOpen && tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
               {clipboardLink && !extracting && (
                 <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
@@ -534,6 +567,14 @@ function Main() {
                   onSkipExploration={result.exploration ? skipExploration : null}
                 />
               )}
+              {(lastListing && result) || (search.run && search.run.job && search.run.job.running) ? (
+                <Card muted>
+                  <Body small muted>{search.run && search.run.job && search.run.job.running
+                    ? `Cerca altrove: verifica in corso, ${search.run.job.done} di ${search.run.job.total}.`
+                    : 'Stesso articolo su Vinted, Subito o Wallapop a un prezzo finale più basso?'}</Body>
+                  <Button label={search.run && search.run.job && search.run.job.running ? 'Torna alla ricerca' : 'Cerca lo stesso articolo altrove'} variant="secondary" onPress={() => openSearch(true)} />
+                </Card>
+              ) : null}
               <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
                 <OfferForm
                   form={form}
@@ -550,7 +591,7 @@ function Main() {
               </View>
             </View>
           )}
-          {!counterContext && !labOpen && tab === 'lista' && (
+          {!counterContext && !labOpen && !searchOpen && tab === 'lista' && (
             <WatchlistView
               items={watchlist.items}
               ready={watchlist.ready}
@@ -563,7 +604,7 @@ function Main() {
               onCounterSent={counterSent}
             />
           )}
-          {!counterContext && !labOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} />}
+          {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} />}
           {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} onCollectingChange={onCollectingChange} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>
@@ -577,7 +618,7 @@ function Main() {
           const active = tab === item.id
           const count = item.id === 'lista' ? watchlist.stats.planned : 0
           return (
-            <Pressable key={item.id} onPress={() => { setCounterContext(null); setLabOpen(false); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
+            <Pressable key={item.id} onPress={() => { setCounterContext(null); setLabOpen(false); setSearchOpen(false); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
               <Text style={[styles.tabLabel, { color: active ? t.accent : t.ink3, fontWeight: active ? '700' : '500' }]}>
                 {item.label}{count ? ` (${count})` : ''}
               </Text>

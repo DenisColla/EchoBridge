@@ -9,12 +9,14 @@
  * The AI calls are made by the app (llm.js shapes, the model chosen in the lab).
  */
 
-import { CHANNELS, buyerFee, offerFloorFor } from './channels.js'
+import { CHANNELS, buyerFee, offerFloorFor, withCosts } from './channels.js'
 import { vintedSearchQuery } from './catalog.js'
 import { engineFactsFor } from './ailab.js'
 import { formatEuro } from './messages.js'
 
 const round2 = (n) => Math.round(n * 100 + 1e-7) / 100
+// Contacts never reach the AI providers: e-mail addresses and phone-like numbers in listing texts are blanked.
+export const scrubContacts = (s) => String(s || '').replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[contatto]').replace(/\+?\d(?:[\s./-]?\d){7,}/g, '[contatto]')
 
 /* ───────── 1. product card ───────── */
 
@@ -56,7 +58,7 @@ export function productPrompt(reference) {
       `- marca: ${reference.brand || 'n.d.'}`,
       `- taglia/misura: ${reference.size || 'n.d.'}`,
       `- categoria: ${reference.categoryText || 'n.d.'}`,
-      `- descrizione: ${reference.description ? String(reference.description).slice(0, 800) : 'n.d.'}`,
+      `- descrizione: ${reference.description ? scrubContacts(reference.description).slice(0, 800) : 'n.d.'}`,
       'Restituisci il JSON richiesto.',
     ].join('\n'),
     schema: PRODUCT_SCHEMA,
@@ -184,16 +186,19 @@ const describeListing = (who, l, extra = []) => [
   `- taglia/misura: ${l.size || 'n.d.'}`,
   `- condizioni dichiarate: ${l.condition || 'n.d.'}`,
   `- prezzo: ${Number.isFinite(l.price) ? formatEuro(l.price) : 'n.d.'}`,
-  `- descrizione: ${l.description ? String(l.description).replace(/\s+/g, ' ').slice(0, 400) : 'n.d.'}`,
+  `- descrizione: ${l.description ? scrubContacts(l.description).replace(/\s+/g, ' ').slice(0, 400) : 'n.d.'}`,
   ...extra,
 ].join('\n')
 
-/** Verification prompt for a search candidate. Images: reference first, candidate second. */
-export function searchVerifyPrompt(reference, product, candidate) {
+/**
+ * Verification prompt for a search candidate. Images: reference first, candidate second; when the reference has no
+ * photo, only the candidate's.
+ */
+export function searchVerifyPrompt(reference, product, candidate, { withReferencePhoto = true } = {}) {
   return {
     system: SEARCH_VERIFY_SYSTEM,
     text: [
-      'Prima immagine: articolo cercato. Seconda immagine: annuncio candidato.',
+      withReferencePhoto ? 'Prima immagine: articolo cercato. Seconda immagine: annuncio candidato.' : 'Unica immagine: annuncio candidato (l\'articolo cercato non ha foto: confronta i testi).',
       describeListing('Articolo cercato', reference, product && product.name ? [`- prodotto: ${product.name}${product.attributes && product.attributes.length ? ` (${product.attributes.join(', ')})` : ''}`] : []),
       describeListing('Annuncio candidato', candidate),
       'Restituisci il JSON richiesto.',
@@ -264,8 +269,22 @@ export function rankResults(results, now = new Date()) {
   return { main: rows.filter((r) => r.group === 'main'), alternatives: rows.filter((r) => r.group === 'alternative') }
 }
 
-/** Saving versus the reference listing (positive = cheaper), on the same basis (total now). */
-export function savingVersus(row, referenceTotal) {
-  if (!row || !Number.isFinite(referenceTotal)) return null
-  return round2(referenceTotal - row.expectedTotal)
+/**
+ * The reference listing on the rows' basis: total now (estimated shipping) and expected total after the same kind of
+ * negotiation. Null without a price.
+ */
+export function referenceOutlook(reference, now = new Date()) {
+  if (!reference || !Number.isFinite(reference.price) || reference.price <= 0) return null
+  const c = withCosts({ ...reference, source: reference.source || 'vinted', shipping: {} })
+  if (c.total == null) return null
+  const neg = negotiationFor(c, now)
+  const expectedPrice = neg ? neg.expectedPrice : c.price
+  const fee = buyerFee(c.source, expectedPrice).amount ?? c.buyerFee
+  return { totalNow: c.total, expectedTotal: round2(expectedPrice + fee + c.shippingCost) }
+}
+
+/** Saving of a row versus the reference (positive = cheaper): now, and after negotiating both. */
+export function savingVersus(row, outlook) {
+  if (!row || !outlook) return null
+  return { now: round2(outlook.totalNow - row.totalNow), expected: round2(outlook.expectedTotal - row.expectedTotal) }
 }

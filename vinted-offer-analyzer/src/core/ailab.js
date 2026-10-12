@@ -134,7 +134,7 @@ export function psychPrompt(caseItem) {
     `- preferiti: ${c.favourites != null ? c.favourites : 'n.d.'}`,
     `- venditore professionale: ${c.sellerBusiness == null ? 'n.d.' : c.sellerBusiness ? 'sì' : 'no'}`,
     `- annuncio in evidenza a pagamento: ${c.promoted ? 'sì' : 'no'}`,
-    `- verifica foto rispetto all'articolo cercato: ${caseItem.label === 'same' ? 'stesso prodotto' : caseItem.label === 'variant' ? 'variante dello stesso modello' : 'n.d.'}`,
+    `- verifica foto rispetto all'articolo cercato: ${caseItem.label === 'same' ? 'stesso prodotto' : caseItem.label === 'variant' ? 'variante dello stesso modello' : caseItem.label === 'family' ? 'modello diverso della stessa famiglia (alternativa)' : 'n.d.'}`,
     'Numeri del motore:',
     `- offerta consigliata: ${Number.isFinite(f.target) ? formatEuro(f.target) : 'n.d.'}${Number.isFinite(f.discountPct) ? ` (−${f.discountPct}%)` : ''}`,
     `- probabilità stimata che la accetti: ${Number.isFinite(f.probability) ? `${f.probability}%` : 'n.d.'}`,

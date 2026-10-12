@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CHANNELS, CHANNEL_IDS, ITALIAN_CITIES, NOT_MODEL_KINDS, channelSearchUrl, cleanProduct, fallbackProduct, prefilter, priceWindow, productPrompt,
-  psychPrompt, rankResults, searchVerifyPrompt, withCosts,
+  psychPrompt, rankResults, referenceOutlook, searchVerifyPrompt,
 } from '../../core/index.js'
 import { callModel } from '../services/llmClient.js'
 import { getApiKey } from '../services/secrets.js'
@@ -15,6 +15,7 @@ const CONCURRENCY = 4
 const PER_CHANNEL = 20
 
 const providerOf = (modelKey) => modelKey.split(':')[0]
+let runCounter = 0
 
 /** First answer that validates, trying the chain in order; models without a key are skipped. */
 async function callChain(chain, prompt, images, opts) {
@@ -74,22 +75,36 @@ export function useSearch() {
     updateRun((r) => (r ? { ...r, cost: (r.cost || 0) + usd } : r))
   }, [updateRun, updateStore])
 
+  /** Which chains have at least one key: verification (Qwen/Haiku) and texts (GPT/Haiku). */
+  const [keys, setKeys] = useState(null)
+  const checkKeys = useCallback(async () => {
+    const has = async (chain) => {
+      for (const k of chain) if (await getApiKey(providerOf(k))) return true
+      return false
+    }
+    const next = { verify: await has(VERIFY_CHAIN), text: await has(TEXT_CHAIN) }
+    setKeys(next)
+    return next
+  }, [])
+
   const city = (store && ITALIAN_CITIES.find((c) => c.label === store.cityLabel)) || ITALIAN_CITIES[0]
   const setCity = useCallback((label) => updateStore((s) => ({ ...s, cityLabel: label })), [updateStore])
 
   /** Starts a search from a listing: the product card is asked to the AI (falls back to the title words). */
   const start = useCallback(async (reference) => {
+    // A new search stops whatever the previous one was still verifying; late answers are ignored by run id.
+    if (abortRef.current) abortRef.current.abort()
+    const id = ++runCounter
     const fb = fallbackProduct(reference)
-    const window = priceWindow(reference.price)
     updateRun({
-      phase: 'card', reference, product: fb, window, cardLoading: true, queries: Object.fromEntries(CHANNEL_IDS.map((id) => [id, fb.query])),
+      id, phase: 'card', reference, product: fb, window: priceWindow(reference.price), outlook: referenceOutlook(reference, new Date()), cardLoading: true, queries: Object.fromEntries(CHANNEL_IDS.map((id) => [id, fb.query])),
       channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false, raw: null }])), job: null, ranking: null, cost: 0, explanations: {}, error: null,
     })
     const res = await callChain(TEXT_CHAIN, productPrompt(reference), [], { effort: 'low', maxTokens: 1500, timeoutMs: 60_000 })
     if (res.costUsd) addSpend(res.modelKey, res.costUsd)
-    if (!runRef.current || runRef.current.reference !== reference) return
+    if (!runRef.current || runRef.current.id !== id) return
     const product = res.ok ? cleanProduct(res.value, reference) : fb
-    updateRun((r) => ({ ...r, product, cardLoading: false, cardError: res.ok ? null : res.error, queries: Object.fromEntries(CHANNEL_IDS.map((id) => [id, product.query])) }))
+    updateRun((r) => (r && r.id === id ? { ...r, product, cardLoading: false, cardError: res.ok ? null : res.error, queries: Object.fromEntries(CHANNEL_IDS.map((ch) => [ch, r.queries[ch] && r.queries[ch] !== fb.query ? r.queries[ch] : product.query])) } : r))
   }, [addSpend, updateRun])
 
   const setQuery = useCallback((channel, q) => updateRun((r) => (r ? { ...r, queries: { ...r.queries, [channel]: q } } : r)), [updateRun])
@@ -119,6 +134,9 @@ export function useSearch() {
     if (!r || (r.job && r.job.running)) return null
     const all = CHANNEL_IDS.flatMap((id) => r.channels[id].items)
     const reference = r.reference
+    const id = r.id
+    const mine = (x) => Boolean(x && x.id === id)
+    const withReferencePhoto = Boolean(reference.photo)
     const { kept, dropped } = prefilter(all, r.product, reference, { perChannel: PER_CHANNEL })
     const controller = new AbortController()
     abortRef.current = controller
@@ -130,11 +148,11 @@ export function useSearch() {
     const verifyOne = async (c) => {
       let images
       try {
-        images = await Promise.all([prepareImage(reference.photo), prepareImage(c.photo)])
+        images = await Promise.all(withReferencePhoto ? [prepareImage(reference.photo), prepareImage(c.photo)] : [prepareImage(c.photo)])
       } catch (e) {
         return { ok: false, error: `Foto: ${String(e && e.message ? e.message : e)}`, kind: 'photo' }
       }
-      return callChain(VERIFY_CHAIN, searchVerifyPrompt(reference, r.product, c), images, { effort: 'low', maxTokens: 1500, timeoutMs: 90_000, signal: controller.signal })
+      return callChain(VERIFY_CHAIN, searchVerifyPrompt(reference, r.product, c, { withReferencePhoto }), images, { effort: 'low', maxTokens: 1500, timeoutMs: 90_000, signal: controller.signal })
     }
     const worker = async () => {
       while (next < kept.length && !controller.signal.aborted) {
@@ -150,25 +168,26 @@ export function useSearch() {
         done++
         if (res.ok) results.push({ candidate: c, ...res.value, model: res.modelKey })
         else failures.push({ candidate: c, error: res.error, kind: res.kind, infra: NOT_MODEL_KINDS.includes(res.kind) })
-        updateRun((x) => (x ? { ...x, job: { running: true, done, total: kept.length, failed: failures.length } } : x))
+        updateRun((x) => (mine(x) ? { ...x, job: { running: true, done, total: kept.length, failed: failures.length } } : x))
       }
     }
     try {
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, kept.length) }, worker))
     } finally {
-      abortRef.current = null
+      if (abortRef.current === controller) abortRef.current = null
     }
+    if (!mine(runRef.current)) return null
     const now = new Date()
     const ranking = rankResults(results, now)
-    const referenceCost = withCosts({ source: reference.source || 'vinted', price: reference.price, shipping: {} })
+    const outlook = referenceOutlook(reference, now)
     const summary = {
       read: all.length, kept: kept.length, verified: results.length, failed: failures.length, cancelled: controller.signal.aborted,
       different: results.filter((x) => x.verdict === 'different' && !x.family).length,
     }
-    const finished = updateRun((x) => (x ? { ...x, phase: 'done', job: null, ranking, failures, summary, referenceTotal: referenceCost.total, finishedAt: now.toISOString() } : x))
+    const finished = updateRun((x) => (mine(x) ? { ...x, phase: 'done', job: null, ranking, failures, summary, outlook, finishedAt: now.toISOString() } : x))
     if (finished) {
       // Keep the last search to reopen it later (no photos, no prompts).
-      updateStore((s) => ({ ...s, last: { reference, product: finished.product, ranking, summary, referenceTotal: referenceCost.total, at: now.toISOString() } }))
+      updateStore((s) => ({ ...s, last: { reference, product: finished.product, ranking, summary, outlook, at: now.toISOString() } }))
     }
     return summary
   }, [addSpend, updateRun, updateStore])
@@ -179,7 +198,8 @@ export function useSearch() {
   const explain = useCallback(async (row) => {
     const key = `${row.candidate.source}:${row.candidate.id}`
     const r = runRef.current
-    if (!r || (r.explanations[key] && (r.explanations[key].loading || r.explanations[key].value))) return
+    if (!r || r.reopened || (r.explanations[key] && (r.explanations[key].loading || r.explanations[key].value))) return
+    const id = r.id
     updateRun((x) => ({ ...x, explanations: { ...x.explanations, [key]: { loading: true } } }))
     const c = row.candidate
     const ch = CHANNELS[c.source]
@@ -189,17 +209,18 @@ export function useSearch() {
       probability: Number.isFinite(row.probability) ? Math.round(row.probability * 100) : null, sendLabel: row.sendLabel,
       note: c.source !== 'vinted' ? 'numeri stimati con il modello di Vinted' : null,
     }
-    const prompt = psychPrompt({ candidate: c, facts, label: row.verdict, channelLabel: ch ? ch.label : c.source, channelRules: ch ? ch.offerRules : null })
+    const prompt = psychPrompt({ candidate: c, facts, label: row.group === 'alternative' ? 'family' : row.verdict, channelLabel: ch ? ch.label : c.source, channelRules: ch ? ch.offerRules : null })
     const res = await callChain(TEXT_CHAIN, prompt, [], { effort: 'medium', maxTokens: 3000, timeoutMs: 120_000 })
     if (res.costUsd) addSpend(res.modelKey, res.costUsd)
-    updateRun((x) => (x ? { ...x, explanations: { ...x.explanations, [key]: res.ok ? { value: res.value } : { error: res.error || 'Testo non disponibile' } } } : x))
+    updateRun((x) => (x && x.id === id ? { ...x, explanations: { ...x.explanations, [key]: res.ok ? { value: res.value } : { error: res.error || 'Testo non disponibile' } } } : x))
   }, [addSpend, updateRun])
 
   /** Reopens the last saved search (read-only: no channels to browse). */
   const reopenLast = useCallback(() => {
     const last = storeRef.current && storeRef.current.last
     if (!last) return false
-    updateRun({ phase: 'done', reference: last.reference, product: last.product, ranking: last.ranking, summary: last.summary, referenceTotal: last.referenceTotal, finishedAt: last.at, channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false }])), queries: {}, explanations: {}, cost: 0, reopened: true })
+    if (abortRef.current) abortRef.current.abort()
+    updateRun({ id: ++runCounter, phase: 'done', reference: last.reference, product: last.product, ranking: last.ranking, summary: last.summary, outlook: last.outlook || null, finishedAt: last.at, channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false }])), queries: {}, explanations: {}, cost: 0, reopened: true })
     return true
   }, [updateRun])
 
@@ -209,7 +230,7 @@ export function useSearch() {
   }, [updateRun])
 
   return {
-    ready: Boolean(store), store, run, city, setCity, start, setQuery, searchUrlFor, setChannelResults, addChannelResults, setPhase,
+    ready: Boolean(store), store, run, keys, checkKeys, city, setCity, start, setQuery, searchUrlFor, setChannelResults, addChannelResults, setPhase,
     analyze, cancel, explain, reopenLast, close,
   }
 }
