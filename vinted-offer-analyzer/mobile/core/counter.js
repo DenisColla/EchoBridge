@@ -21,7 +21,7 @@ import { formatPoints, interpolate, ramp, squash, toPercent } from './math.js'
 import { buildAcceptMessages, buildCounterMessages, formatEuro, recommendedCounterToneFor } from './messages.js'
 import { buildVerdict } from './reasoning.js'
 import { avoidWindowsOn } from './scheduler.js'
-import { ageCurve, attributeFactors, effectiveWeekday, monthWindowAt, sellerWeight, timeWeight, timeWindowAt, uncertaintyFor } from './scoring.js'
+import { ageCurve, attributeFactors, effectiveWeekday, marketHazardMultiplier, monthWindowAt, sellerWeight, timeWeight, timeWindowAt, uncertaintyFor } from './scoring.js'
 import { buildWarnings, normalizeInput, parsePrice, priceStepFor } from './analyze.js'
 import { counterShareOf, learnedCounterRow, sellerReplyHoursOf } from './profile.js'
 
@@ -146,7 +146,7 @@ const ctrMaxPrice = (raw) => {
 
 /**
  * Validates the raw form (strings, as forms provide them) and derives the negotiation state.
- * Returns { ok, errors, warnings, state }.
+ * Returns { ok, errors, warnings, state }. options: { profile, validityHours, market } — `market` comes from value.js.
  */
 export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const errors = {}
@@ -230,11 +230,16 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const inactive = input.sellerProfile === 'inactive'
   const profile = inactive ? 'unknown' : input.sellerProfile
   const ageDays = input.listingAge.days + (offerSentAt ? Math.max(0, calendarDaysBetween(offerSentAt, now)) : 0)
+  // The market (value.js marketFromRows) speeds up or slows down the hazard and caps the loss at the best alternative.
+  const market = options.market || null
   const hazard = input.category.dailySellRate * ageHazardMultiplier(ageDays)
     * (raw.competition ? COUNTER.COMPETITION_MULT : 1) * (raw.publicPrice ? COUNTER.PUBLIC_PRICE_MULT : 1)
+    * marketHazardMultiplier(L, market)
   const W = ctrMaxPrice(raw.maxPrice)
   const Wcap = W ?? Infinity
-  const V = ctrR2(Math.max(L * (1 + COUNTER.LOSS_PREMIUM), W ?? 0))
+  let V = ctrR2(Math.max(L * (1 + COUNTER.LOSS_PREMIUM), W ?? 0))
+  // Losing the item costs at most the best alternative found elsewhere (never less than his price: we would not pay more here).
+  if (market && Number.isFinite(market.bestAltPrice) && market.bestAltPrice < V) V = ctrR2(Math.min(V, Math.max(S, market.bestAltPrice)))
   const chat = raw.channel === 'chat'
   const theta = Boolean(raw.publicPrice) || chat
   const validityHours = options.validityHours === undefined ? VINTED_ASSUMED.COUNTER_VALIDITY_HOURS : options.validityHours
@@ -259,6 +264,7 @@ export function normalizeCounterInput(raw, now = new Date(), options = {}) {
     Sprev, sigma, share, shareNorm, stance, k, n, buyers, sellers, mode, enteredAs,
     receivedAt, unc, offerSentAt, latencyH, inactive, profile, ageDays, hazard, W, Wcap, V, chat, theta, validityHours,
     assumedExpiry, deadline, planHorizon, minDelayMinutes, tMin, minStep: priceStepFor(L), goalPrice: Number.isFinite(goalPrice) ? goalPrice : null,
+    ...(market ? { market } : {}),
     cache: new Map(),
   }
   return { ok: true, errors: {}, warnings, state }

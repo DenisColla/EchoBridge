@@ -272,7 +272,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
             <View style={{ gap: space.xs }}>
               <Body style={{ fontWeight: '600' }}>{product.name}</Body>
               {product.attributes.length ? <Body small muted>{product.attributes.join(' · ')}</Body> : null}
-              {product.family.length ? <Body small muted>Stessa famiglia: {product.family.join(', ')}</Body> : null}
+              {product.family.length ? <Body small muted>Stessa famiglia: {product.family.map((f) => (typeof f === 'string' ? f : f.name)).join(', ')}</Body> : null}
               {run.cardError ? <Body small muted>Scheda dal titolo (AI non disponibile: {run.cardError}).</Body> : null}
             </View>
           )}

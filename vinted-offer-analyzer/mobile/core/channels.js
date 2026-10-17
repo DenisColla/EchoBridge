@@ -340,3 +340,38 @@ export function offerFloorFor(channelId, price, { sellerBusiness = false, refurb
   if (channelId === 'wallapop' && (sellerBusiness || refurbished)) return price // no offers to PRO sellers or on refurbished items
   return round2(price * ch.offerFloor)
 }
+
+/* ───────── declared condition ───────── */
+
+/**
+ * Condition penalty per grade step, in % of the expected total, by engine category: one step down weighs more on a
+ * luxury bag or a pair of sneakers than on a kitchen gadget.
+ */
+export const CONDITION_PENALTY_PCT = { electronics: 6, sneakers: 8, fast_fashion: 8, kids: 8, luxury: 10, collectible: 7, other: 5 }
+
+// Leading words of the condition labels of the three channels (and their English versions), most specific first.
+// Vinted: Nuovo con cartellino 0, Nuovo senza cartellino 1, Ottime condizioni 2, Buone condizioni 3, Discrete
+// condizioni / Soddisfacenti 4. Subito: Nuovo 0, Come nuovo 1, Ottimo 2, Buono 3, Danneggiato 4.
+const GRADE_RULES = [
+  [1, /^(?:nuov[oaie] senza (?:cartellin|etichett)|new without tag)/],
+  [0, /^(?:nuov[oaie]|brand new|new)\b/],
+  [1, /^(?:come nuov|pari al nuov|like new|as new|as good as new)/],
+  [2, /^(?:ottim|eccellent|very good|excellent)/],
+  [3, /^(?:buon|good)/],
+  [4, /^(?:discret|soddisfacent|danneggiat|usurat|rovinat|difettos|satisfactory|fair|damaged|worn|poor)/],
+]
+// Wallapop has five levels with «Buono» in the middle: Nuovo 0, Come nuovo 1, Buono 2, Discreto 3, Usurato 4.
+const WALLAPOP_GRADE_RULES = [[2, /^(?:buon|good)/], [3, /^(?:discret|fair)/]]
+
+/**
+ * Condition grade 0 (new with tags) … 4 (worn or damaged) from a channel's label, or null when unknown. Labels are
+ * matched on their leading words, case and accents aside; `channelId` picks the channel's own scale where the same
+ * word means another level (Wallapop's «Buono»).
+ */
+export function conditionGrade(label, channelId = null) {
+  const s = String(label || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+  if (!s) return null
+  const rules = channelId === 'wallapop' ? [...WALLAPOP_GRADE_RULES, ...GRADE_RULES] : GRADE_RULES
+  const hit = rules.find(([, re]) => re.test(s))
+  return hit ? hit[0] : null
+}

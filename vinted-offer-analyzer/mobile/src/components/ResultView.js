@@ -46,22 +46,25 @@ function MarketCard({ result, marketInfo, onOpenSearch }) {
  */
 function ExpectedPriceCard({ result, form, profile, market, onApplyPrice }) {
   const t = useTheme()
-  const [curve, setCurve] = useState(null)
+  // Keyed by the analysis moment: a new analysis gets a fresh (null) curve without a synchronous setState in the effect.
+  const stamp = result.now.getTime()
+  const [state, setState] = useState({ stamp: 0, curve: null })
   const listPrice = result.input.listPrice
   const target = result.input.targetPrice
   useEffect(() => {
     let alive = true
-    setCurve(null)
     const timer = setTimeout(() => {
+      let c
       try {
-        const c = expectedPriceCurve({ ...form, listPrice: String(listPrice).replace('.', ','), targetPrice: String(target).replace('.', ',') }, result.now, { profile, market })
-        if (alive) setCurve(c || { empty: true })
+        c = expectedPriceCurve({ ...form, listPrice: String(listPrice).replace('.', ','), targetPrice: String(target).replace('.', ',') }, result.now, { profile, market }) || { empty: true }
       } catch {
-        if (alive) setCurve({ empty: true })
+        c = { empty: true }
       }
+      if (alive) setState({ stamp, curve: c })
     }, 120)
     return () => { alive = false; clearTimeout(timer) }
-  }, [form, listPrice, target, profile, market, result.now])
+  }, [form, listPrice, target, profile, market, result.now, stamp])
+  const curve = state.stamp === stamp ? state.curve : null
   if (!curve) return <Card muted><SectionLabel>Prezzo atteso</SectionLabel><Body small muted>Calcolo la curva delle offerte…</Body></Card>
   if (curve.empty || !curve.best) return null
   const best = curve.best
