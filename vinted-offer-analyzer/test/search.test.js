@@ -576,3 +576,9 @@ test('search: family entries of the product card may be names or { name, tier, p
   assert.equal(readModelJson(JSON.stringify({ name: 'x', brand: '', model: '', attributes: [], category: '', query: 'x', mustWords: [], accessoryWords: [], family: ['Galaxy Tab S9'] }), PRODUCT_SCHEMA).ok, false)
   assert.match(productPrompt(reference).system, /family: .*tier \(lower = inferiore, same = pari, higher = superiore.*priceRatio/)
 })
+
+test('attributeConflict: "8GB RAM 128GB" keeps the storage, both RAM spellings are skipped', () => {
+  assert.deepEqual(attributeConflict('iPhone 13 8GB RAM 128GB', 'iPhone 13 256GB').capacity, ['128GB', '256GB'])
+  assert.deepEqual(attributeConflict('Xiaomi RAM 8 GB 128GB', 'Xiaomi 256GB').capacity, ['128GB', '256GB'])
+  assert.equal(attributeConflict('Xiaomi 8GB RAM', 'Xiaomi 256GB'), null)
+})

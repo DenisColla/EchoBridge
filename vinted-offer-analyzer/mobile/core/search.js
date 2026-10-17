@@ -407,7 +407,9 @@ function storageOf(text) {
   let best = null
   let m
   while ((m = re.exec(text))) {
-    if (/^\s*(?:di\s+)?ram\b/.test(text.slice(m.index + m[0].length)) || /ram\s*$/.test(text.slice(0, m.index))) continue
+    const before = text.slice(0, m.index)
+    // "8GB RAM" / "RAM 8 GB" are memory, not storage; in "8GB RAM 128GB" the RAM belongs to the number before it.
+    if (/^\s*(?:di\s+)?ram\b/.test(text.slice(m.index + m[0].length)) || (/\bram\s*$/.test(before) && !/\d+\s?(?:gb|tb)\s*ram\s*$/.test(before))) continue
     const gb = m[2] === 'tb' ? Number(m[1]) * 1024 : Number(m[1])
     if (!best || gb > best.gb) best = { gb, label: `${m[1]}${m[2].toUpperCase()}` }
   }
