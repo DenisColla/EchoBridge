@@ -47,14 +47,40 @@ export function normalizeInput(raw) {
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) errors.targetPrice = 'Inserisci il prezzo che vorresti pagare (ad esempio 10).'
   if (Object.keys(errors).length) return { ok: false, errors, input: null }
 
+  const signals = normalizeSignals(raw.signals)
   return { ok: true, errors: {}, input: withPrices({
     itemTitle: (raw.itemTitle || '').trim(),
     category,
     listingAge: findListingAge(raw.listingAge),
     sellerProfile: raw.sellerProfile || 'unknown',
     listingSignal: findListingSignal(raw.listingSignal),
+    // Listing signals (favourites, seller's other items) ride on the input only when the form carries at least one.
+    ...(signals ? { signals } : {}),
   }, listPrice, targetPrice) }
 }
+
+const SIGNAL_KEYS = ['favourites', 'sellerItems', 'bundleDiscountPct']
+
+/** { favourites, sellerItems, bundleDiscountPct } with the finite numbers only, or null when there is none. */
+export function normalizeSignals(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const out = {}
+  for (const key of SIGNAL_KEYS) {
+    const v = typeof raw[key] === 'string' && raw[key].trim() !== '' ? Number(raw[key].replace(',', '.')) : raw[key]
+    if (typeof v === 'number' && Number.isFinite(v)) out[key] = v
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** The market summary attached to an analysis: the figures the UI shows next to the verdict. `gapPct` is relative to this listing. */
+const marketSummary = (market, listPrice) => ({
+  n: market.n,
+  medianPrice: market.medianPrice,
+  p25Price: market.p25Price,
+  p75Price: market.p75Price,
+  gapPct: market.medianPrice > 0 ? Math.round((listPrice / market.medianPrice - 1) * 100) : null,
+  best: market.best || null,
+})
 
 /** Derives discount and risk band from the two prices. */
 export const withPrices = (input, listPrice, targetPrice) => {
@@ -170,24 +196,34 @@ function buildAnalysis(input, now, options = {}) {
     suggestedPrice,
     twoStep,
     messageBeforeOffer,
-    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer }),
+    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer, market: input.market }),
     recommendedTone: recommendedToneFor(input),
     avoid: avoidWindows(),
     avoidToday: avoidWindowsOn(chosen.date),
     nowInAvoid: nowSlot.score.timeWindow.weight < 0,
     warnings: buildWarnings(now),
+    // Only when the caller passed a market (value.js marketFromRows): the result is otherwise unchanged.
+    ...(input.market ? { market: marketSummary(input.market, input.listPrice) } : {}),
   }
+}
+
+/** The learned profile and the market ride on the input, so every scoreAt / hazard call (slots, price search, two-step) sees them. */
+export const withContext = (input, { profile = null, market = null } = {}) => {
+  let out = input
+  if (profile) out = { ...out, profile }
+  if (market) out = { ...out, market }
+  return out
 }
 
 /**
  * Entry point: raw form values + current date → full analysis for the UI.
  * kinds: 'analysis' | 'no_offer_needed' | 'over_cap' (discount above Vinted's 40% limit).
+ * options: { profile, market, preferredSendAt, exactSendAt } — `market` is the summary from value.js marketFromRows.
  */
 export function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  // The learned profile rides on the input, so every scoreAt call (slots, price search, two-step) sees it.
-  const input = options.profile ? { ...normalized.input, profile: options.profile } : normalized.input
+  const input = withContext(normalized.input, options)
 
   if (input.discountPct <= 0) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')

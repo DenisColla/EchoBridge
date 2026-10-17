@@ -2,6 +2,8 @@
  * Supporting message templates (Italian). Pure data + formatting, no UI.
  * Rules baked in: "Ciao" + tu register, never criticise the item or the price,
  * never compare with other listings, the offer itself is sent through Vinted's button.
+ * One exception, opt-in: the 'informato' tone cites the market median found by the
+ * cross-channel search, only when real comparable listings were found and priced lower.
  */
 
 export const TONES = [
@@ -10,6 +12,9 @@ export const TONES = [
   { id: 'impegno', label: 'Impegno all\'acquisto', hint: 'Toglie al venditore la paura dell\'offerta accettata e mai pagata' },
   { id: 'motivato', label: 'Motivato', hint: 'Dà un motivo (il budget) senza criticare l\'articolo: adatto a categorie di valore' },
 ]
+
+/** Fifth tone, present only when buildMessages receives a market whose median is below the listing price. */
+export const MARKET_TONE = { id: 'informato', label: 'Informato', hint: 'Cita il prezzo visto su altri siti: onesto e verificabile, solo quando il mercato è davvero più basso' }
 
 export const recommendedToneFor = (input) => {
   if (input.category && input.category.premium) return 'motivato'
@@ -41,12 +46,17 @@ const closing = (sendAt) => {
 /**
  * `beforeOffer` = true when the strategy is to write first and send the offer only after a reply
  * (high block risk or inactive seller): the templates then propose the price instead of announcing a sent offer.
+ * `market` (value.js marketFromRows, optional): with at least two comparable listings whose median is below the
+ * listing price, a fifth 'informato' message cites that median; without it the four messages are unchanged.
  */
-export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer = false }) {
+export function buildMessages({ itemTitle, listPrice, targetPrice, listingAge, sendAt, beforeOffer = false, market = null }) {
   const item = itemTitle && itemTitle.trim() ? `"${itemTitle.trim()}"` : "l'articolo"
   const Item = item === "l'articolo" ? "L'articolo" : item
   const price = formatEuro(targetPrice)
   const isOld = listingAge && (listingAge.id === 'over_month' || listingAge.id === 'weeks_2_4')
+  const informed = market && market.n >= 2 && Number.isFinite(market.medianPrice) && Number.isFinite(listPrice) && market.medianPrice < listPrice
+    ? formatEuro(market.medianPrice)
+    : null
 
   if (beforeOffer) {
     return [
@@ -66,6 +76,10 @@ export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, befo
         tone: 'motivato',
         text: `Ciao! ${Item} mi interessa davvero: potrei arrivare a ${price}, che è il massimo del mio budget in questo momento. Se per te può andare ti invio subito l'offerta. ${closing(sendAt)}`,
       },
+      ...(informed ? [{
+        tone: MARKET_TONE.id,
+        text: `Ciao! Mi piace molto ${item}. Ho visto lo stesso modello intorno a ${informed} su altri siti, per questo ti propongo ${price}: se per te può andare ti invio subito l'offerta e completo l'acquisto. ${closing(sendAt)}`,
+      }] : []),
     ]
   }
 
@@ -86,6 +100,10 @@ export function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, befo
       tone: 'motivato',
       text: `Ciao! ${Item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
     },
+    ...(informed ? [{
+      tone: MARKET_TONE.id,
+      text: `Ciao! Mi piace molto ${item} e ti ho appena inviato un'offerta di ${price}. Ho visto lo stesso modello intorno a ${informed} su altri siti, per questo la cifra: se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
+    }] : []),
   ]
 }
 

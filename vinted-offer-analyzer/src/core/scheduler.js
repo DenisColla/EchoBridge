@@ -5,14 +5,14 @@ import {
 } from './constants.js'
 import { addDays, addMinutes, atTime, calendarDaysBetween, ceilToMinutes, formatDayList, formatRange, isSameDay, startOfDay } from './dates.js'
 import { hashString } from './math.js'
-import { effectiveWeekday, scoreAt, timeWindowAt } from './scoring.js'
+import { effectiveWeekday, marketHazardMultiplier, scoreAt, timeWindowAt } from './scoring.js'
 
 /* ───────── availability & response ───────── */
 
-/** Daily probability that the item sells to someone else on day `j` from now. */
+/** Daily probability that the item sells to someone else on day `j` from now (× the market multiplier when a market is attached). */
 export const hazardAt = (input, j) => {
   const rate = input.category ? input.category.dailySellRate : 0.015
-  return rate * ageHazardMultiplier(input.listingAge.days + j)
+  return rate * ageHazardMultiplier(input.listingAge.days + j) * marketHazardMultiplier(input.listPrice, input.market)
 }
 
 /** Probability that the item is still available after `days` days. */

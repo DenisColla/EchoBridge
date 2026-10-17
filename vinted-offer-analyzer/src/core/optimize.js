@@ -1,7 +1,7 @@
 import { VINTED } from './constants.js'
 import { formatLongDate, formatRelativeDay, formatTime, isSameDay } from './dates.js'
 import { formatEuro } from './messages.js'
-import { normalizeInput, priceStepFor, withPrices } from './analyze.js'
+import { normalizeInput, priceStepFor, withContext, withPrices } from './analyze.js'
 import { evaluateSlot, pickMoments } from './scheduler.js'
 
 /** Next "round" goal above the current probability: 63% → 70%, 88% → 93%, capped at 95%. */
@@ -37,11 +37,12 @@ const describeSlot = (slot, now) =>
  * Finds the cheapest ways to reach a target overall probability: waiting for a
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
+ * `market` (value.js marketFromRows) is attached to the input like `profile`.
  */
-export function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, exactSendAt = null } = {}) {
+export function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, market = null, exactSendAt = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  let input = profile ? { ...normalized.input, profile } : normalized.input
+  let input = withContext(normalized.input, { profile, market })
   if (input.discountPct <= 0) return { ok: false, reason: 'no_offer_needed' }
   let capped = false
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {

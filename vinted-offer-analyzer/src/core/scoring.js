@@ -87,6 +87,62 @@ export const timeWindowAt = (date) => {
 export const timeWeight = (window, sellerProfileId) =>
   window.weight * (sellerProfileId === 'inactive' ? INACTIVE_TIME_DAMPING : 1)
 
+/* ───────── market and demand (cross-channel search, listing signals) ───────── */
+
+/**
+ * Logit weight of the listing's price against its market (median of comparable listings found elsewhere): a listing
+ * priced above its market tolerates deeper discounts, one priced below it does not. 0.9·ln(list / median), clamped to
+ * [−0.5, +0.6]; 0 without a market or with fewer than two comparable listings. Lives here (not in value.js) because
+ * value.js imports analyze.js, which imports this module.
+ */
+export const marketGapWeight = (listPrice, market) => {
+  if (!market || !(market.n >= 2) || !(market.medianPrice > 0) || !(listPrice > 0)) return 0
+  return clamp(0.9 * Math.log(listPrice / market.medianPrice), -0.5, 0.6)
+}
+
+/**
+ * Demand prior from the listing's favourites count: no heart → the seller is glad of any interest (+0.1); 4–9 → he can
+ * wait (−0.15); 10 or more → he expects to sell at his price (−0.3). Deliberately small: a prior not yet calibrated on
+ * outcomes (the learning loop does not see it). 0 without a finite count.
+ */
+export const demandWeight = (signals) => {
+  if (!signals || !Number.isFinite(signals.favourites)) return 0
+  const n = signals.favourites
+  if (n <= 0) return 0.1
+  if (n <= 3) return 0
+  if (n <= 9) return -0.15
+  return -0.3
+}
+
+/**
+ * Multiplier on the daily sell-through hazard from the listing's place in its market: a bargain (at or under the first
+ * quartile) sells fast (×1.5), an expensive listing (at or over the third quartile) lingers (×0.7), linear in between.
+ * 1 without a market.
+ */
+export const marketHazardMultiplier = (listPrice, market) => {
+  if (!market || !(market.n >= 2) || !Number.isFinite(market.p25Price) || !Number.isFinite(market.p75Price) || !(listPrice > 0)) return 1
+  if (listPrice <= market.p25Price) return 1.5
+  if (listPrice >= market.p75Price) return 0.7
+  return 1.5 - 0.8 * ((listPrice - market.p25Price) / (market.p75Price - market.p25Price))
+}
+
+/** Extra factors that exist only when the input carries a market or listing signals: nothing is appended otherwise. */
+const contextFactors = (input) => {
+  const { listPrice, market, signals } = input
+  const extra = []
+  if (market && market.n >= 2 && market.medianPrice > 0) {
+    const gapPct = Math.round((listPrice / market.medianPrice - 1) * 100)
+    const label = gapPct === 0 ? 'Prezzo in linea con il mercato' : gapPct > 0 ? `Prezzo ${gapPct}% sopra il mercato` : `Prezzo ${-gapPct}% sotto il mercato`
+    extra.push({ id: 'market', group: 'price', label, weight: marketGapWeight(listPrice, market) })
+  }
+  if (signals && Number.isFinite(signals.favourites)) {
+    const n = signals.favourites
+    const label = n <= 0 ? 'Nessun preferito' : n === 1 ? '1 preferito' : `${n} preferiti`
+    extra.push({ id: 'demand', group: 'signal', label, weight: demandWeight(signals) })
+  }
+  return extra
+}
+
 /** Month-end effect anchored to the last day (short months shift earlier), with ramps instead of cliffs. */
 export const monthWindowAt = (date) => {
   const day = date.getDate()
@@ -103,6 +159,7 @@ export const monthWindowAt = (date) => {
 /**
  * Scores the offer if sent at `sendDate`, `daysWaited` days from now.
  * Returns the base logit, the (capped) factor list in a fixed order, the total logit and pAccept.
+ * `input.market` (from value.js marketFromRows) and `input.signals` ({ favourites }) add a factor each when present.
  */
 export function scoreAt(input, sendDate, daysWaited = 0) {
   const { discountPct, category, listingAge, sellerProfile, listingSignal, listPrice, targetPrice } = input
@@ -119,6 +176,8 @@ export function scoreAt(input, sendDate, daysWaited = 0) {
     { id: 'age', group: 'age', label: listingAge.id === 'unknown' ? 'Anzianità non indicata' : `Annuncio ${listingAge.label.toLowerCase()}`, weight: age.today },
     { id: 'wait', group: 'age', label: daysWaited > 0 ? `Attesa di ${daysWaited} ${daysWaited === 1 ? 'giorno' : 'giorni'}` : 'Nessuna attesa', weight: age.wait },
     { id: 'seller', group: 'seller', label: sellerLabel(sellerProfile), weight: sellerWeight(sellerProfile, discountPct) },
+    // Market and demand factors only when the input carries them (empty otherwise, so the list is unchanged).
+    ...contextFactors(input),
     { id: 'time', group: 'time', label: timeWindow.label, weight: timeWeight(timeWindow, sellerProfile), window: timeWindow },
     { id: 'month', group: 'month', label: monthWindow.label, weight: monthWindow.weight, window: monthWindow },
   ]
