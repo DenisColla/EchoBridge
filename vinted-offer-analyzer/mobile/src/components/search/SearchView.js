@@ -139,7 +139,8 @@ function PortfolioCard({ rows, outlook, reopened }) {
       <SectionLabel>Piano a {eligible.length}</SectionLabel>
       <Title>Tratta con {eligible.length} venditori insieme</Title>
       <Body muted small>Un'offerta accettata non ti obbliga a comprare (su Vinted hai 24 ore). Offrendo a {eligible.length} annunci equivalenti nello stesso momento, compri il più conveniente tra quelli che accettano e lasci scadere gli altri.</Body>
-      {!plan ? <Button label={busy ? 'Calcolo…' : 'Calcola il piano'} onPress={compute} disabled={busy || reopened} /> : null}
+      {!plan ? <Button label={busy ? 'Calcolo…' : 'Calcola il piano'} onPress={compute} disabled={busy} /> : null}
+      {reopened && !plan ? <Body small muted>Ricerca salvata: i prezzi possono essere cambiati, controlla gli annunci prima di offrire.</Body> : null}
       {plan && plan.error ? <Note tone="warn">Non riesco a calcolare il piano su questi annunci.</Note> : null}
       {plan && !plan.error ? (
         <View style={{ gap: space.sm }}>

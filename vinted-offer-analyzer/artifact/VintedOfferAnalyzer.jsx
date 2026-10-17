@@ -844,6 +844,62 @@ const timeWindowAt = (date) => {
 const timeWeight = (window, sellerProfileId) =>
   window.weight * (sellerProfileId === 'inactive' ? INACTIVE_TIME_DAMPING : 1)
 
+/* ───────── market and demand (cross-channel search, listing signals) ───────── */
+
+/**
+ * Logit weight of the listing's price against its market (median of comparable listings found elsewhere): a listing
+ * priced above its market tolerates deeper discounts, one priced below it does not. 0.9·ln(list / median), clamped to
+ * [−0.5, +0.6]; 0 without a market or with fewer than two comparable listings. Lives here (not in value.js) because
+ * value.js imports analyze.js, which imports this module.
+ */
+const marketGapWeight = (listPrice, market) => {
+  if (!market || !(market.n >= 2) || !(market.medianPrice > 0) || !(listPrice > 0)) return 0
+  return clamp(0.9 * Math.log(listPrice / market.medianPrice), -0.5, 0.6)
+}
+
+/**
+ * Demand prior from the listing's favourites count: no heart → the seller is glad of any interest (+0.1); 4–9 → he can
+ * wait (−0.15); 10 or more → he expects to sell at his price (−0.3). Deliberately small: a prior not yet calibrated on
+ * outcomes (the learning loop does not see it). 0 without a finite count.
+ */
+const demandWeight = (signals) => {
+  if (!signals || !Number.isFinite(signals.favourites)) return 0
+  const n = signals.favourites
+  if (n <= 0) return 0.1
+  if (n <= 3) return 0
+  if (n <= 9) return -0.15
+  return -0.3
+}
+
+/**
+ * Multiplier on the daily sell-through hazard from the listing's place in its market: a bargain (at or under the first
+ * quartile) sells fast (×1.5), an expensive listing (at or over the third quartile) lingers (×0.7), linear in between.
+ * 1 without a market.
+ */
+const marketHazardMultiplier = (listPrice, market) => {
+  if (!market || !(market.n >= 2) || !Number.isFinite(market.p25Price) || !Number.isFinite(market.p75Price) || !(listPrice > 0)) return 1
+  if (listPrice <= market.p25Price) return 1.5
+  if (listPrice >= market.p75Price) return 0.7
+  return 1.5 - 0.8 * ((listPrice - market.p25Price) / (market.p75Price - market.p25Price))
+}
+
+/** Extra factors that exist only when the input carries a market or listing signals: nothing is appended otherwise. */
+const contextFactors = (input) => {
+  const { listPrice, market, signals } = input
+  const extra = []
+  if (market && market.n >= 2 && market.medianPrice > 0) {
+    const gapPct = Math.round((listPrice / market.medianPrice - 1) * 100)
+    const label = gapPct === 0 ? 'Prezzo in linea con il mercato' : gapPct > 0 ? `Prezzo ${gapPct}% sopra il mercato` : `Prezzo ${-gapPct}% sotto il mercato`
+    extra.push({ id: 'market', group: 'price', label, weight: marketGapWeight(listPrice, market) })
+  }
+  if (signals && Number.isFinite(signals.favourites)) {
+    const n = signals.favourites
+    const label = n <= 0 ? 'Nessun preferito' : n === 1 ? '1 preferito' : `${n} preferiti`
+    extra.push({ id: 'demand', group: 'signal', label, weight: demandWeight(signals) })
+  }
+  return extra
+}
+
 /** Month-end effect anchored to the last day (short months shift earlier), with ramps instead of cliffs. */
 const monthWindowAt = (date) => {
   const day = date.getDate()
@@ -860,6 +916,7 @@ const monthWindowAt = (date) => {
 /**
  * Scores the offer if sent at `sendDate`, `daysWaited` days from now.
  * Returns the base logit, the (capped) factor list in a fixed order, the total logit and pAccept.
+ * `input.market` (from value.js marketFromRows) and `input.signals` ({ favourites }) add a factor each when present.
  */
 function scoreAt(input, sendDate, daysWaited = 0) {
   const { discountPct, category, listingAge, sellerProfile, listingSignal, listPrice, targetPrice } = input
@@ -876,6 +933,8 @@ function scoreAt(input, sendDate, daysWaited = 0) {
     { id: 'age', group: 'age', label: listingAge.id === 'unknown' ? 'Anzianità non indicata' : `Annuncio ${listingAge.label.toLowerCase()}`, weight: age.today },
     { id: 'wait', group: 'age', label: daysWaited > 0 ? `Attesa di ${daysWaited} ${daysWaited === 1 ? 'giorno' : 'giorni'}` : 'Nessuna attesa', weight: age.wait },
     { id: 'seller', group: 'seller', label: sellerLabel(sellerProfile), weight: sellerWeight(sellerProfile, discountPct) },
+    // Market and demand factors only when the input carries them (empty otherwise, so the list is unchanged).
+    ...contextFactors(input),
     { id: 'time', group: 'time', label: timeWindow.label, weight: timeWeight(timeWindow, sellerProfile), window: timeWindow },
     { id: 'month', group: 'month', label: monthWindow.label, weight: monthWindow.weight, window: monthWindow },
   ]
@@ -984,10 +1043,10 @@ function uncertaintyFor(input) {
 // ───────────────────────── src/core/scheduler.js ─────────────────────────
 /* ───────── availability & response ───────── */
 
-/** Daily probability that the item sells to someone else on day `j` from now. */
+/** Daily probability that the item sells to someone else on day `j` from now (× the market multiplier when a market is attached). */
 const hazardAt = (input, j) => {
   const rate = input.category ? input.category.dailySellRate : 0.015
-  return rate * ageHazardMultiplier(input.listingAge.days + j)
+  return rate * ageHazardMultiplier(input.listingAge.days + j) * marketHazardMultiplier(input.listPrice, input.market)
 }
 
 /** Probability that the item is still available after `days` days. */
@@ -1154,6 +1213,8 @@ const avoidWindowsOn = (date) => {
  * Supporting message templates (Italian). Pure data + formatting, no UI.
  * Rules baked in: "Ciao" + tu register, never criticise the item or the price,
  * never compare with other listings, the offer itself is sent through Vinted's button.
+ * One exception, opt-in: the 'informato' tone cites the market median found by the
+ * cross-channel search, only when real comparable listings were found and priced lower.
  */
 
 const TONES = [
@@ -1162,6 +1223,9 @@ const TONES = [
   { id: 'impegno', label: 'Impegno all\'acquisto', hint: 'Toglie al venditore la paura dell\'offerta accettata e mai pagata' },
   { id: 'motivato', label: 'Motivato', hint: 'Dà un motivo (il budget) senza criticare l\'articolo: adatto a categorie di valore' },
 ]
+
+/** Fifth tone, present only when buildMessages receives a market whose median is below the listing price. */
+const MARKET_TONE = { id: 'informato', label: 'Informato', hint: 'Cita il prezzo visto su altri siti: onesto e verificabile, solo quando il mercato è davvero più basso' }
 
 const recommendedToneFor = (input) => {
   if (input.category && input.category.premium) return 'motivato'
@@ -1193,12 +1257,17 @@ const closing = (sendAt) => {
 /**
  * `beforeOffer` = true when the strategy is to write first and send the offer only after a reply
  * (high block risk or inactive seller): the templates then propose the price instead of announcing a sent offer.
+ * `market` (value.js marketFromRows, optional): with at least two comparable listings whose median is below the
+ * listing price, a fifth 'informato' message cites that median; without it the four messages are unchanged.
  */
-function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer = false }) {
+function buildMessages({ itemTitle, listPrice, targetPrice, listingAge, sendAt, beforeOffer = false, market = null }) {
   const item = itemTitle && itemTitle.trim() ? `"${itemTitle.trim()}"` : "l'articolo"
   const Item = item === "l'articolo" ? "L'articolo" : item
   const price = formatEuro(targetPrice)
   const isOld = listingAge && (listingAge.id === 'over_month' || listingAge.id === 'weeks_2_4')
+  const informed = market && market.n >= 2 && Number.isFinite(market.medianPrice) && Number.isFinite(listPrice) && market.medianPrice < listPrice
+    ? formatEuro(market.medianPrice)
+    : null
 
   if (beforeOffer) {
     return [
@@ -1218,6 +1287,10 @@ function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer
         tone: 'motivato',
         text: `Ciao! ${Item} mi interessa davvero: potrei arrivare a ${price}, che è il massimo del mio budget in questo momento. Se per te può andare ti invio subito l'offerta. ${closing(sendAt)}`,
       },
+      ...(informed ? [{
+        tone: MARKET_TONE.id,
+        text: `Ciao! Mi piace molto ${item}. Ho visto lo stesso modello intorno a ${informed} su altri siti, per questo ti propongo ${price}: se per te può andare ti invio subito l'offerta e completo l'acquisto. ${closing(sendAt)}`,
+      }] : []),
     ]
   }
 
@@ -1238,6 +1311,10 @@ function buildMessages({ itemTitle, targetPrice, listingAge, sendAt, beforeOffer
       tone: 'motivato',
       text: `Ciao! ${Item} mi interessa davvero e ti ho inviato un'offerta di ${price}: è il massimo del mio budget in questo momento. Se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
     },
+    ...(informed ? [{
+      tone: MARKET_TONE.id,
+      text: `Ciao! Mi piace molto ${item} e ti ho appena inviato un'offerta di ${price}. Ho visto lo stesso modello intorno a ${informed} su altri siti, per questo la cifra: se per te può andare completo subito l'acquisto. ${closing(sendAt)}`,
+    }] : []),
   ]
 }
 
@@ -1537,14 +1614,40 @@ function normalizeInput(raw) {
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) errors.targetPrice = 'Inserisci il prezzo che vorresti pagare (ad esempio 10).'
   if (Object.keys(errors).length) return { ok: false, errors, input: null }
 
+  const signals = normalizeSignals(raw.signals)
   return { ok: true, errors: {}, input: withPrices({
     itemTitle: (raw.itemTitle || '').trim(),
     category,
     listingAge: findListingAge(raw.listingAge),
     sellerProfile: raw.sellerProfile || 'unknown',
     listingSignal: findListingSignal(raw.listingSignal),
+    // Listing signals (favourites, seller's other items) ride on the input only when the form carries at least one.
+    ...(signals ? { signals } : {}),
   }, listPrice, targetPrice) }
 }
+
+const SIGNAL_KEYS = ['favourites', 'sellerItems', 'bundleDiscountPct']
+
+/** { favourites, sellerItems, bundleDiscountPct } with the finite numbers only, or null when there is none. */
+function normalizeSignals(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const out = {}
+  for (const key of SIGNAL_KEYS) {
+    const v = typeof raw[key] === 'string' && raw[key].trim() !== '' ? Number(raw[key].replace(',', '.')) : raw[key]
+    if (typeof v === 'number' && Number.isFinite(v)) out[key] = v
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** The market summary attached to an analysis: the figures the UI shows next to the verdict. `gapPct` is relative to this listing. */
+const marketSummary = (market, listPrice) => ({
+  n: market.n,
+  medianPrice: market.medianPrice,
+  p25Price: market.p25Price,
+  p75Price: market.p75Price,
+  gapPct: market.medianPrice > 0 ? Math.round((listPrice / market.medianPrice - 1) * 100) : null,
+  best: market.best || null,
+})
 
 /** Derives discount and risk band from the two prices. */
 const withPrices = (input, listPrice, targetPrice) => {
@@ -1660,24 +1763,34 @@ function buildAnalysis(input, now, options = {}) {
     suggestedPrice,
     twoStep,
     messageBeforeOffer,
-    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer }),
+    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer, market: input.market }),
     recommendedTone: recommendedToneFor(input),
     avoid: avoidWindows(),
     avoidToday: avoidWindowsOn(chosen.date),
     nowInAvoid: nowSlot.score.timeWindow.weight < 0,
     warnings: buildWarnings(now),
+    // Only when the caller passed a market (value.js marketFromRows): the result is otherwise unchanged.
+    ...(input.market ? { market: marketSummary(input.market, input.listPrice) } : {}),
   }
+}
+
+/** The learned profile and the market ride on the input, so every scoreAt / hazard call (slots, price search, two-step) sees them. */
+const withContext = (input, { profile = null, market = null } = {}) => {
+  let out = input
+  if (profile) out = { ...out, profile }
+  if (market) out = { ...out, market }
+  return out
 }
 
 /**
  * Entry point: raw form values + current date → full analysis for the UI.
  * kinds: 'analysis' | 'no_offer_needed' | 'over_cap' (discount above Vinted's 40% limit).
+ * options: { profile, market, preferredSendAt, exactSendAt } — `market` is the summary from value.js marketFromRows.
  */
 function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  // The learned profile rides on the input, so every scoreAt call (slots, price search, two-step) sees it.
-  const input = options.profile ? { ...normalized.input, profile: options.profile } : normalized.input
+  const input = withContext(normalized.input, options)
 
   if (input.discountPct <= 0) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')
@@ -1743,11 +1856,12 @@ const describeSlot = (slot, now) =>
  * Finds the cheapest ways to reach a target overall probability: waiting for a
  * better moment, raising the offer, or both. Every option carries what to apply
  * (`targetPrice`, `preferredSendAt`) so the UI can re-run the analysis with it.
+ * `market` (value.js marketFromRows) is attached to the input like `profile`.
  */
-function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, exactSendAt = null } = {}) {
+function optimizeOffer(raw, now = new Date(), { targetProbability = null, profile = null, market = null, exactSendAt = null } = {}) {
   const normalized = normalizeInput(raw)
   if (!normalized.ok) return { ok: false, errors: normalized.errors }
-  let input = profile ? { ...normalized.input, profile } : normalized.input
+  let input = withContext(normalized.input, { profile, market })
   if (input.discountPct <= 0) return { ok: false, reason: 'no_offer_needed' }
   let capped = false
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
@@ -1998,7 +2112,7 @@ const ctrMaxPrice = (raw) => {
 
 /**
  * Validates the raw form (strings, as forms provide them) and derives the negotiation state.
- * Returns { ok, errors, warnings, state }.
+ * Returns { ok, errors, warnings, state }. options: { profile, validityHours, market } — `market` comes from value.js.
  */
 function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const errors = {}
@@ -2082,11 +2196,16 @@ function normalizeCounterInput(raw, now = new Date(), options = {}) {
   const inactive = input.sellerProfile === 'inactive'
   const profile = inactive ? 'unknown' : input.sellerProfile
   const ageDays = input.listingAge.days + (offerSentAt ? Math.max(0, calendarDaysBetween(offerSentAt, now)) : 0)
+  // The market (value.js marketFromRows) speeds up or slows down the hazard and caps the loss at the best alternative.
+  const market = options.market || null
   const hazard = input.category.dailySellRate * ageHazardMultiplier(ageDays)
     * (raw.competition ? COUNTER.COMPETITION_MULT : 1) * (raw.publicPrice ? COUNTER.PUBLIC_PRICE_MULT : 1)
+    * marketHazardMultiplier(L, market)
   const W = ctrMaxPrice(raw.maxPrice)
   const Wcap = W ?? Infinity
-  const V = ctrR2(Math.max(L * (1 + COUNTER.LOSS_PREMIUM), W ?? 0))
+  let V = ctrR2(Math.max(L * (1 + COUNTER.LOSS_PREMIUM), W ?? 0))
+  // Losing the item costs at most the best alternative found elsewhere (never less than his price: we would not pay more here).
+  if (market && Number.isFinite(market.bestAltPrice) && market.bestAltPrice < V) V = ctrR2(Math.min(V, Math.max(S, market.bestAltPrice)))
   const chat = raw.channel === 'chat'
   const theta = Boolean(raw.publicPrice) || chat
   const validityHours = options.validityHours === undefined ? VINTED_ASSUMED.COUNTER_VALIDITY_HOURS : options.validityHours
@@ -2111,6 +2230,7 @@ function normalizeCounterInput(raw, now = new Date(), options = {}) {
     Sprev, sigma, share, shareNorm, stance, k, n, buyers, sellers, mode, enteredAs,
     receivedAt, unc, offerSentAt, latencyH, inactive, profile, ageDays, hazard, W, Wcap, V, chat, theta, validityHours,
     assumedExpiry, deadline, planHorizon, minDelayMinutes, tMin, minStep: priceStepFor(L), goalPrice: Number.isFinite(goalPrice) ? goalPrice : null,
+    ...(market ? { market } : {}),
     cache: new Map(),
   }
   return { ok: true, errors: {}, warnings, state }
