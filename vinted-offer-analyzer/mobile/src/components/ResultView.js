@@ -76,7 +76,7 @@ function ExpectedPriceCard({ result, form, profile, market, onApplyPrice }) {
       <SectionLabel>Prezzo atteso</SectionLabel>
       <Title>{sameAsTarget ? `La tua offerta è già quella che paga meno: circa ${formatEuro(best.expected)}` : `Paghi meno in media offrendo ${formatEuro(best.price)}`}</Title>
       <Body small muted>
-        Prezzo atteso = probabilità × offerta + (1 − probabilità) × {curve.fallback < listPrice ? `l'alternativa a ${formatEuro(curve.fallback)}` : 'il prezzo pieno'}. {at ? `Con la tua offerta di ${formatEuro(at.price)} (${toPercent(at.probability)}%) il prezzo atteso è ${formatEuro(at.expected)}` : ''}{!sameAsTarget && at ? `; con ${formatEuro(best.price)} (${toPercent(best.probability)}%) scende a ${formatEuro(best.expected)}` : ''}.
+        Prezzo atteso = probabilità × offerta + (1 − probabilità) × il prezzo pieno (se rifiuta, compri qui a listino; un'alternativa più economica è tra le leve). {at ? `Con la tua offerta di ${formatEuro(at.price)} (${toPercent(at.probability)}%) il prezzo atteso è ${formatEuro(at.expected)}` : ''}{!sameAsTarget && at ? `; con ${formatEuro(best.price)} (${toPercent(best.probability)}%) scende a ${formatEuro(best.expected)}` : ''}.
       </Body>
       <View style={{ gap: 4 }}>
         {shown.map((p) => (

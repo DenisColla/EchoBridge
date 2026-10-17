@@ -81,8 +81,10 @@ export function marketFromRows(rows, { referencePrice = null } = {}) {
 /**
  * Expected price paid as a function of the discount asked (integer percentages 1..maxDiscountPct): each point runs the
  * full analysis at that target (same moment, profile and market as the one on screen) and weighs the price by its
- * overall probability, the fallback by the rest. The fallback is the best alternative's price basis when the market has
- * one below the listing price, otherwise the listing price itself (buy here at full price).
+ * overall probability, the fallback by the rest. The fallback is the listing price itself (a refused offer leaves the
+ * user buying here at full price): the curve ranks the offers on THIS listing, while a cheaper alternative is a separate
+ * choice, shown as a lever. (Using the alternative as fallback made every aggressive offer look cheap, because the rest
+ * of the weight went to a price the user would not pay here.)
  * Returns { listPrice, fallback, points: [{ discountPct, price, probability, expected }], best, atTarget, savingVsList }
  * (best = lowest expected, ties to the lower discount; atTarget = the point nearest the form's own target) or null
  * when the form is invalid or no discount is sendable.
@@ -93,8 +95,7 @@ export function expectedPriceCurve(form, now, { profile = null, market = null, m
   if (!probe.ok) return null
   const listPrice = probe.input.listPrice
   const step = priceStepFor(listPrice)
-  const alt = market && Number.isFinite(market.bestAltPrice) ? market.bestAltPrice : null
-  const fallback = alt !== null && alt < listPrice ? alt : listPrice
+  const fallback = listPrice
   const options = { ...(profile ? { profile } : {}), ...(market ? { market } : {}) }
 
   const points = []

@@ -207,7 +207,7 @@ test('buildMessages gains the fifth informato tone only with a market whose medi
 
 /* ───────── expected price curve ───────── */
 
-test('expectedPriceCurve: one point per sendable price, a minimum, the alternative as fallback, byte-identity of the analysis', () => {
+test('expectedPriceCurve: one point per sendable price, a minimum, full price as fallback, byte-identity of the analysis', () => {
   const curve = expectedPriceCurve(base, SUNDAY_AFTERNOON)
   assert.ok(curve)
   assert.equal(curve.listPrice, 100)
@@ -224,16 +224,15 @@ test('expectedPriceCurve: one point per sendable price, a minimum, the alternati
   assert.equal(curve.atTarget.price, 80)
   near(curve.savingVsList, 100 - curve.best.expected, 0.006)
 
-  // With an alternative below the listing the fallback is its price basis and every point is re-weighed.
+  // A cheaper alternative never becomes the fallback (it is a separate choice, shown as a lever): the market still
+  // changes the probabilities, so the points move, but the rest of the weight stays on buying here at full price.
   const market = marketFromRows([row(70, { expected: 70 }), row(80), row(90), row(100)], { referencePrice: 100 })
   assert.ok(market.bestAltPrice < 100)
   const withAlt = expectedPriceCurve(base, SUNDAY_AFTERNOON, { market })
-  assert.equal(withAlt.fallback, market.bestAltPrice)
-  assert.ok(withAlt.best.expected < curve.best.expected)
+  assert.equal(withAlt.fallback, 100)
   const p = withAlt.points.find((x) => x.price === 80)
-  near(p.expected, p.probability * 80 + (1 - p.probability) * market.bestAltPrice, 0.006)
-  // An alternative above the listing is no fallback.
-  assert.equal(expectedPriceCurve(base, SUNDAY_AFTERNOON, { market: { ...market, bestAltPrice: 150 } }).fallback, 100)
+  near(p.expected, p.probability * 80 + (1 - p.probability) * 100, 0.006)
+  assert.ok(withAlt.points.every((x) => x.expected <= 100 + 1e-9))
 
   // Each point is exactly what analyzeOffer says for that target; the on-screen analysis is untouched.
   const at = analyzeOffer({ ...base, targetPrice: 80 }, SUNDAY_AFTERNOON)
