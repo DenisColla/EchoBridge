@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Alert, Image, Linking, StyleSheet, Text, View } from 'react-native'
-import { CHANNELS, CHANNEL_IDS, ITALIAN_CITIES, channelOfUrl, formatEuro, savingVersus } from '../../../core/index.js'
+import { CHANNELS, CHANNEL_IDS, ITALIAN_CITIES, channelOfUrl, formatEuro, offerCurveFor, portfolioPlan, savingVersus } from '../../../core/index.js'
 import { radius, space, useTheme } from '../../theme.js'
 import { Badge, Body, Button, ButtonRow, Card, Chip, Collapsible, Field, Meter, Note, SectionLabel, Title } from '../ui.js'
 import { ChannelSweep } from './ChannelSweep.js'
@@ -14,7 +14,11 @@ const VERDICT = {
   same: { label: 'Stesso articolo', tone: 'good' },
   variant: { label: 'Variante', tone: 'warn' },
   alternative: { label: 'Alternativa', tone: 'accent' },
+  functional: { label: 'Variante funzionale', tone: 'accent' },
+  suspect: { label: 'Da controllare', tone: 'bad' },
 }
+const TIER = { lower: 'modello inferiore', same: 'stessa fascia', higher: 'modello superiore' }
+const GRADE = ['nuovo', 'come nuovo', 'ottimo', 'buono', 'discreto']
 
 const pct = (p) => `${Math.round(p * 100)}%`
 const usd = (n) => `${n < 0.01 ? n.toFixed(4) : n.toFixed(2)} $`
@@ -48,9 +52,11 @@ function Explanation({ value }) {
 function ResultRow({ row, outlook, explanation, onExplain, canExplain, stale }) {
   const t = useTheme()
   const c = row.candidate
-  const v = VERDICT[row.group === 'alternative' ? 'alternative' : row.verdict] || VERDICT.same
+  const v = VERDICT[c.suspect ? 'suspect' : row.variantKind === 'functional' ? 'functional' : row.group === 'alternative' ? 'alternative' : row.verdict] || VERDICT.same
   const saving = savingVersus(row, outlook)
   const negotiated = Number.isFinite(row.offer) && row.offer < c.price && Number.isFinite(row.probability)
+  const valueDiffers = Number.isFinite(row.valueTotal) && Math.abs(row.valueTotal - row.expectedTotal) >= 0.5
+  const tier = row.tier && TIER[row.tier.tier] ? row.tier : null
   return (
     <Card>
       <View style={styles.rowHead}>
@@ -59,6 +65,8 @@ function ResultRow({ row, outlook, explanation, onExplain, canExplain, stale }) 
           <View style={styles.badges}>
             <Badge tone="neutral">{CHANNELS[c.source] ? CHANNELS[c.source].label : c.source}</Badge>
             <Badge tone={v.tone}>{v.label} · {pct(row.confidence)}</Badge>
+            {tier ? <Badge tone="neutral">{TIER[tier.tier]}</Badge> : null}
+            {c.condition ? <Badge tone="neutral">{c.condition}</Badge> : null}
           </View>
           <Body numberOfLines={2} style={{ fontWeight: '600' }}>{c.title}</Body>
           {c.location ? <Body small muted numberOfLines={1}>{c.location}</Body> : null}
@@ -72,6 +80,12 @@ function ResultRow({ row, outlook, explanation, onExplain, canExplain, stale }) 
         {negotiated ? (
           <Body small>Offri {formatEuro(row.offer)}: accettata nel {pct(row.probability)} dei casi stimati{row.sendLabel && !stale ? `, meglio ${row.sendLabel}` : ''}.</Body>
         ) : row.negotiationNote ? <Body small muted>{row.negotiationNote}</Body> : null}
+        {valueDiffers ? (
+          <Body small muted>Valore equivalente {formatEuro(row.valueTotal)}: {row.conditionDeltaPct > 0 ? `condizioni peggiori (${GRADE[row.conditionGrade] || c.condition})` : `condizioni migliori (${GRADE[row.conditionGrade] || c.condition})`} rispetto all'annuncio di partenza.</Body>
+        ) : null}
+        {tier && Number.isFinite(row.dealIndex) ? (
+          <Body small muted>Rispetto al prezzo tipico di questo modello: {row.dealIndex < 0.9 ? 'affare' : row.dealIndex <= 1.05 ? 'nella norma' : 'caro'} ({Math.round(row.dealIndex * 100)}%).</Body>
+        ) : null}
         {saving ? (
           <Body small style={{ color: saving.expected > 0 ? t.good : t.ink3, fontWeight: '600' }}>
             {saving.expected > 0 ? `Circa ${formatEuro(saving.expected)} in meno dell'annuncio di partenza` : saving.expected < 0 ? `Circa ${formatEuro(-saving.expected)} in più dell'annuncio di partenza` : 'Stesso costo dell\'annuncio di partenza'}
@@ -91,6 +105,51 @@ function ResultRow({ row, outlook, explanation, onExplain, canExplain, stale }) 
           <Button label={explanation && explanation.error ? 'Riprova' : 'Perché conviene'} small variant="ghost" onPress={onExplain} disabled={!canExplain} />
         ) : explanation.loading ? <Button label="Scrivo…" small variant="ghost" disabled onPress={() => {}} /> : null}
       </ButtonRow>
+    </Card>
+  )
+}
+
+/**
+ * «Piano a 3»: offers on the best equivalent listings at the same time, calibrated so the cheapest accepted one costs the
+ * least. An accepted offer is not a purchase (24 h to decide on Vinted; proposals elsewhere), so the user buys the best
+ * and lets the others lapse. Computed on request: it runs the engine on a few price levels per listing.
+ */
+function PortfolioCard({ rows, outlook, reopened }) {
+  const t = useTheme()
+  const [plan, setPlan] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const eligible = rows.filter((r) => Number.isFinite(r.offer) && r.offer < r.candidate.price).slice(0, 3)
+  if (eligible.length < 2) return null
+  const compute = () => {
+    setBusy(true)
+    setTimeout(() => {
+      try {
+        const now = new Date()
+        const curves = eligible.map((r) => offerCurveFor(r.candidate, now))
+        const fallbackTotal = Math.min(...eligible.map((r) => r.totalNow), outlook && Number.isFinite(outlook.totalNow) ? outlook.totalNow : Infinity)
+        setPlan(portfolioPlan(curves, { fallbackTotal }))
+      } catch {
+        setPlan({ error: true })
+      }
+      setBusy(false)
+    }, 30)
+  }
+  return (
+    <Card style={{ borderColor: t.accent }}>
+      <SectionLabel>Piano a {eligible.length}</SectionLabel>
+      <Title>Tratta con {eligible.length} venditori insieme</Title>
+      <Body muted small>Un'offerta accettata non ti obbliga a comprare (su Vinted hai 24 ore). Offrendo a {eligible.length} annunci equivalenti nello stesso momento, compri il più conveniente tra quelli che accettano e lasci scadere gli altri.</Body>
+      {!plan ? <Button label={busy ? 'Calcolo…' : 'Calcola il piano'} onPress={compute} disabled={busy || reopened} /> : null}
+      {plan && plan.error ? <Note tone="warn">Non riesco a calcolare il piano su questi annunci.</Note> : null}
+      {plan && !plan.error ? (
+        <View style={{ gap: space.sm }}>
+          {plan.picks.map((p) => (
+            <Body key={p.id} small>• {p.label}: offri <Text style={{ fontWeight: '700' }}>{formatEuro(p.price)}</Text> (totale {formatEuro(p.total)}, accettata nel {pct(p.probability)})</Body>
+          ))}
+          <Body small>Almeno una accetta: <Text style={{ fontWeight: '700' }}>{pct(plan.pAny)}</Text>. Totale atteso del migliore: <Text style={{ fontWeight: '700' }}>{formatEuro(plan.expectedMin)}</Text>{Number.isFinite(plan.savingVsSingle) && plan.savingVsSingle > 0 ? `, circa ${formatEuro(plan.savingVsSingle)} meglio della trattativa singola` : ''}.</Body>
+          <Body small muted>Se nessuno accetta, compri il più economico a prezzo pieno ({formatEuro(plan.fallbackTotal)}). Le offerte le invii tu, una per sito.</Body>
+        </View>
+      ) : null}
     </Card>
   )
 }
@@ -248,9 +307,11 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
 
       {running ? (
         <Card>
-          <SectionLabel>Verifica con le foto</SectionLabel>
-          <Body>{job.done} di {job.total}{job.failed ? ` · ${job.failed} non riusciti` : ''}</Body>
-          <Meter value={job.total ? job.done / job.total : 0} />
+          <SectionLabel>{job.stage === 'triage' ? 'Prima scrematura (solo testi)' : 'Verifica con le foto'}</SectionLabel>
+          {job.stage === 'triage'
+            ? <Body>Una chiamata ogni 40 annunci: tolgo accessori e altri prodotti prima delle foto.</Body>
+            : <Body>{job.done} di {job.total}{job.failed ? ` · ${job.failed} non riusciti` : ''}{run.triage && run.triage.rejectedCount ? ` · ${run.triage.rejectedCount} scartati dalla scrematura` : ''}</Body>}
+          <Meter value={job.stage === 'triage' ? 0.05 : job.total ? job.done / job.total : 0} />
           <Body small muted>Spesa finora: {usd(run.cost || 0)}</Body>
           <Button label="Interrompi" variant="secondary" small onPress={search.cancel} />
         </Card>
@@ -258,9 +319,18 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
 
       {ranking ? (
         <View style={{ gap: space.md }}>
+          {run.partial ? <Note>Classifica provvisoria: si aggiorna man mano che arrivano le verifiche.</Note> : null}
+          {run.market && run.market.n >= 2 ? (
+            <Card muted>
+              <SectionLabel>Mercato di questo articolo</SectionLabel>
+              <Body>Mediana {formatEuro(run.market.medianPrice)} · metà degli annunci tra {formatEuro(run.market.p25Price)} e {formatEuro(run.market.p75Price)} ({run.market.n} confrontati).</Body>
+              {Number.isFinite(run.market.gapPct) ? <Body small muted>L'annuncio di partenza è {run.market.gapPct >= 0 ? `${run.market.gapPct}% sopra` : `${-run.market.gapPct}% sotto`} la mediana: {run.market.gapPct > 10 ? 'puoi trattare con decisione.' : run.market.gapPct < -10 ? 'è già un affare, non tirare troppo.' : 'è nella norma.'}</Body> : null}
+              <Body small muted>Questi numeri entrano nel calcolo dell'offerta in Calcola per questo annuncio.</Body>
+            </Card>
+          ) : null}
           {run.summary ? (
             <Body small muted>
-              Letti {run.summary.read} · verificati {run.summary.verified} di {run.summary.kept}{run.summary.reused ? ` (${run.summary.reused} già verificati prima)` : ''}{run.summary.failed ? ` · ${run.summary.failed} non riusciti` : ''}{run.summary.different ? ` · ${run.summary.different} erano altri prodotti` : ''}{run.summary.cancelled ? ' · interrotta' : ''}{!run.reopened && run.cost ? ` · spesa ${usd(run.cost)}` : ''}
+              Letti {run.summary.read}{run.summary.triaged ? ` · ${run.summary.triaged} scartati dalla scrematura` : ''} · verificati {run.summary.verified} di {run.summary.kept}{run.summary.reused ? ` (${run.summary.reused} già verificati prima)` : ''}{run.summary.failed ? ` · ${run.summary.failed} non riusciti` : ''}{run.summary.different ? ` · ${run.summary.different} erano altri prodotti` : ''}{run.summary.cancelled ? ' · interrotta' : ''}{!run.reopened && run.cost ? ` · spesa ${usd(run.cost)}` : ''}
             </Body>
           ) : null}
           {run.dropped && Object.keys(run.dropped).length ? (
@@ -271,10 +341,22 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
           {ranking.main.length ? ranking.main.map((row) => (
             <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
           )) : <Note>Nessun annuncio dello stesso articolo tra quelli letti. Prova altre parole o scorri di più le ricerche.</Note>}
+          {!run.partial && ranking.main.length >= 2 ? <PortfolioCard rows={ranking.main} outlook={outlook} reopened={Boolean(run.reopened)} /> : null}
+
+          {ranking.suspects && ranking.suspects.length ? (
+            <>
+              <SectionLabel>Prezzo molto sotto il mercato: da controllare</SectionLabel>
+              <Body small muted>Potrebbero essere affari veri o annunci sospetti: apri l'annuncio e leggi i segnali di rischio prima di offrire.</Body>
+              {ranking.suspects.map((row) => (
+                <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
+              ))}
+            </>
+          ) : null}
 
           {ranking.alternatives.length ? (
             <>
-              <SectionLabel>Alternative della stessa famiglia</SectionLabel>
+              <SectionLabel>Alternative: altri modelli e varianti funzionali</SectionLabel>
+              <Body small muted>Ordinate per convenienza rispetto al prezzo tipico di ciascun modello, non per prezzo assoluto.</Body>
               {ranking.alternatives.map((row) => (
                 <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
               ))}

@@ -1,12 +1,116 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
-  GOAL_CHOICES, TONES, articleFor, capitalize, formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatSignedPoints, formatTime,
-  isSameDay, prepArticleFor, toPercent,
+  GOAL_CHOICES, TONES, articleFor, capitalize, expectedPriceCurve, formatEuro, formatLongDate, formatPoints, formatRelativeDay, formatSignedPoints, formatTime,
+  isSameDay, leversFor, prepArticleFor, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneColors, toneForLevel, toneForProbability, useTheme } from '../theme.js'
 import { Badge, Body, Button, ButtonRow, Card, Chip, Collapsible, Meter, Note, Row, SectionLabel, Title } from './ui.js'
+
+/**
+ * The market picture from «Cerca altrove» (same product, other listings): where this price sits and whether the
+ * numbers below were anchored to it. `marketInfo` = { market, at } or null.
+ */
+function MarketCard({ result, marketInfo, onOpenSearch }) {
+  const t = useTheme()
+  const m = result.market || (marketInfo && marketInfo.market)
+  if (!m || !(m.n >= 2)) {
+    return onOpenSearch ? (
+      <Card muted>
+        <SectionLabel>Mercato</SectionLabel>
+        <Body small muted>Senza un confronto con altri annunci l'offerta parte da regole generali. Con «Cerca altrove» il motore ancora il prezzo al mercato reale di questo articolo.</Body>
+        <Button label="Cerca lo stesso articolo altrove" small variant="secondary" onPress={onOpenSearch} />
+      </Card>
+    ) : null
+  }
+  const gap = Number.isFinite(m.gapPct) ? m.gapPct : null
+  const when = marketInfo && marketInfo.at ? new Date(marketInfo.at) : null
+  return (
+    <Card>
+      <SectionLabel>Mercato di questo articolo</SectionLabel>
+      <Title>{gap === null ? `Mediana ${formatEuro(m.medianPrice)}` : gap > 10 ? `Prezzo ${gap}% sopra il mercato` : gap < -10 ? `Prezzo ${-gap}% sotto il mercato` : 'Prezzo nella norma del mercato'}</Title>
+      <Body small>Mediana {formatEuro(m.medianPrice)} · metà degli annunci tra {formatEuro(m.p25Price)} e {formatEuro(m.p75Price)} · {m.n} annunci confrontati{when ? `, ${formatRelativeDay(when, new Date())}` : ''}.</Body>
+      <Body small muted>
+        {gap !== null && gap > 10 ? 'Il venditore chiede più degli altri: lo sconto che proponi è giustificato e il calcolo ne tiene conto.' : gap !== null && gap < -10 ? 'È già tra i più economici: si vende in fretta, meglio non tirare troppo.' : 'Prezzo allineato: contano di più momento e tono.'}
+        {m.best && m.best.expectedTotal ? ` L'alternativa più conveniente trovata: ${m.best.title} a circa ${formatEuro(m.best.expectedTotal)} tutto compreso.` : ''}
+      </Body>
+      <Text style={[styles.factorValue, { color: t.ink3, fontSize: 12 }]}>Entra nel punteggio come «prezzo rispetto al mercato» e nel rischio che l'articolo sparisca.</Text>
+    </Card>
+  )
+}
+
+/**
+ * One metric for every choice: the expected final price = p·offerta + (1−p)·quello che paghi se rifiuta (il listino,
+ * o l'alternativa migliore trovata). The curve is computed lazily: forty analyses take a moment on a phone.
+ */
+function ExpectedPriceCard({ result, form, profile, market, onApplyPrice }) {
+  const t = useTheme()
+  const [curve, setCurve] = useState(null)
+  const listPrice = result.input.listPrice
+  const target = result.input.targetPrice
+  useEffect(() => {
+    let alive = true
+    setCurve(null)
+    const timer = setTimeout(() => {
+      try {
+        const c = expectedPriceCurve({ ...form, listPrice: String(listPrice).replace('.', ','), targetPrice: String(target).replace('.', ',') }, result.now, { profile, market })
+        if (alive) setCurve(c || { empty: true })
+      } catch {
+        if (alive) setCurve({ empty: true })
+      }
+    }, 120)
+    return () => { alive = false; clearTimeout(timer) }
+  }, [form, listPrice, target, profile, market, result.now])
+  if (!curve) return <Card muted><SectionLabel>Prezzo atteso</SectionLabel><Body small muted>Calcolo la curva delle offerte…</Body></Card>
+  if (curve.empty || !curve.best) return null
+  const best = curve.best
+  const at = curve.atTarget
+  const sameAsTarget = at && Math.abs(best.price - at.price) < 0.005
+  const shown = curve.points.filter((p, i) => i % Math.max(1, Math.floor(curve.points.length / 6)) === 0 || p === best || p === at)
+  return (
+    <Card>
+      <SectionLabel>Prezzo atteso</SectionLabel>
+      <Title>{sameAsTarget ? `La tua offerta è già quella che paga meno: circa ${formatEuro(best.expected)}` : `Paghi meno in media offrendo ${formatEuro(best.price)}`}</Title>
+      <Body small muted>
+        Prezzo atteso = probabilità × offerta + (1 − probabilità) × {curve.fallback < listPrice ? `l'alternativa a ${formatEuro(curve.fallback)}` : 'il prezzo pieno'}. {at ? `Con la tua offerta di ${formatEuro(at.price)} (${toPercent(at.probability)}%) il prezzo atteso è ${formatEuro(at.expected)}` : ''}{!sameAsTarget && at ? `; con ${formatEuro(best.price)} (${toPercent(best.probability)}%) scende a ${formatEuro(best.expected)}` : ''}.
+      </Body>
+      <View style={{ gap: 4 }}>
+        {shown.map((p) => (
+          <View key={p.price} style={styles.factorRow}>
+            <Body small style={[styles.factorLabel, { fontWeight: p === best ? '700' : '400' }]}>{p === best ? '★ ' : ''}{formatEuro(p.price)} (−{p.discountPct}%) · {toPercent(p.probability)}%</Body>
+            <Text style={[styles.factorValue, { color: p === best ? t.good : t.ink }]}>{formatEuro(p.expected)}</Text>
+          </View>
+        ))}
+      </View>
+      {!sameAsTarget && onApplyPrice ? <Button label={`Usa ${formatEuro(best.price)} come offerta`} small variant="secondary" onPress={() => onApplyPrice(best.price)} /> : null}
+      <Body small muted>Vale per la prima offerta; il risparmio atteso rispetto al prezzo pieno è circa {formatEuro(curve.savingVsList)}.</Body>
+    </Card>
+  )
+}
+
+/** Ways to pay less that are not an offer: each with its value in euro and, where it exists, a reminder. */
+function LeversCard({ result, form, market, signals, onLever }) {
+  const t = useTheme()
+  const levers = leversFor({ result, form, market, signals: signals || {}, now: result.now })
+  if (!levers.length) return null
+  return (
+    <Card>
+      <SectionLabel>Altre leve</SectionLabel>
+      <Title>Oltre all'offerta</Title>
+      {levers.map((l) => (
+        <View key={l.id} style={[styles.optionBox, { borderColor: t.line, backgroundColor: t.cardMuted }]}>
+          <View style={styles.factorRow}>
+            <Body style={[styles.factorLabel, { fontWeight: '700' }]}>{l.title}</Body>
+            {Number.isFinite(l.valueEur) && l.valueEur > 0 ? <Text style={[styles.factorValue, { color: t.good }]}>≈ {formatEuro(l.valueEur)}</Text> : null}
+          </View>
+          <Body small>{l.body}</Body>
+          {l.action && l.action.kind === 'reminder' && onLever ? <Button label={`Ricordamelo tra ${l.action.hours} ore`} small variant="secondary" onPress={() => onLever(l)} /> : null}
+        </View>
+      ))}
+    </Card>
+  )
+}
 
 /** What the extractor read from the listing, what it guessed and what it could not find: the user sees the basis of the numbers. */
 function SourceCard({ extraction, onEdit }) {
@@ -333,7 +437,7 @@ function ExplorationNote({ exploration, onSkip }) {
   )
 }
 
-export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData, onCounter, risk = null, onSkipExploration = null }) {
+export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy = false, goal, onGoal, plan, onOptimize, onApply, optimizing, extraction = null, onEditData, onCounter, risk = null, onSkipExploration = null, form = null, profile = null, marketInfo = null, onOpenSearch = null, onApplyPrice = null, onLever = null }) {
   const t = useTheme()
   if (result.kind === 'no_offer_needed') {
     return (
@@ -355,6 +459,9 @@ export function ResultView({ result, onSave, saveState, onCalendar, calendarBusy
       {result.exploration ? <ExplorationNote exploration={result.exploration} onSkip={onSkipExploration} /> : result.pinned && <Note>Momento fissato dall'ottimizzatore: {result.verdict.headline.replace("Invia l'offerta ", 'invio ')}.</Note>}
       <ScoreCard result={result} />
       <VerdictCard result={result} />
+      <MarketCard result={result} marketInfo={marketInfo} onOpenSearch={onOpenSearch} />
+      {form ? <ExpectedPriceCard result={result} form={form} profile={profile} market={marketInfo ? marketInfo.market : null} onApplyPrice={onApplyPrice} /> : null}
+      {form ? <LeversCard result={result} form={form} market={marketInfo ? marketInfo.market : null} signals={marketInfo ? marketInfo.signals : null} onLever={onLever} /> : null}
       <RiskCard risk={risk} />
       {extraction && extraction.ok && <SourceCard extraction={extraction} onEdit={onEditData} />}
       <Card style={{ borderColor: t.accent }}>

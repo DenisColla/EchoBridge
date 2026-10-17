@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
   COUNTER_RECEIVED_AGO, TONES, analyzeCounter, capitalize, counterFromPercent, counterPreview, formatEuro, formatLongDate,
-  formatSignedPoints, formatTime, parsePercent, parsePrice, toPercent,
+  formatSignedPoints, formatTime, parsePercent, parsePrice, reservationPosterior, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneForProbability, useTheme } from '../theme.js'
@@ -16,7 +16,7 @@ const priceText = (v) => (Math.abs(v - Math.round(v)) > 0.004 ? v.toFixed(2) : S
  * the engine returns the best reply price, the moment to send it, the plan for the next round and the message.
  * `context` comes from a fresh analysis ({ form }) or from a saved item ({ itemId, form, history }).
  */
-export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null }) {
+export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null, market = null }) {
   const t = useTheme()
   const pendingScroll = useRef(false)
   const history = useMemo(() => (Array.isArray(context.history) ? context.history : []), [context.history])
@@ -77,7 +77,16 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
 
   const run = (opts = {}) => {
     // The learned profile (monthly report) corrects the acceptance of our counter for this user's sellers.
-    const outcome = analyzeCounter(buildRaw(), clock(), profile ? { ...opts, profile } : opts)
+    const raw = buildRaw()
+    const outcome = analyzeCounter(raw, clock(), { ...opts, ...(profile ? { profile } : {}), ...(market ? { market } : {}) })
+    // What the seller's answers say about the lowest price they would take (a soft posterior, shown as a range).
+    if (outcome.ok && Array.isArray(raw.history)) {
+      try {
+        outcome.reservation = reservationPosterior({ listPrice: parsePrice(raw.listPrice), history: raw.history.map((e) => ({ side: e.by, price: e.price })) })
+      } catch {
+        outcome.reservation = null
+      }
+    }
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
@@ -225,6 +234,9 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
         {result.lines.tier ? <Note tone="warn">{result.lines.tier}</Note> : null}
         {result.lines.alsoGood ? <Body muted small>{result.lines.alsoGood}</Body> : null}
         <Body muted small>{result.lines.deadline}</Body>
+        {result.reservation && Number.isFinite(result.reservation.median) ? (
+          <Body muted small>Dalle sue risposte, il minimo che accetterebbe è probabilmente tra {formatEuro(result.reservation.p20)} e {formatEuro(result.reservation.p80)} (mediana {formatEuro(result.reservation.median)}){Number.isFinite(result.reservation.suggested) ? `; la cifra che minimizza il prezzo atteso su questa stima è ${formatEuro(result.reservation.suggested)}` : ''}. Stima morbida: si affina a ogni sua risposta.</Body>
+        ) : null}
       </Card>
 
       <Card style={{ borderColor: t.accent }}>

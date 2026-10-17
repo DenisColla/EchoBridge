@@ -19,7 +19,7 @@ import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
 import { useSearch } from './src/hooks/useSearch.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
-import { listenToReminderTaps } from './src/services/notifications.js'
+import { listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 import { Body, Button, Card } from './src/components/ui.js'
@@ -152,6 +152,9 @@ function Main() {
 
   /** Engine options with the learned profile (none until the monthly report has something to correct). */
   const engineOptions = (extra = {}) => ({ ...extra, ...(learning.engineProfile ? { profile: learning.engineProfile } : {}) })
+  /** The market picture of the listing on screen (from «Cerca altrove», when it searched this very listing). */
+  const marketInfoFor = (f) => search.marketFor(normalizeVintedLink(f && f.link) || (f && f.link))
+  const marketInfo = useMemo(() => marketInfoFor(form), [form.link, search.run, search.store]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * `explore` only for fresh analyses (Calcola, link): a pinned moment or an applied option is the user's own choice.
@@ -159,8 +162,11 @@ function Main() {
    */
   const runAnalysis = (nextForm, preferredSendAt, { explore = false } = {}) => {
     const at = new Date()
-    const options = engineOptions(preferredSendAt ? { preferredSendAt } : {})
-    let outcome = analyzeOffer(nextForm, at, options)
+    const mk = marketInfoFor(nextForm)
+    const options = engineOptions({ ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}) })
+    // Demand signals seen for this very listing in the search results (favourites) ride on the form, like the profile.
+    const scored = mk && mk.signals ? { ...nextForm, signals: mk.signals } : nextForm
+    let outcome = analyzeOffer(scored, at, options)
     if (outcome.ok && explore && learning.exploration) {
       const key = explorationKey(nextForm)
       const month = monthKeyOf(at)
@@ -203,7 +209,8 @@ function Main() {
       // The optimizer starts from the offer on screen: with a test variation, its price and its moment.
       const ex = result && result.exploration
       const src = ex ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form
-      setPlan(optimizeOffer(src, new Date(), engineOptions({ targetProbability: goal, exactSendAt: ex && ex.kind === 'time' ? ex.at : null })))
+      const mk = marketInfoFor(src)
+      setPlan(optimizeOffer(src, new Date(), engineOptions({ targetProbability: goal, exactSendAt: ex && ex.kind === 'time' ? ex.at : null, ...(mk ? { market: mk.market } : {}) })))
       setOptimizing(false)
     }, 20)
   }
@@ -215,6 +222,26 @@ function Main() {
     setPlan(null)
     const outcome = runAnalysis(nextForm, option.apply.preferredSendAt)
     if (outcome) showToast(`Applicato: ${option.label.toLowerCase()} → ${Math.round(outcome.probability * 100)}%`)
+  }
+
+  /** «Usa X come offerta» from the expected-price curve: same as typing the price and recalculating. */
+  const applyPrice = (price) => {
+    const nextForm = { ...form, targetPrice: String(price).replace('.', ',') }
+    setForm(nextForm)
+    setPlan(null)
+    setPinnedSendAt(null)
+    const outcome = runAnalysis(nextForm, null)
+    if (outcome) showToast(`Offerta impostata a ${formatEuro(price)}.`)
+  }
+
+  /** A lever with a reminder («metti nei preferiti e aspetta»): one notification, no item in the list. */
+  const scheduleLever = async (lever) => {
+    const at = new Date(Date.now() + lever.action.hours * 3600 * 1000)
+    const id = await scheduleReminderAt({
+      itemId: null, link: form.link || null, at, kind: 'lever',
+      title: 'Nessuno sconto dal venditore?', body: `${form.itemTitle || 'L\'articolo'}: se non è arrivata la sua offerta, invia ora la tua nel momento consigliato.`,
+    })
+    showToast(id ? `Ti avviso ${lever.action.hours === 60 ? 'tra due giorni e mezzo' : `tra ${lever.action.hours} ore`}.` : 'Non riesco a programmare la notifica: controlla i permessi nella scheda Info.', 4000)
   }
 
   const reset = () => {
@@ -531,6 +558,7 @@ function Main() {
               onCalendar={counterCalendar}
               calendarBusy={calendarBusy}
               profile={learning.engineProfile}
+              market={marketInfoFor(counterContext.form) ? marketInfoFor(counterContext.form).market : null}
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />
           )}
@@ -565,6 +593,12 @@ function Main() {
                   onCounter={openCounterFromAnalysis}
                   risk={risk}
                   onSkipExploration={result.exploration ? skipExploration : null}
+                  form={form}
+                  profile={learning.engineProfile}
+                  marketInfo={marketInfo}
+                  onOpenSearch={lastListing && form.link === lastListing.url ? () => openSearch(true) : null}
+                  onApplyPrice={applyPrice}
+                  onLever={scheduleLever}
                 />
               )}
               {(lastListing && result && form.link === lastListing.url) || (search.run && search.run.job && search.run.job.running) ? (

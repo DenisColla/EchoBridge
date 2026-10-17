@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  CHANNELS, CHANNEL_IDS, ITALIAN_CITIES, NOT_MODEL_KINDS, channelSearchUrl, cleanProduct, fallbackProduct, prefilter, priceWindow, productPrompt,
-  psychPrompt, rankResults, referenceOutlook, searchVerifyPrompt,
+  CHANNELS, CHANNEL_IDS, ITALIAN_CITIES, NOT_MODEL_KINDS, applyTriage, channelSearchUrl, cleanProduct, fallbackProduct, marketFromRows, prefilter,
+  priceWindow, productPrompt, psychPrompt, rankResults, referenceOutlook, searchVerifyPrompt, triageBatches, triagePrompt,
 } from '../../core/index.js'
 import { callModel } from '../services/llmClient.js'
 import { getApiKey } from '../services/secrets.js'
@@ -13,6 +13,11 @@ export const VERIFY_CHAIN = ['qwen:qwen3.8-flash', 'anthropic:claude-haiku-5-5']
 export const TEXT_CHAIN = ['openai:gpt-6-luna', 'anthropic:claude-haiku-5-5']
 const CONCURRENCY = 4
 const PER_CHANNEL = 20
+/** Below this many unverified candidates the text triage is not worth a call. */
+const TRIAGE_MIN = 4
+/** The partial ranking is refreshed at most this often while verifications arrive. */
+const PARTIAL_EVERY_MS = 4000
+const MARKET_MAX_AGE_MS = 7 * 24 * 3600 * 1000
 
 const providerOf = (modelKey) => modelKey.split(':')[0]
 let runCounter = 0
@@ -124,9 +129,16 @@ export function useSearch() {
     return channelSearchUrl(channel, r.queries[channel] || r.product.query, { ...r.window, city })
   }, [city])
 
+  /** Demand signals of the reference itself, when it shows up among the Vinted results (favourites are only there). */
+  const referenceSignals = (r, items) => {
+    if (!r.reference || !r.reference.id) return r.referenceSignals || null
+    const self = items.find((c) => c.source === (r.reference.source || 'vinted') && String(c.id) === String(r.reference.id))
+    if (!self || !Number.isFinite(self.favourites)) return r.referenceSignals || null
+    return { ...(r.referenceSignals || {}), favourites: self.favourites }
+  }
   /** Results read from a channel's page (replaces that channel's previous read). `from` = the search URL loaded. */
   const setChannelResults = useCallback((channel, items, raw, from) => updateRun((r) => (r ? {
-    ...r, channels: { ...r.channels, [channel]: { items, read: true, raw: items.length ? null : raw || null, from: from || null } },
+    ...r, referenceSignals: referenceSignals(r, items), channels: { ...r.channels, [channel]: { items, read: true, raw: items.length ? null : raw || null, from: from || null } },
   } : r)), [updateRun])
   /** A new query on a channel: what it read before no longer counts. */
   const resetChannel = useCallback((channel) => updateRun((r) => (r ? {
@@ -143,7 +155,11 @@ export function useSearch() {
 
   const setPhase = useCallback((phase) => updateRun((r) => (r ? { ...r, phase } : r)), [updateRun])
 
-  /** Pre-filter + verification of what was read, then the ranking. */
+  /**
+   * Light pre-filter → one text-only triage call per 40 listings (same / variant / family / accessory / other) →
+   * photo verification of the plausible ones, with the ranking refreshed while answers arrive → final ranking and
+   * the market picture of the reference (median, percentiles, best alternative).
+   */
   const analyze = useCallback(async () => {
     const r = runRef.current
     if (!r || (r.job && r.job.running)) return null
@@ -152,20 +168,48 @@ export function useSearch() {
     const id = r.id
     const mine = (x) => Boolean(x && x.id === id)
     const withReferencePhoto = Boolean(reference.photo)
-    const { kept, dropped } = prefilter(all, r.product, reference, { perChannel: PER_CHANNEL, window: r.window })
+    const { kept, dropped, suspects } = prefilter(all, r.product, reference, { perChannel: PER_CHANNEL, window: r.window, mode: 'light' })
     // Listings already verified in this search are not paid for twice (the fresh listing data is kept).
     const keyOf = (c) => `${c.source}:${c.id}`
     const cache = r.verdicts || {}
     const reused = kept.filter((c) => cache[keyOf(c)]).map((c) => ({ candidate: c, ...cache[keyOf(c)].value, model: cache[keyOf(c)].model }))
-    const todo = kept.filter((c) => !cache[keyOf(c)])
+    const unverified = kept.filter((c) => !cache[keyOf(c)])
     const fresh = {}
     const controller = new AbortController()
     abortRef.current = controller
-    updateRun((x) => ({ ...x, phase: 'analyze', dropped, job: { running: true, done: 0, total: todo.length, failed: 0 } }))
+    const rankOpts = { reference, product: r.product }
+    updateRun((x) => ({ ...x, phase: 'analyze', dropped, suspectCount: suspects || 0, job: { running: true, stage: 'triage', done: 0, total: unverified.length, failed: 0 } }))
+
+    // Text triage: cheap, no photos; what it rejects never reaches the paid photo verification.
+    let todo = unverified
+    let triage = null
+    if (unverified.length >= TRIAGE_MIN) {
+      const answers = []
+      let calls = 0
+      for (const batch of triageBatches(unverified, 40)) {
+        if (controller.signal.aborted) break
+        const res = await callChain(VERIFY_CHAIN, triagePrompt(reference, r.product, batch), [], { effort: 'low', maxTokens: 4000, timeoutMs: 90_000, signal: controller.signal })
+        if (res.costUsd) addSpend(res.modelKey, res.costUsd, id)
+        if (res.ok && res.value && Array.isArray(res.value.items)) { answers.push(...res.value.items); calls++ }
+      }
+      if (!mine(runRef.current)) return null
+      const t = applyTriage(unverified, answers)
+      todo = t.plausible
+      triage = { calls, rejected: t.rejected, rejectedCount: unverified.length - t.plausible.length, unanswered: t.unanswered.length }
+    }
+    updateRun((x) => (mine(x) ? { ...x, triage, job: { running: true, stage: 'verify', done: 0, total: todo.length, failed: 0 } } : x))
     const results = []
     const failures = []
     let next = 0
     let done = 0
+    let lastPartial = 0
+    const refreshPartial = (force) => {
+      const at = Date.now()
+      if (!force && at - lastPartial < PARTIAL_EVERY_MS) return
+      lastPartial = at
+      const partial = rankResults([...reused, ...results], new Date(), rankOpts)
+      updateRun((x) => (mine(x) ? { ...x, ranking: partial, partial: true } : x))
+    }
     const verifyOne = async (c) => {
       let images
       try {
@@ -191,7 +235,8 @@ export function useSearch() {
           results.push({ candidate: c, ...res.value, model: res.modelKey })
           fresh[keyOf(c)] = { value: res.value, model: res.modelKey }
         } else failures.push({ candidate: c, error: res.error, kind: res.kind, infra: NOT_MODEL_KINDS.includes(res.kind) })
-        updateRun((x) => (mine(x) ? { ...x, job: { running: true, done, total: todo.length, failed: failures.length } } : x))
+        updateRun((x) => (mine(x) ? { ...x, job: { running: true, stage: 'verify', done, total: todo.length, failed: failures.length } } : x))
+        if (res.ok) refreshPartial(false)
       }
     }
     try {
@@ -202,21 +247,38 @@ export function useSearch() {
     if (!mine(runRef.current)) return null
     const now = new Date()
     const verified = [...reused, ...results]
-    const ranking = rankResults(verified, now)
+    const ranking = rankResults(verified, now, rankOpts)
     const outlook = referenceOutlook(reference, now)
+    const market = marketFromRows(ranking.main, { referencePrice: reference.price })
     const summary = {
-      read: all.length, kept: kept.length, verified: verified.length, reused: reused.length, failed: failures.length, cancelled: controller.signal.aborted,
+      read: all.length, kept: kept.length, triaged: triage ? triage.rejectedCount : 0, verified: verified.length, reused: reused.length, failed: failures.length,
+      cancelled: controller.signal.aborted, suspects: ranking.suspects ? ranking.suspects.length : 0,
       different: verified.filter((x) => x.verdict === 'different' && !x.family).length,
     }
-    const finished = updateRun((x) => (mine(x) ? { ...x, phase: 'done', job: null, ranking, failures, summary, outlook, verdicts: { ...(x.verdicts || {}), ...fresh }, finishedAt: now.toISOString() } : x))
-    if (finished) {
-      // Keep the last search to reopen it later (no photos, no prompts).
-      updateStore((s) => ({ ...s, last: { reference, product: finished.product, ranking, summary, outlook, at: now.toISOString() } }))
+    const finished = updateRun((x) => (mine(x) ? { ...x, phase: 'done', job: null, ranking, partial: false, failures, summary, outlook, market, verdicts: { ...(x.verdicts || {}), ...fresh }, finishedAt: now.toISOString() } : x))
+    if (finished && !controller.signal.aborted) {
+      // Keep the last search to reopen it later (no photos, no prompts); its market picture feeds the offer engine.
+      updateStore((s) => ({ ...s, last: { reference, product: finished.product, ranking, summary, outlook, market, signals: finished.referenceSignals || null, at: now.toISOString() } }))
     }
     return summary
   }, [addSpend, updateRun, updateStore])
 
   const cancel = useCallback(() => { if (abortRef.current) abortRef.current.abort() }, [])
+
+  /**
+   * The market picture of a listing (from the search on screen or the saved one, when recent): what the same product
+   * costs elsewhere, so the offer engine can anchor its numbers. Null when unknown.
+   */
+  const marketFor = useCallback((url) => {
+    if (!url) return null
+    const r = runRef.current
+    if (r && r.market && r.reference && r.reference.url === url) return { market: r.market, at: r.finishedAt || null, signals: r.referenceSignals || null }
+    const last = storeRef.current && storeRef.current.last
+    if (last && last.market && last.reference && last.reference.url === url && last.at && Date.now() - new Date(last.at).getTime() < MARKET_MAX_AGE_MS) {
+      return { market: last.market, at: last.at, signals: last.signals || null }
+    }
+    return null
+  }, [])
 
   /** «Perché conviene»: the negotiation text for one row, with the channel's rules and the ranking's numbers. */
   const explain = useCallback(async (row) => {
@@ -249,7 +311,7 @@ export function useSearch() {
     const last = storeRef.current && storeRef.current.last
     if (!last) return false
     stopAll()
-    updateRun({ id: ++runCounter, phase: 'done', reference: last.reference, product: last.product, ranking: last.ranking, summary: last.summary, outlook: last.outlook || null, finishedAt: last.at, channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false }])), queries: {}, explanations: {}, cost: 0, reopened: true })
+    updateRun({ id: ++runCounter, phase: 'done', reference: last.reference, product: last.product, ranking: last.ranking, summary: last.summary, outlook: last.outlook || null, market: last.market || null, finishedAt: last.at, channels: Object.fromEntries(CHANNEL_IDS.map((id) => [id, { items: [], read: false }])), queries: {}, explanations: {}, cost: 0, reopened: true })
     return true
   }, [stopAll, updateRun])
 
@@ -260,6 +322,6 @@ export function useSearch() {
 
   return {
     ready: Boolean(store), store, run, keys, checkKeys, city, setCity, start, setQuery, searchUrlFor, setChannelResults, resetChannel, addChannelResults, setPhase,
-    analyze, cancel, explain, reopenLast, close,
+    analyze, cancel, explain, reopenLast, close, marketFor,
   }
 }
