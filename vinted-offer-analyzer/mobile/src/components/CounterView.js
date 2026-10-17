@@ -80,9 +80,12 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
     const raw = buildRaw()
     const outcome = analyzeCounter(raw, clock(), { ...opts, ...(profile ? { profile } : {}), ...(market ? { market } : {}) })
     // What the seller's answers say about the lowest price they would take (a soft posterior, shown as a range).
-    if (outcome.ok && Array.isArray(raw.history)) {
+    if (outcome.ok) {
       try {
-        outcome.reservation = reservationPosterior({ listPrice: parsePrice(raw.listPrice), history: raw.history.map((e) => ({ side: e.by, price: e.price })) })
+        const B = parsePrice(fields.previousOffer)
+        const S = fields.counterMode === 'pct' ? counterFromPercent(B, parsePercent(fields.sellerCounter)) : parsePrice(fields.sellerCounter)
+        const moves = Array.isArray(raw.history) ? raw.history.map((e) => ({ side: e.by, price: e.price })) : [{ side: 'buyer', price: B }, { side: 'seller', price: S }]
+        outcome.reservation = reservationPosterior({ listPrice: parsePrice(raw.listPrice), history: moves })
       } catch {
         outcome.reservation = null
       }

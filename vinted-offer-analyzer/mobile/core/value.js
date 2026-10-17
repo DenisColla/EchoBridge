@@ -70,7 +70,7 @@ export function marketFromRows(rows, { referencePrice = null } = {}) {
     p75Price: valR2(percentile(prices, 0.75)),
     medianTotal: valR2(percentile(totals, 0.5)),
     bestTotal,
-    bestAltPrice: valR2(bestTotal - valFinite(c.buyerFee) - valFinite(c.shippingCost)),
+    bestAltPrice: valR2(Number.isFinite(bestRow.expectedPrice) ? bestRow.expectedPrice : bestTotal - valFinite(c.buyerFee) - valFinite(c.shippingCost)),
     best: { source: c.source || null, title: c.title || '', url: c.url || null, price: c.price, totalNow: valR2(totalOf(bestRow)), expectedTotal: bestTotal },
     gapPct: Number.isFinite(referencePrice) && referencePrice > 0 && medianPrice > 0 ? Math.round((referencePrice / medianPrice - 1) * 100) : null,
   }
@@ -121,6 +121,8 @@ export function expectedPriceCurve(form, now, { profile = null, market = null, m
 
 /** Buyer total on Vinted for a price: commission 5% + 0,70 €, shipping excluded. */
 const vintedTotal = (price) => valR2(price * (1 + VINTED.BUYER_FEE_PCT / 100) + VINTED.BUYER_FEE_FIXED)
+/** Vinted's typical domestic shipping, the same estimate channels.js uses for search rows. */
+const VINTED_SHIPPING_ESTIMATE = 3.5
 
 /** Prior probability of a price drop of 10% or more within 7 days, by listing age (not yet calibrated on outcomes). */
 const dropPriorFor = (days) => (days < 14 ? 0.12 : days <= 30 ? 0.2 : 0.15)
@@ -147,7 +149,7 @@ export function leversFor({ result, form = null, market = null, signals = {}, no
   const reminder = (hours) => ({ kind: 'reminder', hours, at: new Date(now.getTime() + hours * 3_600_000) })
   const levers = []
 
-  if (hasMarket && Number.isFinite(market.p25Price) && L <= market.p25Price) {
+  if (hasMarket && Number.isFinite(market.p25Price) && L < market.p25Price && market.medianPrice - L >= Math.max(1, 0.02 * market.medianPrice)) {
     levers.push({
       id: 'market_buy_now',
       title: 'Sotto il mercato: compra subito',
@@ -158,25 +160,30 @@ export function leversFor({ result, form = null, market = null, signals = {}, no
     })
   }
 
+  // Same basis on both sides: what this listing should cost after its own negotiation (expected price + fee + the
+  // same shipping estimate) against the alternative's expected total. Buying here at full price is not the comparison.
   const best = hasMarket && market.best && Number.isFinite(market.best.expectedTotal) ? market.best : null
-  const listTotal = vintedTotal(L)
-  if (best && best.expectedTotal + 0.5 < listTotal) {
+  const pHere = result && result.kind === 'analysis' && Number.isFinite(result.probability) ? result.probability : 0
+  const expectedHere = pHere * input.targetPrice + (1 - pHere) * L
+  const hereTotal = valR2(vintedTotal(expectedHere) + VINTED_SHIPPING_ESTIMATE)
+  if (best && best.expectedTotal + 0.5 < hereTotal) {
     levers.push({
       id: 'alternative',
       title: `Alternativa su ${sourceLabel(best.source)}`,
-      body: `${best.title ? `"${best.title}"` : 'Lo stesso modello'} su ${sourceLabel(best.source)} dovrebbe costare circa ${formatEuro(best.expectedTotal)} tutto compreso dopo la trattativa, contro ${formatEuro(listTotal)} qui a prezzo pieno con la commissione. Stima: dipende da come risponde l'altro venditore.`,
-      valueEur: valR2(listTotal - best.expectedTotal),
+      body: `${best.title ? `"${best.title}"` : 'Lo stesso modello'} su ${sourceLabel(best.source)} dovrebbe costare circa ${formatEuro(best.expectedTotal)} tutto compreso dopo la trattativa, contro circa ${formatEuro(hereTotal)} qui trattando allo stesso modo (commissione e spedizione comprese). Stima: dipende da come risponde l'altro venditore.`,
+      valueEur: valR2(hereTotal - best.expectedTotal),
       probability: null,
       action: null,
     })
   }
 
-  if (result && result.kind === 'analysis' && (result.probability < 0.5 || days <= 14)) {
+  const ageKnown = input.listingAge.id !== 'unknown'
+  if (result && result.kind === 'analysis' && (result.probability < 0.5 || (ageKnown && days <= 14))) {
     levers.push({
       id: 'favourite_wait',
       title: 'Metti nei preferiti e aspetta',
-      body: 'Metti nei preferiti e aspetta 48–72 ore: i venditori mandano sconti a chi ha messo il cuore, senza il limite del 40%. La probabilità (25%) e lo sconto (15%) sono una stima non ancora calibrata.',
-      valueEur: valR2(0.15 * L),
+      body: `Metti nei preferiti e aspetta 48–72 ore: i venditori mandano sconti a chi ha messo il cuore, senza il limite del 40%. Se succede (stima 25%, non ancora calibrata) lo sconto vale circa ${formatEuro(0.15 * L)}: il valore qui sotto è già pesato per la probabilità.`,
+      valueEur: valR2(0.25 * 0.15 * L),
       probability: 0.25,
       action: reminder(60),
     })
@@ -187,14 +194,14 @@ export function leversFor({ result, form = null, market = null, signals = {}, no
     levers.push({
       id: 'bundle',
       title: 'Chiedi un prezzo per due articoli',
-      body: `Il venditore ha ${sig.sellerItems} articoli in vendita: chiedi un prezzo per due pezzi insieme, risparmi una spedizione e lo sconto sul lotto si ottiene più facilmente. Stima: ${pct}% sul lotto più 3,50 € di spedizione.`,
-      valueEur: valR2((pct / 100) * L + 3.5),
-      probability: null,
+      body: `Il venditore ha ${sig.sellerItems} articoli in vendita: chiedi un prezzo per due pezzi insieme, risparmi una spedizione e lo sconto sul lotto si ottiene più facilmente. Stima: ${pct}% sul lotto più 3,50 € di spedizione, pesata per una probabilità del 50%.`,
+      valueEur: valR2(0.5 * ((pct / 100) * L + 3.5)),
+      probability: 0.5,
       action: null,
     })
   }
 
-  if (days >= 7) {
+  if (ageKnown && days >= 7) {
     const pDrop = dropPriorFor(days)
     const category = input.category || CATEGORIES.find((c) => c.id === 'other')
     const rate = category.dailySellRate * ageHazardMultiplier(days) * marketHazardMultiplier(L, market)
@@ -233,8 +240,11 @@ export function portfolioPlan(curves, { fallbackTotal, maxRows = 3 } = {}) {
     .map((c) => ({
       id: c.id,
       label: c.label || '',
+      // At most 10 points per row, the ten best on their own (lowest single expected), kept in price order.
       points: (Array.isArray(c.points) ? c.points : []).filter((p) => Number.isFinite(p.total) && Number.isFinite(p.probability)
-        && p.probability >= 0 && p.probability <= 1 && p.total < fallbackTotal).slice(0, 10),
+        && p.probability >= 0 && p.probability <= 1 && p.total < fallbackTotal)
+        .map((p) => ({ ...p, single: p.probability * p.total + (1 - p.probability) * fallbackTotal }))
+        .sort((a, b) => a.single - b.single).slice(0, 10).sort((a, b) => a.price - b.price),
     }))
     .filter((c) => c.points.length)
     .slice(0, maxRows)
@@ -288,7 +298,7 @@ export function portfolioPlan(curves, { fallbackTotal, maxRows = 3 } = {}) {
 
 const RESERVE_GRID_POINTS = 81
 const RESERVE_FLOOR_SHARE = 0.5
-const RESERVE_REJECT_FACTOR = 0.08
+const RESERVE_REJECT_FACTOR = 0.01
 const RESERVE_COUNTER_FACTOR = 0.05
 const RESERVE_PDF_FLOOR = 1e-4
 const RESERVE_SUGGEST_MIN_SHARE = 0.6
@@ -314,11 +324,13 @@ export function reservationPosterior({ listPrice, history = [] }) {
   const moves = (Array.isArray(history) ? history : []).filter((h) => h && (h.side === 'buyer' || h.side === 'seller'))
   let lastCounter = null
   let answered = false
+  let maxRejected = null
   for (let i = 0; i < moves.length; i++) {
     const h = moves[i]
     const price = valPrice(h.price)
     if (h.side === 'buyer') {
       if (!Number.isFinite(price) || i === moves.length - 1 || moves[i + 1].side !== 'seller') continue
+      maxRejected = maxRejected === null ? price : Math.max(maxRejected, price)
       for (let g = 0; g < grid.length; g++) if (grid[g] <= price + 1e-9) pdf[g] *= RESERVE_REJECT_FACTOR
     } else {
       answered = true
@@ -332,15 +344,20 @@ export function reservationPosterior({ listPrice, history = [] }) {
   let acc = 0
   const cdf = pdf.map((v) => (acc += v / mass))
   const quantile = (q) => valR2(grid[Math.max(0, cdf.findIndex((c) => c >= q - 1e-12))])
+  // The suggestion never re-offers what he already refused, never exceeds his own counter, and (unless he countered
+  // below it) stays above Vinted's 60% floor.
   let suggested = null
   if (answered) {
     const cLast = lastCounter ?? L
+    const floor = Math.min(RESERVE_SUGGEST_MIN_SHARE * L, cLast)
     let bestCost = Infinity
     for (let g = 0; g < grid.length; g++) {
-      if (grid[g] < RESERVE_SUGGEST_MIN_SHARE * L - 1e-9) continue
+      if (grid[g] < floor - 1e-9 || grid[g] > cLast + 1e-9) continue
+      if (maxRejected !== null && grid[g] <= maxRejected + 1e-9) continue
       const cost = cdf[g] * grid[g] + (1 - cdf[g]) * cLast
       if (cost < bestCost - 1e-9) { bestCost = cost; suggested = valR2(grid[g]) }
     }
+    if (suggested === null) suggested = valR2(cLast)
   }
   return { median: quantile(0.5), p20: quantile(0.2), p80: quantile(0.8), grid: grid.map((x, g) => ({ price: valR2(x), cdf: cdf[g] })), suggested }
 }

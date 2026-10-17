@@ -127,7 +127,7 @@ function PortfolioCard({ rows, outlook, reopened }) {
         const now = new Date()
         const curves = eligible.map((r) => offerCurveFor(r.candidate, now))
         const fallbackTotal = Math.min(...eligible.map((r) => r.totalNow), outlook && Number.isFinite(outlook.totalNow) ? outlook.totalNow : Infinity)
-        setPlan(portfolioPlan(curves, { fallbackTotal }))
+        setPlan(portfolioPlan(curves, { fallbackTotal }) || { empty: true })
       } catch {
         setPlan({ error: true })
       }
@@ -142,7 +142,8 @@ function PortfolioCard({ rows, outlook, reopened }) {
       {!plan ? <Button label={busy ? 'Calcolo…' : 'Calcola il piano'} onPress={compute} disabled={busy} /> : null}
       {reopened && !plan ? <Body small muted>Ricerca salvata: i prezzi possono essere cambiati, controlla gli annunci prima di offrire.</Body> : null}
       {plan && plan.error ? <Note tone="warn">Non riesco a calcolare il piano su questi annunci.</Note> : null}
-      {plan && !plan.error ? (
+      {plan && plan.empty ? <Note>Nessuna offerta su questi annunci conviene rispetto al prezzo pieno più basso: compra direttamente il più economico.</Note> : null}
+      {plan && !plan.error && !plan.empty ? (
         <View style={{ gap: space.sm }}>
           {plan.picks.map((p) => (
             <Body key={p.id} small>• {p.label}: offri <Text style={{ fontWeight: '700' }}>{formatEuro(p.price)}</Text> (totale {formatEuro(p.total)}, accettata nel {pct(p.probability)})</Body>
@@ -342,7 +343,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
           {ranking.main.length ? ranking.main.map((row) => (
             <ResultRow key={keyOf(row)} row={row} outlook={outlook} explanation={explanations[keyOf(row)]} onExplain={() => search.explain(row)} canExplain={Boolean(keys && keys.text) && !run.reopened} stale={Boolean(run.reopened)} />
           )) : <Note>Nessun annuncio dello stesso articolo tra quelli letti. Prova altre parole o scorri di più le ricerche.</Note>}
-          {!run.partial && ranking.main.length >= 2 ? <PortfolioCard rows={ranking.main} outlook={outlook} reopened={Boolean(run.reopened)} /> : null}
+          {!run.partial && ranking.main.length >= 2 ? <PortfolioCard key={`${run.id || ''}-${run.finishedAt || ''}`} rows={ranking.main} outlook={outlook} reopened={Boolean(run.reopened)} /> : null}
 
           {ranking.suspects && ranking.suspects.length ? (
             <>

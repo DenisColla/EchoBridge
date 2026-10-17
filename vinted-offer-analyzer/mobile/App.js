@@ -19,7 +19,7 @@ import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
 import { useSearch } from './src/hooks/useSearch.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
-import { listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
+import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 import { Body, Button, Card } from './src/components/ui.js'
@@ -112,11 +112,20 @@ function Main() {
     toastTimer.current = setTimeout(() => setToast(null), ms)
   }, [])
 
+  /** The latest extractFromLink, for the reminder-tap listener (registered once). */
+  const extractRef = useRef(null)
   useEffect(() => listenToReminderTaps((data) => {
     // An open pair collection may hold unsaved labels: the lab stays, the tab underneath is ready when it closes.
     if (!collectingRef.current) {
       setLabOpen(false)
       setSearchOpen(false)
+    }
+    if (data && data.kind === 'lever') {
+      // A lever reminder («preferito e aspetta», «aspetta 7 giorni»): back to the listing, ready to send the offer.
+      setCounterContext(null)
+      setTab('calcola')
+      if (data.link && extractRef.current) extractRef.current(data.link)
+      return
     }
     if (data && data.kind === 'monthly') {
       setCounterContext(null)
@@ -164,13 +173,14 @@ function Main() {
     const at = new Date()
     const mk = marketInfoFor(nextForm)
     const options = engineOptions({ ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}) })
-    // Demand signals seen for this very listing in the search results (favourites) ride on the form, like the profile.
+    // Demand signals seen for this very listing in the search results (favourites) ride on the form, like the profile:
+    // the exploration arms are scored on the same input, so their cost is measured against the same base.
     const scored = mk && mk.signals ? { ...nextForm, signals: mk.signals } : nextForm
     let outcome = analyzeOffer(scored, at, options)
     if (outcome.ok && explore && learning.exploration) {
       const key = explorationKey(nextForm)
       const month = monthKeyOf(at)
-      const varied = skipExploreRef.current.has(key) ? null : explorationPlan(nextForm, outcome, at, { key, month, options, budget: explorationBudget(watchlist.allItems, month) })
+      const varied = skipExploreRef.current.has(key) ? null : explorationPlan(scored, outcome, at, { key, month, options, budget: explorationBudget(watchlist.allItems, month) })
       if (varied) outcome = varied.result
     }
     if (!outcome.ok) {
@@ -210,6 +220,7 @@ function Main() {
       const ex = result && result.exploration
       const src = ex ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form
       const mk = marketInfoFor(src)
+      if (mk && mk.signals) src.signals = mk.signals
       setPlan(optimizeOffer(src, new Date(), engineOptions({ targetProbability: goal, exactSendAt: ex && ex.kind === 'time' ? ex.at : null, ...(mk ? { market: mk.market } : {}) })))
       setOptimizing(false)
     }, 20)
@@ -234,14 +245,25 @@ function Main() {
     if (outcome) showToast(`Offerta impostata a ${formatEuro(price)}.`)
   }
 
-  /** A lever with a reminder («metti nei preferiti e aspetta»): one notification, no item in the list. */
+  /** A lever with a reminder («metti nei preferiti e aspetta», «aspetta 7 giorni»): one notification, no item in the list. */
   const scheduleLever = async (lever) => {
-    const at = new Date(Date.now() + lever.action.hours * 3600 * 1000)
-    const id = await scheduleReminderAt({
-      itemId: null, link: form.link || null, at, kind: 'lever',
-      title: 'Nessuno sconto dal venditore?', body: `${form.itemTitle || 'L\'articolo'}: se non è arrivata la sua offerta, invia ora la tua nel momento consigliato.`,
-    })
-    showToast(id ? `Ti avviso ${lever.action.hours === 60 ? 'tra due giorni e mezzo' : `tra ${lever.action.hours} ore`}.` : 'Non riesco a programmare la notifica: controlla i permessi nella scheda Info.', 4000)
+    const allowed = await ensureNotificationPermission().catch(() => false)
+    if (!allowed) {
+      showToast('Notifiche disattivate: attivale nella scheda Info per ricevere il promemoria.', 4000)
+      return
+    }
+    const hours = lever.action.hours
+    const name = form.itemTitle || 'L\'articolo'
+    const copy = lever.id === 'patience'
+      ? { title: 'È passata una settimana', body: `${name}: controlla se il prezzo è sceso; se è ancora in vendita, invia l'offerta nel momento consigliato.` }
+      : { title: 'Nessuno sconto dal venditore?', body: `${name}: se non è arrivata la sua offerta, invia ora la tua nel momento consigliato.` }
+    const when = hours % 24 === 0 ? `tra ${hours / 24} giorni` : hours === 60 ? 'tra due giorni e mezzo' : `tra ${hours} ore`
+    try {
+      const id = await scheduleReminderAt({ itemId: null, link: form.link || null, at: new Date(Date.now() + hours * 3600 * 1000), kind: 'lever', ...copy })
+      showToast(id ? `Ti avviso ${when}.` : 'Non riesco a programmare la notifica.', 4000)
+    } catch {
+      showToast('Non riesco a programmare la notifica.', 4000)
+    }
   }
 
   const reset = () => {
@@ -342,6 +364,8 @@ function Main() {
       setExtractPhase(null)
     }
   }
+
+  useEffect(() => { extractRef.current = extractFromLink })
 
   const pasteLink = async () => {
     const link = await readVintedLinkFromClipboard()
@@ -596,6 +620,7 @@ function Main() {
                   form={form}
                   profile={learning.engineProfile}
                   marketInfo={marketInfo}
+                  onRecalc={recalcKeepingPin}
                   onOpenSearch={lastListing && form.link === lastListing.url ? () => openSearch(true) : null}
                   onApplyPrice={applyPrice}
                   onLever={scheduleLever}

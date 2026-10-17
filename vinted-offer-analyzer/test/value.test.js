@@ -253,7 +253,7 @@ test('leversFor: each rule fires on its condition, values sorted descending, bod
   // 1–2 weeks old (10 days): favourite_wait (≤ 14 days) and patience (≥ 7 days), nothing else.
   assert.deepEqual(none.map((l) => l.id).sort(), ['favourite_wait', 'patience'])
   const fav = none.find((l) => l.id === 'favourite_wait')
-  assert.equal(fav.valueEur, 15)
+  assert.equal(fav.valueEur, 3.75, 'expected value: 25% of a 15% discount')
   assert.equal(fav.probability, 0.25)
   assert.deepEqual(fav.action, { kind: 'reminder', hours: 60, at: new Date(SUNDAY_AFTERNOON.getTime() + 60 * 3_600_000) })
   assert.match(fav.body, /48–72 ore/)
@@ -280,7 +280,7 @@ test('leversFor: each rule fires on its condition, values sorted descending, bod
   assert.equal(leversFor({ result: analyzeOffer({ ...base, listingAge: 'over_month', targetPrice: '92' }, SUNDAY_AFTERNOON) })[0].probability, 0.15)
 
   // Market under p25: buy now; a cheaper alternative on another site.
-  const market = marketFromRows([row(110, { expected: 95, source: 'subito', title: 'AF1 bianche 42' }), row(120), row(130), row(140)], { referencePrice: 100 })
+  const market = marketFromRows([row(110, { expected: 85, source: 'subito', title: 'AF1 bianche 42' }), row(120), row(130), row(140)], { referencePrice: 100 })
   assert.ok(100 <= market.p25Price)
   const withMarket = leversFor({ result, market })
   const buyNow = withMarket.find((l) => l.id === 'market_buy_now')
@@ -288,14 +288,16 @@ test('leversFor: each rule fires on its condition, values sorted descending, bod
   assert.equal(buyNow.valueEur, market.medianPrice - 100)
   assert.match(buyNow.body, /Sotto il mercato|mediana 125 €/)
   assert.match(buyNow.title, /Sotto il mercato: compra subito/)
+  // The alternative is compared with THIS listing negotiated the same way: p·target + (1−p)·list, fee and shipping.
+  const hereTotal = Math.round(((result.probability * 80 + (1 - result.probability) * 100) * 1.05 + 0.7 + 3.5) * 100) / 100
   const alt = withMarket.find((l) => l.id === 'alternative')
-  assert.ok(alt, 'expected total 95 + 0.5 < 105.7')
-  near(alt.valueEur, 105.7 - 95, 0.006)
+  assert.ok(alt, `expected total 85 + 0.5 < ${hereTotal}`)
+  near(alt.valueEur, hereTotal - 85, 0.006)
   assert.match(alt.body, /"AF1 bianche 42" su Subito/)
-  assert.match(alt.body, /95 €/)
+  assert.match(alt.body, /85 €/)
   assert.equal(withMarket[0].valueEur, Math.max(...withMarket.map((l) => l.valueEur)))
-  // No alternative when its expected total is not cheaper than buying here at list with the fee.
-  const dear = { ...market, best: { ...market.best, expectedTotal: 105.3 } }
+  // No alternative when its expected total is not cheaper than negotiating here.
+  const dear = { ...market, best: { ...market.best, expectedTotal: hereTotal + 2 } }
   assert.equal(leversFor({ result, market: dear }).some((l) => l.id === 'alternative'), false)
   // Market hazard speeds up the loss in the patience lever.
   const patienceCheap = leversFor({ result, market: { ...market, p25Price: 120, p75Price: 140 } }).find((l) => l.id === 'patience')
@@ -303,9 +305,9 @@ test('leversFor: each rule fires on its condition, values sorted descending, bod
 
   // Bundle from the seller's items.
   const bundle = leversFor({ result, signals: { sellerItems: 7 } }).find((l) => l.id === 'bundle')
-  assert.equal(bundle.valueEur, 13.5)
+  assert.equal(bundle.valueEur, 6.75, 'expected value at 50%')
   assert.match(bundle.body, /7 articoli/)
-  assert.equal(leversFor({ result, signals: { sellerItems: 7, bundleDiscountPct: 20 } }).find((l) => l.id === 'bundle').valueEur, 23.5)
+  assert.equal(leversFor({ result, signals: { sellerItems: 7, bundleDiscountPct: 20 } }).find((l) => l.id === 'bundle').valueEur, 11.75, 'expected value at 50%')
   assert.equal(leversFor({ result, signals: { sellerItems: 1 } }).some((l) => l.id === 'bundle'), false)
 
   // Nothing without a usable result or form; the form alone is enough for the rules that do not need the analysis.
@@ -415,4 +417,26 @@ test('analyzeCounter: the market caps the loss value at the best alternative and
   const withMarket = analyzeCounter(EX1, NOW1, { market })
   assert.equal(withMarket.ok, true)
   assert.notEqual(JSON.stringify(withMarket), JSON.stringify(plain))
+})
+
+test('review fixes: posterior never suggests a refused price, buy-now needs a real gap, alternative lever on the same basis, unknown age has no patience lever', () => {
+  const refused = reservationPosterior({ listPrice: 100, history: [{ side: 'buyer', price: 95 }, { side: 'seller', price: null }] })
+  assert.ok(refused.suggested > 95 && refused.suggested <= 100, `suggested ${refused.suggested}`)
+  assert.ok(refused.median > 95, `median ${refused.median}`)
+  const low = reservationPosterior({ listPrice: 100, history: [{ side: 'buyer', price: 50 }, { side: 'seller', price: 55 }] })
+  assert.ok(low.suggested <= 55, 'never above his own counter')
+  const two = reservationPosterior({ listPrice: 100, history: [{ side: 'buyer', price: 80 }, { side: 'seller', price: 95 }, { side: 'buyer', price: 90 }, { side: 'seller', price: 93 }] })
+  assert.ok(two.suggested > 90 && two.suggested <= 93, `suggested ${two.suggested}`)
+
+  const rowAt = (price) => ({ verdict: 'same', candidate: { source: 'vinted', title: 'x', url: 'https://www.vinted.it/items/1', price, buyerFee: 0.7 + 0.05 * price, shippingCost: 3.5 }, totalNow: price * 1.05 + 4.2, expectedTotal: price * 1.05 + 4.2 })
+  const flat = marketFromRows([rowAt(100), rowAt(100), rowAt(100), rowAt(100)], { referencePrice: 100 })
+  const resFlat = analyzeOffer({ ...base, listPrice: '100', targetPrice: '80' }, SUNDAY_AFTERNOON, { market: flat })
+  const ids = leversFor({ result: resFlat, market: flat }).map((l) => l.id)
+  assert.ok(!ids.includes('market_buy_now'), 'equal prices are not "below the market"')
+  assert.ok(!ids.includes('alternative'), 'an identical listing is no alternative')
+  const cheaper = marketFromRows([{ ...rowAt(60), expectedTotal: 60 }, rowAt(100), rowAt(100), rowAt(100)], { referencePrice: 100 })
+  assert.ok(leversFor({ result: resFlat, market: cheaper }).some((l) => l.id === 'alternative'))
+
+  const unknown = leversFor({ result: analyzeOffer({ ...base, listingAge: 'unknown', targetPrice: '80' }, SUNDAY_AFTERNOON) }).map((l) => l.id)
+  assert.ok(!unknown.includes('patience'))
 })

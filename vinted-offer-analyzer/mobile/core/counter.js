@@ -376,7 +376,7 @@ const ctrIsBelow = (state, x) => (x <= state.Wcap + CTR_EPS && x < state.S0 - 0.
 /** After a decline or silence: his price may survive (θ) or we re-offer it (φ), otherwise list price or walk away. */
 const ctrFallback = (state, x) => (state.theta
   ? ctrAccCost(state, x)
-  : COUNTER.RECOVER_PROB * ctrAccCost(state, x) + (1 - COUNTER.RECOVER_PROB) * (state.L <= state.Wcap + CTR_EPS ? state.L : state.V))
+  : COUNTER.RECOVER_PROB * ctrAccCost(state, x) + (1 - COUNTER.RECOVER_PROB) * (state.L <= state.Wcap + CTR_EPS ? Math.min(state.L, state.V) : state.V))
 const ctrMinGap = (listPrice) => Math.max(0.5, ctrGrid(listPrice))
 
 /**

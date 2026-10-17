@@ -580,7 +580,7 @@ export function rankResults(results, now = new Date(), { reference = null, produ
     const dealIndex = tier && refPrice != null ? Math.round(valueTotal / (refPrice * tier.priceRatio) * 1000) / 1000 : null
     rows.push({
       group, candidate: c, verdict, variantKind, conflict, confidence, reason: r.reason || '', differences,
-      totalNow, expectedTotal, conditionGrade: candGrade, conditionDeltaPct, valueTotal, score: round2(valueTotal * (1 + penalty)),
+      totalNow, expectedPrice, expectedTotal, conditionGrade: candGrade, conditionDeltaPct, valueTotal, score: round2(valueTotal * (1 + penalty)),
       tier, dealIndex,
       offer: neg ? neg.offer : null, probability: neg ? neg.probability : null, sendLabel: neg ? neg.sendLabel : null,
       negotiationNote: neg ? neg.note : null, risks,
