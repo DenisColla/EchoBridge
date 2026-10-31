@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { radius, space, toneColors, useTheme } from '../theme.js'
 
 export function Card({ children, style, muted = false }) {
@@ -115,7 +115,8 @@ export function ChipGroup({ label, hint, options, value, onChange, error }) {
   )
 }
 
-export function Field({ label, hint, error, value, onChangeText, placeholder, keyboardType = 'default', suffix, multiline = false, autoCapitalize = 'sentences' }) {
+/** `trailing` renders a node inside the input frame after the text (an inline button, a unit); it replaces `suffix` when both are given. */
+export function Field({ label, hint, error, value, onChangeText, placeholder, keyboardType = 'default', suffix, trailing, multiline = false, autoCapitalize = 'sentences', autoFocus = false, onSubmitEditing, returnKeyType }) {
   const t = useTheme()
   return (
     <View style={styles.field}>
@@ -134,9 +135,12 @@ export function Field({ label, hint, error, value, onChangeText, placeholder, ke
           multiline={multiline}
           autoCapitalize={autoCapitalize}
           autoCorrect={false}
+          autoFocus={autoFocus}
+          onSubmitEditing={onSubmitEditing}
+          returnKeyType={returnKeyType}
           style={[styles.input, { color: t.ink, minHeight: multiline ? 72 : 48 }]}
         />
-        {suffix ? <Text style={[styles.suffix, { color: t.ink3 }]}>{suffix}</Text> : null}
+        {trailing ? <View style={styles.trailing}>{trailing}</View> : suffix ? <Text style={[styles.suffix, { color: t.ink3 }]}>{suffix}</Text> : null}
       </View>
       {error ? <Text style={[styles.error, { color: t.bad }]}>{error}</Text> : null}
     </View>
@@ -146,13 +150,20 @@ export function Field({ label, hint, error, value, onChangeText, placeholder, ke
 /**
  * Secondary detail that stays folded until asked for: a tappable header with a chevron and an optional summary
  * shown while closed. Keeps the result page short on a phone without hiding anything.
+ * Uncontrolled by default (`initiallyOpen`); pass `open` + `onToggle` to control it from the parent.
  */
-export function Collapsible({ title, summary, children, initiallyOpen = false }) {
+export function Collapsible({ title, summary, children, initiallyOpen = false, open: openProp, onToggle }) {
   const t = useTheme()
-  const [open, setOpen] = useState(initiallyOpen)
+  const [openState, setOpenState] = useState(initiallyOpen)
+  const controlled = openProp !== undefined
+  const open = controlled ? Boolean(openProp) : openState
+  const toggle = () => {
+    if (onToggle) onToggle(!open)
+    if (!controlled) setOpenState((v) => !v)
+  }
   return (
     <View style={[styles.collapsible, { borderColor: t.line }]}>
-      <Pressable onPress={() => setOpen((v) => !v)} accessibilityRole="button" accessibilityState={{ expanded: open }} style={({ pressed }) => [styles.collapsibleHeader, { opacity: pressed ? 0.7 : 1 }]}>
+      <Pressable onPress={toggle} accessibilityRole="button" accessibilityState={{ expanded: open }} style={({ pressed }) => [styles.collapsibleHeader, { opacity: pressed ? 0.7 : 1 }]}>
         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
           <Text style={[styles.collapsibleTitle, { color: t.ink }]} numberOfLines={1}>{title}</Text>
           {!open && summary ? <Text style={[styles.small, { color: t.ink3 }]} numberOfLines={2}>{summary}</Text> : null}
@@ -173,6 +184,92 @@ export function Toggle({ label, value, onChange }) {
         {value ? <Text style={{ color: t.onAccent, fontSize: 13, fontWeight: '800', lineHeight: 16 }}>✓</Text> : null}
       </View>
       <Text style={[styles.body, { color: t.ink, flex: 1, minWidth: 0 }]}>{label}</Text>
+    </Pressable>
+  )
+}
+
+/** A compact figure tile: label on top, a large value, one muted line beneath. `tone` colours the value. */
+export function Stat({ label, value, sub, tone = 'neutral', style }) {
+  const t = useTheme()
+  const color = tone === 'neutral' ? t.ink : toneColors(t, tone).fg
+  return (
+    <View style={[styles.stat, { backgroundColor: t.cardMuted }, style]} accessible accessibilityLabel={`${label}: ${value}${sub ? `, ${sub}` : ''}`}>
+      <Text style={[styles.sectionLabel, { color: t.ink3 }]} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.statValue, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{value}</Text>
+      {sub ? <Text style={[styles.small, { color: t.ink3 }]} numberOfLines={1}>{sub}</Text> : null}
+    </View>
+  )
+}
+
+/** A row of Stat tiles that share the width equally. */
+export function StatRow({ children }) {
+  const cells = (Array.isArray(children) ? children : [children]).filter(Boolean)
+  return (
+    <View style={styles.statRow}>
+      {cells.map((child, index) => <View key={index} style={styles.statCell}>{child}</View>)}
+    </View>
+  )
+}
+
+/** Horizontal tabs (compact chips) with optional counts: options [{ id, label, count }]. */
+export function SegmentedControl({ options, value, onChange }) {
+  const t = useTheme()
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.segments} accessibilityRole="tablist" keyboardShouldPersistTaps="handled">
+      {options.map((opt) => {
+        const active = opt.id === value
+        const label = opt.count != null ? `${opt.label} · ${opt.count}` : opt.label
+        return (
+          <Pressable
+            key={opt.id}
+            onPress={() => onChange(opt.id)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            style={({ pressed }) => [styles.chipCompact, { backgroundColor: active ? t.accent : t.card, borderColor: active ? t.accent : t.line, opacity: pressed ? 0.85 : 1 }]}
+          >
+            <Text style={[styles.chipLabel, { color: active ? t.onAccent : t.ink }]} numberOfLines={1}>{label}</Text>
+          </Pressable>
+        )
+      })}
+    </ScrollView>
+  )
+}
+
+/** A search box: leading glyph, no label, a clear button while there is text. */
+export function SearchField({ value, onChangeText, placeholder, onClear }) {
+  const t = useTheme()
+  const clear = () => (onClear ? onClear() : onChangeText(''))
+  return (
+    <View style={[styles.inputWrap, { backgroundColor: t.card, borderColor: t.line }]}>
+      <Text style={[styles.searchGlyph, { color: t.ink3 }]} accessibilityElementsHidden importantForAccessibility="no">⌕</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={t.ink3}
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+        accessibilityRole="search"
+        accessibilityLabel={placeholder}
+        style={[styles.input, { color: t.ink, minHeight: 48 }]}
+      />
+      {value ? (
+        <Pressable onPress={clear} accessibilityRole="button" accessibilityLabel="Cancella la ricerca" hitSlop={8} style={({ pressed }) => [styles.clearButton, { opacity: pressed ? 0.6 : 1 }]}>
+          <Text style={[styles.clearGlyph, { color: t.ink3 }]}>×</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  )
+}
+
+/** A text-only action for secondary choices inside a row or a sentence (44 dp touch target through hitSlop). */
+export function InlineAction({ label, onPress, tone = 'accent', disabled = false, style }) {
+  const t = useTheme()
+  const color = tone === 'accent' ? t.accentInk : tone === 'danger' ? t.bad : tone === 'neutral' ? t.ink2 : toneColors(t, tone).fg
+  return (
+    <Pressable onPress={onPress} disabled={disabled} accessibilityRole="button" hitSlop={12} style={({ pressed }) => [styles.inlineAction, { opacity: disabled ? 0.5 : pressed ? 0.6 : 1 }, style]}>
+      <Text style={[styles.inlineActionText, { color }]} numberOfLines={1}>{label}</Text>
     </Pressable>
   )
 }
@@ -227,4 +324,15 @@ const styles = StyleSheet.create({
   collapsibleTitle: { fontSize: 14, fontWeight: '700' },
   collapsibleBody: { paddingHorizontal: space.md, paddingBottom: space.md, gap: space.sm },
   chevron: { fontSize: 16, flexShrink: 0 },
+  trailing: { marginLeft: 6, flexShrink: 0, justifyContent: 'center' },
+  stat: { flex: 1, minWidth: 0, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: 10, gap: 2 },
+  statValue: { fontSize: 22, fontWeight: '800', fontVariant: ['tabular-nums'], lineHeight: 28 },
+  statRow: { flexDirection: 'row', gap: space.sm },
+  statCell: { flex: 1, minWidth: 0 },
+  segments: { flexDirection: 'row', gap: space.sm, paddingVertical: 2 },
+  searchGlyph: { fontSize: 18, marginRight: 6, flexShrink: 0 },
+  clearButton: { minWidth: 32, minHeight: 32, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  clearGlyph: { fontSize: 22, lineHeight: 24, fontWeight: '600' },
+  inlineAction: { alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 2, minHeight: 32, justifyContent: 'center' },
+  inlineActionText: { fontSize: 14, fontWeight: '700' },
 })
