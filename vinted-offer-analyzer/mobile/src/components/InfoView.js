@@ -1,11 +1,83 @@
 import { useEffect, useState } from 'react'
-import { Share, View } from 'react-native'
+import { Alert, Share, View } from 'react-native'
 import { VINTED, formatEuro } from '../../core/index.js'
 import { ensureNotificationPermission, getNotificationStatus } from '../services/notifications.js'
 import { STEP_LABEL, VIA_LABEL, calendarDiagnostics, eventNotesFor, openCalendarWithEvent } from '../services/calendar.js'
+import { loadReadStats } from '../services/readStats.js'
 import { space } from '../theme.js'
-import { Body, Button, Card, Note, SectionLabel, Title } from './ui.js'
+import { Body, Button, Card, Field, Note, Row, SectionLabel, Title } from './ui.js'
 import { LearningCard } from './LearningCard.js'
+
+/** How many items a pasted backup holds (the exported array, or { items, archive }). */
+const countOf = (data) => (Array.isArray(data) ? data.length : data && typeof data === 'object' ? (Array.isArray(data.items) ? data.items.length : 0) + (Array.isArray(data.archive) ? data.archive.length : 0) : 0)
+
+/**
+ * «Ripristina da JSON»: paste the backup exported by this card on another device (or an offline-fitted dataset) and
+ * merge it into the list; the newer copy of each offer wins. Confirmed before anything is written.
+ */
+function RestoreBlock({ onRestore, onToast }) {
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  if (!onRestore) return null
+
+  const restore = () => {
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      onToast('JSON non valido: incolla il contenuto del backup così com\'è.')
+      return
+    }
+    const n = countOf(data)
+    if (!n) {
+      onToast('Il testo non contiene offerte: serve il backup JSON di questa app.')
+      return
+    }
+    Alert.alert('Ripristinare il backup?', `${n} ${n === 1 ? 'offerta' : 'offerte'} nel testo. Quelle già presenti vengono aggiornate solo se la copia incollata è più recente; nessuna viene cancellata.`, [
+      { text: 'Annulla', style: 'cancel' },
+      {
+        text: 'Ripristina',
+        onPress: async () => {
+          setBusy(true)
+          try {
+            const r = await onRestore(data)
+            onToast(`Ripristino fatto: ${r.added} ${r.added === 1 ? 'nuova' : 'nuove'}, ${r.updated} ${r.updated === 1 ? 'aggiornata' : 'aggiornate'}, ${r.skipped} già presenti${r.invalid ? `, ${r.invalid} non valide` : ''}. In lista: ${r.total}.`)
+            setText('')
+            setOpen(false)
+          } catch {
+            onToast('Ripristino non riuscito: il backup non è stato scritto.')
+          } finally {
+            setBusy(false)
+          }
+        },
+      },
+    ])
+  }
+
+  if (!open) return <Button label="Ripristina da JSON" variant="ghost" small onPress={() => setOpen(true)} />
+  return (
+    <View style={{ gap: space.sm }}>
+      <Field label="Backup da ripristinare" hint="(incolla il JSON)" value={text} onChangeText={setText} placeholder='[{"id": …}]' multiline autoCapitalize="none" />
+      <Row>
+        <Button label={busy ? 'Ripristino…' : 'Ripristina'} variant="secondary" small onPress={restore} disabled={busy || !text.trim()} />
+        <Button label="Annulla" variant="ghost" small onPress={() => { setOpen(false); setText('') }} />
+      </Row>
+    </View>
+  )
+}
+
+/** Per-field read counters of the last link extractions (engine-spec §3.1): what Vinted's page really shows us. */
+function ReadStats({ stats }) {
+  if (!stats || !stats.total) return null
+  const n = stats.total
+  return (
+    <View style={{ gap: 2 }}>
+      <Body small style={{ fontWeight: '700' }}>Nelle ultime {n} {n === 1 ? 'lettura' : 'letture'}{stats.viaBrowser ? ` (${stats.viaBrowser} dal browser interno)` : ''}</Body>
+      {stats.fields.map((f) => <Body key={f.id} muted small>• {f.label}: letto in {f.read} {n === 1 ? 'dell\'ultima lettura' : `delle ultime ${n} letture`}</Body>)}
+    </View>
+  )
+}
 
 const STATUS_LABEL = {
   granted: 'Notifiche attive',
@@ -57,10 +129,12 @@ function CalendarSection() {
 }
 
 /** Info tab, outcomes first: how well the estimates match reality, then the engine's learning, reminders, calendar, tools and the explanations. */
-export function InfoView({ stats, items, learning = null, onToast = () => {}, onOpenLab = null, onOpenSearch = null }) {
+export function InfoView({ stats, items, learning = null, onToast = () => {}, onOpenLab = null, onOpenSearch = null, onRestore = null }) {
   const [status, setStatus] = useState('undetermined')
+  const [reads, setReads] = useState(null)
   useEffect(() => {
     getNotificationStatus().then(setStatus)
+    loadReadStats().then(setReads).catch(() => setReads(null))
   }, [])
 
   const exportData = async () => {
@@ -91,7 +165,10 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
           <Body muted small>Segna l'esito di ogni offerta inviata: è l'unico modo per capire se il modello sovrastima o sottostima.</Body>
         )}
         <Body muted small>La Lista conta lo stato attuale, qui il primo esito.</Body>
-        <Button label="Backup dei dati (JSON)" variant="ghost" small onPress={exportData} disabled={items.length === 0} />
+        <Row>
+          <Button label="Backup dei dati (JSON)" variant="ghost" small onPress={exportData} disabled={items.length === 0} />
+          <RestoreBlock onRestore={onRestore} onToast={onToast} />
+        </Row>
       </Card>
 
       <LearningCard learning={learning} onToast={onToast} />
@@ -129,6 +206,8 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
         <Body>• Dalla pagina pubblica dell'annuncio: titolo, prezzo, marca, condizioni, categoria, data di caricamento e ultima attività del venditore (es. "Ultima visita 26 min fa"), più la valutazione in stelle.</Body>
         <Body>• Da questi dati stima categoria e tipo di venditore e propone un'offerta al −{discount}%{discount !== 20 ? ' (appreso dai tuoi esiti)' : ''}: controlla sempre i campi stimati prima di salvare.</Body>
         <Body>• Il numero di recensioni e i distintivi del venditore vengono letti quando la pagina li contiene; se mancano, il tipo di venditore resta "Non lo so" e puoi impostarlo a mano.</Body>
+        <Body>• Dalla pagina aperta nel browser interno legge anche visualizzazioni, interessati, un prezzo precedente barrato, lo sconto sui lotti e gli altri articoli del venditore: entrano nel calcolo come stime, finché i tuoi esiti non dicono quanto pesano.</Body>
+        <ReadStats stats={reads} />
         <Body muted small>La lettura usa solo la pagina pubblica, senza login. Se Vinted blocca la richiesta, l'app te lo dice e puoi compilare i dati a mano.</Body>
       </Card>
 

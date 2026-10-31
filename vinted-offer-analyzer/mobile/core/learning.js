@@ -25,10 +25,12 @@
  * No Math.random, no clock reads: every function takes `now`. Same inputs → same output.
  */
 import { COUNTER, ENGINE_VERSION, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, VINTED } from './constants.js'
-import { analyzeOffer, normalizeInput, priceStepFor, withPrices } from './analyze.js'
+import { analyzeOffer, normalizeInput, priceStepFor, withContext, withPrices } from './analyze.js'
 import { MONTHS_IT, WEEKDAYS_IT, calendarDaysBetween, minutesOfDay, pad2 } from './dates.js'
+import { hashUnit } from './gate.js'
 import { clamp, formatPoints, hashString, squash } from './math.js'
 import { formatEuro } from './messages.js'
+import { policyAgeTierOf, policyDiscountFor } from './policy.js'
 import { prepArticleFor } from './reasoning.js'
 import {
   DEFAULT_PROFILE, correctionFeature, discKnotOf, discKnotWeights, discOffset, dslopeOffset, firstOfferCorrected, monotoneDisc,
@@ -108,8 +110,62 @@ export function dueMonths(lastProcessed, now, max = LEARNING.MAX_CATCH_UP_MONTHS
 
 /* ───────── decision snapshot (stored with the item when it is saved) ───────── */
 
-/** What the engine recommended and why, frozen at save time: the report compares it with what really happened. */
-export function decisionSnapshot(result, { now, profile = null, exploration = null } = {}) {
+const lrnNumOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const lrnBoolOrNull = (v) => (typeof v === 'boolean' ? v : null)
+const lrnPick = (src, keys, map = lrnNumOrNull) => Object.fromEntries(keys.map((k) => [k, src ? map(src[k]) : null]))
+
+/** The raw page readings worth keeping with the decision (engine-spec §6): un-bucketed, nullable, never guessed. */
+export function snapshotExtraction(ex) {
+  if (!ex || typeof ex !== 'object') return null
+  const hits = []
+  for (const [id, re] of [['fixed_price', /prezzo (fisso|non trattabile)|non trattabil|no offerte|ultimo prezzo|prezzo minimo|non scendo/i], ['clearing_out', /svuoto|faccio spazio|vendo tutto|svend/i], ['open_to_offers', /trattabil|accetto offerte|fate offerte|offerte benvenute/i], ['bundle', /lott[io]|bundle|più pezzi/i]]) {
+    if (re.test(`${ex.title || ''} ${ex.description || ''}`)) hits.push(id)
+  }
+  return {
+    ...lrnPick(ex, ['uploadedDays', 'sellerLastSeenDays', 'sellerFeedbackCount', 'sellerRating']),
+    sellerBusiness: lrnBoolOrNull(ex.sellerBusiness),
+    sellerBadges: Array.isArray(ex.sellerBadges) ? ex.sellerBadges.slice(0, 8) : [],
+    condition: typeof ex.condition === 'string' ? ex.condition : null,
+    brand: typeof ex.brand === 'string' ? ex.brand : null,
+    categoryText: typeof ex.categoryText === 'string' ? ex.categoryText.slice(0, 120) : null,
+    textHits: hits,
+  }
+}
+
+/** The listing signals as the record stores them: numbers or null, the price drop as { from, to, hoursAgo }. */
+export function snapshotSignals(sig) {
+  if (!sig || typeof sig !== 'object') return null
+  const drop = sig.priceDrop && typeof sig.priceDrop === 'object' ? lrnPick(sig.priceDrop, ['from', 'to', 'hoursAgo']) : null
+  return {
+    ...lrnPick(sig, ['favourites', 'interested', 'views', 'sellerItems', 'bundleDiscountPct', 'lastSeenDays']),
+    priceDrop: drop || (sig.priceDropped === true ? { from: lrnNumOrNull(sig.oldPrice), to: null, hoursAgo: null } : null),
+    reserved: lrnBoolOrNull(sig.reserved),
+    vacation: lrnBoolOrNull(sig.vacation),
+  }
+}
+
+/** The market summary as the record stores it (value.js marketFromRows or the analysis' own summary). */
+export function snapshotMarket(market, at = null) {
+  if (!market || typeof market !== 'object' || !(market.n >= 2)) return null
+  return { ...lrnPick(market, ['n', 'medianPrice', 'p25Price', 'p75Price', 'gapPct']), at: lrnIso(at || market.at) }
+}
+
+const snapshotPolicy = (pol) => (pol && typeof pol === 'object'
+  ? { band: pol.band ?? null, ageTier: pol.ageTier ?? null, table: lrnNumOrNull(pol.table), modifiers: Array.isArray(pol.modifiers) ? pol.modifiers.map((m) => ({ id: m.id, pts: m.pts })) : [], shift: lrnNumOrNull(pol.shift) ?? 0, d0: lrnNumOrNull(pol.discountPct), kind: pol.kind || null, source: pol.source || null }
+  : null)
+const snapshotGate = (gate) => (gate && typeof gate === 'object' ? { kind: gate.kind || null, rule: lrnNumOrNull(gate.rule), waitHours: lrnNumOrNull(gate.waitHours) } : null)
+const snapshotMessagePolicy = (mp) => (mp && typeof mp === 'object'
+  ? { mode: mp.mode || null, rule: mp.rule || null, tone: mp.tone || null, randomised: Boolean(mp.randomised), propensity: lrnNumOrNull(mp.propensity), assigned: mp.assigned || null }
+  : null)
+
+/**
+ * What the engine recommended and why, frozen at save time (engine-spec §6): the report compares it with what really
+ * happened, the replay re-scores it, the live fit judges it by the correction it really applied. Every option is
+ * optional: `exploration` (thompsonArm / explorationPlan), `policy` (policy.js, else the input's), `gate` and
+ * `messagePolicy` (else the result's), `extraction` (parseVintedItemHtml's raw output), `signals` and `market` (else
+ * the input's). Nullable fields are null, never guessed.
+ */
+export function decisionSnapshot(result, { now, profile = null, exploration = null, policy = null, gate = null, messagePolicy = null, extraction = null, signals = null, market = null } = {}) {
   if (!result || !result.optimal) return null
   const { input, optimal } = result
   const score = optimal.score
@@ -129,11 +185,20 @@ export function decisionSnapshot(result, { now, profile = null, exploration = nu
     monthWindowId: score.monthWindow.id,
     rawLogit: score.rawLogit ?? score.logit,
     learnedWeight: score.learnedWeight || 0,
+    appliedCorrection: score.learnedWeight || 0,
     k: optimal.pAvailable * optimal.pRead,
     probability: result.probability,
     probabilityRange: result.probabilityRange || null,
     blockRisk: result.blockRisk ? result.blockRisk.level : null,
-    exploration: exploration || null,
+    tier: result.tier ? { id: result.tier.id, label: result.tier.label } : null,
+    factors: Array.isArray(score.factors) ? score.factors.map((f) => ({ id: f.id, weight: lrnR4(f.weight), prior: Boolean(f.prior) })) : [],
+    policy: snapshotPolicy(policy || input.policy || null),
+    gate: snapshotGate(gate || result.gate || null),
+    messagePolicy: snapshotMessagePolicy(messagePolicy || result.messagePolicy || null),
+    extraction: snapshotExtraction(extraction),
+    signals: snapshotSignals(signals || input.signals || null),
+    market: snapshotMarket(market || result.market || input.market || null, now),
+    exploration: exploration || result.exploration || null,
   }
 }
 
@@ -151,18 +216,49 @@ const FIRST_SUCCESS = new Set(['accepted', 'bought'])
 const FIRST_FAIL = new Set(['declined', 'no_reply', 'sold_other', 'countered'])
 const FINAL_LOST = new Set(['declined', 'no_reply', 'sold_other', 'abandoned'])
 
-/** Re-scores the first offer with the CURRENT engine (no profile) at the moment it was sent. */
+/**
+ * Re-scores the first offer with the CURRENT engine (no profile) at the moment it was sent, with the market and the
+ * listing signals the item was analysed with (engine-spec §6: the item carries them; older items only have what the
+ * form holds), so the rescored logit equals the stored `decision.rawLogit` whenever the engine did not change.
+ */
 function lrnRescore(item, sentAt) {
   const form = item.form
   if (!form) return null
-  const raw = { ...form, targetPrice: item.targetPrice != null ? String(item.targetPrice).replace('.', ',') : form.targetPrice }
+  const signals = item.signals && typeof item.signals === 'object' ? item.signals : form.signals || null
+  const raw = { ...form, ...(signals ? { signals } : {}), targetPrice: item.targetPrice != null ? String(item.targetPrice).replace('.', ',') : form.targetPrice }
   const norm = normalizeInput(raw)
   if (!norm.ok || norm.input.discountPct <= 0) return null
-  const input = norm.input
+  const market = item.market && typeof item.market === 'object' && item.market.n >= 2 ? item.market : null
+  const input = withContext(norm.input, { market })
   const created = lrnDate(item.createdAt) || sentAt
   const daysWaited = Math.max(0, calendarDaysBetween(created, sentAt))
   const score = scoreAt(input, sentAt, daysWaited)
-  return { input, daysWaited, rawLogit: score.logit, k: availabilityAfter(input, daysWaited) * readProbability(input), windowId: score.timeWindow.id }
+  return { input, daysWaited, rawLogit: score.rawLogit, k: availabilityAfter(input, daysWaited) * readProbability(input), windowId: score.timeWindow.id, factors: score.factors.map((f) => ({ id: f.id, weight: lrnR4(f.weight), prior: Boolean(f.prior) })) }
+}
+
+/** Did the seller answer the first offer? 1 for any reply or deal, 0 for silence, null when nothing says. */
+const lrnAnswered = (item, first) => {
+  if (typeof item.answered === 'boolean') return item.answered ? 1 : 0
+  if (item.answered === 1 || item.answered === 0) return item.answered
+  if (['accepted', 'bought', 'declined', 'countered'].includes(first)) return 1
+  if (first === 'no_reply') return 0
+  return null
+}
+
+/**
+ * Did a message go out before the offer? Yes when the user confirmed it, when the message was copied before the send,
+ * or when the policy assigned «message first»; no when the item says nothing but the send is known; null otherwise.
+ */
+const lrnMessageBefore = (item, sentAt, sentKnown) => {
+  const copied = lrnDate(item.messageCopiedAt)
+  const sent = lrnDate(item.messageSentAt)
+  const mp = item.decision && item.decision.messagePolicy
+  if (sent || (copied && sentAt && copied.getTime() < sentAt.getTime())) return true
+  if (item.messageBefore === true) return true
+  if (item.messageBefore === false) return false
+  if (mp && mp.assigned === 'message_first') return true
+  if (mp && mp.assigned === 'offer_direct') return false
+  return sentKnown && (copied || sent || mp) ? false : null
 }
 
 const lastActivity = (item) => {
@@ -290,6 +386,16 @@ export function learningRecord(item, now) {
   const delayMinutes = recommendedAt && sentKnown && item.sentAtSource !== 'imputed' ? Math.round((sentAt.getTime() - recommendedAt.getTime()) / 60000) : null
   const firstOutcomeAt = lrnDate(item.firstOutcomeAt) || (hasSeller ? lrnDate((history.find((e) => e.by === 'seller') || {}).at) : null) || (first && !implicit ? lrnDate(item.outcomeAt) : null)
   const rounds = lrnRounds(item, final, now)
+  // The 1.7 log (engine-spec §6): nulls on older items, never guesses.
+  const exploration = decision && decision.exploration ? decision.exploration : null
+  const policy = decision && decision.policy ? decision.policy : null
+  const ageTier = policy && policy.ageTier ? policy.ageTier : rescored ? policyAgeTierOf(rescored.input.listingAge.id === 'unknown' ? null : rescored.input.listingAge.days).id : null
+  const market = decision && decision.market ? decision.market : item.market && typeof item.market === 'object' ? item.market : null
+  const marketGap = market && Number.isFinite(lrnNum(market.gapPct)) ? lrnNum(market.gapPct) : market && lrnNum(market.medianPrice) > 0 && listPrice > 0 ? Math.round((listPrice / lrnNum(market.medianPrice) - 1) * 100) : null
+  // The user sent another price than the one the engine planned (the UI's own flag, else price ≠ decision.price).
+  const userOverride = Number.isFinite(lrnNum(item.userOverride)) ? true
+    : decision && Number.isFinite(lrnNum(decision.price)) && Number.isFinite(price) ? Math.abs(lrnNum(decision.price) - price) > 0.004
+      : null
 
   return {
     id: item.id,
@@ -335,7 +441,21 @@ export function learningRecord(item, now) {
     savingEur: closed ? lrnR2(listPrice - finalPrice) : null,
     savingShare: closed && listPrice > 0 ? (listPrice - finalPrice) / listPrice : null,
     rounds,
-    exploration: decision && decision.exploration ? decision.exploration : null,
+    exploration,
+    arm: exploration && exploration.arm ? exploration.arm : null,
+    propensity: exploration && Number.isFinite(lrnNum(exploration.propensity)) ? lrnNum(exploration.propensity) : null,
+    ageTier,
+    gateKind: decision && decision.gate && decision.gate.kind ? decision.gate.kind : null,
+    gateRule: decision && decision.gate && Number.isFinite(lrnNum(decision.gate.rule)) ? lrnNum(decision.gate.rule) : null,
+    messageMode: decision && decision.messagePolicy && decision.messagePolicy.mode ? decision.messagePolicy.mode : null,
+    messagePropensity: decision && decision.messagePolicy && Number.isFinite(lrnNum(decision.messagePolicy.propensity)) ? lrnNum(decision.messagePolicy.propensity) : null,
+    messageBefore: lrnMessageBefore(item, sentAt, sentKnown),
+    answered: lrnAnswered(item, first),
+    userOverride,
+    marketGap,
+    signals: decision && decision.signals ? decision.signals : item.signals && typeof item.signals === 'object' ? item.signals : null,
+    factors: decision && Array.isArray(decision.factors) ? decision.factors : rescored ? rescored.factors : null,
+    tier: decision && decision.tier ? decision.tier.id || null : null,
     profileId: decision ? decision.profileId : 'default',
     engine: decision && decision.engine ? decision.engine : null,
     // The learned correction the app really added when it showed this estimate: the prequential rollback compares
@@ -775,6 +895,47 @@ export function isoAcceptanceDiscount(records, profile, now) {
   return { target, targetAcceptance, curve, nEff, n: usable.length }
 }
 
+/** The policy table's own ask for a record (points), or null when the policy says «non offrire» (no table to shift). */
+const lrnTableDiscount = (r) => {
+  const input = r.input
+  const pol = policyDiscountFor({
+    listPrice: r.listPrice, listingAge: input.listingAge, category: input.category, sellerProfile: input.sellerProfile, listingSignal: input.listingSignal,
+    signals: input.signals || null, market: input.market || null, sellerBusiness: input.signals && input.signals.sellerBusiness === true,
+  })
+  return pol && pol.kind === 'offer' && Number.isFinite(pol.discountPct) ? pol.discountPct : null
+}
+
+/**
+ * Iso-acceptance shift of the policy table (engine-spec §2.3): the deepest s in [−6, +6] (grid 0,5) such that the
+ * weighted mean CORRECTED acceptance over the user's own decided items, each asked at its table value + s, is still at
+ * least the plain engine's mean at the table value itself. Tougher sellers → a negative shift (softer asks), more
+ * generous ones → a positive one; with no correction exactly 0. Items the table would not ask on are left out. Gated
+ * monthly in proposeProfile (MIN_EFFECTIVE.discount weighted outcomes, one point a month, bounded).
+ */
+export function isoAcceptanceShift(records, profile, now) {
+  const P = normalizeProfile(profile)
+  const [lo, hi] = LEARNING.BOUNDS.discountShift
+  const usable = records.filter((r) => r.y != null && r.input && r.listPrice > 0).map((r) => ({ r, table: lrnTableDiscount(r) })).filter((x) => x.table !== null)
+  const weights = usable.map(({ r }) => recencyWeight(r.sentAt, now))
+  const nEff = weights.reduce((s, w) => s + w, 0)
+  if (!nEff) return { target: null, targetAcceptance: null, curve: [], nEff: 0, n: 0 }
+  const priceAt = (r, d) => Math.round(r.listPrice * (1 - d / 100) * 100) / 100
+  const z0At = (r, d) => scoreAt(withPrices(r.input, r.listPrice, priceAt(r, d)), r.sentAt, r.daysWaited).rawLogit
+  const corrected = (r, d, z0) => r.k * squash(z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + dslopeOffset(P, d) + (P.time[r.timeGroup] || 0) + discOffset(P, d))
+  const targetAcceptance = usable.reduce((s, { r, table }, i) => s + weights[i] * r.k * squash(z0At(r, table)), 0) / nEff
+  const curve = []
+  let target = lo
+  for (let s = lo; s <= hi + 1e-9; s += 0.5) {
+    const a = usable.reduce((acc, { r, table }, i) => {
+      const d = clamp(table + s, 1, VINTED.MAX_DISCOUNT_PCT)
+      return acc + weights[i] * corrected(r, d, z0At(r, d))
+    }, 0) / nEff
+    curve.push({ shift: s, pAccept: a })
+    if (a >= targetAcceptance - 1e-9) target = s
+  }
+  return { target, targetAcceptance, curve, nEff, n: usable.length }
+}
+
 /**
  * The default starting discount that maximises the expected saving share (of list price), averaged over the user's
  * own items, under the corrected engine:
@@ -1041,6 +1202,7 @@ const PARAM_LABELS = {
   counterShare: 'Quanto scendono i tuoi venditori',
   sellerReplyHours: 'Tempo di risposta dei venditori',
   discountPct: 'Sconto di partenza suggerito',
+  discountShift: 'Spostamento della tabella degli sconti (punti)',
 }
 export const paramLabel = (key) => {
   if (PARAM_LABELS[key]) return PARAM_LABELS[key]
@@ -1049,7 +1211,7 @@ export const paramLabel = (key) => {
   if (kind === 'disc') return `${(LEARNING_DISCOUNT_KNOTS.find((k) => k.id === id) || { label: id }).label}`
   return key
 }
-const SCALARS = new Set(['intercept', 'dslope', 'slope', 'counter', 'counterShare', 'sellerReplyHours', 'discountPct'])
+const SCALARS = new Set(['intercept', 'dslope', 'slope', 'counter', 'counterShare', 'sellerReplyHours', 'discountPct', 'discountShift'])
 const getParam = (P, key) => {
   if (SCALARS.has(key)) return P[key]
   const [kind, id] = key.split('.')
@@ -1063,7 +1225,13 @@ const setParam = (P, key, value) => {
   }
 }
 /** Parameter family of a key (what a rollback freezes). */
-const familyOf = (key) => ({ intercept: 'intercept', dslope: 'dslope', slope: 'slope', counter: 'counter', counterShare: 'share', sellerReplyHours: 'latency', discountPct: 'discount' })[key] || key.split('.')[0]
+const familyOf = (key) => ({ intercept: 'intercept', dslope: 'dslope', slope: 'slope', counter: 'counter', counterShare: 'share', sellerReplyHours: 'latency', discountPct: 'discount', discountShift: 'shift' })[key] || key.split('.')[0]
+/** The monthly gates of each parameter kind: weighted outcomes needed, largest step, bounds, smallest change worth storing. */
+const lrnGatesOf = (kind) => {
+  if (kind === 'discount') return { minEffective: LEARNING.MIN_EFFECTIVE.discount, maxStep: LEARNING.MAX_STEP.discountPct, bounds: LEARNING.BOUNDS.discountPct, minChange: LEARNING.MIN_CHANGE_DISCOUNT_PCT }
+  if (kind === 'shift') return { minEffective: LEARNING.MIN_EFFECTIVE.discount, maxStep: LEARNING.MAX_STEP.discountShift, bounds: LEARNING.BOUNDS.discountShift, minChange: LEARNING.MIN_CHANGE_SHIFT_PTS }
+  return { minEffective: LEARNING.MIN_EFFECTIVE[kind], maxStep: LEARNING.MAX_STEP[kind], bounds: LEARNING.BOUNDS[kind], minChange: LEARNING.MIN_CHANGE }
+}
 /** True when a monthly family (anything but the live intercept and slope) differs from the engine default. */
 const monthlyActive = (P) => profileIsActive({ ...P, intercept: 0, dslope: 0 })
 
@@ -1102,7 +1270,7 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   // A rollback is a change of its own: every parameter that goes back to the parent's value is listed (and undoable).
   const rolledBack = new Set()
   if (rollback) {
-    const keys = ['slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct']
+    const keys = ['slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct', 'discountShift']
     for (const key of keys) {
       // null reply time = the engine default (2 h): show the number, not «null».
       const orDefault = (v) => (key === 'sellerReplyHours' && v == null ? COUNTER.SELLER_REPLY_HOURS : v)
@@ -1120,10 +1288,7 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   }
   const consider = (key, target, nEff, kind, { sd = null, eligible = true, notEligible = '' } = {}) => {
     const from = getParam(next, key)
-    const minEffective = LEARNING.MIN_EFFECTIVE[kind]
-    const maxStep = kind === 'discount' ? LEARNING.MAX_STEP.discountPct : LEARNING.MAX_STEP[kind]
-    const bounds = kind === 'discount' ? LEARNING.BOUNDS.discountPct : LEARNING.BOUNDS[kind]
-    const minChange = kind === 'discount' ? LEARNING.MIN_CHANGE_DISCOUNT_PCT : LEARNING.MIN_CHANGE
+    const { minEffective, maxStep, bounds, minChange } = lrnGatesOf(kind)
     const base = { key, label: paramLabel(key), from: from == null ? null : lrnR4(from), target: target == null || !Number.isFinite(target) ? null : lrnR4(target), nEff: lrnR2(nEff || 0), minEffective }
     const keep = (status, reason) => changes.push({ ...base, to: base.from, status, reason })
     if (frozen[familyOf(key)]) return rolledBack.has(key) ? null : keep('frozen', `Bloccata fino a ${monthLabel(frozen[familyOf(key)])} dopo il ritorno ai valori precedenti.`)
@@ -1143,7 +1308,7 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
     const wanted = clamp(target, bounds[0], bounds[1])
     if (sd != null && Math.abs(wanted - from) < LEARNING.EVIDENCE_GATE_SD * sd) return keep('unchanged', 'Differenza dentro il margine di incertezza: resta com\'è.')
     const step = clamp(wanted - from, -maxStep, maxStep)
-    const to = kind === 'discount' ? Math.round((from + step) * 2) / 2 : lrnR4(from + step)
+    const to = kind === 'discount' || kind === 'shift' ? Math.round((from + step) * 2) / 2 : lrnR4(from + step)
     if (Math.abs(to - from) < minChange) return keep('unchanged', 'Già allineato ai tuoi esiti.')
     setParam(next, key, to)
     const capped = Math.abs(wanted - from) > maxStep + 1e-9
@@ -1178,11 +1343,13 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   consider('counter', counterFit ? counterFit.theta : null, counterFit ? counterFit.nEff : 0, 'counter', { sd: counterFit ? counterFit.sd : null })
   consider('counterShare', counterStats ? counterStats.shareMultiplier : null, counterStats ? counterStats.shareEff : 0, 'share', { sd: counterStats ? counterStats.shareMultiplierSd : null })
   consider('sellerReplyHours', counterStats && counterStats.latency.median != null ? counterStats.latency.median : null, counterStats ? counterStats.latency.events : 0, 'latency')
-  // Starting discount, with next month's corrections in place: the deepest discount at which these sellers still accept
-  // as often as the plain engine expects at −20% (iso-acceptance). With an uncorrected engine it is exactly −20%.
+  // The policy table's shift, with next month's corrections in place (engine-spec §2.3): the deepest shift at which
+  // these sellers still accept as often as the plain engine expects at the table's own ask. With an uncorrected engine
+  // it is exactly 0. The legacy default discount is reported for the sheet but no longer learned: the table owns the ask.
+  const shift = isoAcceptanceShift(records, next, now)
+  consider('discountShift', shift.target, shift.nEff, 'shift')
   const iso = isoAcceptanceDiscount(records, next, now)
-  consider('discountPct', iso.target, iso.nEff, 'discount')
-  const discountFit = { ...optimalDiscount(records, next, now), iso, learnedTarget: iso.target }
+  const discountFit = { ...optimalDiscount(records, next, now), iso, shift, learnedTarget: iso.target, learnedShift: shift.target }
 
   const moved = changes.filter((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback')
   const renewed = moved.length > 0 || rollback
@@ -1227,7 +1394,8 @@ export const explorationKey = (raw) => {
   return link || [raw && raw.itemTitle, raw && raw.listPrice, raw && raw.category].map((v) => String(v || '').trim().toLowerCase()).join('|')
 }
 
-const lrnUnit = (key, month, purpose) => (hashString(`${key}|${month}|${purpose}`) % 100000) / 100000
+/** Deterministic unit per offer, month and purpose (gate.js hashUnit: the message coin uses the same hash). */
+const lrnUnit = hashUnit
 
 const lrnQuiet = (date) => {
   const m = minutesOfDay(date)
@@ -1327,6 +1495,184 @@ export function explorationPlan(raw, base, now, { key = null, month = null, enab
     savingCostPct: Math.round(pick.savingCost * 1000) / 10,
   }
   return { result: { ...pick.result, exploration }, exploration }
+}
+
+/* ───────── Thompson exploration over discount arms (engine-spec §5) ───────── */
+
+export const THOMPSON_ARMS = [
+  { id: 'softer', offset: -LEARNING.THOMPSON_ARM_PTS, label: `${LEARNING.THOMPSON_ARM_PTS} punti di sconto in meno` },
+  { id: 'base', offset: 0, label: 'sconto della tabella' },
+  { id: 'deeper', offset: LEARNING.THOMPSON_ARM_PTS, label: `${LEARNING.THOMPSON_ARM_PTS} punti di sconto in più` },
+]
+
+/** mulberry32: a small PRNG whose successive draws are not correlated; seeded by the offer's key and the month. */
+const lrnMulberry32 = (seed) => {
+  let a = seed | 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+/** Two independent standard normals from two uniforms (Box–Muller). */
+const lrnNormalPair = (rnd) => {
+  const u = Math.max(1e-12, rnd())
+  const v = rnd()
+  const r = Math.sqrt(-2 * Math.log(u))
+  return [r * Math.cos(2 * Math.PI * v), r * Math.sin(2 * Math.PI * v)]
+}
+/** Lower Cholesky factor of a 2×2 covariance (closed form), guarded against a degenerate matrix. */
+const lrnCholesky2 = (S) => {
+  const a = Math.max(1e-12, S[0][0])
+  const l11 = Math.sqrt(a)
+  const l21 = (S[1] && Number.isFinite(S[1][0]) ? S[1][0] : 0) / l11
+  const l22 = Math.sqrt(Math.max(1e-12, (S[1] && Number.isFinite(S[1][1]) ? S[1][1] : 0) - l21 * l21))
+  return [[l11, 0], [l21, l22]]
+}
+
+/**
+ * q (chance a failed first offer still closes) and ρ (saving of those deals relative to the first discount), smoothed
+ * with the priors as optimalDiscount does; the priors alone without records.
+ */
+export function continuationPosterior(records, now) {
+  const W0 = LEARNING.CONTINUATION_PRIOR_WEIGHT
+  const fails = Array.isArray(records) ? records.filter((r) => r.y === 0 && (r.closed || r.lost)) : []
+  const fw = fails.map((r) => recencyWeight(r.sentAt, now))
+  const q = (fails.reduce((s, r, i) => s + fw[i] * (r.closed ? 1 : 0), 0) + LEARNING.CLOSE_AFTER_FAIL_PRIOR * W0) / (fw.reduce((s, w) => s + w, 0) + W0)
+  const later = fails.map((r, i) => ({ r, w: fw[i] })).filter(({ r }) => r.closed && r.discountPct > 0)
+  const rho = (later.reduce((s, { r, w }) => s + w * clamp(r.savingShare / (r.discountPct / 100), 0, 1.2), 0) + LEARNING.CONTINUATION_RATIO_PRIOR * W0) / (later.reduce((s, { w }) => s + w, 0) + W0)
+  return { q, rho }
+}
+
+/** Expected saving share at acceptance p and discount d (%): p·d + (1 − p)·[q(d)·ρ·d − (1 − q(d))·LOSS], q halved on aggressive openers. */
+const lrnExpectedSavingWith = (p, discountPct, { q, rho }) => {
+  const [rampFrom, rampTo] = LEARNING.AGGRESSIVE_RAMP_PCT
+  const qd = q * (1 - 0.5 * clamp((discountPct - rampFrom) / (rampTo - rampFrom), 0, 1))
+  const d = discountPct / 100
+  return p * d + (1 - p) * (qd * rho * d - (1 - qd) * LEARNING.LOSS_COST_SHARE)
+}
+
+/** The arm's price on the engine's price grid, strictly under the list price and within Vinted's cap; null when there is none. */
+const lrnArmPrice = (L, discountPct) => {
+  const step = priceStepFor(L)
+  if (discountPct < 1 || discountPct > VINTED.MAX_DISCOUNT_PCT - 0.01) return null
+  let price = Math.round(Math.round((L * (1 - discountPct / 100)) / step) * step * 100) / 100
+  if (price >= L) price = Math.round((L - step) * 100) / 100
+  if (!(price > 0) || ((L - price) / L) * 100 > VINTED.MAX_DISCOUNT_PCT) return null
+  return price
+}
+
+/**
+ * Thompson sampling over three discount arms around the policy default d₀ (form.policy.discountPct, else the current
+ * discount): softer d₀ − 4, base d₀, deeper d₀ + 4; the deeper arm only when the corrected acceptance at d₀ is ≥ 0,3,
+ * the category is not premium and the list price is ≥ 20 €. θ = [intercept, dslope] ~ N(θ̂, Σ) from the live profile
+ * (its `cov`; the prior diag(1,0², 0,35²) without one); DRAWS draws (mulberry32 seeded by key|month, so the same
+ * listing gets the same arm all month); for each draw the arm with the best expected saving ES̃(d) = p̃·d + (1 − p̃)·
+ * [q·ρ·d − (1 − q)·LOSS] with p̃ = k·squash(z(d) + θ̃₀ + θ̃_d·(d − 20)/10) wins. The propensities are the win shares,
+ * floored at MIN_PROPENSITY and renormalised, and the arm is drawn from THEM (so the logged propensity is the real
+ * sampling probability); `records` (optional) give q and ρ. Mirrors explorationPlan's output:
+ * { result, exploration: { arms, arm, d0, propensity, draws, base: { price, probability }, label, costPoints, … } } or null.
+ */
+export function thompsonArm(raw, base, now, { profile = null, key = null, month = null, options = {}, enabled = true, records = null } = {}) {
+  if (!enabled || !base || !base.ok || base.kind !== 'analysis' || !base.optimal) return null
+  const input = base.input
+  const L = input.listPrice
+  if (L < LEARNING.EXPLORE_MIN_LIST_PRICE) return null
+  const pol = raw && raw.policy && typeof raw.policy === 'object' ? raw.policy : input.policy || null
+  const d0 = pol && Number.isFinite(pol.discountPct) && pol.kind !== 'no_offer' ? pol.discountPct : input.discountPct
+  const P = profile ? normalizeProfile(profile) : null
+  const k = base.optimal.pAvailable * base.optimal.pRead
+  const at = base.optimal.date
+  const daysWaited = base.optimal.daysWaited
+  // z(d) is the engine logit before the live pair; the profile's other families (slope, time, knots) are a fixed part.
+  const armZ = (d, price) => {
+    const score = scoreAt(withPrices(input, L, price), at, daysWaited)
+    const fixed = P ? (P.slope - 1) * (score.rawLogit - LEARNING.SLOPE_CENTER) + (P.time[timeGroupOf(score.timeWindow.id)] || 0) + discOffset(P, d) : 0
+    return score.rawLogit + fixed
+  }
+  const theta = P ? [P.intercept, P.dslope] : [0, 0]
+  const live = P && Array.isArray(P.cov) && Array.isArray(P.paramKeys) && P.paramKeys.length === 2 && P.paramKeys[0] === 'intercept' && P.paramKeys[1] === 'dslope' && P.cov.length === 2
+  const cov = live ? P.cov : [[LEARNING.PRIOR_SD.intercept ** 2, 0], [0, LEARNING.PRIOR_SD.dslope ** 2]]
+  const corrected = (d, z, th) => k * squash(z + th[0] + th[1] * (d - 20) / 10)
+
+  const arms = []
+  for (const arm of THOMPSON_ARMS) {
+    const d = d0 + arm.offset
+    const price = lrnArmPrice(L, d)
+    if (price === null) continue
+    const discountPct = Math.round(((L - price) / L) * 100 * 1e6) / 1e6
+    if (arms.some((a) => Math.abs(a.price - price) < 0.004)) continue
+    arms.push({ id: arm.id, label: arm.label, offset: arm.offset, discountPct, price, z: armZ(discountPct, price) })
+  }
+  const baseArm = arms.find((a) => a.id === 'base')
+  if (!baseArm || arms.length < 2) return null
+  const deeperOk = corrected(baseArm.discountPct, baseArm.z, theta) >= LEARNING.THOMPSON_DEEPER_MIN_P && !(input.category && input.category.premium) && L >= LEARNING.THOMPSON_DEEPER_MIN_LIST_PRICE
+  const candidates = arms.filter((a) => a.id !== 'deeper' || deeperOk)
+  if (candidates.length < 2) return null
+
+  const { q, rho } = continuationPosterior(records, now)
+  const rnd = lrnMulberry32(hashString(`${key || explorationKey(raw)}|${month || monthKeyOf(now)}`))
+  const chol = lrnCholesky2(cov)
+  const wins = Object.fromEntries(candidates.map((a) => [a.id, 0]))
+  for (let i = 0; i < LEARNING.THOMPSON_DRAWS; i++) {
+    const [n1, n2] = lrnNormalPair(rnd)
+    const th = [theta[0] + chol[0][0] * n1, theta[1] + chol[1][0] * n1 + chol[1][1] * n2]
+    let best = null
+    let bestEs = -Infinity
+    for (const a of candidates) {
+      const es = lrnExpectedSavingWith(corrected(a.discountPct, a.z, th), a.discountPct, { q, rho })
+      if (es > bestEs + 1e-12) { bestEs = es; best = a }
+    }
+    wins[best.id]++
+  }
+  // Win shares → propensities: the arms under the floor get exactly the floor, the others share the rest in proportion
+  // (repeated until no arm sits under the floor, so the floor is exact after the renormalisation); the arm is drawn from them.
+  const floor = LEARNING.THOMPSON_MIN_PROPENSITY
+  const shares = candidates.map((a) => wins[a.id] / LEARNING.THOMPSON_DRAWS)
+  const low = shares.map((v) => v < floor - 1e-12) // once an arm is floored it stays floored
+  let mu = [...shares]
+  for (let pass = 0; pass < candidates.length; pass++) {
+    const rest = 1 - floor * low.filter(Boolean).length
+    const high = shares.reduce((s, v, i) => s + (low[i] ? 0 : v), 0)
+    const free = low.filter((x) => !x).length
+    mu = shares.map((v, i) => (low[i] ? floor : high > 0 ? (v * rest) / high : rest / Math.max(1, free)))
+    const newlyLow = mu.map((v, i) => !low[i] && v < floor - 1e-12)
+    if (!newlyLow.some(Boolean)) break
+    newlyLow.forEach((x, i) => { if (x) low[i] = true })
+  }
+  const u = rnd()
+  let acc = 0
+  let pick = candidates[candidates.length - 1]
+  for (let i = 0; i < candidates.length; i++) {
+    acc += mu[i]
+    if (u < acc) { pick = candidates[i]; break }
+  }
+  const propensities = Object.fromEntries(candidates.map((a, i) => [a.id, lrnR4(mu[i])]))
+
+  // The chosen arm's full analysis at the same moment; the base arm at the user's own price is the analysis itself.
+  const samePrice = Math.abs(pick.price - input.targetPrice) < 0.004
+  const result = samePrice ? base : analyzeOffer({ ...raw, targetPrice: String(pick.price).replace('.', ',') }, now, { ...options, preferredSendAt: at })
+  if (!result || !result.ok || result.kind !== 'analysis') return null
+  const expected = Object.fromEntries(candidates.map((a) => [a.id, lrnR4(lrnExpectedSavingWith(corrected(a.discountPct, a.z, theta), a.discountPct, { q, rho }))]))
+  const exploration = {
+    kind: 'discount',
+    method: 'thompson',
+    arms: candidates.map((a) => ({ id: a.id, discountPct: Math.round(a.discountPct * 10) / 10, price: a.price, propensity: propensities[a.id], expectedSaving: expected[a.id] })),
+    arm: pick.id,
+    d0: Math.round(d0 * 10) / 10,
+    propensity: propensities[pick.id],
+    draws: LEARNING.THOMPSON_DRAWS,
+    base: { price: input.targetPrice, at: lrnIso(at), probability: base.probability },
+    price: pick.price,
+    at: lrnIso(result.optimal.date),
+    label: pick.id === 'base' ? (samePrice ? 'sconto della tabella, nessuna variazione' : 'sconto della tabella') : pick.label,
+    varied: !samePrice,
+    costPoints: Math.round((base.probability - result.probability) * 100),
+    savingCostPct: Math.round((expected[baseArm.id] - expected[pick.id]) * 1000) / 10,
+    posterior: live ? 'live' : 'prior',
+  }
+  return { result: { ...result, exploration }, exploration }
 }
 
 /* ───────── failure risk ───────── */
@@ -1441,6 +1787,49 @@ const groupStats = (records, keyOf, ids, profileBefore, profileAfter, kind) => i
 })
 
 /**
+ * Inverse-propensity-weighted acceptance of an arm (Hájek estimate: Σ y/μ ÷ Σ 1/μ) with its standard error (delta
+ * method); records without a propensity count with weight 1. Null without records.
+ */
+const lrnIpwRate = (rs) => {
+  if (!rs.length) return null
+  const w = rs.map((r) => (Number.isFinite(r.propensity) && r.propensity > 0 ? 1 / r.propensity : 1))
+  const W = w.reduce((s, x) => s + x, 0)
+  const p = rs.reduce((s, r, i) => s + w[i] * r.y, 0) / W
+  const v = rs.reduce((s, r, i) => s + (w[i] * (r.y - p)) ** 2, 0) / (W * W)
+  return { rate: p, se: Math.sqrt(v), n: rs.length }
+}
+
+/**
+ * The «Varianti di test» rows (engine-spec §5.4): the three Thompson arms (plus the offers without a variant and any
+ * legacy ±1 h / ±2 pt arms that still have records) with n, accepted, expected under the engine as it was, O − E, mean
+ * saving; and the inverse-propensity-weighted acceptance difference softer − base with its se, only when both arms
+ * have at least THOMPSON_REPORT_MIN_PER_ARM offers. Returns an array of rows; the difference rides on `rows.ipw`.
+ */
+export function explorationStats(records, profile = null) {
+  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit))
+  const legacy = EXPLORATION_ARMS.filter((arm) => decided.some((r) => r.exploration && r.exploration.arm === arm.id && r.exploration.method !== 'thompson'))
+  const armRows = [{ id: 'none', label: 'Nessuna variante' }, ...THOMPSON_ARMS, ...legacy.map((a) => ({ ...a, id: `legacy_${a.id}`, label: `${a.label} (varianti 1.3)` }))]
+  const pick = (id) => {
+    if (id === 'none') return decided.filter((r) => !r.exploration)
+    if (id.startsWith('legacy_')) return decided.filter((r) => r.exploration && r.exploration.arm === id.slice(7) && r.exploration.method !== 'thompson')
+    return decided.filter((r) => r.exploration && r.exploration.arm === id && r.exploration.method === 'thompson')
+  }
+  const rows = armRows.map((arm) => {
+    const rs = pick(arm.id)
+    const expected = rs.reduce((s, r) => s + predictWith(profile, r), 0)
+    const successes = rs.filter((r) => r.y === 1).length
+    const saving = rs.filter((r) => r.closed)
+    const ipw = lrnIpwRate(rs)
+    return { id: arm.id, label: arm.label, n: rs.length, successes, expected: lrnR2(expected), oe: lrnR2(successes - expected), avgSavingPct: saving.length ? lrnMean(saving.map((r) => r.savingShare)) : null, ipwRate: ipw ? ipw.rate : null }
+  })
+  const softer = lrnIpwRate(pick('softer'))
+  const base = lrnIpwRate(pick('base'))
+  const enough = softer && base && softer.n >= LEARNING.THOMPSON_REPORT_MIN_PER_ARM && base.n >= LEARNING.THOMPSON_REPORT_MIN_PER_ARM
+  rows.ipw = enough ? { diff: softer.rate - base.rate, se: Math.sqrt(softer.se ** 2 + base.se ** 2), nSofter: softer.n, nBase: base.n } : null
+  return rows
+}
+
+/**
  * The month's report. `items` = current list + archive; `month` = 'YYYY-MM'; `previous` = profile active during the
  * month. The fit uses ALL history up to `now` (late outcomes of earlier months included); the month's numbers use the
  * offers sent in that month. Returns everything the workbook and the app's report card show.
@@ -1532,13 +1921,7 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
   const byKnot = groupStats(records, (r) => r.knot, LEARNING_DISCOUNT_KNOTS, prev, next, 'disc')
   // Engine vs reality by price band (engine-spec §2.3): where the cheap-item miss shows up.
   const byPriceBand = groupStats(records, (r) => r.priceBand, PRICE_BANDS, prev, next, null)
-  const exploration = [{ id: 'none', label: 'Nessuna variante' }, ...EXPLORATION_ARMS].map((arm) => {
-    const rs = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && (arm.id === 'none' ? !r.exploration : r.exploration && r.exploration.arm === arm.id))
-    const expected = rs.reduce((s, r) => s + predictWith(prev, r), 0)
-    const successes = rs.filter((r) => r.y === 1).length
-    const saving = rs.filter((r) => r.closed)
-    return { id: arm.id, label: arm.label, n: rs.length, successes, expected: lrnR2(expected), oe: lrnR2(successes - expected), avgSavingPct: saving.length ? lrnMean(saving.map((r) => r.savingShare)) : null }
-  })
+  const exploration = explorationStats(records, prev)
 
   const notes = []
   if (!records.length) notes.push('Nessuna offerta inviata finora: segna «Inviata» e l\'esito di ogni offerta, il motore impara solo dai tuoi esiti.')
@@ -1824,10 +2207,15 @@ export function reportWorkbook(report) {
     },
     {
       name: 'Varianti di test',
-      title: 'Varianti di test (1 offerta su 5)',
-      note: 'Tutto lo storico. Osservate − attese confronta ogni variante con la stima del motore per le stesse offerte. Con poche offerte è solo un indizio: le varianti servono a coprire fasce e sconti poco provati.',
-      columns: [{ header: 'Variante', width: 36 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' }, { header: 'Risparmio medio', format: 'pct' }],
-      rows: report.exploration.map((a) => [a.label, a.n, a.successes, a.expected, a.oe, a.avgSavingPct]),
+      title: 'Varianti di test (bracci di sconto intorno alla tabella)',
+      note: `Tutto lo storico. Ogni offerta esce con lo sconto della tabella, ${LEARNING.THOMPSON_ARM_PTS} punti in meno o ${LEARNING.THOMPSON_ARM_PTS} punti in più, scelto a sorte con probabilità che seguono quanto il motore ha imparato (la propensione è registrata). Osservate − attese confronta ogni braccio con la stima del motore per le stesse offerte; la differenza pesata tiene conto della propensione. Con poche offerte è solo un indizio.`,
+      columns: [{ header: 'Variante', width: 36 }, { header: 'Prime offerte', format: 'int' }, { header: 'Accettate', format: 'int' }, { header: 'Attese', format: 'num' }, { header: 'Osservate − attese', format: 'num' }, { header: 'Accettazione pesata', format: 'pct' }, { header: 'Risparmio medio', format: 'pct' }],
+      rows: [
+        ...report.exploration.map((a) => [a.label, a.n, a.successes, a.expected, a.oe, a.ipwRate, a.avgSavingPct]),
+        [],
+        ['Differenza pesata «in meno» − «tabella» (accettazione)', null, null, null, null,
+          report.exploration.ipw ? pm(report.exploration.ipw.diff, report.exploration.ipw.se) : `servono almeno ${LEARNING.THOMPSON_REPORT_MIN_PER_ARM} offerte per braccio`],
+      ],
     },
     {
       name: 'Modifiche motore',

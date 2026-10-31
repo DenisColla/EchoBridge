@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
+import * as core from './core/index.js'
 import {
-  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationBudget, explorationKey, explorationPlan, failureRiskFor, formatEuro, leversFor, monthKeyOf,
+  MONTHS_IT, analyzeOffer, buildFormFromExtraction, explorationKey, explorationPlan, failureRiskFor, formatEuro, leversFor, monthKeyOf,
   nextGoalFor, optimizeOffer, parseVintedItemHtml, quickDiscountsFor,
 } from './core/index.js'
 import { EMPTY_FORM } from './src/components/formDefaults.js'
@@ -23,6 +24,7 @@ import { useSearch } from './src/hooks/useSearch.js'
 import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
+import { recordRead } from './src/services/readStats.js'
 import { badgeCountOf, counterStatsOf } from './src/services/segments.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
@@ -53,6 +55,38 @@ const extractErrorFor = (page) => {
       : `Vinted ha risposto con un errore (${page.status}). Riprova tra poco o compila i dati a mano.`
   }
   return EXTRACT_ERRORS[page.reason] || EXTRACT_ERRORS.network
+}
+
+/**
+ * Core exports that the second part of engine 1.4.0 adds (thompsonArm, reofferBlock) or retires (explorationBudget,
+ * defaultDiscountFor): looked up at call time, so the app runs on either version of the shared engine.
+ */
+const coreFn = (name) => (typeof core[name] === 'function' ? core[name] : null)
+const legacyDefaultDiscount = (profile) => {
+  const fn = coreFn('defaultDiscountFor')
+  return fn ? fn(profile) : (core.LEARNING && core.LEARNING.DEFAULT_DISCOUNT_PCT) || 20
+}
+
+/** «12 ottobre»: the day a listing was refused and the day a new offer may go out (gate rule 7 toast). */
+const dayOf = (value) => {
+  const d = new Date(value)
+  return Number.isFinite(d.getTime()) ? `${d.getDate()} ${MONTHS_IT[d.getMonth()]}` : '…'
+}
+
+/** Non-null demand signals of the page (already on the form) and of the search for this listing, the page's reading winning. */
+const mergeSignals = (fromForm, fromSearch) => {
+  const out = {}
+  for (const source of [fromSearch, fromForm]) {
+    if (!source || typeof source !== 'object') continue
+    for (const [k, v] of Object.entries(source)) if (v !== null && v !== undefined) out[k] = v
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** The form as the engine scores it: with the demand signals of the page and of «Cerca altrove» (when it searched this listing). */
+const withSignals = (f, mk) => {
+  const signals = mergeSignals(f && f.signals, mk && mk.signals)
+  return signals ? { ...f, signals } : f
 }
 
 /** The form of a saved item, for «Ricalcola» from the list: the one it was analysed with, else rebuilt from its fields. */
@@ -204,21 +238,28 @@ function Main() {
 
   /**
    * `explore` only for fresh analyses (Calcola, link): a pinned moment or an applied option is the user's own choice.
-   * About 1 offer in 5 gets its flagged test variation, the same one every time the offer is re-analysed this month.
+   * The engine's test (Thompson arms on the discount, or the older flagged variation) is the same one every time the
+   * offer is re-analysed this month: key and month seed it.
    */
   const runAnalysis = (nextForm, preferredSendAt, { explore = false } = {}) => {
     const at = new Date()
     const mk = marketInfoFor(nextForm)
-    const options = engineOptions({ ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}) })
-    // Demand signals seen for this very listing in the search results (favourites) ride on the form, like the profile:
-    // the exploration arms are scored on the same input, so their cost is measured against the same base.
-    const scored = mk && mk.signals ? { ...nextForm, signals: mk.signals } : nextForm
+    const key = explorationKey(nextForm)
+    const month = monthKeyOf(at)
+    // The saved offers feed gate rule 7 (no re-offer on a listing refused within 14 days); key and month seed the
+    // message-first draw and the exploration arm, so the same listing gets the same assignment all month.
+    const options = engineOptions({ ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}), records: watchlist.allItems, key, month })
+    // Demand signals of the page and of the search results ride on the form, like the profile: the exploration arms
+    // are scored on the same input, so their cost is measured against the same base.
+    const scored = withSignals(nextForm, mk)
     let outcome = analyzeOffer(scored, at, options)
-    if (outcome.ok && explore && learning.exploration) {
-      const key = explorationKey(nextForm)
-      const month = monthKeyOf(at)
-      const varied = skipExploreRef.current.has(key) ? null : explorationPlan(scored, outcome, at, { key, month, options, budget: explorationBudget(watchlist.allItems, month) })
-      if (varied) outcome = varied.result
+    if (outcome.ok && explore && learning.exploration && !skipExploreRef.current.has(key)) {
+      const thompson = coreFn('thompsonArm')
+      const budgetOf = coreFn('explorationBudget')
+      const varied = thompson
+        ? thompson(scored, outcome, at, { key, month, options, enabled: true, profile: learning.engineProfile, records: learning.records })
+        : explorationPlan(scored, outcome, at, { key, month, options, ...(budgetOf ? { budget: budgetOf(watchlist.allItems, month) } : {}) })
+      if (varied && varied.result) outcome = varied.result
     }
     if (!outcome.ok) {
       setErrors(outcome.errors)
@@ -264,9 +305,8 @@ function Main() {
     setTimeout(() => {
       // The optimizer starts from the offer on screen: with a test variation, its price and its moment.
       const ex = result && result.exploration
-      const src = ex ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form
-      const mk = marketInfoFor(src)
-      if (mk && mk.signals) src.signals = mk.signals
+      const mk = marketInfoFor(form)
+      const src = withSignals(ex ? { ...form, targetPrice: String(result.input.targetPrice).replace('.', ',') } : form, mk)
       setPlan(optimizeOffer(src, new Date(), engineOptions({ targetProbability: goal, exactSendAt: ex && ex.kind === 'time' ? ex.at : null, ...(mk ? { market: mk.market } : {}) })))
       setOptimizing(false)
     }, 20)
@@ -300,10 +340,13 @@ function Main() {
     }
     const hours = lever.action.hours
     const name = form.itemTitle || 'L\'articolo'
+    // Three reminders share this path: the two levers and the hero's «Ricordamelo tra N h» when the gate says to wait.
     const copy = lever.id === 'patience'
       ? { title: 'È passata una settimana', body: `${name}: controlla se il prezzo è sceso; se è ancora in vendita, invia l'offerta nel momento consigliato.` }
-      : { title: 'Nessuno sconto dal venditore?', body: `${name}: se non è arrivata la sua offerta, invia ora la tua nel momento consigliato.` }
-    const when = hours % 24 === 0 ? `tra ${hours / 24} giorni` : hours === 60 ? 'tra due giorni e mezzo' : `tra ${hours} ore`
+      : lever.id === 'gate_wait'
+        ? { title: 'Tempo di riprovare', body: `${name}: controlla se è ancora in vendita e a che prezzo. Se sì, calcola di nuovo e invia l'offerta nel momento consigliato.` }
+        : { title: 'Nessuno sconto dal venditore?', body: `${name}: se non è arrivata la sua offerta, invia ora la tua nel momento consigliato.` }
+    const when = hours % 24 === 0 ? `tra ${hours / 24} giorni` : hours === 60 ? 'tra due giorni e mezzo' : hours >= 48 ? `tra circa ${Math.round(hours / 24)} giorni` : `tra ${hours} ore`
     try {
       const id = await scheduleReminderAt({ itemId: null, link: form.link || null, at: new Date(Date.now() + hours * 3600 * 1000), kind: 'lever', ...copy })
       showToast(id ? `Ti avviso ${when}.` : 'Non riesco a programmare la notifica.', 4000)
@@ -355,7 +398,8 @@ function Main() {
         const viaBrowser = await pageLoaderRef.current.load(link, { onVisible: () => setExtractPhase('verify') })
         if (viaBrowser.ok) {
           page = viaBrowser
-          ex = parseVintedItemHtml(viaBrowser.html)
+          // The probe's read-only scrape of the hydrated page (views, interested, previous price…) completes the HTML.
+          ex = parseVintedItemHtml(viaBrowser.html, viaBrowser.details || null)
         } else if (viaBrowser.reason !== 'unsupported' && !(page.reason === 'http' && (viaBrowser.reason === 'empty' || viaBrowser.reason === 'timeout'))) {
           // An HTTP error of the quick download stays the explanation when the browser found nothing better.
           page = viaBrowser
@@ -375,13 +419,16 @@ function Main() {
       const mk = marketInfoFor({ link })
       const built = buildFormFromExtraction(ex, {
         link, policy: true, profile: learning.engineProfile, market: mk ? mk.market : null, signals: mk ? mk.signals : null,
-        targetDiscountPct: defaultDiscountFor(learning.profile), previousForm: { ...EMPTY_FORM, link },
+        targetDiscountPct: legacyDefaultDiscount(learning.profile), previousForm: { ...EMPTY_FORM, link },
       })
       setForm(built.form)
       setPlan(null)
       setPinnedSendAt(null)
       const outcome = runAnalysis(built.form, null, { explore: true })
-      setExtraction({ ok: true, summary: built.summary, link, at: Date.now() })
+      // `raw` is the parser's output as read (kept with the saved item, engine-spec §6); `via` tells the two paths apart.
+      const via = page.via === 'browser' ? 'browser' : 'fetch'
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via })
+      recordRead(ex, { via }) // per-field read counters for Info; never blocks the analysis
       const idMatch = String(link).match(/\/items\/(\d+)/)
       setLastListing({
         source: 'vinted', id: idMatch ? idMatch[1] : link, url: link, title: ex.title, brand: ex.brand, size: null, condition: ex.condition, price: ex.listPrice,
@@ -438,9 +485,34 @@ function Main() {
     if (!result) setField('link', '')
   }
 
+  /**
+   * What the list stores with the analysis on screen (engine-spec §6): the form as scored (with the demand signals),
+   * the market of this listing, the raw extraction when it belongs to this very link, the discount policy, the gate and
+   * the message policy. Fields the running engine does not produce are simply absent.
+   */
+  const savePayload = () => {
+    const mk = marketInfoFor(form)
+    const raw = extraction && extraction.ok && extraction.raw && extraction.link === normalizeVintedLink(form.link) ? extraction.raw : null
+    return {
+      result, link: form.link, form: withSignals(form, mk), profile: learning.engineProfile,
+      market: mk ? mk.market : null, extraction: raw, policy: form.policy || null, gate: result.gate || null, messagePolicy: result.messagePolicy || null,
+    }
+  }
+
+  /** Gate rule 7: the listing was refused within 14 days, nothing is saved. */
+  const toastBlocked = (blocked) => {
+    const label = blocked.outcome === 'no_reply' ? 'senza risposta' : 'rifiutata'
+    showToast(`Già in Lista: ${label} il ${dayOf(blocked.at)}. Rilancia dopo il ${dayOf(blocked.until)}.`, 5000)
+  }
+
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
-    const { item, reminder, replaced } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
+    const saved = await watchlist.addFromAnalysis(savePayload())
+    if (saved.blocked) {
+      toastBlocked(saved.blocked)
+      return
+    }
+    const { item, reminder, replaced } = saved
     const messages = {
       scheduled: { tone: 'good', message: `Salvato. Ti avviso 10 minuti prima: ${result.verdict.headline.replace("Invia l'offerta ", '')}.` },
       too_soon: { tone: 'warn', message: 'Salvato. Il momento consigliato è troppo vicino per una notifica: invia l\'offerta adesso.' },
@@ -454,11 +526,21 @@ function Main() {
   /** «L'ho inviata adesso»: saved and marked sent in one tap (sentAtSource 'tap'); the outcome is then set from the list. */
   const saveAndMarkSent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
-    const { item } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
+    const saved = await watchlist.addFromAnalysis(savePayload())
+    if (saved.blocked) {
+      toastBlocked(saved.blocked)
+      return
+    }
+    const { item } = saved
     await watchlist.setStatus(item.id, 'sent')
     const message = 'Segnata come inviata: segna l\'esito dalla Lista.'
     setSaveState({ saved: true, itemId: item.id, tone: 'good', message })
     showToast(message, 4000)
+  }
+
+  /** «Copia messaggio» in the hero after a save: the log tells a sent message from a bare offer (engine-spec §6). */
+  const noteMessageCopied = () => {
+    if (saveState && saveState.saved && saveState.itemId) watchlist.markMessageCopied(saveState.itemId)
   }
 
   /** «Ricalcola» from the list: the saved form (or the link) back into Calcola, analysed again. */
@@ -720,6 +802,8 @@ function Main() {
                   onSkipExploration={result.exploration ? skipExploration : null}
                   onApplyPrice={applyPrice}
                   onLever={scheduleLever}
+                  onCopyMessage={noteMessageCopied}
+                  link={form.link}
                   onPickMoment={pickMoment}
                   onOpenSearch={(lastListing && form.link === lastListing.url) || (searchJob && searchJob.running) ? () => openSearch(true) : null}
                   searchJob={searchJob}
@@ -772,7 +856,7 @@ function Main() {
               scrollRef={scrollRef}
             />
           )}
-          {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} />}
+          {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} onRestore={watchlist.restoreItems} />}
           {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} onCollectingChange={onCollectingChange} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>

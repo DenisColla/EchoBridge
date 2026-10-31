@@ -92,6 +92,95 @@ export const GAP_EUR_CURVE = [
   [60, 0], [150, -0.15], [250, -0.3],
 ]
 
+/**
+ * Prior weights of the listing signals (engine-spec §3.2), logit. They are design values, not calibrated: every factor
+ * row built from them carries `prior: true` and the record stores it, so a 'demand' family can be fitted once ≥ 10
+ * records carry the field.
+ *   demand      favourites / interested: none → the seller is glad of any interest; many → he expects his price;
+ *               FRESH: a listing under 3 days old with 3 or more hearts is not ready to move.
+ *   reduced     a price already cut: ≥ 48 h ago the seller is «in modalità vendita»; under 48 h he has just moved.
+ *   views       a stale listing nobody looks at; many views and no hearts (over-priced, the seller knows); a fresh
+ *               listing with heavy traffic.
+ *   sellerItems logged only: hobby resellers accept bundles, not deep cuts, so the direction is ambiguous.
+ */
+export const SIGNAL_WEIGHTS = {
+  demand: { none: 0.1, few: 0, some: -0.15, many: -0.3, fresh: -0.3 },
+  reduced: { settled: 0.15, recent: -0.2 },
+  views: { dead: 0.1, overpriced: 0.1, hot: -0.1 },
+  sellerItems: 0,
+}
+/**
+ * Multiplier on SIGNAL_WEIGHTS for the fields that only the hydrated DOM provides (interested, views, old price, the
+ * seller's other items). They stay at 0, so the fields are logged but weigh nothing, until a real WebView dump is
+ * committed as test/fixtures/vinted-item-hydrated-*.html and the parser is verified on it (engine-spec §3.1): a weight
+ * on a field that is read wrongly would be worse than no weight. Bumping a value to 1 turns the factor on. Favourites
+ * from the cross-channel search are not DOM-only and keep their full weight.
+ */
+export const DOM_SIGNAL_SCALE = { interested: 0, reduced: 0, views: 0, sellerItems: 0 }
+export const SIGNAL_THRESHOLDS = { freshDays: 3, freshHearts: 3, someHearts: 4, manyHearts: 10, recentDropHours: 48, deadAgeDays: 14, deadViewsPerDay: 2, overpricedViews: 150, overpricedHearts: 2, hotDays: 3, hotViewsPerDay: 30 }
+
+/**
+ * The decision gate (engine-spec §3.3): ten ordered rules, the first match wins, evaluated before the verdict. Days,
+ * hours, euros and points as the rules read them.
+ */
+export const GATE = {
+  /** Rule 3: under this saving an offer is not worth the exchange (analyze.js MIN_MEANINGFUL_GAP_EUR). */
+  MIN_GAP_EUR: 2,
+  /** Rule 4: a «prezzo fisso» listing younger than this still gets seller discounts on the heart. */
+  FIXED_PRICE_MAX_AGE_DAYS: 30,
+  /** Rule 5: a fresh listing with hearts. */
+  FRESH_DAYS: 3,
+  FRESH_HEARTS: 3,
+  /** Rule 6: a price cut younger than this with a discount deeper than DROP_MAX_DISCOUNT_PCT; the alternative ask. */
+  RECENT_DROP_HOURS: 48,
+  DROP_MAX_DISCOUNT_PCT: 10,
+  DROP_OFFER_CAP_PCT: 8,
+  /** Rule 7: no second offer on a listing that declined or ignored one within this many days. */
+  REOFFER_BLOCK_DAYS: 14,
+  /** Rule 8: last seen this many days ago or more → write first. */
+  INACTIVE_DAYS: 14,
+  /** Rule 9: a deep ask on a dear item → write first, unless the listing invites offers. */
+  DEEP_DISCOUNT_PCT: 15,
+  DEAR_LIST_PRICE_EUR: 40,
+  /** How long to wait with the heart on (rules 4, 5) and after a fresh price cut (rule 6). */
+  FAVOURITE_WAIT_HOURS: 72,
+  DROP_WAIT_HOURS: 48,
+  /** Favourite-wait value as leversFor estimates it: chance of a seller discount, its typical size (share of list). */
+  FAVOURITE_DISCOUNT_P: 0.25,
+  FAVOURITE_DISCOUNT_SHARE: 0.15,
+}
+
+/** UI tier from the corrected overall probability (engine-spec §3.4), highest threshold first. */
+export const TIERS = [
+  { id: 'strong', min: 0.45, label: 'Offri deciso' },
+  { id: 'offer', min: 0.25, label: 'Offri' },
+  { id: 'soft', min: 0.12, label: 'Scrivi prima o metti il cuore' },
+  { id: 'no', min: 0, label: 'Non offrire' },
+]
+
+/** Message-first / offer-direct policy (engine-spec §4.1). */
+export const MESSAGE_POLICY = {
+  /** Write first when the seller was last seen more than this many days ago… */
+  QUIET_DAYS: 3,
+  /** A «quiet» seller profile (last seen 3–13 days ago) without the exact reading stands for this many days. */
+  QUIET_PROFILE_DAYS: 7,
+  /** …or the ask is deeper than this on an item dearer than that… */
+  DEEP_DISCOUNT_PCT: 15,
+  DEAR_LIST_PRICE_EUR: 40,
+  /** …or the listing is fresh and the ask deeper than this. */
+  FRESH_DAYS: 3,
+  FRESH_DEEP_DISCOUNT_PCT: 10,
+  /** Offer directly when the ask is small and the seller was online within a day… */
+  DIRECT_MAX_DISCOUNT_PCT: 12,
+  ACTIVE_WITHIN_DAYS: 1,
+  /** …or the listing is old and the tier says «Offri». */
+  OLD_LISTING_DAYS: 14,
+  /** Bundle: the seller has this many items and the user flagged another one. */
+  BUNDLE_MIN_SELLER_ITEMS: 2,
+  /** The optional case is a coin toss, logged with this propensity (§5.3). */
+  RANDOM_PROPENSITY: 0.5,
+}
+
 /** Daily sell-through hazard multiplier by listing age (feed boost in the first days, stale after a month). */
 export const ageHazardMultiplier = (ageDays) =>
   ageDays < 1 ? 2.0 : ageDays < 7 ? 1.3 : ageDays < 14 ? 1.0 : ageDays < 30 ? 0.7 : 0.4
@@ -349,12 +438,15 @@ export const LEARNING = {
    * must be able to reach −1 within a dozen outcomes; dslope is the live correction per 10 points of discount.
    */
   PRIOR_SD: { intercept: 1.0, dslope: 0.35, slope: 0.25, time: 0.35, disc: 0.35, counter: 0.5 },
-  /** Weighted outcomes a parameter needs before it may move at all (monthly path). */
+  /** Weighted outcomes a parameter needs before it may move at all (monthly path); `discount` also gates the shift. */
   MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, disc: 6, counter: 6, discount: 10, share: 8, latency: 8 },
   /** Largest change applied in one month (latency: multiplicative factor). Not applied to the live intercept/dslope. */
-  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, disc: 0.2, counter: 0.3, discountPct: 1, share: 0.1, latency: 1.5 },
-  /** Asymmetric intercept bounds: engines err by optimism, a user's sellers can be much tougher than the prior. */
-  BOUNDS: { intercept: [-3, 1.5], dslope: [-1, 0.4], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], share: [0.7, 1.3], latency: [0.5, 12] },
+  MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, disc: 0.2, counter: 0.3, discountPct: 1, discountShift: 1, share: 0.1, latency: 1.5 },
+  /**
+   * Asymmetric intercept bounds: engines err by optimism, a user's sellers can be much tougher than the prior.
+   * discountShift moves the whole policy table (policy.js) by at most 6 points either way (engine-spec §2.3).
+   */
+  BOUNDS: { intercept: [-3, 1.5], dslope: [-1, 0.4], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], discountShift: [-6, 6], share: [0.7, 1.3], latency: [0.5, 12] },
   /**
    * Live recalibration (learning.js liveProfile): the intercept and the discount slope are re-fitted on every change
    * of the watchlist and applied at the posterior mode, with these gates instead of a monthly step.
@@ -374,9 +466,10 @@ export const LEARNING = {
   /** Corrected acceptance must keep falling with the discount: engine slope ≥ 0,088 logit per point, 80% margin. */
   DISC_MIN_ENGINE_SLOPE: 0.088,
   DISC_MONOTONE_MARGIN: 0.8,
-  /** Changes smaller than this are not worth a new profile (logit units, or points for the discount). */
+  /** Changes smaller than this are not worth a new profile (logit units, or points for the discount and the shift). */
   MIN_CHANGE: 0.02,
   MIN_CHANGE_DISCOUNT_PCT: 1,
+  MIN_CHANGE_SHIFT_PTS: 0.5,
   DEFAULT_DISCOUNT_PCT: 20,
   /**
    * The slope scales the engine's logit around this value (a typical offer's logit), so a pure level shift lands in
@@ -400,7 +493,22 @@ export const LEARNING = {
   EXPLORE_MAX_SAVING_COST: 0.01,
   /** Monthly budget: total acceptance given up by variations ≤ this share of the month's total base acceptance. */
   EXPLORE_BUDGET_SHARE: 0.03,
-  EXPLORE_MIN_LIST_PRICE: 10,
+  /** No exploration under this list price: the policy table says «non offrire» on cheap items anyway (engine-spec §5.1). */
+  EXPLORE_MIN_LIST_PRICE: 12,
+  /**
+   * Thompson exploration (engine-spec §5): discount arms at d₀ − ARM_PTS / d₀ / d₀ + ARM_PTS around the policy default,
+   * DRAWS posterior draws of [intercept, dslope], the arm sampled from the floored win shares (MIN_PROPENSITY, then
+   * renormalised: the logged propensity is the real sampling probability, which an argmax under a floor would not be).
+   * The deeper arm needs a corrected acceptance of at least DEEPER_MIN_P at d₀, a list price from DEEPER_MIN_LIST_PRICE
+   * and a category that is not premium.
+   */
+  THOMPSON_ARM_PTS: 4,
+  THOMPSON_DRAWS: 200,
+  THOMPSON_MIN_PROPENSITY: 0.1,
+  THOMPSON_DEEPER_MIN_P: 0.3,
+  THOMPSON_DEEPER_MIN_LIST_PRICE: 20,
+  /** Report (§5.4): the softer − base acceptance difference is shown only with this many offers in each arm. */
+  THOMPSON_REPORT_MIN_PER_ARM: 6,
   /** Reliability table: equal-mass bins, between 2 and this many. */
   RELIABILITY_MAX_BINS: 5,
   /** Months of reports caught up at once when the app was not opened for a while. */

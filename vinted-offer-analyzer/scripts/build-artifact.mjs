@@ -25,6 +25,7 @@ const ORDER = [
   'src/core/scoring.js',
   'src/core/scheduler.js',
   'src/core/messages.js',
+  'src/core/gate.js',
   'src/core/reasoning.js',
   'src/core/analyze.js',
   'src/core/optimize.js',

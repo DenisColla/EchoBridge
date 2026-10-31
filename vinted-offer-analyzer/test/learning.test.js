@@ -8,6 +8,7 @@ import {
   monthKeyOf, monthLabel, monthlyReport, normalizeProfile, optimalDiscount, pickMoments, normalizeInput, predictWith, predictiveInterval, prequentialScore, profileIsActive, profileIsStale, proposeProfile,
   reportFileName, reportWorkbook, scoreAt, shiftMonth, squash, timeGroupOf, unsquash, withLiveHistory, xlsxBase64, xlsxColumn, xlsxCrc32, xlsxDateSerial, xlsxEscape,
   xlsxSheetName, xlsxUtf8,
+  THOMPSON_ARMS, continuationPosterior, explorationStats, isoAcceptanceShift, snapshotSignals, thompsonArm,
 } from '../src/core/index.js'
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg || ''} ${a} ≠ ${b} (±${tol})`)
@@ -966,4 +967,248 @@ test('live history and checkpoints: one entry per day, monthly entries untouched
   assert.equal(liveDiffers(prof(3, -0.7), prof(3, -0.7)), false)
   assert.equal(liveDiffers(prof(3, -0.7), prof(3, -0.75)), true)
   assert.equal(withLiveHistory(history, normalizeProfile({ intercept: 0 })).length, history.length, 'an inactive profile adds nothing')
+})
+
+/* ───────── engine 1.4.0 part 2: Thompson arms, logging, the policy shift (engine-spec §2.3, §5, §6) ───────── */
+
+const T_FORM = { itemTitle: 'Felpa', category: 'other', listPrice: '60', targetPrice: '48', listingAge: 'weeks_1_2', sellerProfile: 'unknown', listingSignal: 'none', link: 'https://www.vinted.it/items/777-felpa' }
+const propsOf = (out) => Object.fromEntries(out.exploration.arms.map((a) => [a.id, a.propensity]))
+
+test('thompson: three arms around the policy default, exact floor, sum one, same key and month → same arm, nothing under 12 €', () => {
+  const base = analyzeOffer(T_FORM, NOW)
+  const a = thompsonArm(T_FORM, base, NOW, { key: 'www.vinted.it/items/777', month: '2026-10' })
+  assert.ok(a, 'an arm is always drawn (the base arm is a plan too)')
+  assert.deepEqual(THOMPSON_ARMS.map((x) => x.id), ['softer', 'base', 'deeper'])
+  assert.deepEqual(a.exploration.arms.map((x) => x.id), ['softer', 'base', 'deeper'], 'p(d₀) ≥ 0,3, not premium, 60 €: the deeper arm is allowed')
+  assert.equal(a.exploration.d0, 20, 'no policy on the form: d₀ is the current discount')
+  // Prices sit on the engine's 1 € grid (60 € → 50 / 48 / 46), so the discounts are the grid's, not exactly ±4.
+  assert.deepEqual(a.exploration.arms.map((x) => x.price), [50, 48, 46])
+  assert.deepEqual(a.exploration.arms.map((x) => x.discountPct), [16.7, 20, 23.3])
+  assert.equal(a.exploration.draws, LEARNING.THOMPSON_DRAWS)
+  const mu = propsOf(a)
+  near(Object.values(mu).reduce((s, v) => s + v, 0), 1, 1e-6, 'Σμ = 1')
+  for (const v of Object.values(mu)) assert.ok(v >= LEARNING.THOMPSON_MIN_PROPENSITY - 1e-9, `propensity ${v} under the floor`)
+  assert.equal(a.exploration.propensity, mu[a.exploration.arm])
+  assert.equal(a.exploration.base.price, 48)
+  near(a.exploration.base.probability, base.probability, 1e-12)
+  assert.equal(a.result.exploration, a.exploration)
+  assert.equal(typeof a.exploration.costPoints, 'number')
+  assert.equal(a.exploration.method, 'thompson')
+  assert.equal(a.exploration.posterior, 'prior')
+  // Deterministic per listing and month.
+  const b = thompsonArm(T_FORM, base, NOW, { key: 'www.vinted.it/items/777', month: '2026-10' })
+  assert.deepEqual(b.exploration, a.exploration)
+  assert.equal(b.result.input.targetPrice, a.result.input.targetPrice)
+  // Across listings every arm is drawn, with the logged propensities as frequencies (loosely).
+  const tally = { softer: 0, base: 0, deeper: 0 }
+  for (let i = 0; i < 120; i++) tally[thompsonArm(T_FORM, base, NOW, { key: `k${i}`, month: '2026-10' }).exploration.arm]++
+  for (const id of Object.keys(tally)) assert.ok(tally[id] >= 4, `${id} drawn ${tally[id]} times in 120`)
+  // The chosen arm's analysis is at the arm's price and the base moment; the base arm at the user's price is the analysis itself.
+  const chosen = a.exploration.arms.find((x) => x.id === a.exploration.arm)
+  assert.equal(a.result.input.targetPrice, chosen.price)
+  if (a.exploration.arm === 'base') assert.equal(a.exploration.varied, false)
+  else assert.ok(Math.abs(a.result.optimal.date.getTime() - base.optimal.date.getTime()) <= 3 * 3_600_000)
+  // Off switch, and no exploration under 12 €.
+  assert.equal(thompsonArm(T_FORM, base, NOW, { key: 'k', month: '2026-10', enabled: false }), null)
+  const cheap = { ...T_FORM, listPrice: '11', targetPrice: '9' }
+  assert.equal(thompsonArm(cheap, analyzeOffer(cheap, NOW), NOW, { key: 'k', month: '2026-10' }), null)
+  assert.equal(LEARNING.EXPLORE_MIN_LIST_PRICE, 12)
+  // The policy default on the form sets d₀; a «no offer» policy falls back to the current discount.
+  const withPolicy = thompsonArm({ ...T_FORM, policy: { kind: 'offer', discountPct: 12 } }, base, NOW, { key: 'k', month: '2026-10' })
+  assert.equal(withPolicy.exploration.d0, 12)
+  assert.deepEqual(withPolicy.exploration.arms.map((x) => x.price), [55, 53, 50])
+  assert.equal(thompsonArm({ ...T_FORM, policy: { kind: 'no_offer', discountPct: null } }, base, NOW, { key: 'k', month: '2026-10' }).exploration.d0, 20)
+})
+
+test('thompson: a posterior that says «rifiutano dal 20% in su» sends the softer arm ≥ 70%; the deeper arm never under p(d₀) 0,3 nor on premium items', () => {
+  // Intercept −1 and dslope −1 (per 10 points), known precisely: acceptance collapses above 20%.
+  const tough = normalizeProfile({ intercept: -1, dslope: -1, cov: [[0.01, 0], [0, 0.005]], paramKeys: ['intercept', 'dslope'], basedOn: 40, live: true })
+  const base = analyzeOffer(T_FORM, NOW, { profile: tough })
+  const out = thompsonArm(T_FORM, base, NOW, { key: 'k', month: '2026-10', profile: tough, options: { profile: tough } })
+  const mu = propsOf(out)
+  assert.ok(mu.softer >= 0.7, `softer ${mu.softer}`)
+  assert.equal(out.exploration.posterior, 'live')
+  assert.ok(base.probability < LEARNING.THOMPSON_DEEPER_MIN_P, `p(d₀) ${base.probability}`)
+  assert.ok(!out.exploration.arms.some((x) => x.id === 'deeper'), 'deeper excluded under 0,3')
+  near(Object.values(mu).reduce((s, v) => s + v, 0), 1, 1e-6)
+  for (const v of Object.values(mu)) assert.ok(v >= LEARNING.THOMPSON_MIN_PROPENSITY - 1e-9)
+  // Premium category, or under 20 €: no deeper arm even with a good base probability.
+  const lux = { ...T_FORM, category: 'luxury', listPrice: '300', targetPrice: '270' }
+  const luxOut = thompsonArm(lux, analyzeOffer(lux, NOW), NOW, { key: 'k', month: '2026-10' })
+  assert.ok(luxOut && !luxOut.exploration.arms.some((x) => x.id === 'deeper'))
+  const small = { ...T_FORM, listPrice: '15', targetPrice: '12' }
+  const smallOut = thompsonArm(small, analyzeOffer(small, NOW), NOW, { key: 'k', month: '2026-10' })
+  assert.ok(smallOut && !smallOut.exploration.arms.some((x) => x.id === 'deeper'), 'under 20 €: no deeper arm')
+  assert.deepEqual(smallOut.exploration.arms.map((x) => x.price), [12.5, 12], '0,50 grid under 20 €')
+  // q and ρ: the priors without records, the user's own continuation with them.
+  const priors = continuationPosterior(null, NOW)
+  near(priors.q, LEARNING.CLOSE_AFTER_FAIL_PRIOR, 1e-12)
+  near(priors.rho, LEARNING.CONTINUATION_RATIO_PRIOR, 1e-12)
+  const records = buildDataset(REAL_LIKE, REAL_NOW)
+  assert.ok(continuationPosterior(records, REAL_NOW).q < priors.q, 'three counters, all lost: the chance to close after a no falls')
+})
+
+test('snapshot (engine-spec §6): extraction, signals, market, policy, gate, message policy, factors, tier ride on the decision', () => {
+  const market = { n: 5, p25Price: 50, medianPrice: 70, p75Price: 90 }
+  const form = { ...T_FORM, signals: { favourites: 2, views: 300, sellerItems: 3, priceDrop: { from: 70, to: 60, hoursAgo: 80 } }, policy: { kind: 'offer', band: 'from_40_to_100', ageTier: 'mid', table: 15, modifiers: [{ id: 'new_seller', pts: 2, label: 'venditore nuovo' }], shift: 0, discountPct: 17 } }
+  const r = analyzeOffer(form, NOW, { market, key: 'www.vinted.it/items/777', month: '2026-10' })
+  const ex = { uploadedDays: 10, sellerLastSeenDays: 0.5, sellerFeedbackCount: 12, sellerRating: 4.9, sellerBusiness: false, sellerBadges: ['ACTIVE_LISTER'], condition: 'usato', brand: 'Nike', categoryText: 'Uomo Felpe', title: 'Felpa', description: 'Svuoto l\'armadio' }
+  const snap = decisionSnapshot(r, { now: NOW, extraction: ex, market })
+  assert.equal(snap.engine, ENGINE_VERSION)
+  assert.deepEqual(snap.extraction, { uploadedDays: 10, sellerLastSeenDays: 0.5, sellerFeedbackCount: 12, sellerRating: 4.9, sellerBusiness: false, sellerBadges: ['ACTIVE_LISTER'], condition: 'usato', brand: 'Nike', categoryText: 'Uomo Felpe', textHits: ['clearing_out'] })
+  assert.deepEqual(snap.signals, { favourites: 2, interested: null, views: 300, sellerItems: 3, bundleDiscountPct: null, lastSeenDays: null, priceDrop: { from: 70, to: 60, hoursAgo: 80 }, reserved: null, vacation: null })
+  assert.deepEqual(snap.market, { n: 5, medianPrice: 70, p25Price: 50, p75Price: 90, gapPct: null, at: NOW.toISOString() })
+  assert.deepEqual(snap.policy, { band: 'from_40_to_100', ageTier: 'mid', table: 15, modifiers: [{ id: 'new_seller', pts: 2 }], shift: 0, d0: 17, kind: 'offer', source: null })
+  assert.deepEqual(snap.gate, { kind: r.gate.kind, rule: r.gate.rule, waitHours: null })
+  assert.deepEqual(snap.messagePolicy, { mode: r.messagePolicy.mode, rule: r.messagePolicy.rule, tone: r.messagePolicy.tone, randomised: r.messagePolicy.randomised, propensity: r.messagePolicy.propensity, assigned: r.messagePolicy.assigned })
+  assert.deepEqual(snap.tier, { id: r.tier.id, label: r.tier.label })
+  assert.ok(snap.factors.some((f) => f.id === 'demand' && f.prior === true))
+  assert.ok(snap.factors.some((f) => f.id === 'market' && f.prior === false))
+  assert.equal(snap.appliedCorrection, 0)
+  assert.equal(snap.probabilityRange.n, 0)
+  // Without the optional inputs: nulls, never guesses; an old-style call still works.
+  const bare = decisionSnapshot(analyzeOffer(FORM, NOW), { now: NOW })
+  assert.equal(bare.extraction, null)
+  assert.equal(bare.signals, null)
+  assert.equal(bare.market, null)
+  assert.equal(bare.policy, null)
+  assert.equal(bare.gate.kind, 'message_first')
+  assert.equal(bare.exploration, null)
+  assert.equal(snapshotSignals({ priceDropped: true, oldPrice: 70 }).priceDrop.from, 70)
+  assert.equal(snapshotSignals(null), null)
+  assert.ok(JSON.parse(JSON.stringify(snap)), 'JSON round-trips')
+})
+
+test('rescoring (engine-spec §6): the record rebuilt with the item\'s market and signals gives the stored rawLogit back', () => {
+  const market = { n: 5, p25Price: 50, medianPrice: 70, p75Price: 90 }
+  const signals = { favourites: 7, views: 300, sellerItems: 3, priceDrop: { from: 70, to: 60, hoursAgo: 80 } }
+  const form = { ...T_FORM, signals }
+  const r = analyzeOffer(form, NOW, { market })
+  const snap = decisionSnapshot(r, { now: NOW, market })
+  const sentAt = r.optimal.date
+  const item = {
+    id: 'rs', createdAt: NOW.toISOString(), listPrice: 60, targetPrice: 48, discountPct: r.input.discountPct, form, signals, market, sentAt: sentAt.toISOString(), sentAtSource: 'tap',
+    status: 'declined', firstOutcome: 'declined', outcomeAt: new Date(sentAt.getTime() + 3600e3).toISOString(), decision: snap, messageCopiedAt: new Date(sentAt.getTime() - 60e3).toISOString(), answered: true,
+  }
+  const rec = learningRecord(item, new Date(NOW.getTime() + 20 * 86400e3))
+  near(rec.rawLogit, snap.rawLogit, 1e-6, 'rawLogit')
+  near(rec.k, snap.k, 1e-9, 'k')
+  assert.ok(rec.factors.some((f) => f.id === 'market'), 'the market factor is back on the record')
+  assert.equal(rec.priceBand, 'over_50')
+  assert.equal(rec.ageTier, 'mid')
+  assert.equal(rec.arm, null)
+  assert.equal(rec.propensity, null)
+  assert.equal(rec.messageBefore, true, 'copied before the send')
+  assert.equal(rec.answered, 1)
+  assert.equal(rec.userOverride, false)
+  assert.equal(rec.gateKind, r.gate.kind)
+  assert.equal(rec.messageMode, r.messagePolicy.mode)
+  assert.equal(rec.marketGap, -14)
+  assert.equal(rec.tier, r.tier.id)
+  // Without the market on the item the rescored logit differs (the market factor is gone): the fix is the point.
+  const noMarket = learningRecord({ ...item, market: null }, new Date(NOW.getTime() + 20 * 86400e3))
+  assert.ok(Math.abs(noMarket.rawLogit - snap.rawLogit) > 0.05)
+  // Overrides and silence.
+  const over = learningRecord({ ...item, targetPrice: 46, userOverride: 46 }, new Date(NOW.getTime() + 20 * 86400e3))
+  assert.equal(over.userOverride, true)
+  const silent = learningRecord({ ...item, status: 'no_reply', firstOutcome: 'no_reply', answered: null, messageCopiedAt: null }, new Date(NOW.getTime() + 20 * 86400e3))
+  assert.equal(silent.answered, 0)
+  assert.equal(silent.messageBefore, true, 'the policy assigned a message first')
+  // With a Thompson arm on the decision, arm and propensity reach the record.
+  const base = analyzeOffer(T_FORM, NOW)
+  const varied = thompsonArm(T_FORM, base, NOW, { key: 'k', month: '2026-10' })
+  const withArm = learningRecord({ ...item, decision: decisionSnapshot(varied.result, { now: NOW, exploration: varied.exploration }) }, new Date(NOW.getTime() + 20 * 86400e3))
+  assert.equal(withArm.arm, varied.exploration.arm)
+  near(withArm.propensity, varied.exploration.propensity, 1e-12)
+})
+
+test('dataset round-trip of the real-like backup: the new fields are null on old items, nothing throws', () => {
+  const records = buildDataset(REAL_LIKE, REAL_NOW)
+  assert.equal(records.length, 12)
+  for (const r of records) {
+    assert.ok(['fresh', 'mid', 'old'].includes(r.ageTier), r.id)
+    assert.equal(r.arm, null)
+    assert.equal(r.propensity, null)
+    assert.equal(r.messageBefore, null, 'no message log on the old items')
+    assert.ok([0, 1, null].includes(r.answered), 'sold to someone else says nothing about an answer')
+    assert.ok(r.userOverride === null || r.userOverride === false, `${r.id}: ${r.userOverride}`)
+    assert.equal(r.gateKind, null)
+    assert.equal(r.messageMode, null)
+    assert.equal(r.marketGap, null)
+    assert.equal(r.signals, null)
+    assert.ok(Array.isArray(r.factors) && r.factors.length >= 10)
+    assert.equal(r.tier, null)
+  }
+  assert.equal(records.filter((r) => r.answered === 1).length, 10, 'ten answers, one silence, one sold to someone else')
+  assert.equal(records.filter((r) => r.answered === 0).length, 1)
+  // A monthly report still runs on them, with the shift waiting for data (nEff under 10 on the table's items).
+  const rep = monthlyReport({ items: REAL_LIKE, month: '2026-10', now: REAL_NOW })
+  const shift = rep.changes.find((c) => c.key === 'discountShift')
+  assert.equal(shift.status, 'waiting_data')
+  assert.equal(shift.to, 0)
+  assert.ok(!rep.changes.some((c) => c.key === 'discountPct'), 'the default discount is no longer learned: the table owns the ask')
+  assert.equal(rep.nextProfile.discountPct, 20)
+  assert.equal(rep.discount.shift.n, 10, 'two items the table would not ask on are left out')
+  assert.deepEqual(rep.exploration.map((a) => a.id), ['none', 'softer', 'base', 'deeper'])
+  assert.equal(rep.exploration.ipw, null)
+  const files = unzip(reportWorkbook(rep))
+  assert.ok(files['xl/worksheets/sheet9.xml'].includes('servono almeno 6 offerte per braccio'))
+  for (const xml of Object.values(files)) assert.ok(!/undefined|NaN|\[object Object\]/.test(xml))
+})
+
+test('discountShift (engine-spec §2.3): clamped to ±6, zero without a correction, moves with it, one point a month behind the gate', () => {
+  assert.equal(normalizeProfile({ discountShift: 9 }).discountShift, 6)
+  assert.equal(normalizeProfile({ discountShift: -9 }).discountShift, -6)
+  assert.equal(normalizeProfile({ discountShift: 'x' }).discountShift, 0)
+  assert.equal(DEFAULT_PROFILE.discountShift, 0)
+  assert.deepEqual(LEARNING.BOUNDS.discountShift, [-6, 6])
+  assert.equal(profileIsActive(normalizeProfile({ discountShift: 2 })), true)
+  assert.equal(firstOfferCorrected(normalizeProfile({ discountShift: 2 })), false, 'the shift does not touch the first-offer estimate')
+  const items = syntheticItems({ months: 4, perMonth: 14 })
+  const now = new Date(2026, 7, 1)
+  const recs = buildDataset(items, now)
+  const none = isoAcceptanceShift(recs, DEFAULT_PROFILE, now)
+  assert.equal(none.target, 0, 'uncorrected engine: no shift')
+  assert.ok(none.nEff >= 10)
+  assert.ok(isoAcceptanceShift(recs, normalizeProfile({ intercept: -0.5 }), now).target < 0, 'tough sellers: softer table')
+  assert.ok(isoAcceptanceShift(recs, normalizeProfile({ intercept: 0.5 }), now).target > 0, 'generous sellers: deeper table')
+  assert.equal(isoAcceptanceShift([], DEFAULT_PROFILE, now).target, null)
+  // Through the monthly path: at most one point a month, never from under 10 weighted outcomes.
+  const fit = { theta: { intercept: 0 }, nEff: { intercept: 0 }, keys: ['intercept'], cov: null, n: 0, weightTotal: 0, ladder: {} }
+  const tough = normalizeProfile({ intercept: -0.9, live: true })
+  const out = proposeProfile({ previous: tough, firstFit: fit, records: recs, month: '2026-07', now, live: { profile: tough, status: { intercept: 'applied', dslope: 'waiting_data' }, nEff: 40, fitted: { intercept: -0.9, dslope: 0 } } })
+  const row = out.changes.find((c) => c.key === 'discountShift')
+  assert.ok(['applied', 'capped'].includes(row.status), row.status)
+  assert.equal(row.to, -1, 'one point a month')
+  assert.equal(out.profile.discountShift, -1)
+  const few = proposeProfile({ previous: tough, firstFit: fit, records: recs.slice(0, 5), month: '2026-07', now, live: { profile: tough, status: { intercept: 'applied', dslope: 'waiting_data' }, nEff: 5, fitted: { intercept: -0.9, dslope: 0 } } })
+  assert.equal(few.changes.find((c) => c.key === 'discountShift').status, 'waiting_data')
+  assert.equal(few.profile.discountShift, 0)
+})
+
+test('report «Varianti di test» (engine-spec §5.4): the three arms with n, accepted, expected, O − E, and the IPW difference only with 6 per arm', () => {
+  const mk = (id, arm, propensity, y) => ({ ...rec(id, y, { now: NOW }), exploration: arm ? { method: 'thompson', arm, propensity } : null, propensity: arm ? propensity : null, closed: y === 1, savingShare: y === 1 ? 0.2 : null })
+  const few = [...Array.from({ length: 5 }, (_, i) => mk(`s${i}`, 'softer', 0.5, i % 2)), ...Array.from({ length: 6 }, (_, i) => mk(`b${i}`, 'base', 0.4, 0)), mk('n', null, null, 1)]
+  const rowsFew = explorationStats(few, null)
+  assert.deepEqual(rowsFew.map((r) => [r.id, r.n]), [['none', 1], ['softer', 5], ['base', 6], ['deeper', 0]])
+  assert.equal(rowsFew.ipw, null, 'five softer offers are not enough')
+  const enough = [...few, mk('s5', 'softer', 0.5, 1)]
+  const rows = explorationStats(enough, null)
+  assert.ok(rows.ipw)
+  assert.equal(rows.ipw.nSofter, 6)
+  assert.equal(rows.ipw.nBase, 6)
+  near(rows.ipw.diff, 0.5, 1e-9, 'equal propensities within an arm: the plain rates')
+  assert.ok(rows.ipw.se > 0 && rows.ipw.se < 0.5)
+  const softer = rows.find((r) => r.id === 'softer')
+  assert.equal(softer.successes, 3)
+  near(softer.expected, 6 * squash(0), 0.01)
+  near(softer.oe, 3 - 6 * squash(0), 0.01)
+  near(softer.ipwRate, 0.5, 1e-9)
+  // Unequal propensities: the weighted rate leans on the rarer offers.
+  const skewed = [mk('a', 'base', 0.1, 1), mk('b', 'base', 0.9, 0), mk('c', 'base', 0.9, 0)]
+  near(explorationStats(skewed, null).find((r) => r.id === 'base').ipwRate, 10 / (10 + 1 / 0.9 + 1 / 0.9), 1e-9)
+  // Legacy ±1 h arms from 1.3 keep their own rows only when records carry them.
+  const legacy = [{ ...mk('l', 'later', 0.05, 0), exploration: { arm: 'later', kind: 'time', propensity: 0.05 } }]
+  assert.ok(explorationStats(legacy, null).some((r) => r.id === 'legacy_later'))
+  assert.ok(!explorationStats(few, null).some((r) => r.id.startsWith('legacy_')))
 })

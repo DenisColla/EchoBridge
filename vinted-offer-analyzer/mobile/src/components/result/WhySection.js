@@ -23,12 +23,20 @@ export function WhySection({ result, risk = null, policy = null }) {
   const pct = (x) => Math.round(x * 100)
   const policyReasons = policy && Array.isArray(policy.reason) ? policy.reason.filter(Boolean) : []
   const similar = risk && risk.similar ? risk.similar : null
+  // The decision gate (engine-spec §3.3): which rule decided, in its own words. Absent on an older engine.
+  const gate = result.gate && typeof result.gate === 'object' && result.gate.kind ? result.gate : null
+  const ruleNo = gate && Number.isFinite(Number(gate.rule)) ? ` n. ${gate.rule}` : ''
 
   return (
     <Collapsible title="Perché questo numero" summary={factorSummaryOf(result)}>
       <Body style={{ fontWeight: '600' }}>{opening}</Body>
       {reasons.map((r) => <Body key={r}>• {r}</Body>)}
       {timingNote ? <Body muted small>{timingNote}</Body> : null}
+      {gate ? (
+        <Body small>
+          <Text style={{ fontWeight: '700' }}>Regola applicata{ruleNo}:</Text> {gate.reason || gate.kind}
+        </Body>
+      ) : null}
 
       {policyReasons.length > 0 && (
         <View style={styles.block}>
@@ -46,7 +54,8 @@ export function WhySection({ result, risk = null, policy = null }) {
         {rows.map((f) => (
           <View key={f.id} style={{ gap: 3 }}>
             <View style={styles.factorRow}>
-              <Body style={styles.factorLabel} numberOfLines={1}>{f.label}</Body>
+              {/* `prior`: a weight not yet calibrated on outcomes (page signals such as views or a price drop) reads as an estimate. */}
+              <Body style={styles.factorLabel} numberOfLines={1}>{f.label}{f.prior ? <Text style={{ color: t.ink3 }}> · stima</Text> : null}</Body>
               <Text style={[styles.factorValue, { color: f.deltaPoints > 0 ? t.good : t.bad }]}>{formatSignedPoints(f.deltaPoints)} punti</Text>
             </View>
             <View style={[styles.miniTrack, { backgroundColor: t.cardMuted }]}>

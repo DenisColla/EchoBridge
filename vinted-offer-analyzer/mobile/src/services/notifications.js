@@ -70,6 +70,25 @@ export async function scheduleReminderAt({ itemId, link, at, title, body, kind =
   })
 }
 
+/**
+ * «Invia l'offerta nella stessa chat»: the nudge after the seller answered a message sent before the offer (engine-spec
+ * §4.1, kind 'offer_after_reply'). `at` is the moment the caller chose (already outside the quiet hours). Checks the
+ * permission itself; returns the notification id, or null when it is missing, the moment is past or scheduling fails.
+ */
+export async function scheduleAfterReplyReminder({ itemId, link = null, title = null, at }) {
+  try {
+    if (!(await ensureNotificationPermission())) return null
+    const name = title && title.trim() ? title.trim() : "l'articolo"
+    return await scheduleReminderAt({
+      itemId, link, at, kind: 'offer_after_reply',
+      title: "Invia l'offerta nella stessa chat",
+      body: `${name}: il venditore ha risposto al tuo messaggio. Manda ora l'offerta nella chat già aperta.`,
+    })
+  } catch {
+    return null
+  }
+}
+
 export async function cancelReminder(notificationId) {
   if (!notificationId) return
   try {

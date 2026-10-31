@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native'
-import { formatEuro, toPercent } from '../../../core/index.js'
+import { buildAfterRefusalMessage, formatEuro, toPercent } from '../../../core/index.js'
 import { copyText } from '../../services/clipboard.js'
-import { estimateOf, hasSellerCounter, hostOf, nextStepOf, rowStateOf, segmentOf, timeLabelOf } from '../../services/segments.js'
+import { estimateOf, hasSellerCounter, hostOf, nextStepOf, rowStateOf, segmentOf, timeLabelOf, whenLabel } from '../../services/segments.js'
 import { statusMeta } from '../../services/storage.js'
 import { space, useTheme } from '../../theme.js'
 import { Badge, Body, Button, Card, Chip, Row } from '../ui.js'
@@ -63,6 +63,12 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
   const canCopy = Boolean(item.message)
   const calendarable = state === 'planned_future' || (state === 'counter_pending' && plan && plan.sendAt && new Date(plan.sendAt).getTime() > now.getTime())
   const reminderActive = Boolean(item.notificationId || (plan && Object.keys(plan.reminderIds || {}).length) || (Array.isArray(item.outcomeReminderIds) && item.outcomeReminderIds.length))
+  // After a refusal: one closing line, no new number (engine-spec §4.1). A message-first offer waits for the reply to
+  // the message before the offer goes out: «Ha risposto al messaggio» records it and sets the 2-hour nudge.
+  const declined = item.status === 'declined'
+  const messageFirst = Boolean(item.messagePolicy && item.messagePolicy.assigned === 'message_first')
+  const awaitingReply = state.startsWith('sent') && messageFirst && !item.replyReceivedAt && !hasCounter
+  const gateNote = item.gate && item.gate.kind && item.gate.kind !== 'offer' && item.gate.reason ? item.gate.reason : null
 
   const copyMessage = async () => {
     const ok = await copyText(item.message)
@@ -84,6 +90,20 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
     if (onSent) onSent(item)
   }
 
+  /** The closing template after a «no»: thanks, the door stays open, no new number. */
+  const copyClosing = async () => {
+    const ok = await copyText(buildAfterRefusalMessage())
+    if (onToast) onToast(ok ? 'Messaggio di chiusura copiato.' : 'Non riesco a copiare il messaggio.')
+  }
+
+  /** The seller answered the message sent before the offer: logged, with a reminder to send the offer in the same chat. */
+  const markReplied = async () => {
+    const r = await call(actions, 'markReplied', item.id)
+    if (!onToast) return
+    if (r && r.reminder === 'scheduled') onToast('Risposta segnata: tra 2 ore ti ricordo di inviare l\'offerta nella stessa chat.')
+    else onToast(r ? 'Risposta segnata. Invia l\'offerta nella stessa chat entro 2 ore.' : 'Non riesco a segnare la risposta.')
+  }
+
   const pick = async (statusId) => {
     setOutcomeOpen(false)
     if (statusId === 'countered') {
@@ -93,9 +113,15 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
     await onStatus(item.id, statusId)
     if (statusId === 'sent' && item.status === 'planned') {
       if (onSent) onSent(item)
-    } else if (onToast) {
-      onToast(`Segnata come ${statusMeta(statusId).label.toLowerCase()}`)
+      return
     }
+    if (statusId === 'declined') {
+      // The closing line lives in the footer: open it, so the next step is one tap away.
+      setExpanded(true)
+      if (onToast) onToast('Segnata come rifiutata · il messaggio di chiusura è qui sotto')
+      return
+    }
+    if (onToast) onToast(`Segnata come ${statusMeta(statusId).label.toLowerCase()}`)
   }
 
   const copyLabel = copied ? 'Copiato!' : 'Copia messaggio'
@@ -198,6 +224,8 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
               {canCopy ? <Button label={copyLabel} variant="ghost" small onPress={copyMessage} /> : null}
               {calendarable ? <Button label={item.calendarOpenedAt ? 'Calendario aperto' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} /> : null}
               {open ? <Button label="Controproposta" variant="ghost" small onPress={() => onCounter(item)} /> : null}
+              {awaitingReply ? <Button label="Ha risposto al messaggio" variant="ghost" small onPress={markReplied} /> : null}
+              {declined ? <Button label="Copia il messaggio di chiusura" variant="ghost" small onPress={copyClosing} /> : null}
               <Button label={outcomeOpen ? 'Chiudi esito' : open ? 'Segna esito' : 'Ha risposto dopo'} variant="ghost" small onPress={() => setOutcomeOpen((v) => !v)} />
               {!confirmDelete ? <Button label="Elimina" variant="ghostDanger" small onPress={() => setConfirmDelete(true)} /> : null}
             </View>
@@ -213,7 +241,9 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
               {item.link ? <Text style={[styles.meta, { color: t.ink3 }]} numberOfLines={1}>{hostOf(item.link)}</Text> : null}
             </Row>
             {hasCounter ? <Body muted small>Trattativa: {negotiationLine(item)}</Body> : null}
-            {item.decision && item.decision.exploration ? <Body muted small>Prova del motore: {item.decision.exploration.label}</Body> : null}
+            {item.decision && item.decision.exploration && item.decision.exploration.varied !== false ? <Body muted small>Prova del motore: {item.decision.exploration.label}</Body> : null}
+            {messageFirst && open ? <Body muted small>{item.replyReceivedAt ? `Ha risposto al messaggio ${whenLabel(item.replyReceivedAt, now)}: l'offerta va nella stessa chat.` : 'Scrivi prima: l\'offerta parte dopo la sua risposta.'}</Body> : null}
+            {gateNote ? <Body muted small>Regola: {gateNote}</Body> : null}
           </View>
         ) : null}
 

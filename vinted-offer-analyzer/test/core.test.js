@@ -8,6 +8,7 @@ import {
   sellerProfileGuess, listingAgeGuess, findPriceInText, detectVintedChallenge,
   MONTH_END_WEIGHT, POSITIVE_CAP, QUIET_READ_PROBABILITY, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, goalChoicesFor, maxReachable,
   normalizeProfile, predictiveInterval, priceBandWeight, readProbability, scoreAt,
+  DOM_SIGNAL_SCALE, SIGNAL_WEIGHTS, demandWeight, reducedWeight, viewsWeight,
 } from '../src/core/index.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -150,7 +151,15 @@ test('analysis returns the full result shape', () => {
   assert.equal(r.probabilityRange.n, 0, 'no learned profile: the range is the prior, verified on no outcome')
   assert.ok(r.maxProbability >= r.probability && r.targetProbability > 0)
   assert.ok(r.optimal.date instanceof Date)
-  assert.match(r.verdict.headline, /^Invia l'offerta /)
+  // A 20% ask on 100 € with no signal inviting offers: the gate leads («scrivi prima»), the time slot is the second line.
+  assert.equal(r.gate.kind, 'message_first')
+  assert.equal(r.gate.rule, 9)
+  assert.equal(r.verdict.headline, 'Scrivi prima, offri dopo la risposta')
+  assert.match(r.verdict.sublabel, /^Se risponde, offri: /)
+  assert.match(r.verdict.timing.headline, /^Invia l'offerta /)
+  assert.deepEqual(Object.keys(r.tier), ['id', 'label', 'min'])
+  assert.equal(r.messagePolicy.assigned, 'message_first')
+  assert.equal(r.messageBeforeOffer, true)
   assert.ok(r.verdict.expiresLabel.length > 5)
   assert.ok(r.opening.length > 20)
   assert.ok(r.reasons.length >= 1 && r.reasons.length <= 3)
@@ -619,6 +628,45 @@ test('prior reset: typical cheap item at −20% shows ≤ 40% before any learnin
   assert.ok(dear.factors.find((f) => f.id === 'gap_eur').rawWeight < 0)
   assert.equal(priceBandWeight(40), 0)
   assert.ok(analyzeOffer({ ...base, category: 'collectible', listPrice: '9', targetPrice: '7' }, SUNDAY_AFTERNOON).reasons.some((t) => t.includes('9 €')))
+})
+
+test('prior factors (engine-spec §3.2): hearts, price drop, views and seller items join the list only with signals, flagged as priors, DOM-only weights at 0', () => {
+  const at = new Date(2026, 9, 7, 21, 40)
+  const plain = scoreAt(normalizeInput(TYPICAL).input, at, 0)
+  assert.deepEqual(plain.factors.map((f) => f.id), ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'time', 'month'], 'unchanged without signals')
+  assert.ok(plain.factors.every((f) => !f.prior))
+  const withAll = scoreAt(normalizeInput({ ...TYPICAL, signals: { favourites: 0, views: 300, sellerItems: 3, priceDrop: { from: 36, to: 30, hoursAgo: 80 } } }).input, at, 0)
+  assert.deepEqual(withAll.factors.map((f) => f.id), ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'demand', 'reduced', 'views', 'seller_items', 'time', 'month'])
+  const byId = Object.fromEntries(withAll.factors.map((f) => [f.id, f]))
+  for (const id of ['demand', 'reduced', 'views', 'seller_items']) assert.equal(byId[id].prior, true, id)
+  // Favourites come from the search, not the DOM: full weight. No heart → +0,1; 4–9 → −0,15; 10+ → −0,3.
+  assert.equal(byId.demand.rawWeight, 0.1)
+  assert.equal(byId.demand.label, 'Nessun preferito')
+  assert.equal(demandWeight({ favourites: 5 }), -0.15)
+  assert.equal(demandWeight({ favourites: 12 }), -0.3)
+  assert.equal(demandWeight({ favourites: 2 }), 0)
+  assert.equal(demandWeight({ favourites: 3 }, 1), -0.3, 'a fresh listing with 3 hearts')
+  assert.equal(demandWeight({ favourites: 3 }, 10), 0)
+  // DOM-only readings are logged, not weighed, until a hydrated fixture exists.
+  assert.deepEqual(DOM_SIGNAL_SCALE, { interested: 0, reduced: 0, views: 0, sellerItems: 0 })
+  assert.equal(byId.reduced.rawWeight, 0)
+  assert.equal(byId.reduced.label, 'Prezzo ribassato da tempo')
+  assert.equal(byId.views.rawWeight, 0)
+  assert.equal(byId.views.label, '300 visualizzazioni')
+  assert.equal(byId.seller_items.rawWeight, 0)
+  assert.equal(demandWeight({ interested: 12 }), 0, 'interessati from the DOM weigh 0 for now')
+  assert.equal(scoreAt(normalizeInput({ ...TYPICAL, signals: { interested: 12 } }).input, at, 0).factors.find((f) => f.id === 'demand').label, '12 interessati')
+  // The designed weights are there for the one-line bump: the scale, not the design, is 0.
+  assert.equal(SIGNAL_WEIGHTS.reduced.settled * 1, 0.15)
+  assert.equal(SIGNAL_WEIGHTS.views.dead, 0.1)
+  assert.equal(reducedWeight({ priceDrop: { hoursAgo: 10 } }), 0, 'a recent drop: designed −0,2, scaled to 0 (and never −0)')
+  assert.equal(viewsWeight({ views: 10 }, 20), 0)
+  assert.equal(SIGNAL_WEIGHTS.reduced.recent, -0.2)
+  // The probability is unchanged by zero-weight rows, and the rows do not show up in the attribution.
+  const r = analyzeOffer({ ...TYPICAL, signals: { interested: 12, views: 300, sellerItems: 3 } }, TYPICAL_NOW)
+  const r0 = analyzeOffer(TYPICAL, TYPICAL_NOW)
+  assert.equal(r.probability, r0.probability)
+  assert.ok(!r.factors.rows.some((row) => ['views', 'seller_items', 'demand'].includes(row.id)))
 })
 
 test('read probability by seller activity: active 0,9, quiet 0,75, inactive 0,5', () => {

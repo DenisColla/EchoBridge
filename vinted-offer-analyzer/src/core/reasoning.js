@@ -28,11 +28,51 @@ const dayPart = (date) => {
 }
 
 /**
+ * What the headline says when the gate says anything but «offer» (engine-spec §3.3): the decision first, the time
+ * slot moves to the second line. `gate` is decisionGate's output.
+ */
+export function gateHeadline(gate) {
+  if (!gate || gate.kind === 'offer') return null
+  const hours = Number.isFinite(gate.waitHours) ? gate.waitHours : null
+  const wait = hours === null ? '' : hours >= 48 && hours % 24 === 0 ? ` e aspetta ${hours / 24} giorni` : ` e aspetta ${hours} h`
+  switch (gate.kind) {
+    case 'buy_now':
+      return gate.rule === 2 ? 'Compra senza offerta: costa già meno degli altri' : 'Compra senza offerta: lo sconto vale pochi euro'
+    case 'favourite_wait':
+      return `Non offrire ora: metti il cuore${hours === null ? ' e aspetta' : wait}`
+    case 'message_first':
+      return 'Scrivi prima, offri dopo la risposta'
+    case 'wait':
+      if (gate.rule === 7) return `Non rilanciare ora${hours === null ? '' : `: riprova tra ${Math.max(1, Math.ceil(hours / 24))} ${Math.ceil(hours / 24) === 1 ? 'giorno' : 'giorni'}`}`
+      return 'Non offrire ora: aspetta che l\'annuncio torni disponibile'
+    default:
+      return null
+  }
+}
+
+/**
  * The verdict sentence, with a fixed grammar by distance in days:
  * now → "adesso", today → "stasera/oggi alle ore", tomorrow → "domani sera, lunedì 5 ottobre, alle ore",
  * later → "giovedì 29 ottobre alle ore 21:45" + "tra 5 giorni".
+ * With a `gate` that says anything but «offer» the headline leads with the gate («Non offrire ora: metti il cuore e
+ * aspetta 3 giorni», «Scrivi prima, offri dopo la risposta», «Compra senza offerta: costa già meno degli altri») and
+ * the time slot becomes the second line (`sublabel`, «Se poi offri: …»); the plain time verdict stays in `timing`.
  */
-export function buildVerdict(chosen, sendNow, now, best = null, { subject = "l'offerta" } = {}) {
+export function buildVerdict(chosen, sendNow, now, best = null, { subject = "l'offerta", gate = null } = {}) {
+  const timing = buildTimeVerdict(chosen, sendNow, now, best, { subject })
+  const lead = gateHeadline(gate)
+  if (!lead) return { ...timing, timing: { headline: timing.headline, sublabel: timing.sublabel }, gateKind: 'offer' }
+  const after = gate.kind === 'message_first' ? 'Se risponde, offri' : 'Se poi offri'
+  return {
+    ...timing,
+    headline: lead,
+    sublabel: `${after}: ${timing.action}`,
+    timing: { headline: timing.headline, sublabel: timing.sublabel },
+    gateKind: gate.kind,
+  }
+}
+
+function buildTimeVerdict(chosen, sendNow, now, best = null, { subject = "l'offerta" } = {}) {
   const lead = `Invia ${subject}`
   const k = calendarDaysBetween(now, chosen.date)
   const time = formatTime(chosen.date)

@@ -41,6 +41,11 @@ export const DEFAULT_PROFILE = Object.freeze({
   counterShare: 1,
   sellerReplyHours: null,
   discountPct: LEARNING.DEFAULT_DISCOUNT_PCT,
+  /**
+   * Learned shift of the policy table (policy.js), points, monthly and bounded (engine-spec §2.3): the deepest shift at
+   * which this user's sellers still accept as often as the plain engine expects at the table's own ask.
+   */
+  discountShift: 0,
   /** Posterior covariance of the first-offer parameters (keys in `paramKeys`), for the predictive interval. */
   cov: null,
   paramKeys: null,
@@ -151,6 +156,7 @@ export function normalizeProfile(raw) {
     counterShare: clampTo(finite(src.counterShare, 1), B.share),
     sellerReplyHours: hours == null ? null : clampTo(hours, B.latency),
     discountPct: clampTo(finite(src.discountPct, LEARNING.DEFAULT_DISCOUNT_PCT), B.discountPct),
+    discountShift: clampTo(finite(src.discountShift, 0), B.discountShift),
     changes: Array.isArray(src.changes) ? src.changes : [],
     frozen: src.frozen && typeof src.frozen === 'object' ? src.frozen : {},
     score: finite(src.score, 0),
@@ -169,7 +175,7 @@ export const profileParams = (profile) => {
   const P = normalizeProfile(profile)
   return {
     intercept: P.intercept, dslope: P.dslope, slope: P.slope, time: { ...P.time }, disc: { ...P.disc }, counter: P.counter,
-    counterShare: P.counterShare, sellerReplyHours: P.sellerReplyHours, discountPct: P.discountPct,
+    counterShare: P.counterShare, sellerReplyHours: P.sellerReplyHours, discountPct: P.discountPct, discountShift: P.discountShift,
   }
 }
 
@@ -179,7 +185,7 @@ export const timeGroupOf = (windowId) => (LEARNING_TIME_GROUPS.find((g) => g.win
 export function profileIsActive(profile) {
   if (!profile) return false
   const off = (v, base = 0) => Math.abs(finite(v, base) - base) > 1e-9
-  if (off(profile.intercept) || off(profile.dslope) || off(profile.slope, 1) || off(profile.counter) || off(profile.counterShare, 1)) return true
+  if (off(profile.intercept) || off(profile.dslope) || off(profile.slope, 1) || off(profile.counter) || off(profile.counterShare, 1) || off(profile.discountShift)) return true
   if (profile.sellerReplyHours != null && Number.isFinite(Number(profile.sellerReplyHours))) return true
   return Object.values(profile.time || {}).some((v) => off(v)) || Object.values(profile.disc || {}).some((v) => off(v))
 }

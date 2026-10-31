@@ -21,11 +21,18 @@ const MAX_HTML_CHARS = 6_000_000
  * parsed. The probe guards itself, so each document runs it once.
  */
 const REINJECT_MS = 1_000
+/**
+ * Once the listing is in the document, the probe waits this long for the hydrated details (views, interested buyers,
+ * the attributes list), which React renders after the server HTML. Spec §3.1: at most 1,5 s, then the page is sent as is.
+ */
+const ATTR_WAIT_MS = 1_500
 
 /**
  * Runs inside the page (injected repeatedly; Cloudflare reloads the page once its check passes). Once the document
- * is fully parsed and carries the listing (JSON-LD Product or og:title), it sends the whole DOM back; until then it
- * reports every 700 ms whether the page is a challenge. The HTML is parsed in the app by the shared extractor.
+ * is fully parsed and carries the listing (JSON-LD Product or og:title), it waits up to ATTR_WAIT_MS for the hydrated
+ * details and sends the whole DOM back with a read-only scrape of them (`details`, every field nullable, nothing
+ * invented); until then it reports every 700 ms whether the page is a challenge. The HTML and the details are parsed in
+ * the app by the shared extractor (parseVintedItemHtml). The probe only reads the page: no clicks, no form input.
  */
 export const PAGE_PROBE = `(function () {
   if (window.__ovtProbe) return;
@@ -49,11 +56,131 @@ export const PAGE_PROBE = `(function () {
     return !!(document.querySelector('#cf-error-details, .cf-error-details')
       || /attention required|you have been blocked|access denied|\\| 5\\d\\d:/i.test(document.title || ''));
   };
+
+  /* ----- read-only scrape of the hydrated details (spec §3.1) ----- */
+  var ATTR_SEL = '[data-testid^="item-attributes-"]';
+  var ATTR_WORDS = { view_count: 'Visualizzazioni', favourite_count: 'Interessati', upload_date: 'Caricato', condition: 'Condizioni', brand: 'Marca', size: 'Taglia', color: 'Colore' };
+  var text = function (node) { return node ? String(node.textContent || '').replace(/\\s+/g, ' ').trim() : ''; };
+  var itemId = (location.pathname.match(/\\/items\\/(\\d+)/) || [])[1] || null;
+  var hasAttributes = function () {
+    if (document.querySelector(ATTR_SEL)) return true;
+    var body = document.body ? document.body.textContent || '' : '';
+    return /Visualizzazioni|Interessati/.test(body);
+  };
+  // [label, value] pairs: the visible label (or the testid's key in Italian) and the value shown next to it.
+  var readAttributes = function () {
+    var out = [];
+    var nodes = document.querySelectorAll(ATTR_SEL);
+    for (var i = 0; i < nodes.length && out.length < 30; i++) {
+      var node = nodes[i];
+      var testid = String(node.getAttribute('data-testid') || '');
+      if (/--/.test(testid)) continue; // the container holds both the title and the value node
+      var key = testid.replace(/^item-attributes-/, '');
+      var kids = node.children || [];
+      var label = kids.length >= 2 ? text(kids[0]) : '';
+      var value = kids.length >= 2 ? text(kids[kids.length - 1]) : text(node);
+      if (!value) continue;
+      out.push([(label || ATTR_WORDS[key] || key).slice(0, 60), value.slice(0, 120)]);
+    }
+    return out;
+  };
+  var readTexts = function (selector, needDigit, max) {
+    var out = [];
+    var nodes;
+    try { nodes = document.querySelectorAll(selector); } catch (e) { return out; }
+    for (var i = 0; i < nodes.length && out.length < max; i++) {
+      var v = text(nodes[i]).slice(0, 40);
+      if (v && (!needDigit || /\\d/.test(v)) && out.indexOf(v) < 0) out.push(v);
+    }
+    return out;
+  };
+  var readStrikethrough = function () { return readTexts('s, del, [class*="strikethrough" i], [class*="line-through" i], [style*="line-through"]', true, 10); };
+  var readBadges = function () { return readTexts('[data-testid*="badge" i]', false, 10); };
+  var readBundleText = function () {
+    var parts = readTexts('[data-testid*="bundle" i]', false, 6);
+    var joined = parts.join(' \\u00b7 ').slice(0, 300);
+    return joined || null;
+  };
+  // Other listings of the same seller: distinct item links under the «altri articoli» heading, null when there is none.
+  var readSellerItemCards = function () {
+    var heads = document.querySelectorAll('h2, h3, [data-testid*="seller-items" i], [data-testid*="closet" i]');
+    var box = null;
+    for (var i = 0; i < heads.length; i++) {
+      var h = heads[i];
+      var byId = /seller-items|closet/i.test(String(h.getAttribute('data-testid') || ''));
+      if (byId || /altri articoli|articoli del (venditore|membro)|dello stesso venditore|armadio/i.test(text(h))) { box = byId ? h : (h.closest('section') || h.parentElement); break; }
+    }
+    if (!box) return null;
+    var links = box.querySelectorAll('a[href*="/items/"]');
+    var seen = {};
+    var n = 0;
+    for (var j = 0; j < links.length; j++) {
+      var m = String(links[j].getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+      if (m && m[1] !== itemId && !seen[m[1]]) { seen[m[1]] = 1; n++; }
+    }
+    return n;
+  };
+  // Next.js flight chunks (self.__next_f) carry the item JSON: a key is read next to this item's id, or anywhere in the
+  // chunks only when every occurrence agrees (other listings on the page carry the same keys). is_reserved: id-near only.
+  var FLIGHT_RES = {
+    view_count: /\\\\?"view_count\\\\?":\\s*(\\d+)/g,
+    favourite_count: /\\\\?"favourite_count\\\\?":\\s*(\\d+)/g,
+    item_count: /\\\\?"item_count\\\\?":\\s*(\\d+)/g,
+    is_reserved: /\\\\?"is_reserved\\\\?":\\s*(true|false)/g,
+  };
+  var readFlight = function () {
+    var out = { view_count: null, favourite_count: null, item_count: null, is_reserved: null };
+    var chunks = self.__next_f;
+    if (!Array.isArray(chunks)) return out;
+    var all = { view_count: [], favourite_count: [], item_count: [] };
+    var near = {};
+    var convert = function (raw) { return raw === 'true' ? true : raw === 'false' ? false : Number(raw); };
+    for (var i = 0; i < chunks.length; i++) {
+      var s = Array.isArray(chunks[i]) ? chunks[i][1] : chunks[i];
+      if (typeof s !== 'string' || s.length < 20) continue;
+      var idx = itemId ? s.indexOf('"id":' + itemId) : -1;
+      if (idx < 0 && itemId) idx = s.indexOf('\\\\"id\\\\":' + itemId);
+      var win = idx >= 0 ? s.slice(idx, idx + 6000) : '';
+      for (var key in FLIGHT_RES) {
+        var re = FLIGHT_RES[key];
+        if (win && near[key] === undefined) {
+          re.lastIndex = 0;
+          var hit = re.exec(win);
+          if (hit) near[key] = convert(hit[1]);
+        }
+        if (all[key]) {
+          re.lastIndex = 0;
+          var m;
+          while ((m = re.exec(s)) && all[key].length < 50) all[key].push(convert(m[1]));
+        }
+      }
+    }
+    for (var k in out) {
+      if (near[k] !== undefined) out[k] = near[k];
+      else if (all[k] && all[k].length && all[k].every(function (v) { return v === all[k][0]; })) out[k] = all[k][0];
+    }
+    return out;
+  };
+  var readDetails = function () {
+    try {
+      return { attributes: readAttributes(), strikethrough: readStrikethrough(), badges: readBadges(), bundleText: readBundleText(), sellerItemCards: readSellerItemCards(), flight: readFlight() };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  var itemSince = null;
   var tick = function () {
     var ready = document.readyState !== 'loading';
     if (ready && hasItem()) {
+      if (itemSince === null) itemSince = Date.now();
+      if (!hasAttributes() && Date.now() - itemSince < ${ATTR_WAIT_MS}) {
+        post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
+        setTimeout(tick, 250);
+        return;
+      }
       var html = document.documentElement ? document.documentElement.outerHTML : '';
-      post({ type: 'html', url: location.href, html: html.length > ${MAX_HTML_CHARS} ? html.slice(0, ${MAX_HTML_CHARS}) : html });
+      post({ type: 'html', url: location.href, html: html.length > ${MAX_HTML_CHARS} ? html.slice(0, ${MAX_HTML_CHARS}) : html, details: readDetails() });
       return;
     }
     var challenge = isChallenge();
@@ -71,8 +198,9 @@ const ALLOWED_SCHEMES = /^(https?:|about:|data:|blob:)/i
  * (a real Chrome engine, so Cloudflare's automatic check passes and its cookie is kept for the next time), hidden
  * behind the app. If the check wants a tap, the WebView is shown full screen with a short explanation and «Annulla».
  *
- * Imperative API through `ref`: `load(url, { onVisible })` → Promise<{ ok, html, url } | { ok: false, reason, status }>
+ * Imperative API through `ref`: `load(url, { onVisible })` → Promise<{ ok, html, details, url } | { ok: false, reason, status }>
  * with reason one of challenge, timeout, network, crashed, cferror, http (404/410), empty, cancelled, unsupported.
+ * `details` is the probe's read-only scrape of the hydrated page (see PAGE_PROBE), or null.
  * Never rejects.
  */
 export function VintedPageLoader({ ref }) {
@@ -193,7 +321,8 @@ export function VintedPageLoader({ ref }) {
     }
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'html' && typeof msg.html === 'string') {
-      finish({ ok: true, html: msg.html, url: msg.url || job.url, via: 'browser' }, id)
+      // `details` is the probe's scrape of the hydrated page (null when it failed): parseVintedItemHtml's second argument.
+      finish({ ok: true, html: msg.html, details: msg.details && typeof msg.details === 'object' ? msg.details : null, url: msg.url || job.url, via: 'browser' }, id)
       return
     }
     if (msg.type !== 'state') return
@@ -202,7 +331,8 @@ export function VintedPageLoader({ ref }) {
       finish({ ok: false, reason: 'cferror' }, id)
       return
     }
-    if (msg.challenge) {
+    if (msg.challenge || msg.item) {
+      // A challenge, or the listing found while the probe waits for its hydrated details: not a page without data.
       current.noDataSince = null
       return
     }

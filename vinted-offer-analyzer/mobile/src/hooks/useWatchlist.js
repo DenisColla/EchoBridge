@@ -1,8 +1,88 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import * as core from '../../core/index.js'
 import { LEARNING, buildCounterReminders, decisionSnapshot } from '../../core/index.js'
-import { loadArchive, loadItems, newId, saveArchive, saveItems } from '../services/storage.js'
-import { cancelReminder, ensureNotificationPermission, scheduleOfferReminder, scheduleReminderAt } from '../services/notifications.js'
-import { outcomeReminderTimes } from '../services/segments.js'
+import { loadArchive, loadItems, newId, normalizeItem, saveArchive, saveItems } from '../services/storage.js'
+import { cancelReminder, ensureNotificationPermission, scheduleAfterReplyReminder, scheduleOfferReminder, scheduleReminderAt } from '../services/notifications.js'
+import { linkIdOf, outcomeReminderTimes, outsideQuietHours } from '../services/segments.js'
+
+const HOUR_MS = 3_600_000
+const DAY_MS = 24 * HOUR_MS
+/** Gate rule 7 (engine-spec §3.3): a listing refused or left unanswered blocks a new plan for this long. */
+export const REOFFER_BLOCK_DAYS = 14
+const REOFFER_OUTCOMES = ['declined', 'no_reply']
+/** After the seller answers a message sent before the offer, the offer itself should follow within this many hours (§4.1). */
+export const AFTER_REPLY_HOURS = 2
+/** Raw extraction fields kept on the item (engine-spec §6): what the page said, before the form bucketed it. */
+const EXTRACTION_FIELDS = ['uploadedDays', 'sellerLastSeenDays', 'sellerFeedbackCount', 'sellerRating', 'sellerBusiness', 'sellerBadges', 'condition', 'brand', 'categoryText']
+
+const finiteMs = (v) => {
+  const t = v ? new Date(v).getTime() : NaN
+  return Number.isFinite(t) ? t : null
+}
+
+/** The raw parse fields worth logging, plus the text hits (listing-text signals) the engine read in title and description. */
+export const extractionOf = (ex) => {
+  if (!ex || typeof ex !== 'object') return null
+  const out = {}
+  for (const key of EXTRACTION_FIELDS) out[key] = ex[key] === undefined ? null : ex[key]
+  let hits = Array.isArray(ex.textHits) ? ex.textHits.filter(Boolean) : null
+  if (!hits) {
+    hits = []
+    const text = `${ex.title || ''} ${ex.description || ''}`
+    const signal = typeof core.signalFromText === 'function' ? core.signalFromText(text) : null
+    if (signal && signal.id && signal.id !== 'none') hits.push(signal.id)
+    if (core.BUNDLE_HINT instanceof RegExp && core.BUNDLE_HINT.test(text)) hits.push('bundle_hint')
+  }
+  out.textHits = hits
+  return out
+}
+
+/**
+ * Gate rule 7 without the core export: the same listing id (…/items/<id>…) refused or left unanswered within 14 days
+ * blocks a new plan. Exempt: a negotiation with a seller counter, and a listing whose price is now lower than the one
+ * refused (the seller moved). Returns null or { until, outcome, at }.
+ */
+export const localReofferBlock = (records, link, now, listPrice = null) => {
+  const id = linkIdOf(link)
+  if (!id) return null
+  const t = now.getTime()
+  let hit = null
+  for (const it of records || []) {
+    if (!it || linkIdOf(it.link) !== id || !REOFFER_OUTCOMES.includes(it.status)) continue
+    const at = finiteMs(it.outcomeAt)
+    if (at === null || t - at > REOFFER_BLOCK_DAYS * DAY_MS || at > t) continue
+    if ((Array.isArray(it.negotiation) ? it.negotiation : []).some((e) => e && e.by === 'seller')) continue
+    const oldPrice = Number(it.listPrice)
+    if (Number.isFinite(listPrice) && Number.isFinite(oldPrice) && listPrice < oldPrice - 0.004) continue
+    if (!hit || at > hit.at.getTime()) hit = { until: new Date(at + REOFFER_BLOCK_DAYS * DAY_MS), outcome: it.status, at: new Date(at) }
+  }
+  return hit
+}
+
+/** The core's reofferBlock when the engine exports it (part 2), else the local check above. */
+const reofferBlockFor = (records, link, now, listPrice) => {
+  if (typeof core.reofferBlock === 'function') {
+    try {
+      const block = core.reofferBlock(records, link, now)
+      if (!block || !block.until) return null
+      const until = new Date(block.until)
+      return { until, outcome: block.outcome || 'declined', at: block.at ? new Date(block.at) : new Date(until.getTime() - REOFFER_BLOCK_DAYS * DAY_MS) }
+    } catch {
+      // a core still being wired: the local rule decides
+    }
+  }
+  return localReofferBlock(records, link, now, listPrice)
+}
+
+/** The last moment an item changed: for the restore merge, the newer copy of the same id wins. */
+export const touchedAt = (it) => {
+  const events = Array.isArray(it.events) ? it.events.map((e) => e && e.at) : []
+  const times = [it.updatedAt, it.outcomeAt, it.sentAt, it.firstOutcomeAt, it.calendarOpenedAt, it.createdAt, ...events].map(finiteMs).filter((v) => v !== null)
+  return times.length ? Math.max(...times) : 0
+}
+
+/** A restored item carries another device's notification ids: they mean nothing here and must not read as «promemoria attivo». */
+const withoutReminders = (it) => ({ ...it, notificationId: null, outcomeReminderIds: [], counterPlan: it.counterPlan ? { ...it.counterPlan, reminderIds: {} } : it.counterPlan ?? null })
 
 /** Links typed without a scheme would not open: default to https. */
 const normalizeLink = (link) => {
@@ -30,7 +110,7 @@ const OUTCOMES = ['accepted', 'countered', 'declined', 'no_reply', 'sold_other',
 const answeredFor = (status) => (['accepted', 'bought', 'declined', 'countered'].includes(status) ? true : status === 'no_reply' ? false : null)
 
 /** Fields added for the 1.7 data log; older items simply lack them (schema stays 3, nothing reads them as required). */
-const LOG_FIELDS = { messageCopiedAt: null, messageSentAt: null, userOverride: null, answered: null, outcomeReminderIds: [] }
+const LOG_FIELDS = { messageCopiedAt: null, messageSentAt: null, replyReceivedAt: null, userOverride: null, answered: null, outcomeReminderIds: [] }
 
 /**
  * «Com'è andata?» at +36 h and +7 d after a first offer went out (outside the quiet hours). Returns the notification
@@ -142,20 +222,34 @@ export function useWatchlist() {
   }, [])
 
   /**
-   * Saves an analysis as a planned offer and schedules its reminder. Returns { item, reminder }.
-   * Stores the decision snapshot (what the engine recommended, with which profile, and the test variation if any).
+   * Saves an analysis as a planned offer and schedules its reminder. Returns { item, reminder, replaced }, or
+   * { item: null, blocked: { until, outcome, at } } when the listing was refused within 14 days (gate rule 7): the
+   * caller shows «Già in Lista…» and nothing is saved.
+   * Stores the decision snapshot (what the engine recommended, with which profile, and the test variation if any) and,
+   * for the data log (engine-spec §6): the market and the demand signals the analysis used, the raw extraction fields,
+   * the discount policy that proposed the ask, the gate and the message policy. Every one of them may be absent.
    * `userOverride`: the price the user typed in place of the suggested one (null when the suggestion was kept).
    */
-  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null }) => {
+  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null, market = null, extraction = null, policy = null, gate = null, messagePolicy = null }) => {
     const { input, optimal, probability, messages, recommendedTone } = result
     const message = (messages.find((m) => m.tone === recommendedTone) || messages[0]).text
     const now = new Date()
+    const cleanLink = normalizeLink(link)
+    const blocked = reofferBlockFor([...itemsRef.current, ...archiveRef.current], cleanLink, now, input.listPrice)
+    if (blocked) return { item: null, reminder: 'skipped', replaced: 0, blocked }
+    const signals = (form && form.signals && typeof form.signals === 'object' ? form.signals : null) || input.signals || null
+    const marketUsed = market || result.market || null
+    const extractionLog = extractionOf(extraction)
+    const gateLog = gate && typeof gate === 'object' ? { kind: gate.kind || null, rule: gate.rule ?? null, reason: gate.reason || null, waitHours: gate.waitHours ?? null, alternative: gate.alternative || null } : null
+    const messagePolicyLog = messagePolicy && typeof messagePolicy === 'object'
+      ? { mode: messagePolicy.mode || null, rule: messagePolicy.rule ?? null, tone: messagePolicy.tone || null, randomised: Boolean(messagePolicy.randomised), propensity: messagePolicy.propensity ?? null, assigned: messagePolicy.assigned || null }
+      : null
     let item = {
       id: newId(),
       schema: 3,
       createdAt: now.toISOString(),
       title: input.itemTitle || '',
-      link: normalizeLink(link),
+      link: cleanLink,
       platform: 'vinted',
       category: input.category.id,
       listPrice: input.listPrice,
@@ -172,12 +266,14 @@ export function useWatchlist() {
       calendarOpenedAt: null,
       outcomeAt: null,
       // The form is rebuilt from what was ANALYSED (the typed form may have been edited since, a test variation or
-      // Vinted's cap may have changed the price): the monthly analysis re-scores exactly this offer.
+      // Vinted's cap may have changed the price): the monthly analysis re-scores exactly this offer. The demand signals
+      // ride on it too, so lrnRescore sees the same input as the analysis.
       form: {
         ...(form || {}),
         itemTitle: input.itemTitle || '', category: input.category.id, listPrice: String(input.listPrice).replace('.', ','),
         targetPrice: String(input.targetPrice).replace('.', ','), listingAge: input.listingAge.id, sellerProfile: input.sellerProfile || 'unknown',
-        listingSignal: input.listingSignal.id, link: normalizeLink(link),
+        listingSignal: input.listingSignal.id, link: cleanLink,
+        ...(signals ? { signals } : {}),
       },
       negotiation: [{ by: 'buyer', kind: 'offer', price: input.targetPrice, at: optimal.date.toISOString(), planned: true, probability }],
       sentAt: null,
@@ -185,8 +281,19 @@ export function useWatchlist() {
       firstOutcome: null,
       firstOutcomeAt: null,
       finalPrice: null,
-      decision: decisionSnapshot(result, { now, profile, exploration: result.exploration || null }),
-      events: [{ at: now.toISOString(), type: 'saved', price: input.targetPrice, recommendedAt: optimal.date.toISOString(), probability, exploration: result.exploration ? result.exploration.arm : null }],
+      // The data log (engine-spec §6). `extraction` holds the raw page fields, `signals` the DOM/search readings.
+      market: marketUsed,
+      signals,
+      policy: policy && typeof policy === 'object' ? policy : null,
+      extraction: extractionLog,
+      gate: gateLog,
+      messagePolicy: messagePolicyLog,
+      tier: result.tier && typeof result.tier === 'object' ? result.tier : null,
+      decision: decisionSnapshot(result, {
+        now, profile, exploration: result.exploration || null, policy: policy || null, gate: gateLog, messagePolicy: messagePolicyLog,
+        extraction: extractionLog, signals, market: marketUsed,
+      }),
+      events: [{ at: now.toISOString(), type: 'saved', price: input.targetPrice, recommendedAt: optimal.date.toISOString(), probability, exploration: result.exploration ? result.exploration.arm : null, gate: gateLog ? gateLog.kind : null }],
       ...LOG_FIELDS,
       userOverride: userOverride ?? null,
     }
@@ -323,6 +430,67 @@ export function useWatchlist() {
     const now = new Date().toISOString()
     await update(id, { messageSentAt: now }, { type: 'message_sent' })
   }, [update])
+
+  /**
+   * «Ha risposto al messaggio» (message-first offers): records the reply and schedules «invia l'offerta nella stessa
+   * chat» two hours later, outside the quiet hours. The reminder id joins outcomeReminderIds, so any outcome cancels it.
+   * Returns { at, reminder: 'scheduled' | 'skipped' } or null for an unknown item.
+   */
+  const markReplied = useCallback(async (id) => {
+    const target = itemsRef.current.find((it) => it.id === id)
+    if (!target) return null
+    const now = new Date()
+    const at = outsideQuietHours(new Date(now.getTime() + AFTER_REPLY_HOURS * HOUR_MS))
+    await update(id, { replyReceivedAt: now.toISOString() }, { type: 'reply_received' })
+    const rid = await scheduleAfterReplyReminder({ itemId: id, link: target.link, title: target.title, at })
+    if (rid) await persist((prev) => prev.map((it) => (it.id === id ? { ...it, outcomeReminderIds: [...(Array.isArray(it.outcomeReminderIds) ? it.outcomeReminderIds : []), rid] } : it)))
+    return { at, reminder: rid ? 'scheduled' : 'skipped' }
+  }, [update, persist])
+
+  /**
+   * «Ripristina da JSON» (Info): merges a backup into the list. Accepts the array Info exports or { items, archive }.
+   * Items are matched by id and the newer copy wins (touchedAt); every item goes through normalizeItem, so an older
+   * schema is upgraded. An item deleted here (in the archive) is only refreshed in the archive. Notification ids from
+   * the other device are dropped. Returns { added, updated, skipped, invalid, total }.
+   */
+  const restoreItems = useCallback(async (payload) => {
+    const raw = Array.isArray(payload) ? payload
+      : payload && typeof payload === 'object' ? [...(Array.isArray(payload.items) ? payload.items : []), ...(Array.isArray(payload.archive) ? payload.archive : [])] : []
+    let invalid = 0
+    const incoming = []
+    for (const entry of raw) {
+      const it = normalizeItem(entry)
+      if (it && typeof it.id === 'string' && it.id && typeof it.status === 'string') incoming.push(withoutReminders(it))
+      else invalid += 1
+    }
+    const next = [...itemsRef.current]
+    const archive = [...archiveRef.current]
+    let added = 0
+    let updated = 0
+    let skipped = 0
+    let archiveChanged = false
+    for (const it of incoming) {
+      const i = next.findIndex((x) => x.id === it.id)
+      if (i >= 0) {
+        if (touchedAt(it) > touchedAt(next[i])) { next[i] = it; updated += 1 } else skipped += 1
+        continue
+      }
+      const a = archive.findIndex((x) => x.id === it.id)
+      if (a >= 0) {
+        if (touchedAt(it) > touchedAt(archive[a])) { archive[a] = { ...it, deletedAt: archive[a].deletedAt || it.deletedAt || null }; archiveChanged = true; updated += 1 } else skipped += 1
+        continue
+      }
+      if (it.deletedAt) { archive.unshift(it); archiveChanged = true } else next.unshift(it)
+      added += 1
+    }
+    if (added || updated) await persist(next)
+    if (archiveChanged) {
+      archiveRef.current = archive
+      setArchive(archive)
+      await saveArchive(archive)
+    }
+    return { added, updated, skipped, invalid, total: next.length }
+  }, [persist])
 
   /**
    * Saves a counter analysis: on an existing item (appending the seller's counter) or as a new item.
@@ -472,5 +640,5 @@ export function useWatchlist() {
     }
   }, [items, archive])
 
-  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, update, setStatus, remove, stats }
+  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, markReplied, restoreItems, update, setStatus, remove, stats }
 }

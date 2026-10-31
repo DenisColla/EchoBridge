@@ -151,8 +151,8 @@ export function LearningCard({ learning, onToast }) {
         </View>
       )}
 
-      <Toggle label={`Varianti di test: circa 1 offerta su ${Math.round(1 / LEARNING.EXPLORE_SHARE)} esce ±1 ora o circa ±2 punti di sconto, sempre segnalata`} value={exploration} onChange={(v) => { if (!learning.busy) learning.setExploration(v) }} />
-      <Body muted small>Le varianti costano {LEARNING.EXPLORE_MAX_COST ? `al massimo ${Math.round(LEARNING.EXPLORE_MAX_COST * 100)} punti di probabilità` : 'poco'} e servono a capire se orari e sconti vicini rendono di più. Puoi sempre scegliere «Usa il piano migliore».</Body>
+      <Toggle label={`Prova del motore: lo sconto esce ${LEARNING.THOMPSON_ARM_PTS} punti sotto, uguale o ${LEARNING.THOMPSON_ARM_PTS} punti sopra la tabella, scelto a sorte dal motore e sempre segnalato`} value={exploration} onChange={(v) => { if (!learning.busy) learning.setExploration(v) }} />
+      <Body muted small>La quota di ogni variante segue quel che il motore ha imparato dai tuoi esiti (la propensione finisce nel report). Puoi sempre scegliere «Usa il piano migliore».</Body>
       <Button label={busy || learning.busy ? 'Preparo l\'Excel…' : 'Esporta adesso il mese in corso'} variant="secondary" small onPress={exportNow} disabled={busy || learning.busy} />
       <Body muted small>Per imparare servono gli esiti: segna «Inviata» quando mandi l'offerta e poi com'è andata, anche «Venduto ad altri» o «Lasciato perdere».</Body>
     </Card>

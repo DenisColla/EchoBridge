@@ -1,7 +1,7 @@
 import {
-  AGE_CURVE, BASE_CURVE, CATEGORIES, GAP_EUR_CURVE, HOLIDAY_WINDOW_LABELS, HOLIDAY_WINDOW_WHY, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
+  AGE_CURVE, BASE_CURVE, CATEGORIES, DOM_SIGNAL_SCALE, GAP_EUR_CURVE, HOLIDAY_WINDOW_LABELS, HOLIDAY_WINDOW_WHY, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
   MONTH_END_WEIGHT, MONTH_START_WEIGHT, MONTH_WINDOWS, NEGATIVE_CAP, NEUTRAL_WINDOW, POSITIVE_CAP, PRICE_BAND_CURVE,
-  RISK_BANDS, TIME_WINDOWS, UNCERTAINTY_MAX, UNCERTAINTY_PER_UNKNOWN,
+  RISK_BANDS, SIGNAL_THRESHOLDS, SIGNAL_WEIGHTS, TIME_WINDOWS, UNCERTAINTY_MAX, UNCERTAINTY_PER_UNKNOWN,
 } from './constants.js'
 import { clamp, interpolate, interpolateLogit, ramp, squash } from './math.js'
 import { daysInMonth, isItalianHoliday, minutesOfDay } from './dates.js'
@@ -104,18 +104,74 @@ export const marketGapWeight = (listPrice, market) => {
   return clamp(0.9 * Math.log(listPrice / market.medianPrice), -0.5, 0.6)
 }
 
+/** A DOM-only weight under its scale: an explicit 0 when the scale is 0 (never −0, which trips strict comparisons). */
+const scaledWeight = (weight, scale) => (scale === 0 ? 0 : weight * scale)
+
+/** The hearts on the listing: favourites (cross-channel search) first, else the DOM's «interessati»; null without either. */
+export const heartsOf = (signals) => {
+  if (!signals) return null
+  if (Number.isFinite(signals.favourites)) return { n: signals.favourites, source: 'favourites' }
+  if (Number.isFinite(signals.interested)) return { n: signals.interested, source: 'interested' }
+  return null
+}
+
 /**
- * Demand prior from the listing's favourites count: no heart → the seller is glad of any interest (+0.1); 4–9 → he can
- * wait (−0.15); 10 or more → he expects to sell at his price (−0.3). Deliberately small: a prior not yet calibrated on
- * outcomes (the learning loop does not see it). 0 without a finite count.
+ * Demand prior from the hearts on the listing: none → the seller is glad of any interest (+0.1); 4–9 → he can wait
+ * (−0.15); 10 or more → he expects to sell at his price (−0.3); a listing under 3 days old with 3 or more → −0.3.
+ * Deliberately small: a prior not yet calibrated on outcomes. The DOM's «interessati» count weighs DOM_SIGNAL_SCALE
+ * (0 until a hydrated fixture exists). 0 without a finite count. `ageDays` is the listing's age today (optional).
  */
-export const demandWeight = (signals) => {
-  if (!signals || !Number.isFinite(signals.favourites)) return 0
-  const n = signals.favourites
-  if (n <= 0) return 0.1
-  if (n <= 3) return 0
-  if (n <= 9) return -0.15
-  return -0.3
+export const demandWeight = (signals, ageDays = null) => {
+  const hearts = heartsOf(signals)
+  if (!hearts) return 0
+  const W = SIGNAL_WEIGHTS.demand
+  const T = SIGNAL_THRESHOLDS
+  const n = hearts.n
+  let w
+  if (Number.isFinite(ageDays) && ageDays < T.freshDays && n >= T.freshHearts) w = W.fresh
+  else if (n <= 0) w = W.none
+  else if (n < T.someHearts) w = W.few
+  else if (n < T.manyHearts) w = W.some
+  else w = W.many
+  return hearts.source === 'interested' ? scaledWeight(w, DOM_SIGNAL_SCALE.interested) : w
+}
+
+/** Hours since the seller cut the price, from `signals.priceDrop.hoursAgo` or `priceDropHoursAgo`; null when unknown. */
+const dropHoursOf = (signals) => {
+  if (!signals) return null
+  if (signals.priceDrop && typeof signals.priceDrop === 'object' && Number.isFinite(signals.priceDrop.hoursAgo)) return signals.priceDrop.hoursAgo
+  return Number.isFinite(signals.priceDropHoursAgo) ? signals.priceDropHoursAgo : null
+}
+export const priceDroppedOf = (signals) => Boolean(signals && (signals.priceDropped === true || (signals.priceDrop && typeof signals.priceDrop === 'object') || dropHoursOf(signals) !== null))
+
+/**
+ * A price already cut (DOM only, so scaled by DOM_SIGNAL_SCALE.reduced): ≥ 48 h ago the seller is «in modalità
+ * vendita» (+0.15), under 48 h he has just moved and will not move again (−0.2); with the drop's age unknown, 0.
+ */
+export const reducedWeight = (signals) => {
+  if (!priceDroppedOf(signals)) return 0
+  const hours = dropHoursOf(signals)
+  if (hours === null) return 0
+  const w = hours >= SIGNAL_THRESHOLDS.recentDropHours ? SIGNAL_WEIGHTS.reduced.settled : SIGNAL_WEIGHTS.reduced.recent
+  return scaledWeight(w, DOM_SIGNAL_SCALE.reduced)
+}
+
+/**
+ * Views (DOM only, scaled by DOM_SIGNAL_SCALE.views): a listing ≥ 14 days old seen under twice a day is dead (+0.1);
+ * ≥ 150 views with at most 2 hearts is over-priced and the seller knows (+0.1); ≥ 30 views a day in its first 3 days
+ * is hot (−0.1). 0 without a finite count or a known age.
+ */
+export const viewsWeight = (signals, ageDays) => {
+  if (!signals || !Number.isFinite(signals.views) || !Number.isFinite(ageDays)) return 0
+  const T = SIGNAL_THRESHOLDS
+  const W = SIGNAL_WEIGHTS.views
+  const perDay = signals.views / Math.max(1, ageDays)
+  const hearts = heartsOf(signals)
+  let w = 0
+  if (ageDays >= T.deadAgeDays && perDay < T.deadViewsPerDay) w = W.dead
+  else if (signals.views >= T.overpricedViews && hearts && hearts.n <= T.overpricedHearts) w = W.overpriced
+  else if (ageDays < T.hotDays && perDay >= T.hotViewsPerDay) w = W.hot
+  return scaledWeight(w, DOM_SIGNAL_SCALE.views)
 }
 
 /**
@@ -130,19 +186,39 @@ export const marketHazardMultiplier = (listPrice, market) => {
   return 1.5 - 0.8 * ((listPrice - market.p25Price) / (market.p75Price - market.p25Price))
 }
 
-/** Extra factors that exist only when the input carries a market or listing signals: nothing is appended otherwise. */
+/**
+ * Extra factors that exist only when the input carries a market or listing signals: nothing is appended otherwise, so
+ * the factor list of a plain form is unchanged. The signal rows are priors (`prior: true`, engine-spec §3.2): the UI
+ * labels them «stima» and the record stores them for a later fit; the DOM-only ones weigh 0 for now (DOM_SIGNAL_SCALE).
+ */
 const contextFactors = (input) => {
-  const { listPrice, market, signals } = input
+  const { listPrice, market, signals, listingAge } = input
   const extra = []
   if (market && market.n >= 2 && market.medianPrice > 0) {
     const gapPct = Math.round((listPrice / market.medianPrice - 1) * 100)
     const label = gapPct === 0 ? 'Prezzo in linea con il mercato' : gapPct > 0 ? `Prezzo ${gapPct}% sopra il mercato` : `Prezzo ${-gapPct}% sotto il mercato`
     extra.push({ id: 'market', group: 'price', label, weight: marketGapWeight(listPrice, market) })
   }
-  if (signals && Number.isFinite(signals.favourites)) {
-    const n = signals.favourites
-    const label = n <= 0 ? 'Nessun preferito' : n === 1 ? '1 preferito' : `${n} preferiti`
-    extra.push({ id: 'demand', group: 'signal', label, weight: demandWeight(signals) })
+  if (!signals) return extra
+  const ageDays = listingAge && listingAge.id !== 'unknown' ? listingAge.days : null
+  const hearts = heartsOf(signals)
+  if (hearts) {
+    const n = hearts.n
+    const word = hearts.source === 'favourites' ? ['preferito', 'preferiti'] : ['interessato', 'interessati']
+    const label = n <= 0 ? `Nessun ${word[0]}` : n === 1 ? `1 ${word[0]}` : `${n} ${word[1]}`
+    extra.push({ id: 'demand', group: 'signal', label, weight: demandWeight(signals, ageDays), prior: true, source: hearts.source })
+  }
+  if (priceDroppedOf(signals)) {
+    const hours = dropHoursOf(signals)
+    const label = hours === null ? 'Prezzo già ribassato' : hours < SIGNAL_THRESHOLDS.recentDropHours ? 'Prezzo ribassato da poco' : 'Prezzo ribassato da tempo'
+    extra.push({ id: 'reduced', group: 'signal', label, weight: reducedWeight(signals), prior: true })
+  }
+  if (Number.isFinite(signals.views)) {
+    extra.push({ id: 'views', group: 'signal', label: `${signals.views} visualizzazioni`, weight: viewsWeight(signals, ageDays), prior: true })
+  }
+  if (Number.isFinite(signals.sellerItems)) {
+    const n = signals.sellerItems
+    extra.push({ id: 'seller_items', group: 'signal', label: n === 1 ? 'Il venditore ha 1 articolo' : `Il venditore ha ${n} articoli`, weight: scaledWeight(SIGNAL_WEIGHTS.sellerItems, DOM_SIGNAL_SCALE.sellerItems), prior: true })
   }
   return extra
 }

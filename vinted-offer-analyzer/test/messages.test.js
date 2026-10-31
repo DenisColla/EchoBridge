@@ -102,10 +102,22 @@ test('messages: recommended tone is «diretto» under 30 €, «motivato» only 
 test('messages: the analysis carries the situational tones and the recommended one exists among its messages', () => {
   const cheap = analyzeOffer({ itemTitle: 'Maglietta', category: 'fast_fashion', listPrice: '12', targetPrice: '10', listingAge: 'over_month', sellerProfile: 'quiet', listingSignal: 'none', signals: { sellerItems: 4 } }, SUNDAY_NIGHT)
   assert.equal(cheap.kind, 'analysis')
-  assert.equal(cheap.recommendedTone, 'diretto')
+  // A seller who enters rarely: the message policy says write first and ask («domanda»), so that is the recommended tone.
+  assert.equal(cheap.messagePolicy.mode, 'message_first')
+  assert.equal(cheap.messagePolicy.rule, 'seller_quiet')
+  assert.equal(cheap.recommendedTone, 'domanda')
+  assert.equal(cheap.messageBeforeOffer, true)
   assert.deepEqual(cheap.messages.map((m) => m.tone), ['cordiale', 'diretto', 'impegno', 'motivato', 'lotto', 'spedizione', 'domanda'])
   assert.ok(cheap.messages.some((m) => m.tone === cheap.recommendedTone))
   assertRules(cheap.messages, 12)
+  // The same listing with an active seller: offer direct (small ask), «diretto» under 30 €.
+  const active = analyzeOffer({ itemTitle: 'Maglietta', category: 'fast_fashion', listPrice: '30', targetPrice: '27', listingAge: 'over_month', sellerProfile: 'unknown', listingSignal: 'none', signals: { lastSeenDays: 0.2 } }, SUNDAY_NIGHT)
+  assert.equal(active.kind, 'analysis')
+  assert.equal(active.messagePolicy.mode, 'offer_direct')
+  assert.equal(active.recommendedTone, 'diretto')
+  assert.equal(active.messageBeforeOffer, false)
   const plain = analyzeOffer({ itemTitle: 'Nike Air Force 1', category: 'sneakers', listPrice: '100', targetPrice: '80', listingAge: 'weeks_1_2', sellerProfile: 'unknown', listingSignal: 'none' }, SUNDAY_NIGHT)
   assert.equal(plain.messages.length, 4, 'nothing situational on a plain 100 € listing')
+  assert.equal(plain.messagePolicy.mode, 'message_first', 'a 20% ask on 100 €: write first')
+  assert.ok(plain.messages.every((m) => !/ho inviato|ho appena inviato/.test(m.text)), 'the templates propose the price instead of announcing a sent offer')
 })

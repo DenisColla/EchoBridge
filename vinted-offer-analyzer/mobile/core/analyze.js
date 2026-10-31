@@ -1,5 +1,6 @@
 import { NEGLIGIBLE_DISCOUNT_PCT, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, VINTED } from './constants.js'
 import { deviceOffsetMinutes, romeOffsetMinutes } from './dates.js'
+import { decisionGate, messagePolicyFor, offerTierFor } from './gate.js'
 import { buildMessages, formatEuro, recommendedToneFor } from './messages.js'
 import { buildReasons, buildTimingNote, buildTips, buildVerdict, openingSentence } from './reasoning.js'
 import { predictiveInterval } from './profile.js'
@@ -8,6 +9,10 @@ import {
   attributeFactors, blockRiskAt, computeDiscountPct, findCategory, findListingAge, findListingSignal,
   riskBandFor, scoreAt, uncertaintyFor,
 } from './scoring.js'
+
+// The gate, the tier and the message policy live in gate.js; they are re-exported here so callers that know the
+// contract «reofferBlock is exported from analyze.js» find them without a second import.
+export * from './gate.js'
 
 /**
  * Below this discount (or euro gap) an offer is pointless: buy at list price, or ask for shipping included / a bundle.
@@ -52,26 +57,50 @@ export function normalizeInput(raw) {
   if (Object.keys(errors).length) return { ok: false, errors, input: null }
 
   const signals = normalizeSignals(raw.signals)
+  const link = typeof raw.link === 'string' ? raw.link.trim() : ''
   return { ok: true, errors: {}, input: withPrices({
     itemTitle: (raw.itemTitle || '').trim(),
     category,
     listingAge: findListingAge(raw.listingAge),
     sellerProfile: raw.sellerProfile || 'unknown',
     listingSignal: findListingSignal(raw.listingSignal),
-    // Listing signals (favourites, seller's other items) ride on the input only when the form carries at least one.
+    // Listing signals (favourites, seller's other items, DOM readings) ride on the input only when the form carries one.
     ...(signals ? { signals } : {}),
+    // The link (gate rule 7 looks up earlier offers on the same listing) and the policy that proposed the ask (the
+    // gate's «non offrire» wording), when the form carries them.
+    ...(link ? { link } : {}),
+    ...(raw.policy && typeof raw.policy === 'object' ? { policy: raw.policy } : {}),
   }, listPrice, targetPrice) }
 }
 
-const SIGNAL_KEYS = ['favourites', 'sellerItems', 'bundleDiscountPct']
+const SIGNAL_NUMBER_KEYS = ['favourites', 'interested', 'views', 'sellerItems', 'bundleDiscountPct', 'oldPrice', 'lastSeenDays', 'uploadedDays', 'priceDropHoursAgo']
+const SIGNAL_BOOLEAN_KEYS = ['priceDropped', 'reserved', 'vacation', 'bundleOffered', 'sellerBusiness', 'bundleInterest']
 
-/** { favourites, sellerItems, bundleDiscountPct } with the finite numbers only, or null when there is none. */
+/**
+ * The listing signals a form may carry (extract.js parseVintedItemHtml, the search's favourites, the user's flags),
+ * normalised: finite numbers (form strings accepted), booleans, and `priceDrop: { from, to, hoursAgo }` with its finite
+ * fields. Null when nothing usable is there, so a plain form scores exactly as before.
+ */
 export function normalizeSignals(raw) {
   if (!raw || typeof raw !== 'object') return null
   const out = {}
-  for (const key of SIGNAL_KEYS) {
-    const v = typeof raw[key] === 'string' && raw[key].trim() !== '' ? Number(raw[key].replace(',', '.')) : raw[key]
-    if (typeof v === 'number' && Number.isFinite(v)) out[key] = v
+  const num = (v) => {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v.replace(',', '.')) : v
+    return typeof n === 'number' && Number.isFinite(n) ? n : null
+  }
+  for (const key of SIGNAL_NUMBER_KEYS) {
+    const v = num(raw[key])
+    if (v !== null) out[key] = v
+  }
+  for (const key of SIGNAL_BOOLEAN_KEYS) if (typeof raw[key] === 'boolean') out[key] = raw[key]
+  if (raw.priceDrop && typeof raw.priceDrop === 'object') {
+    const drop = {}
+    for (const key of ['from', 'to', 'hoursAgo']) {
+      const v = num(raw.priceDrop[key])
+      if (v !== null) drop[key] = v
+    }
+    out.priceDrop = drop
+    if (out.priceDropped === undefined) out.priceDropped = true
   }
   return Object.keys(out).length ? out : null
 }
@@ -164,16 +193,32 @@ export function buildWarnings(now) {
   return warnings
 }
 
-const noOfferNeeded = (input, now, message) => ({ ok: true, kind: 'no_offer_needed', input, now, message })
+/**
+ * «Compra»: no analysis, but the gate still says why (rule 2 under the market, else rule 3), so the UI leads with the
+ * same decision it would lead with on an analysed offer.
+ */
+const noOfferNeeded = (input, now, message, options = {}) => {
+  const gate = decisionGate(input, null, { records: options.records || null, now, link: input.link || null })
+  return { ok: true, kind: 'no_offer_needed', input, now, message, gate: gate.kind === 'buy_now' ? gate : { ...gate, kind: 'buy_now', rule: 3 } }
+}
+
+/** pickMoments' own options: the analysis options minus what the gate and the message policy read. */
+const momentOptions = ({ preferredSendAt = null, exactSendAt = null } = {}) => ({ preferredSendAt, exactSendAt })
 
 function buildAnalysis(input, now, options = {}) {
-  const moments = pickMoments(input, now, options)
+  const moments = pickMoments(input, now, momentOptions(options))
   const { chosen, nowSlot, sendNow } = moments
   const attribution = attributeFactors(chosen.score)
   const blockRisk = blockRiskAt(input, chosen.date)
   const blockRiskNow = blockRiskAt(input, nowSlot.date)
   const uncertainty = uncertaintyFor(input)
-  const verdict = buildVerdict(chosen, sendNow, now, moments.best)
+  // The gate (ten ordered rules), the tier (on the corrected probability) and the message policy come before the
+  // verdict: the headline leads with the gate whenever it says anything but «offer».
+  const gate = decisionGate(input, moments, { records: options.records || null, now, link: input.link || null })
+  const tier = offerTierFor(chosen.pOverall)
+  const messagePolicy = messagePolicyFor(input, gate, input.signals || null, { tier, key: options.key || null, month: options.month || null, otherItem: options.otherItem || null })
+  const messageBeforeOffer = messagePolicy.assigned === 'message_first'
+  const verdict = buildVerdict(chosen, sendNow, now, moments.best, { gate })
   const twoStep = twoStepFor(input, chosen)
   // Relative goal (engine-spec §7): the suggested price aims at a share of the BEST probability this listing can reach,
   // never below the floor. A fixed 55% was unreachable on most cheap listings once the prior stopped promising it.
@@ -183,10 +228,12 @@ function buildAnalysis(input, now, options = {}) {
   const targetProbability = Math.max(SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX * maxProbability)
   const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability, { exactSendAt }) : null
   const ambition = moments.maxAccept < 0.15 ? 'unrealistic' : moments.maxAccept < 0.3 ? 'ambitious' : null
-  const messageBeforeOffer = blockRisk.level === 'high' || input.sellerProfile === 'inactive'
   // Honest range: the posterior uncertainty of the learned correction (or its prior, before any outcome), not the
   // ±4 points per blank field, which stays as the hint «indica … per restringerla».
   const probabilityRange = predictiveInterval({ probability: chosen.pOverall, optimal: chosen, input }, input.profile || null)
+  const messages = buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer, market: input.market, signals: input.signals || null, otherItem: options.otherItem || null })
+  // The policy's tone when the analysis carries that template, else the plain recommendation.
+  const recommendedTone = messages.some((m) => m.tone === messagePolicy.tone) ? messagePolicy.tone : recommendedToneFor(input)
 
   return {
     ok: true,
@@ -195,6 +242,9 @@ function buildAnalysis(input, now, options = {}) {
     now,
     probability: chosen.pOverall,
     probabilityRange,
+    gate,
+    tier,
+    messagePolicy,
     maxProbability,
     targetProbability,
     ceiling,
@@ -225,8 +275,8 @@ function buildAnalysis(input, now, options = {}) {
     suggestedPrice,
     twoStep,
     messageBeforeOffer,
-    messages: buildMessages({ ...input, sendAt: chosen.date, beforeOffer: messageBeforeOffer, market: input.market }),
-    recommendedTone: recommendedToneFor(input),
+    messages,
+    recommendedTone,
     avoid: avoidWindows(),
     avoidToday: avoidWindowsOn(chosen.date),
     nowInAvoid: nowSlot.score.timeWindow.weight < 0,
@@ -247,7 +297,11 @@ export const withContext = (input, { profile = null, market = null } = {}) => {
 /**
  * Entry point: raw form values + current date → full analysis for the UI.
  * kinds: 'analysis' | 'no_offer_needed' | 'over_cap' (discount above Vinted's 40% limit).
- * options: { profile, market, preferredSendAt, exactSendAt } — `market` is the summary from value.js marketFromRows.
+ * options: { profile, market, preferredSendAt, exactSendAt, records, key, month, otherItem } — `market` is the summary
+ * from value.js marketFromRows; `records` the saved offers (gate rule 7: no re-offer on a listing that just said no);
+ * `key` and `month` (explorationKey, monthKeyOf) make the optional message policy a deterministic coin per listing and
+ * month. Every result carries `gate` ({ kind, rule, reason, alternative, waitHours }); an analysis also `tier`
+ * ({ id, label }) and `messagePolicy` ({ mode, rule, tone, randomised, propensity, assigned }).
  */
 export function analyzeOffer(raw, now = new Date(), options = {}) {
   const normalized = normalizeInput(raw)
@@ -255,16 +309,16 @@ export function analyzeOffer(raw, now = new Date(), options = {}) {
   const input = withContext(normalized.input, options)
 
   if (input.discountPct <= 0) {
-    return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')
+    return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.', options)
   }
   if (input.discountPct < MIN_MEANINGFUL_DISCOUNT_PCT || input.listPrice - input.targetPrice < MIN_MEANINGFUL_GAP_EUR) {
-    return noOfferNeeded(input, now, `Risparmieresti solo ${formatEuro(input.listPrice - input.targetPrice)}: compra a prezzo pieno, oppure chiedi la spedizione inclusa o un lotto con un altro articolo. Un'offerta così piccola non vale lo scambio.`)
+    return noOfferNeeded(input, now, `Risparmieresti solo ${formatEuro(input.listPrice - input.targetPrice)}: compra a prezzo pieno, oppure chiedi la spedizione inclusa o un lotto con un altro articolo. Un'offerta così piccola non vale lo scambio.`, options)
   }
 
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
     const cappedPrice = Math.ceil(input.listPrice * (1 - VINTED.MAX_DISCOUNT_PCT / 100) * 100) / 100
     if (input.listPrice - cappedPrice < MIN_MEANINGFUL_GAP_EUR) {
-      return noOfferNeeded(input, now, 'Su un prezzo così basso non esiste un\'offerta inviabile: compra direttamente.')
+      return noOfferNeeded(input, now, 'Su un prezzo così basso non esiste un\'offerta inviabile: compra direttamente.', options)
     }
     const capped = withPrices(input, input.listPrice, cappedPrice)
     return {

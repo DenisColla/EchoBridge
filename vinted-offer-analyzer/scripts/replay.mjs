@@ -121,6 +121,68 @@ if (hasLive && mature.length >= 2) {
   loo = { n: mature.length, live: sumLive / mature.length, engine: sumEngine / mature.length }
 }
 
+/*
+ * Counterfactual policy table (engine-spec §8.2): for each past offer, what the 1.7 engine would have said BEFORE the
+ * send (the table's ask, the gate, the message mode) and, for the seller counters, whether the accept rule would have
+ * fired. Only what is observable is summarised: the outcomes of the offers the gates would have blocked, and the
+ * counters the rule would have taken (their saving against the list price). Acceptance under another discount is not
+ * observable from these data and is never estimated here.
+ */
+const { policyDiscountFor, decisionGate, messagePolicyFor, offerTierFor, analyzeCounter } = core
+const counterfactual = decided.map((r) => {
+  const input = r.input
+  const pol = input ? policyDiscountFor({ listPrice: r.listPrice, listingAge: input.listingAge, category: input.category, sellerProfile: input.sellerProfile, listingSignal: input.listingSignal }) : null
+  // The other saved items stand for the watchlist as it was: rule 7 looks for an earlier refusal on the same listing.
+  const gate = input ? decisionGate(input, null, { records: items.filter((it) => it.id !== r.id), now: r.sentAt, link: r.link, policy: pol }) : null
+  const message = input && gate ? messagePolicyFor(input, gate, null, { tier: offerTierFor(predictWith(null, r)) }) : null
+  const round = r.rounds[0] || null
+  let accept = null
+  if (round && input) {
+    const receivedAt = round.receivedAt ? new Date(round.receivedAt) : new Date(r.sentAt.getTime() + 3_600_000)
+    const form = {
+      itemTitle: r.title, category: input.category.id, listPrice: String(r.listPrice), targetPrice: String(r.price), listingAge: input.listingAge.id, sellerProfile: input.sellerProfile, listingSignal: input.listingSignal.id,
+      previousOffer: String(round.buyerPrice), sellerCounter: String(round.sellerPrice), offerSentAt: r.sentAt, receivedAt,
+    }
+    const res = analyzeCounter(form, new Date(receivedAt.getTime() + 5 * 60_000), { policyTarget: pol && pol.kind === 'offer' ? pol.targetPrice : null })
+    accept = res.ok && res.accept ? { recommended: res.accept.recommended, reason: res.accept.reason, saving: Math.round((r.listPrice - round.sellerPrice) * 100) / 100 } : null
+  }
+  return {
+    id: r.id, title: r.title || '(senza titolo)', listPrice: r.listPrice, price: r.price, discountPct: r.discountPct, outcome: r.first, y: r.y, closed: r.closed, savingEur: r.savingEur,
+    policy: pol ? (pol.kind === 'offer' ? { target: pol.targetPrice, discountPct: pol.discountPct } : { noOffer: true, alternative: pol.alternative }) : null,
+    gate: gate ? { kind: gate.kind, rule: gate.rule } : null,
+    message: message ? message.mode : null,
+    counter: round ? { seller: round.sellerPrice, ours: round.replyPrice, accept } : null,
+  }
+})
+const gated = counterfactual.filter((c) => c.gate && c.gate.kind !== 'offer' && c.gate.rule >= 2 && c.gate.rule <= 9)
+const acceptedCounters = counterfactual.filter((c) => c.counter && c.counter.accept && c.counter.accept.recommended)
+const realisedSaving = decided.filter((r) => r.closed).reduce((s, r) => s + (r.savingEur || 0), 0)
+const counterSaving = acceptedCounters.reduce((s, c) => s + c.counter.accept.saving, 0)
+const wilsonLow = (k, n, z = 1.645) => {
+  if (!n) return null
+  const p = k / n
+  const d = 1 + (z * z) / n
+  return Math.max(0, (p + (z * z) / (2 * n)) / d - (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d)
+}
+const today = {
+  decided: decided.length,
+  accepted: decided.filter((r) => r.y === 1).length,
+  acceptRate: decided.length ? decided.filter((r) => r.y === 1).length / decided.length : null,
+  acceptWilsonLow: wilsonLow(decided.filter((r) => r.y === 1).length, decided.length),
+  closed: decided.filter((r) => r.closed).length,
+  closeRate: decided.length ? decided.filter((r) => r.closed).length / decided.length : null,
+  savingPerOffer: decided.length ? realisedSaving / decided.length : null,
+  overrideShare: decided.filter((r) => r.userOverride != null).length ? decided.filter((r) => r.userOverride === true).length / decided.filter((r) => r.userOverride != null).length : null,
+}
+/** Pre-registered prospective targets for the next 30 offers under 1.7 (engine-spec §8.3): what counts as success. */
+const PROSPECTIVE_TARGETS = [
+  { id: 'first_accept', text: 'Accettazione della prima offerta ≥ 25%, con limite inferiore Wilson 90% > 10%', today: today.acceptRate == null ? null : `${pct(today.acceptRate).trim()} (${today.accepted} su ${today.decided}; limite inferiore ${pct(today.acceptWilsonLow).trim()})` },
+  { id: 'close_rate', text: 'Tasso di chiusura, controproposte accettate incluse, ≥ 40%', today: today.closeRate == null ? null : `${pct(today.closeRate).trim()} (${today.closed} su ${today.decided})` },
+  { id: 'saving_per_offer', text: 'Euro risparmiati per offerta inviata ≥ 8 €', today: today.savingPerOffer == null ? null : `${num(today.savingPerOffer, 1)} € (${num(realisedSaving, 1)} € su ${today.decided} offerte)` },
+  { id: 'outcomes_48h', text: 'Quota di esiti segnati entro 48 ore ≥ 80%', today: 'non misurabile sui dati vecchi (manca il promemoria esito)' },
+  { id: 'override_share', text: 'Quota di prezzi inviati diversi dal piano (userOverride) < 25%, altrimenti le propensioni non sono usabili', today: today.overrideShare == null ? 'nessun dato' : pct(today.overrideShare).trim() },
+]
+
 const out = {
   engine: ENGINE_VERSION,
   now: now.toISOString(),
@@ -133,6 +195,18 @@ const out = {
   byBand,
   byKnot,
   byBandKnot,
+  counterfactual,
+  counterfactualSummary: {
+    gated: gated.map((c) => ({ id: c.id, rule: c.gate.rule, kind: c.gate.kind, outcome: c.outcome, y: c.y })),
+    gatedAccepted: gated.filter((c) => c.y === 1).length,
+    counters: counterfactual.filter((c) => c.counter).length,
+    countersAccepted: acceptedCounters.length,
+    counterSavingEur: Math.round(counterSaving * 100) / 100,
+    realisedSavingEur: Math.round(realisedSaving * 100) / 100,
+    observableOnly: true,
+  },
+  today,
+  prospectiveTargets: PROSPECTIVE_TARGETS,
   live: hasLive
     ? { intercept: live.profile.intercept, dslope: live.profile.dslope, status: live.status, nEff: live.nEff, basedOn: live.basedOn, sd: live.sd || null, fitted: live.fitted || null, gain: live.gain || null, arms: live.arms || null, rollback: live.rollback || false }
     : { intercept: fallbackFit.theta.intercept, note: 'motore senza liveProfile: intercetta del fit mensile senza cancelli', nEff: fallbackFit.nEff.intercept, basedOn: fallbackFit.n },
@@ -178,4 +252,22 @@ if (hasLive) {
 }
 if (loo) console.log(`Leave-one-out (log score medio, più alto è meglio): live ${num(loo.live)} vs motore ${num(loo.engine)} su ${loo.n} esiti maturi`)
 console.log('')
-console.log('Nota: l\'accettazione con sconti diversi da quelli inviati non è osservabile da questi dati; le colonne confrontano solo stime e esiti reali.')
+
+// §8.2: what the 1.7 engine would have said before each send.
+const GATE_LABELS = { offer: 'offri', buy_now: 'compra', favourite_wait: 'cuore e aspetta', message_first: 'scrivi prima', wait: 'aspetta' }
+const MESSAGE_LABELS = { message_first: 'messaggio prima', offer_direct: 'offerta diretta', optional: 'a sorte' }
+console.log('Tabella controfattuale (motore 1.7 prima dell\'invio):')
+console.log(`${'Articolo'.padEnd(28)} ${'L€'.padStart(6)} ${'off€'.padStart(6)}  ${'tabella'.padStart(9)}  ${'cancello'.padEnd(18)} ${'messaggio'.padEnd(16)} esito            controproposta`)
+for (const c of counterfactual) {
+  const table = !c.policy ? '—' : c.policy.noOffer ? 'no offerta' : `${c.policy.target} € (−${c.policy.discountPct}%)`
+  const gate = c.gate ? `${GATE_LABELS[c.gate.kind] || c.gate.kind} (regola ${c.gate.rule})` : '—'
+  const counter = c.counter ? `${c.counter.seller} €${c.counter.ours != null ? ` → noi ${c.counter.ours} €` : ''}: regola accetta ${c.counter.accept ? (c.counter.accept.recommended ? `SÌ (${c.counter.accept.reason})` : 'no') : '—'}` : ''
+  console.log(`${short(c.title, 28)} ${String(c.listPrice).padStart(6)} ${String(c.price).padStart(6)}  ${table.padStart(9)}  ${gate.padEnd(18)} ${(MESSAGE_LABELS[c.message] || '—').padEnd(16)} ${String(c.outcome).padEnd(16)} ${counter}`)
+}
+console.log('')
+console.log(`Offerte che i cancelli 2–9 avrebbero fermato: ${gated.length} su ${counterfactual.length}${gated.length ? ` (${gated.map((c) => `regola ${c.gate.rule}: ${c.outcome}`).join(', ')})` : ''}; accettate tra queste: ${gated.filter((c) => c.y === 1).length}.`)
+console.log(`Controproposte che la regola «accetta» avrebbe chiuso: ${acceptedCounters.length} su ${counterfactual.filter((c) => c.counter).length} → +${acceptedCounters.length} affari, +${num(counterSaving, 1)} € risparmiati sul listino (da ${num(realisedSaving, 1)} € a ${num(realisedSaving + counterSaving, 1)} € su ${counterfactual.length} offerte).`)
+console.log('Nota: l\'accettazione con sconti diversi da quelli inviati NON è osservabile da questi dati: la colonna «tabella» dice solo che cosa il motore avrebbe chiesto, non se sarebbe passato. Le colonne delle stime confrontano solo stime e esiti reali.')
+console.log('')
+console.log('Obiettivi prospettici pre-registrati per le prossime 30 offerte con la 1.7 (engine-spec §8.3):')
+for (const tgt of PROSPECTIVE_TARGETS) console.log(`  · ${tgt.text}${tgt.today ? ` — oggi: ${tgt.today}` : ''}`)
