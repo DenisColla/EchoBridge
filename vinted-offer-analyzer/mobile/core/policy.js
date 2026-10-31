@@ -59,6 +59,12 @@ export const POLICY_BOUNDS = Object.freeze({
   MAX_PCT: 25,
   /** The learned shift (profile.discountShift) may move the table by at most this many points either way. */
   SHIFT_PTS: 6,
+  /**
+   * An offer must save at least this many euros (analyze.js applies the same threshold): below it the precise rounding
+   * is pushed down, and when that would ask more than GAP_EXTRA_PTS over the table the policy says «compra».
+   */
+  MIN_GAP_EUR: 2,
+  GAP_EXTRA_PTS: 6,
   /** Vinted refuses offers under 60% of the listing price; the market floor keeps the ask above the cheapest quarter. */
   FLOOR_SHARE: 0.6,
   MARKET_FLOOR_SHARE: 0.95,
@@ -212,7 +218,20 @@ export function policyDiscountFor({ listPrice, ageDays = null, listingAge = null
 
   const floor = polR2(Math.max(POLICY_BOUNDS.FLOOR_SHARE * L, marketOk ? POLICY_BOUNDS.MARKET_FLOOR_SHARE * market.p25Price : 0))
   const rawTarget = Math.max(L * (1 - pts / 100), floor)
-  const targetPrice = precisePriceFor(rawTarget, L, { min: floor, max: L })
+  let targetPrice = precisePriceFor(rawTarget, L, { min: floor, max: L })
+  // The precise rounding may land within MIN_GAP_EUR of the listing (22 € → 21 €): a saving that small is not worth an
+  // offer, so step down to the last price that keeps the gap; if that asks far more than the table, say «compra».
+  let gapCapped = false
+  if (targetPrice !== null && L - targetPrice < POLICY_BOUNDS.MIN_GAP_EUR - 1e-9) {
+    const step = L < 20 ? 0.5 : 1
+    const capped = Math.floor((L - POLICY_BOUNDS.MIN_GAP_EUR) / step + 1e-9) * step
+    const gapPts = ((L - capped) / L) * 100
+    if (capped < floor - 1e-9 || capped <= 0 || gapPts > pts + POLICY_BOUNDS.GAP_EXTRA_PTS) {
+      return noOffer(`sotto ${polEuro(POLICY_BOUNDS.MIN_GAP_EUR)} di risparmio un'offerta non vale lo scambio: compra, o chiedi la spedizione inclusa o un lotto`, 'buy')
+    }
+    targetPrice = polR2(capped)
+    gapCapped = true
+  }
   const effective = targetPrice !== null ? Math.round(((L - targetPrice) / L) * 1000) / 10 : null
 
   const reason = [`Fascia ${band.label}, ${ageText}: la tabella parte da −${table}%.`]
@@ -220,6 +239,7 @@ export function policyDiscountFor({ listPrice, ageDays = null, listingAge = null
   if (capped) reason.push(`${caps.find((c) => c.pts === cap).label.charAt(0).toUpperCase()}${caps.find((c) => c.pts === cap).label.slice(1)}: non oltre il ${cap}%.`)
   if (shift !== 0) reason.push(`Dai tuoi esiti: ${polSigned(Math.round(shift * 10) / 10)} punti.`)
   if (targetPrice !== null && rawTarget > L * (1 - pts / 100) + 1e-9) reason.push(`Mai sotto ${polEuro(floor)} (il 60% del prezzo, o il mercato).`)
+  if (gapCapped) reason.push(`Almeno ${polEuro(POLICY_BOUNDS.MIN_GAP_EUR)} di risparmio, altrimenti l'offerta non vale lo scambio.`)
   const summaryBits = [`fascia ${band.label}`, ageText, ...modifiers.map((m) => `${m.label} ${polSigned(m.pts)}`), ...(capped ? [`massimo ${cap}%`] : []), ...(shift !== 0 ? [`tuoi esiti ${polSigned(Math.round(shift * 10) / 10)}`] : [])]
 
   return {

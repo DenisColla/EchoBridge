@@ -745,7 +745,7 @@ test('acceptRule: fires on the three real counters of the backup (440/469, 24/27
   assert.equal(comic.accept.policyTarget, 24)
   const small = analyzeCounter(REAL_COUNTERS[2].raw, REAL_COUNTERS[2].now, { policyTarget: policyTargetOf(REAL_COUNTERS[2].raw) })
   assert.ok(small.accept.reasons.includes('policy_target'))
-  assert.equal(small.accept.policyTarget, 12)
+  assert.equal(small.accept.policyTarget, 11.5)
   // The tablet: 440 € is 27 € over the 413 € policy ask, so only the expected price (437–438 € with the prior) anchors it.
   const tablet = analyzeCounter(REAL_COUNTERS[0].raw, REAL_COUNTERS[0].now, { policyTarget: 413 })
   assert.deepEqual(tablet.accept.reasons, ['expected_price'])

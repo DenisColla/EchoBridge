@@ -194,9 +194,9 @@ export function Stat({ label, value, sub, tone = 'neutral', style }) {
   const color = tone === 'neutral' ? t.ink : toneColors(t, tone).fg
   return (
     <View style={[styles.stat, { backgroundColor: t.cardMuted }, style]} accessible accessibilityLabel={`${label}: ${value}${sub ? `, ${sub}` : ''}`}>
-      <Text style={[styles.sectionLabel, { color: t.ink3 }]} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.statLabel, { color: t.ink3 }]} numberOfLines={2}>{label}</Text>
       <Text style={[styles.statValue, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{value}</Text>
-      {sub ? <Text style={[styles.small, { color: t.ink3 }]} numberOfLines={1}>{sub}</Text> : null}
+      {sub ? <Text style={[styles.statSub, { color: t.ink3 }]} numberOfLines={2}>{sub}</Text> : null}
     </View>
   )
 }
@@ -325,8 +325,10 @@ const styles = StyleSheet.create({
   collapsibleBody: { paddingHorizontal: space.md, paddingBottom: space.md, gap: space.sm },
   chevron: { fontSize: 16, flexShrink: 0 },
   trailing: { marginLeft: 6, flexShrink: 0, justifyContent: 'center' },
-  stat: { flex: 1, minWidth: 0, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: 10, gap: 2 },
-  statValue: { fontSize: 22, fontWeight: '800', fontVariant: ['tabular-nums'], lineHeight: 28 },
+  stat: { flex: 1, minWidth: 0, borderRadius: radius.md, paddingHorizontal: 8, paddingVertical: 10, gap: 2 },
+  statLabel: { fontSize: 11, lineHeight: 14, fontWeight: '700' },
+  statSub: { fontSize: 12, lineHeight: 16 },
+  statValue: { fontSize: 20, fontWeight: '800', fontVariant: ['tabular-nums'], lineHeight: 26 },
   statRow: { flexDirection: 'row', gap: space.sm },
   statCell: { flex: 1, minWidth: 0 },
   segments: { flexDirection: 'row', gap: space.sm, paddingVertical: 2 },

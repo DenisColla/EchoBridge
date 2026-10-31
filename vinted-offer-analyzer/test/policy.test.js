@@ -122,7 +122,7 @@ test('policy: the twelve tabular cases of the spec', () => {
 })
 
 test('policy: inputs come as numbers, form strings, LISTING_AGES ids or objects; no price → null', () => {
-  assert.equal(policyDiscountFor({ listPrice: '13,5', listingAge: 'unknown' }).targetPrice, 12)
+  assert.equal(policyDiscountFor({ listPrice: '13,5', listingAge: 'unknown' }).targetPrice, 11.5)
   assert.equal(policyDiscountFor({ listPrice: 27, listingAge: LISTING_AGES.find((a) => a.id === 'weeks_1_2') }).ageDays, 10)
   assert.equal(policyDiscountFor({ listPrice: 27, listingAge: 'over_month' }).ageTier, 'old')
   assert.equal(policyDiscountFor({ listPrice: 27, listingAge: 'unknown' }).ageDays, null)
@@ -199,7 +199,7 @@ test('policy: retro table on the user\'s 13 real items (two «no offer», comics
   // Anchors of the counter accept rule (spec §7): 413 / 24 / 12 € for the three listings whose sellers countered.
   assert.equal(byId['mv6qf10m-wait9i'].targetPrice, 413)
   assert.equal(byId['muvfbizr-gsecaj'].targetPrice, 24)
-  assert.equal(byId['muvcbux2-7mka1b'].targetPrice, 12)
+  assert.equal(byId['muvcbux2-7mka1b'].targetPrice, 11.5)
   // Every summary is a short Italian line the UI can show under «Perché questo numero».
   for (const p of Object.values(byId)) assert.match(p.summary, /^(−\d+%: fascia|nessuna offerta: )/)
 })
@@ -219,4 +219,19 @@ test('policy: the inline fixture matches the user\'s backup when it is on this m
     const seller = (it.negotiation || []).find((e) => e.by === 'seller')
     assert.equal(seller ? seller.price : undefined, fx.counter)
   }
+})
+
+test('policy: the precise rounding never eats the 2 € minimum saving', () => {
+  // 22 € comic, 2–4 weeks, expert seller: table 12 − 3 = 9% → 20,02 € → the precise rule would say 21 € (1 € saved).
+  const p = policyDiscountFor({ listPrice: 22, listingAge: 'weeks_2_4', category: 'collectible', sellerProfile: 'expert' })
+  assert.equal(p.kind, 'offer')
+  assert.equal(p.targetPrice, 20)
+  assert.ok(p.reason.some((r) => /Almeno 2 € di risparmio/.test(r)))
+  // 13,50 € at 7–30 days: 10% → 12,15 → 12 € saves 1,50 €; the next half step keeps the gap and is still near the table.
+  const q = policyDiscountFor({ listPrice: 13.5, ageDays: 10 })
+  assert.equal(q.targetPrice, 11.5)
+  // When keeping the gap would ask far more than the table, the policy says «compra».
+  const r = policyDiscountFor({ listPrice: 12, ageDays: 10 })
+  assert.equal(r.kind, 'no_offer')
+  assert.equal(r.alternative, 'buy')
 })
