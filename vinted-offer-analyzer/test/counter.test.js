@@ -5,10 +5,11 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  analyzeCounter, buildCounterMessages, buildCounterReminders, buildVerdict, buyerTotal, counterFromPercent, counterPreview, evaluateCounter,
-  formatEuro, isPrecisePrice, isSplitPrice, normalizeCounterInput, parsePercent, preciseBelow, precisePricesIn, splitPrice,
-  timeWindowAt, wholeEuroFallback, TONES,
+  acceptRule, analyzeCounter, buildCounterMessages, buildCounterReminders, buildVerdict, buyerTotal, counterFromPercent, counterPreview, evaluateCounter,
+  formatEuro, isPrecisePrice, isSplitPrice, normalizeCounterInput, normalizeProfile, parsePercent, preciseBelow, precisePricesIn, splitPrice,
+  timeWindowAt, wholeEuroFallback, DEFAULT_PROFILE, ENGINE_VERSION, TONES,
 } from '../src/core/index.js'
+import { policyDiscountFor } from '../src/core/policy.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const at = (d, h, m) => new Date(2026, 9, d, h, m)
@@ -145,10 +146,11 @@ test('counter EX1 (60 / 45 / 58,50): split at 51,70 € tomorrow 21:05, with the
   assert.equal(rec.price, 51.7)
   assert.ok(rec.isSplit && !rec.isFinal)
   near(rec.gapShare, 0.496, 0.001)
-  near(rec.pAccept, 0.522, P)
-  near(rec.expectedPrice, 54.72, 0.02)
-  near(rec.expectedSaving, 3.78, 0.02)
-  near(rec.pBelowSeller, 0.653, P)
+  // Engine 1.4.0 prior reset (halved time weights, positive cap 0,7): the same plan, a few points less sure of itself.
+  near(rec.pAccept, 0.498, P)
+  near(rec.expectedPrice, 54.86, 0.02)
+  near(rec.expectedSaving, 3.64, 0.02)
+  near(rec.pBelowSeller, 0.637, P)
   assert.equal(rec.totalWithFee, 54.99)
   assert.equal(rec.wholeEuroFallback, 52)
 
@@ -159,15 +161,13 @@ test('counter EX1 (60 / 45 / 58,50): split at 51,70 € tomorrow 21:05, with the
   sameTime(n.tooSoonUntil, at(13, 22, 40))
   assert.equal(n.deadline - n.receivedAt, 23.5 * 3_600_000)
   assert.equal(n.assumedExpiry - n.receivedAt, 24 * 3_600_000)
-  sameTime(r.alsoGood.date, at(14, 21, 35))
-  assert.equal(r.alsoGood.tier, 'tight')
-  near(r.alsoGood.pAccept, 0.542, P)
-  near(r.nowSlot.pAccept, 0.434, P)
+  assert.equal(r.alsoGood, null, 'with the halved time weights the tight 21:35 slot no longer beats 21:05')
+  near(r.nowSlot.pAccept, 0.417, P)
 
   const bold = option(r, 'bold')
   assert.equal(bold.price, 48.7)
-  near(bold.pAccept, 0.221, P)
-  near(bold.expectedPrice, 55.32, 0.02)
+  near(bold.pAccept, 0.206, P)
+  near(bold.expectedPrice, 55.44, 0.02)
   assert.equal(option(r, 'split'), undefined)
   assert.equal(option(r, 'accept').totalWithFee, 62.13)
   const ordered = r.options
@@ -183,10 +183,10 @@ test('counter EX1 (60 / 45 / 58,50): split at 51,70 € tomorrow 21:05, with the
   near(rec.next.ifMoves.pAccept, 0.626, P)
 
   assert.equal(r.factors.basePct, 42)
-  assert.equal(r.factors.totalPct, 52)
+  assert.equal(r.factors.totalPct, 50)
   const pts = Object.fromEntries(r.factors.rows.map((x) => [x.id, x.deltaPoints]))
   assert.deepEqual({ split: pts.split, counter_stance: pts.counter_stance, time: pts.time, counter_delay: pts.counter_delay, counter_cooling: pts.counter_cooling, counter_habit: pts.counter_habit, counter_latency: pts.counter_latency, counter_message: pts.counter_message },
-    { split: 8, counter_stance: -9, time: 6, counter_delay: 2, counter_cooling: -2, counter_habit: 2, counter_latency: -2, counter_message: 5 })
+    { split: 8, counter_stance: -8, time: 3, counter_delay: 2, counter_cooling: -2, counter_habit: 2, counter_latency: -2, counter_message: 5 })
   assert.equal(r.factors.rows.reduce((s, x) => s + x.deltaPoints, 0), r.factors.totalPct - r.factors.basePct)
 
   assert.equal(r.verdict.hero.title, 'Rispondi con 51,70 €')
@@ -206,9 +206,9 @@ test('counter EX1: the recommendation is the minimum expected price over prices 
     const e = evaluateCounter(norm.state, c, r.optimal.date, { isFinal: false })
     assert.ok(e.expectedPrice >= r.recommended.expectedPrice - 1e-9, `${c}: ${e.expectedPrice}`)
   }
-  near(analyzeCounter({ ...EX1, publicPrice: true }, NOW1).recommended.expectedPrice, 54.74, 0.02)
+  near(analyzeCounter({ ...EX1, publicPrice: true }, NOW1).recommended.expectedPrice, 54.87, 0.02)
   const chat = analyzeCounter({ ...EX1, channel: 'chat' }, NOW1)
-  near(chat.recommended.expectedPrice, 54.63, 0.02)
+  near(chat.recommended.expectedPrice, 54.76, 0.02)
   assert.equal(chat.recommended.price, 51.7)
 })
 
@@ -218,10 +218,10 @@ test('counter: the seller stance changes the step (flexible → small step, hold
   const flexible = analyzeCounter({ ...EX1, sellerCounter: '52' }, NOW1)
   assert.equal(flexible.negotiation.sellerStance, 'flexible')
   assert.equal(flexible.recommended.price, 47)
-  near(flexible.recommended.pAccept, 0.25, P)
-  near(flexible.recommended.expectedPrice, 50.016, 0.02)
+  near(flexible.recommended.pAccept, 0.237, P)
+  near(flexible.recommended.expectedPrice, 50.07, 0.02)
   assert.equal(option(flexible, 'split').price, 48.5)
-  near(option(flexible, 'split').pAccept, 0.554, P)
+  near(option(flexible, 'split').pAccept, 0.537, P)
 
   const moving = analyzeCounter({ ...EX1, sellerCounter: '55' }, NOW1)
   assert.equal(moving.negotiation.sellerStance, 'moving')
@@ -237,7 +237,7 @@ test('counter: the seller stance changes the step (flexible → small step, hold
   assert.equal(hold.recommended.price, 49.8)
   assert.ok(hold.recommended.isFinal)
   assert.ok(hold.recommended.gapShare <= 0.35)
-  near(hold.recommended.pAccept, 0.241, P)
+  near(hold.recommended.pAccept, 0.225, P)
   assert.ok(hold.tips.some((t) => t.includes('riprova')))
   assert.equal(hold.recommendedTone, 'motivato')
 })
@@ -247,9 +247,9 @@ test('counter: a maximum budget caps every option, hides the saving and can forc
   assert.equal(analyzeCounter({ ...EX1, maxPrice: '58,50' }, NOW1).recommended.price, 51.7)
   const w55 = analyzeCounter({ ...EX1, maxPrice: '55' }, NOW1)
   assert.equal(w55.recommended.price, 51.7)
-  sameTime(w55.optimal.date, at(14, 21, 35))
-  assert.equal(w55.optimal.tier, 'tight')
-  sameTime(w55.safeAlternative.date, at(14, 21, 5))
+  sameTime(w55.optimal.date, at(14, 21, 5))
+  assert.equal(w55.optimal.tier, 'on_time')
+  assert.equal(w55.safeAlternative, null, 'the on-time slot is already the best one')
   assert.ok(option(w55, 'accept').overBudget)
   assert.equal(w55.recommended.expectedSaving, null)
   assert.equal(analyzeCounter({ ...EX1, maxPrice: '52' }, NOW1).recommended.price, 51.75)
@@ -266,17 +266,17 @@ test('counter: a maximum budget caps every option, hides the saving and can forc
 test('counter timing: sale risk, inactive seller, unknown send time, opening the app later', () => {
   const competition = analyzeCounter({ ...EX1, competition: true }, NOW1)
   sameTime(competition.optimal.date, at(14, 21, 5))
-  near(competition.recommended.expectedPrice, 54.93, 0.02)
+  near(competition.recommended.expectedPrice, 55.06, 0.02)
   sameTime(analyzeCounter({ ...EX1, category: 'electronics', listingAge: 'today', publicPrice: true }, NOW1).optimal.date, at(13, 22, 40))
 
   const inactive = analyzeCounter({ ...EX1, sellerProfile: 'inactive' }, NOW1)
   sameTime(inactive.optimal.date, at(13, 22, 10))
   near(inactive.components.pRead, 0.889, 0.002)
-  near(inactive.recommended.pAccept, 0.428, P)
+  near(inactive.recommended.pAccept, 0.396, P)
 
   const noSent = analyzeCounter({ ...EX1, offerSentAt: null }, NOW1)
   assert.equal(noSent.factors.rows.find((x) => x.id === 'counter_latency'), undefined)
-  near(noSent.recommended.pAccept, 0.545, P)
+  near(noSent.recommended.pAccept, 0.522, P)
 
   const morning = analyzeCounter(EX1, at(14, 7, 50))
   sameTime(morning.optimal.date, at(14, 21, 5))
@@ -290,8 +290,8 @@ test('counter timing: sale risk, inactive seller, unknown send time, opening the
 
 test('counter timing: lunch, late counters, forced bad window, Sunday, holiday', () => {
   const lunch = analyzeCounter({ ...EX1, offerSentAt: at(14, 12, 0), receivedAt: at(14, 12, 50) }, at(14, 13, 0))
-  sameTime(lunch.optimal.date, at(14, 21, 35))
-  assert.equal(lunch.optimal.windowId, 'weeknight_late')
+  sameTime(lunch.optimal.date, at(14, 21, 5))
+  assert.equal(lunch.optimal.windowId, 'weeknight_early')
   assert.equal(lunch.optimal.tier, 'on_time')
   assert.equal(lunch.sendNow.reason, 'too_soon')
 
@@ -303,7 +303,7 @@ test('counter timing: lunch, late counters, forced bad window, Sunday, holiday',
   const forced = analyzeCounter({ ...EX1, offerSentAt: at(13, 21, 45), receivedAt: at(14, 10, 0) }, at(15, 9, 0))
   sameTime(forced.optimal.date, at(15, 9, 5))
   assert.ok(forced.timing.deadlineForcesBadWindow)
-  sameTime(forced.reapproach.date, at(15, 21, 35))
+  sameTime(forced.reapproach.date, at(15, 21, 5))
   assert.ok(forced.tips.some((t) => t.includes('scade')))
 
   const sunday = analyzeCounter({ ...EX1, offerSentAt: at(18, 21, 0), receivedAt: at(18, 21, 45) }, at(18, 21, 50))
@@ -319,7 +319,7 @@ test('counter timing: lunch, late counters, forced bad window, Sunday, holiday',
 test('counter timing: stale counter, chat counter, received-ago chip, pinned moment, no assumed expiry', () => {
   const stale = analyzeCounter(EX1, at(15, 9, 0))
   assert.equal(stale.kind, 'counter_stale')
-  sameTime(stale.optimal.date, at(15, 21, 35))
+  sameTime(stale.optimal.date, at(15, 21, 5))
   assert.match(option(stale, 'accept').label, /se il pulsante non c'è più/)
   for (const m of stale.messages) assert.match(m.text, /^Ciao! Scusa se ti rispondo solo ora\./)
 
@@ -343,7 +343,7 @@ test('counter timing: stale counter, chat counter, received-ago chip, pinned mom
   assert.ok(pinned.pinned)
   sameTime(pinned.optimal.date, at(14, 21, 35))
   assert.equal(pinned.recommended.price, 51.7)
-  near(pinned.recommended.pAccept, 0.542, P)
+  near(pinned.recommended.pAccept, 0.507, P)
 
   const open = analyzeCounter(EX1, NOW1, { validityHours: null })
   assert.equal(open.negotiation.assumedExpiry, null)
@@ -360,8 +360,8 @@ test('counter timing [Rome]: DST weekend keeps 23,5 h of real time to the soft d
     assert.equal(r.negotiation.deadline.getMinutes(), 30)
     sameTime(r.optimal.date, at(25, 10, 5))
     assert.equal(r.optimal.windowId, 'sunday_morning')
-    sameTime(r.alsoGood.date, at(25, 21, 5))
-    near(r.alsoGood.pAccept, 0.595, P)
+    // 1.4.0 halved the evening weights: Sunday night (past the 20:30 soft deadline) is no longer a near tie.
+    if (r.alsoGood) assert.ok(r.alsoGood.date > r.negotiation.deadline, `${r.alsoGood.date}`)
   } else {
     sameTime(r.optimal.date, at(25, 21, 5))
   }
@@ -406,35 +406,41 @@ test('counter: tiny gaps go to the split or to accepting', () => {
   assert.equal(analyzeCounter({ ...ff, listPrice: '6', previousOffer: '4', sellerCounter: '5,50' }, NOW1).kind, 'accept')
 })
 
-test('counter EX2 (cheap fast fashion): 11 € on Sunday night, split shown as the safer option', () => {
+test('counter EX2 (cheap fast fashion): the 11,75 € split on Sunday afternoon, 11 € as the bold option', () => {
+  // Engine 1.4.0: with the lower acceptance of a small step, the split is the better bet on a 15 € item and the
+  // halved evening bonus no longer pays for waiting until the night window.
   const r = analyzeCounter(EX2, at(18, 15, 20))
   assert.deepEqual(r.candidates.prices, [11, 11.3, 11.7, 11.75])
-  assert.equal(r.recommended.price, 11)
-  near(r.recommended.pAccept, 0.407, P)
-  near(r.recommended.expectedPrice, 12.14, 0.02)
-  near(r.recommended.expectedSaving, 1.36, 0.02)
-  assert.equal(r.recommended.totalWithFee, 12.25)
-  const split = option(r, 'split')
-  assert.equal(split.price, 11.75)
-  near(split.pAccept, 0.717, P)
-  near(split.expectedPrice, 12.18, 0.02)
-  assert.equal(option(r, 'bold'), undefined)
-  sameTime(r.optimal.date, at(18, 21, 5))
-  assert.equal(r.optimal.windowId, 'sunday_night')
+  assert.equal(r.recommended.price, 11.75)
+  assert.ok(r.recommended.isSplit)
+  near(r.recommended.pAccept, 0.615, P)
+  near(r.recommended.expectedPrice, 12.34, 0.02)
+  near(r.recommended.expectedSaving, 1.16, 0.02)
+  assert.equal(r.recommended.totalWithFee, 13.04)
+  assert.equal(option(r, 'split'), undefined, 'the recommendation is already the split')
+  assert.equal(option(r, 'bold').price, 11)
+  sameTime(r.optimal.date, at(18, 18, 5))
+  assert.equal(r.optimal.windowId, 'sunday_afternoon')
   assert.equal(r.sendNow.reason, 'too_soon')
-  assert.equal(r.recommended.next.ifHolds.price, 11.3)
+  assert.equal(r.recommended.next.ifHolds.price, 12.3)
   assert.ok(r.recommended.next.ifHolds.isFinal)
-  assert.equal(r.recommended.next.ifMoves.sellerPrice, 12.51)
-  assert.equal(r.recommended.next.ifMoves.price, 11.7)
+  assert.equal(r.recommended.next.ifMoves.sellerPrice, 13.07)
+  assert.equal(r.recommended.next.ifMoves.price, 12.41)
+  assert.ok(r.recommended.next.ifMoves.isSplit)
   assertGuardRails(r)
 })
 
-test('counter EX3 (expensive collectible): 355 € split on Sunday night, integer grid above 200 €', () => {
+test('counter EX3 (expensive collectible): 355 € split on Sunday morning, integer grid above 200 €', () => {
+  // Engine 1.4.0: the halved evening bonus no longer pays for letting his counter age until the night window; the
+  // Sunday-morning slot, well inside the 24 hours, wins (it used to be the safe alternative to a tight 21:05).
   const r = analyzeCounter(EX3, at(24, 22, 15))
   assert.equal(r.candidates.prices.length, 15)
   assert.equal(r.recommended.price, 355)
   assert.ok(r.recommended.isSplit)
-  sameTime(r.optimal.date, at(25, 21, 5))
+  sameTime(r.optimal.date, at(25, 10, 5))
+  assert.equal(r.optimal.windowId, 'sunday_morning')
+  assert.equal(r.optimal.tier, 'on_time')
+  assert.equal(r.safeAlternative, null)
   assert.equal(option(r, 'bold').price, 338)
   assert.equal(r.recommended.next.ifHolds.price, 372)
   assert.ok(r.recommended.next.ifHolds.isFinal)
@@ -442,13 +448,11 @@ test('counter EX3 (expensive collectible): 355 € split on Sunday night, intege
   assert.equal(r.recommended.next.ifMoves.price, 368)
   assert.equal(r.recommended.totalWithFee, 373.45)
   if (IS_ROME) {
-    near(r.recommended.pAccept, 0.639, P)
-    assert.equal(r.optimal.tier, 'tight')
-    sameTime(r.safeAlternative.date, at(25, 10, 5))
+    near(r.recommended.pAccept, 0.548, P)
     assert.equal(r.negotiation.assumedExpiry.getHours(), 21)
     assert.equal(r.negotiation.assumedExpiry.getMinutes(), 10)
   } else if (IS_UTC) {
-    near(r.recommended.pAccept, 0.644, P)
+    near(r.recommended.pAccept, 0.546, P)
   }
   assertGuardRails(r)
 })
@@ -467,14 +471,14 @@ test('counter: large luxury item stays fast and uses non-multiples of 5', () => 
 
 test('counter round 2 after 51,70 €: final after a hold, split when he moves, accept when close', () => {
   const round2 = (s2) => analyzeCounter({ ...EX1, history: H(['buyer', 45, at(13, 21, 35)], ['seller', 58.5, at(13, 21, 40)], ['buyer', 51.7, at(14, 21, 5)], ['seller', s2, at(14, 21, 50)]) }, at(14, 21, 55))
+  // Engine 1.4.0: after a hold the final 54,80 € would save less than the cost of one more round → buy at his price.
   const hold = round2(58.5)
-  assert.equal(hold.recommended.price, 54.8)
-  assert.ok(hold.recommended.isFinal)
-  sameTime(hold.optimal.date, at(15, 21, 5))
-  near(hold.recommended.pAccept, 0.384, P)
-  near(hold.recommended.expectedPrice, 57.25, 0.02)
+  assert.equal(hold.kind, 'accept')
+  assert.equal(hold.recommended.id, 'accept')
+  assert.equal(hold.recommended.price, 58.5)
+  assert.ok(hold.accept.reasons.includes('no_saving'))
   const raised = round2(59)
-  assert.equal(raised.recommended.price, 54.8)
+  assert.equal(raised.recommended.price, 58.5, 'never chases a raised price')
   assert.ok(raised.warnings.some((w) => w.id === 'seller_raised'))
   assert.equal(round2(57.5).recommended.price, 54.6)
   assert.ok(round2(57.5).recommended.isSplit)
@@ -483,14 +487,14 @@ test('counter round 2 after 51,70 €: final after a hold, split when he moves, 
   sameTime(close.optimal.date, at(14, 22, 50))
   assert.equal(round2(56).recommended.price, 53.85)
   assert.equal(round2(54).kind, 'accept')
-  for (const s2 of [58.5, 57.5, 56.7, 56]) assert.ok(round2(s2).recommended.price - 51.7 <= 0.75 * 6.7 + 1e-9)
+  for (const s2 of [57.5, 56.7, 56]) assert.ok(round2(s2).recommended.price - 51.7 <= 0.75 * 6.7 + 1e-9)
 })
 
 test('counter round 2 after 48,70 € and round 3', () => {
   const round2 = (s2) => analyzeCounter({ ...EX1, history: H(['buyer', 45, at(13, 21, 35)], ['seller', 58.5, at(13, 21, 40)], ['buyer', 48.7, at(14, 21, 5)], ['seller', s2, at(14, 21, 50)]) }, at(14, 21, 55))
-  const final = round2(58.5)
-  assert.equal(final.recommended.price, 50.3)
-  assert.ok(final.recommended.isFinal)
+  const held = round2(58.5)
+  assert.equal(held.kind, 'accept', 'engine 1.4.0: a final step after a hold saves less than the round costs')
+  assert.equal(held.recommended.price, 58.5)
   assert.equal(round2(57.5).recommended.price, 50.8)
   assert.equal(round2(56).recommended.price, 51)
   assert.equal(round2(55.9).recommended.price, 51.3)
@@ -554,7 +558,14 @@ test('counter reminders: send and last call before, nudge and give-up after, not
     const m = x.at.getHours() * 60 + x.at.getMinutes()
     assert.ok(m >= 7 * 60 && m < 23 * 60, `${x.kind} at ${x.at}`)
   }
-  if (IS_ROME) assert.ok(!analyzeCounter(EX3, at(24, 22, 15)).reminders.some((x) => x.kind === 'counter_deadline'))
+  if (IS_ROME) {
+    // DST night: the 24 h expiry is 21:10 local on Sunday, so the last call lands at 20:55 (1.4.0 prefers Sunday
+    // morning for the counter itself, so the call is no longer swallowed by the optimal slot).
+    const dl = analyzeCounter(EX3, at(24, 22, 15)).reminders.find((x) => x.kind === 'counter_deadline')
+    assert.ok(dl, 'deadline call expected')
+    assert.equal(dl.at.getHours(), 20)
+    assert.equal(dl.at.getMinutes(), 55)
+  }
 })
 
 /* ───────── regressions ───────── */
@@ -650,4 +661,138 @@ test('counter: saved negotiations keep the received-time uncertainty and the "fi
 
 test('counter: Italian details (lo 0%, "appena sopra", "di probabilità")', () => {
   assert.match(counterPreview({ listPrice: '60', previousOffer: '58,50', sellerCounter: '58,60' }).text, /appena sopra la tua offerta/)
+})
+
+/* ───────── accept rule (engine 1.4.0, spec §7) ───────── */
+
+/**
+ * The three seller counters in the user's backup (31 October 2026): every one was re-countered and every one was lost.
+ * Forms as saved on the items; times as recorded (UTC instants).
+ */
+const REAL_COUNTERS = [
+  { id: 'mv6qf10m-wait9i', raw: { itemTitle: 'Tablet', category: 'electronics', listPrice: '469', previousOffer: '375', sellerCounter: '440', listingAge: 'today', sellerProfile: 'new_seller', listingSignal: 'none', offerSentAt: new Date('2026-10-13T20:35:41Z'), receivedAt: new Date('2026-10-17T17:12:37Z') }, now: new Date('2026-10-17T17:14:44Z'), reply: 407 },
+  { id: 'muvfbizr-gsecaj', raw: { itemTitle: 'Fumetto integrale', category: 'other', listPrice: '27', previousOffer: '18', sellerCounter: '24', listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', offerSentAt: new Date('2026-10-05T19:55:00Z'), receivedAt: new Date('2026-10-07T09:22:08Z') }, now: new Date('2026-10-07T09:30:00Z'), reply: 19.8 },
+  { id: 'muvcbux2-7mka1b', raw: { itemTitle: 'Fumetto', category: 'other', listPrice: '13,5', previousOffer: '8,5', sellerCounter: '12', listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', receivedAt: new Date('2026-10-07T19:25:30Z') }, now: new Date('2026-10-07T19:30:00Z'), reply: 9.8 },
+]
+const policyTargetOf = (raw) => policyDiscountFor({ listPrice: raw.listPrice, listingAge: raw.listingAge, category: raw.category, sellerProfile: raw.sellerProfile, listingSignal: raw.listingSignal }).targetPrice
+const stateOf = (over = {}) => ({ S: 50, L: 60, W: null, stance: 'moving', ...over })
+
+test('acceptRule: the four anchors, their order, the tolerance and the user\'s maximum', () => {
+  // Nothing known → no recommendation; the shape is always complete.
+  const none = acceptRule(stateOf())
+  assert.deepEqual(none, { recommended: false, reason: null, reasons: [], line: null, lines: [], tolerance: 3, maxPrice: null, policyTarget: null, expectedPrice: null, history: null })
+  assert.equal(acceptRule(stateOf({ L: 469 })).tolerance, 14.07, 'max(3 €, 3% of the list price)')
+  // Maximum price.
+  assert.equal(acceptRule(stateOf({ W: 55 })).reason, 'max_price')
+  assert.equal(acceptRule(stateOf({ W: 50 })).reason, 'max_price')
+  assert.equal(acceptRule(stateOf({ W: 49 })).recommended, false)
+  assert.match(acceptRule(stateOf({ W: 55 })).line, /^Accetta: 50 € è entro il massimo che hai indicato \(55 €\)\.$/)
+  // Expected final price: at or under it, or within the tolerance.
+  assert.equal(acceptRule(stateOf(), { expectedPrice: 50 }).line, 'Accetta: 50 € è già sotto il tuo prezzo atteso.')
+  assert.equal(acceptRule(stateOf(), { expectedPrice: 48 }).line, 'Accetta: 50 € è a un passo dal tuo prezzo atteso (48 €).')
+  assert.equal(acceptRule(stateOf(), { expectedPrice: 46.9 }).recommended, false)
+  // Policy target, same tolerance.
+  assert.equal(acceptRule(stateOf(), { policyTarget: 51 }).line, 'Accetta: 50 € è già sotto la cifra che avresti chiesto (51 €).')
+  assert.equal(acceptRule(stateOf(), { policyTarget: 47 }).line, 'Accetta: 50 € è vicino alla cifra che avresti chiesto (47 €).')
+  assert.equal(acceptRule(stateOf(), { policyTarget: 46 }).recommended, false)
+  // Several anchors: the maximum first, then the expected price, then the policy; all are listed.
+  const all = acceptRule(stateOf({ W: 55 }), { expectedPrice: 52, policyTarget: 49 })
+  assert.deepEqual(all.reasons, ['max_price', 'expected_price', 'policy_target'])
+  assert.equal(all.reason, 'max_price')
+  assert.equal(all.lines.length, 3)
+  // Over the maximum: the anchors no longer apply; only a seller who does not move, up to 5% over it.
+  assert.equal(acceptRule(stateOf({ W: 48 }), { expectedPrice: 60, policyTarget: 60 }).recommended, false)
+  assert.equal(acceptRule(stateOf({ W: 48, stance: 'hold' })).reason, 'stance')
+  assert.equal(acceptRule(stateOf({ W: 48, stance: 'firm' })).line, 'Accetta: non si muove e 50 € supera di poco il tuo massimo (48 €).')
+  assert.equal(acceptRule(stateOf({ W: 47, stance: 'hold' })).recommended, false, '50 > 1,05 × 47')
+  assert.equal(acceptRule(stateOf({ W: 48, stance: 'flexible' })).recommended, false)
+  // Junk anchors are ignored; the history line is plural-aware.
+  assert.equal(acceptRule(stateOf(), { expectedPrice: NaN, policyTarget: 'x', maxPrice: 0 }).recommended, false)
+  assert.equal(acceptRule(stateOf(), { counterStats: { recountered: 3, closed: 0 } }).history, 'Nel tuo storico: 3 controproposte rilanciate, 0 chiuse.')
+  assert.equal(acceptRule(stateOf(), { counterStats: { recountered: 1, closed: 1 } }).history, 'Nel tuo storico: 1 controproposta rilanciata, 1 chiusa.')
+  assert.equal(acceptRule(stateOf(), { counterStats: { recountered: 0 } }).history, null)
+})
+
+test('acceptRule: fires on the three real counters of the backup (440/469, 24/27, 12/13,5), which were all lost after a re-counter', () => {
+  const profile = normalizeProfile({ ...DEFAULT_PROFILE, intercept: -0.9, engine: ENGINE_VERSION, basedOn: 12 })
+  for (const c of REAL_COUNTERS) {
+    const policyTarget = policyTargetOf(c.raw)
+    const r = analyzeCounter(c.raw, c.now, { policyTarget })
+    assert.ok(r.ok, c.id)
+    assert.equal(r.kind, 'counter', `${c.id}: the plan itself still counters (as the app did: ${c.reply} €)`)
+    assert.ok(r.recommended.price < r.negotiation.sellerCounter, c.id)
+    assert.equal(r.accept.recommended, true, `${c.id}: ${JSON.stringify(r.accept)}`)
+    assert.ok(r.accept.reasons.includes('expected_price'), c.id)
+    assert.equal(r.accept.policyTarget, policyTarget)
+    assert.ok(Number.isFinite(r.accept.expectedPrice) && r.accept.expectedPrice < r.negotiation.listPrice, c.id)
+    assert.match(r.accept.line, /^Accetta: /)
+    // With the recalibration the live fit is expected to reach for this user (θ₀ ≈ −0,9) his price is strictly under the expected one.
+    const corrected = analyzeCounter(c.raw, c.now, { policyTarget, profile })
+    assert.equal(corrected.accept.line, `Accetta: ${formatEuro(corrected.negotiation.sellerCounter)} è già sotto il tuo prezzo atteso.`, c.id)
+    assert.ok(corrected.accept.expectedPrice > r.accept.expectedPrice, c.id)
+    // «Accetto a N €»: the page becomes the purchase at his price, through the engine's own accept path.
+    const accepted = analyzeCounter(c.raw, c.now, { policyTarget, acceptNow: true })
+    assert.equal(accepted.kind, 'accept')
+    assert.equal(accepted.recommended.id, 'accept')
+    assert.equal(accepted.recommended.price, r.negotiation.sellerCounter)
+    assert.equal(accepted.verdict.hero.title, `Accetta e compra a ${formatEuro(r.negotiation.sellerCounter)}`)
+    assert.ok(accepted.messages.every((m) => /compro subito|pago subito/.test(m.text)))
+    assert.equal(accepted.accept.recommended, true)
+  }
+  // The two cheap ones are also at or under the policy's own ask (24 € and 12 €).
+  const comic = analyzeCounter(REAL_COUNTERS[1].raw, REAL_COUNTERS[1].now, { policyTarget: policyTargetOf(REAL_COUNTERS[1].raw) })
+  assert.ok(comic.accept.reasons.includes('policy_target'))
+  assert.equal(comic.accept.policyTarget, 24)
+  const small = analyzeCounter(REAL_COUNTERS[2].raw, REAL_COUNTERS[2].now, { policyTarget: policyTargetOf(REAL_COUNTERS[2].raw) })
+  assert.ok(small.accept.reasons.includes('policy_target'))
+  assert.equal(small.accept.policyTarget, 12)
+  // The tablet: 440 € is 27 € over the 413 € policy ask, so only the expected price (437–438 € with the prior) anchors it.
+  const tablet = analyzeCounter(REAL_COUNTERS[0].raw, REAL_COUNTERS[0].now, { policyTarget: 413 })
+  assert.deepEqual(tablet.accept.reasons, ['expected_price'])
+  assert.ok(Math.abs(tablet.accept.expectedPrice - 438) < 6, String(tablet.accept.expectedPrice))
+})
+
+test('acceptRule: every counter result carries `accept`; the engine\'s own verdicts join its reasons; a given expected price is used as is', () => {
+  // Plan says counter, rule says nothing: recommended false, anchors reported.
+  const plain = analyzeCounter(EX1, NOW1, { expectedPrice: 52, policyTarget: 50 })
+  assert.equal(plain.kind, 'counter')
+  assert.deepEqual({ recommended: plain.accept.recommended, expectedPrice: plain.accept.expectedPrice, policyTarget: plain.accept.policyTarget }, { recommended: false, expectedPrice: 52, policyTarget: 50 })
+  // The rule fires while the plan still proposes a split: the UI shows the accept card first and keeps the plan.
+  const close = analyzeCounter(EX1, NOW1, { expectedPrice: 57 })
+  assert.equal(close.kind, 'counter')
+  assert.equal(close.accept.reason, 'expected_price')
+  assert.equal(close.recommended.id, 'balanced')
+  // Without a given expected price the engine computes one from the first offer (45 € on 60 €).
+  const computed = analyzeCounter(EX1, NOW1)
+  assert.ok(computed.accept.expectedPrice > 45 && computed.accept.expectedPrice < 60, String(computed.accept.expectedPrice))
+  assert.equal(analyzeCounter(EX1, NOW1, { expectedPrice: null }).accept.expectedPrice, null)
+  // His price at or under our offer: the engine's reason, recommended.
+  const below = analyzeCounter({ ...EX1, sellerCounter: '45' }, NOW1)
+  assert.equal(below.kind, 'accept_counter')
+  assert.equal(below.accept.recommended, true)
+  assert.ok(below.accept.reasons.includes('at_or_below_offer'))
+  // Countering saves too little: the engine's reason joins.
+  const tiny = analyzeCounter({ ...EX1, sellerCounter: '46' }, NOW1, { expectedPrice: null })
+  assert.equal(tiny.kind, 'accept')
+  assert.ok(tiny.accept.reasons.includes('no_saving'))
+  assert.equal(tiny.accept.recommended, true)
+  // Over the maximum with no room: walk away, and the rule does not contradict it.
+  const walk = analyzeCounter({ ...EX1, maxPrice: '46', previousOffer: '45', sellerCounter: '58,50' }, NOW1, { expectedPrice: 59 })
+  assert.equal(walk.kind, 'walk_away')
+  assert.equal(walk.accept.recommended, false)
+  // A seller who does not move, just over the maximum (60 € against 58 €): accept, even though the plan has no room.
+  const hold = analyzeCounter({ ...EX1, maxPrice: '58', sellerCounter: '60' }, NOW1)
+  assert.equal(hold.negotiation.sellerStance, 'hold')
+  assert.equal(hold.accept.reason, 'stance')
+  assert.equal(analyzeCounter({ ...EX1, maxPrice: '57', sellerCounter: '60' }, NOW1).accept.recommended, false, '60 > 1,05 × 57')
+  // acceptNow over the maximum still produces the purchase page (the user decided), flagged over budget.
+  const forced = analyzeCounter({ ...EX1, maxPrice: '50' }, NOW1, { acceptNow: true })
+  assert.equal(forced.kind, 'accept')
+  assert.equal(forced.recommended.overBudget, true)
+  // The task's illustrative counters: with a recalibrated engine (p ≈ 0,2 on the first offer) all three are accepted.
+  const E = (L, T, p = 0.2) => p * T + (1 - p) * L
+  for (const [L, T, S] of [[520, 416, 490], [45, 36, 40], [28, 22.4, 25]]) {
+    const r = analyzeCounter({ ...EX1, category: 'other', listPrice: String(L), previousOffer: String(T), sellerCounter: String(S) }, NOW1, { expectedPrice: E(L, T) })
+    assert.equal(r.accept.recommended, true, `${L} → ${S}`)
+  }
 })

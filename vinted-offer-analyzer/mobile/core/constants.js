@@ -51,7 +51,8 @@ export const SELLER_PROFILES = [
   { id: 'unknown', label: 'Non lo so', hint: '' },
   { id: 'new_seller', label: 'Nuovo', hint: 'Meno di 5 recensioni' },
   { id: 'expert', label: 'Esperto', hint: '5 stelle, molte vendite' },
-  { id: 'inactive', label: 'Inattivo', hint: 'Ultimo accesso settimane fa' },
+  { id: 'quiet', label: 'Poco attivo', hint: 'Ultimo accesso da 3 a 13 giorni fa' },
+  { id: 'inactive', label: 'Inattivo', hint: 'Ultimo accesso da 2 settimane o più' },
 ]
 
 /** What the listing text says about negotiation: the strongest observable signal of the seller's intent. */
@@ -62,20 +63,33 @@ export const LISTING_SIGNALS = [
   { id: 'clearing_out', label: 'Svuoto l\'armadio', hint: '"faccio spazio", "vendo tutto"', weight: 0.45, blockScore: 0 },
 ]
 
-/** Acceptance probability vs requested discount (%), before modifiers. Interpolated in logit space. */
+/**
+ * Acceptance probability vs requested discount (%), before modifiers. Interpolated in logit space.
+ * Engine 1.4.0 prior: an eBay Best-Offer-style curve (sellers accept about half of −15% asks and few beyond −30%);
+ * the residual for THIS user's sellers is learned per user by the live profile (learning.js), so the prior only has
+ * to be believable for a new user. The 1.3.0 curve (0,65 at −20%) over-predicted the first month of real offers 6×.
+ */
 export const BASE_CURVE = [
-  [0, 0.93], [5, 0.9], [10, 0.84], [15, 0.75], [20, 0.65], [25, 0.54],
-  [30, 0.43], [35, 0.32], [40, 0.21], [50, 0.1],
+  [0, 0.85], [5, 0.78], [10, 0.62], [15, 0.51], [20, 0.40], [25, 0.30],
+  [30, 0.22], [35, 0.15], [40, 0.10], [50, 0.05],
 ]
 
 /** Effect of the days a listing has been online on the seller's flexibility (multiplied by the category's ageMultiplier). */
 export const AGE_CURVE = [
-  [0, -0.4], [3, -0.2], [7, 0], [14, 0.1], [21, 0.25], [30, 0.45], [45, 0.55],
+  [0, -0.4], [3, -0.2], [7, 0], [14, 0.1], [21, 0.3], [30, 0.5], [45, 0.65],
 ]
 
-/** Sellers think in euros too: the absolute gap between list and target price. */
-export const GAP_CURVE = [
-  [3, 0.2], [8, 0.1], [25, 0], [60, -0.15], [150, -0.3], [250, -0.45],
+/**
+ * Price band of the listing (logit on the LIST price): on a cheap item the discount is worth a few euros and the seller
+ * would rather keep the price; on an expensive one there is room to negotiate. 0/8 real acceptances under 50 €.
+ */
+export const PRICE_BAND_CURVE = [
+  [6, -0.45], [12, -0.4], [20, -0.2], [30, -0.05], [40, 0], [100, 0.1], [300, 0.1],
+]
+
+/** Sellers think in euros too: a large absolute gap between list and target price weighs on its own (large gaps only). */
+export const GAP_EUR_CURVE = [
+  [60, 0], [150, -0.15], [250, -0.3],
 ]
 
 /** Daily sell-through hazard multiplier by listing age (feed boost in the first days, stale after a month). */
@@ -88,8 +102,11 @@ export const RISK_BANDS = [
   { id: 'high', label: 'Alto', tone: 'bad', description: 'Richiede tempismo perfetto' },
 ]
 
-/** Caps on the stacked modifiers so that extreme combinations stay plausible. */
-export const POSITIVE_CAP = 1.2
+/**
+ * Caps on the stacked modifiers so that extreme combinations stay plausible. The positive cap is tight (0,7 logit ≈
+ * +16 points at 50%): optimistic factors stack on every offer, pessimistic ones rarely do.
+ */
+export const POSITIVE_CAP = 0.7
 export const NEGATIVE_CAP = -1.6
 
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
@@ -101,23 +118,25 @@ const h = (hours, minutes = 0) => hours * 60 + minutes
  * `to` exclusive, minutes of the local day. `days` uses getDay(): 0 = Sunday.
  * Italian public holidays are evaluated as Sundays. `why` is a complete sentence.
  */
+// Positive weights halved in 1.4.0: 10 of the first 12 real offers went out in the prime evening windows, so the time
+// effect is not identifiable from outcomes yet; the learned time-group offsets can restore it. Negatives unchanged.
 export const TIME_WINDOWS = [
-  { id: 'sunday_night', days: [0], from: h(21), to: h(23), weight: 0.45, tier: 'S', label: 'Domenica sera', range: '21:00–23:00', why: 'È il reset settimanale: il venditore è rilassato, cerca piccole gratificazioni e ha tempo prima del lunedì.' },
-  { id: 'weeknight_late', days: [1, 2, 3, 4], from: h(21, 30), to: h(22, 30), weight: 0.35, tier: 'A', label: 'Tarda serata infrasettimanale', range: '21:30–22:30', why: 'Dopo la giornata di lavoro le difese negoziali sono al minimo e il contesto è senza fretta.' },
-  { id: 'weeknight_early', days: [1, 2, 3, 4], from: h(21), to: h(21, 30), weight: 0.25, tier: 'A', label: 'Sera infrasettimanale', range: '21:00–21:30', why: 'È il picco di traffico serale di Vinted: il venditore è sull\'app e rilassato.' },
-  { id: 'weeknight_end', days: [1, 2, 3, 4], from: h(22, 30), to: h(23), weight: 0.15, tier: 'B', label: 'Fine serata', range: '22:30–23:00', why: 'Il venditore è ancora sveglio e rilassato, ma inizia a staccare.' },
-  { id: 'friday_night', days: [5], from: h(21), to: h(23), weight: 0.2, tier: 'B', label: 'Venerdì sera', range: '21:00–23:00', why: 'L\'umore da inizio weekend è positivo, anche se l\'attenzione è un po\' dispersa.' },
-  { id: 'saturday_night', days: [6], from: h(21), to: h(23, 30), weight: 0.15, tier: 'B', label: 'Sabato sera', range: '21:00–23:30', why: 'Serata sociale: la risposta può arrivare più tardi, ma in un contesto rilassato.' },
-  { id: 'sunday_afternoon', days: [0], from: h(15), to: h(19), weight: 0.15, tier: 'B', label: 'Domenica pomeriggio', range: '15:00–19:00', why: 'La pausa della domenica pomeriggio è un momento di navigazione senza fretta.' },
-  { id: 'sunday_morning', days: [0], from: h(10), to: h(12, 30), weight: 0.15, tier: 'B', label: 'Domenica mattina', range: '10:00–12:30', why: 'La domenica mattina si naviga con calma, senza la pressione dei giorni lavorativi.' },
-  { id: 'saturday_morning', days: [6], from: h(10), to: h(12, 30), weight: 0.05, tier: 'C', label: 'Sabato mattina', range: '10:00–12:30', why: 'Il sabato mattina è tranquillo, ma spesso occupato da commissioni.' },
+  { id: 'sunday_night', days: [0], from: h(21), to: h(23), weight: 0.25, tier: 'S', label: 'Domenica sera', range: '21:00–23:00', why: 'È il reset settimanale: il venditore è rilassato, cerca piccole gratificazioni e ha tempo prima del lunedì.' },
+  { id: 'weeknight_late', days: [1, 2, 3, 4], from: h(21, 30), to: h(22, 30), weight: 0.2, tier: 'A', label: 'Tarda serata infrasettimanale', range: '21:30–22:30', why: 'Dopo la giornata di lavoro le difese negoziali sono al minimo e il contesto è senza fretta.' },
+  { id: 'weeknight_early', days: [1, 2, 3, 4], from: h(21), to: h(21, 30), weight: 0.15, tier: 'A', label: 'Sera infrasettimanale', range: '21:00–21:30', why: 'È il picco di traffico serale di Vinted: il venditore è sull\'app e rilassato.' },
+  { id: 'weeknight_end', days: [1, 2, 3, 4], from: h(22, 30), to: h(23), weight: 0.075, tier: 'B', label: 'Fine serata', range: '22:30–23:00', why: 'Il venditore è ancora sveglio e rilassato, ma inizia a staccare.' },
+  { id: 'friday_night', days: [5], from: h(21), to: h(23), weight: 0.1, tier: 'B', label: 'Venerdì sera', range: '21:00–23:00', why: 'L\'umore da inizio weekend è positivo, anche se l\'attenzione è un po\' dispersa.' },
+  { id: 'saturday_night', days: [6], from: h(21), to: h(23, 30), weight: 0.075, tier: 'B', label: 'Sabato sera', range: '21:00–23:30', why: 'Serata sociale: la risposta può arrivare più tardi, ma in un contesto rilassato.' },
+  { id: 'sunday_afternoon', days: [0], from: h(15), to: h(19), weight: 0.075, tier: 'B', label: 'Domenica pomeriggio', range: '15:00–19:00', why: 'La pausa della domenica pomeriggio è un momento di navigazione senza fretta.' },
+  { id: 'sunday_morning', days: [0], from: h(10), to: h(12, 30), weight: 0.075, tier: 'B', label: 'Domenica mattina', range: '10:00–12:30', why: 'La domenica mattina si naviga con calma, senza la pressione dei giorni lavorativi.' },
+  { id: 'saturday_morning', days: [6], from: h(10), to: h(12, 30), weight: 0.025, tier: 'C', label: 'Sabato mattina', range: '10:00–12:30', why: 'Il sabato mattina è tranquillo, ma spesso occupato da commissioni.' },
   { id: 'night', days: ALL_DAYS, from: 0, to: h(7), weight: -0.2, tier: 'D', label: 'Notte', range: '00:00–07:00', why: 'Il venditore dorme: leggerà l\'offerta la mattina, di fretta e con poca voglia di trattare.' },
   { id: 'commute', days: WEEKDAYS, from: h(7), to: h(9), weight: -0.15, tier: 'C', label: 'Prima mattina lavorativa', range: '07:00–09:00', why: 'Tra uscita di casa e spostamenti non c\'è spazio per riflettere su un\'offerta.' },
   { id: 'work_morning', days: WEEKDAYS, from: h(9), to: h(12), weight: -0.25, tier: 'D', label: 'Mattina lavorativa', range: '09:00–12:00', why: 'In orario di lavoro manca il tempo per riflettere e le risposte sono secche.' },
   { id: 'pre_lunch', days: WEEKDAYS, from: h(12), to: h(12, 30), weight: -0.25, tier: 'D', label: 'Tarda mattinata', range: '12:00–12:30', why: 'Prima di pranzo la fame e la fretta rendono il venditore poco paziente.' },
   { id: 'lunch', days: WEEKDAYS, from: h(12, 30), to: h(14), weight: -0.35, tier: 'D', label: 'Pausa pranzo infrasettimanale', range: '12:30–14:00', why: 'La pausa pranzo è fretta e stress: il rischio di una reazione irritata è il più alto della giornata.' },
   { id: 'work_afternoon', days: WEEKDAYS, from: h(14), to: h(18), weight: -0.1, tier: 'C', label: 'Pomeriggio lavorativo', range: '14:00–18:00', why: 'Nel pomeriggio lavorativo l\'attenzione è frammentata.' },
-  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.05, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'Dopo cena il telefono torna in mano, anche se l\'attenzione è ancora dispersa.' },
+  { id: 'after_dinner', days: ALL_DAYS, from: h(19, 30), to: h(21), weight: 0.025, tier: 'C', label: 'Ora di cena', range: '19:30–21:00', why: 'Dopo cena il telefono torna in mano, anche se l\'attenzione è ancora dispersa.' },
 ]
 
 /** Italian public holidays are scored as Sundays; these labels replace the Sunday-specific prose on a weekday holiday. */
@@ -146,9 +165,15 @@ export const MONTH_WINDOWS = {
   start: { id: 'month_start', label: 'Inizio mese', why: 'A inizio mese il venditore si sente meno pressato a vendere.' },
   mid: { id: 'month_mid', label: 'Metà mese', why: 'A metà mese non c\'è nessun effetto economico marcato.' },
 }
-export const MONTH_END_WEIGHT = 0.2
+export const MONTH_END_WEIGHT = 0.1
 export const MONTH_START_WEIGHT = -0.15
 
+/**
+ * Chance the seller even opens the offer before it lapses, by activity: last seen within 3 days ("active", the default
+ * for unknown sellers too), 3–13 days ("quiet"), 14 days or more ("inactive").
+ */
+export const ACTIVE_READ_PROBABILITY = 0.9
+export const QUIET_READ_PROBABILITY = 0.75
 export const INACTIVE_READ_PROBABILITY = 0.5
 export const INACTIVE_TIME_DAMPING = 0.3
 
@@ -164,8 +189,12 @@ export const QUICK_ALTERNATIVE_MIN_HOURS = 36
 export const SEND_NOW_TOLERANCE = 0.03
 export const TIMING_MATTERS_SPREAD = 0.03
 
-export const SUGGESTED_PRICE_TARGET = 0.55
-export const SUGGESTED_PRICE_TARGET_HIGH_BLOCK = 0.6
+/**
+ * The suggested price aims at a share of the BEST probability this listing can reach (the top of the price grid), never
+ * below the floor: a fixed 55% target was unreachable once the engine stopped promising 65% on every −20% offer.
+ */
+export const SUGGESTED_PRICE_SHARE_OF_MAX = 0.75
+export const SUGGESTED_PRICE_FLOOR = 0.25
 export const UNCERTAINTY_PER_UNKNOWN = 0.04
 export const UNCERTAINTY_MAX = 0.08
 export const NEGLIGIBLE_DISCOUNT_PCT = 5
@@ -227,7 +256,7 @@ export const COUNTER = {
   SHRINK_MAX: 0.75,
   FINAL_STEP: 0.5,
   MAX_BUYER_COUNTERS: 3, // E (Backus: 1,66 offers per thread)
-  CLOSE_GAP_EUR: 2, // H: fixed cost of bargaining
+  CLOSE_GAP_EUR: 3, // H: fixed cost of bargaining
   CLOSE_GAP_PCT: 5,
   MIN_SAVING_EUR: 1, // H
   MIN_SAVING_EUR_SMALL: 0.5,
@@ -278,8 +307,11 @@ export const SELLER_STANCES = {
 
 /* ───────── monthly learning loop (calibration from the user's own outcomes) ───────── */
 
-/** Stamped on every decision snapshot, so the monthly report knows which engine produced each estimate. */
-export const ENGINE_VERSION = '1.3.0'
+/**
+ * Stamped on every decision snapshot and on the learned profile. A profile fitted against another engine version
+ * drops its first-offer corrections (profile.js normalizeProfile): the live fit re-estimates them on the new prior.
+ */
+export const ENGINE_VERSION = '1.4.0'
 
 /**
  * The 16 time windows pooled into 5 groups: with a handful of offers a month a single window never collects enough
@@ -312,12 +344,29 @@ export const LEARNING_DISCOUNT_KNOTS = [
  */
 export const LEARNING = {
   HALF_LIFE_MONTHS: 6,
-  PRIOR_SD: { intercept: 0.5, slope: 0.25, time: 0.35, disc: 0.35, counter: 0.5 },
-  /** Weighted outcomes a parameter needs before it may move at all. */
+  /**
+   * Prior sd of each correction (logit). The intercept prior is wide (1,0): engines err by optimism and the live fit
+   * must be able to reach −1 within a dozen outcomes; dslope is the live correction per 10 points of discount.
+   */
+  PRIOR_SD: { intercept: 1.0, dslope: 0.35, slope: 0.25, time: 0.35, disc: 0.35, counter: 0.5 },
+  /** Weighted outcomes a parameter needs before it may move at all (monthly path). */
   MIN_EFFECTIVE: { intercept: 8, slope: 40, time: 6, disc: 6, counter: 6, discount: 10, share: 8, latency: 8 },
-  /** Largest change applied in one month (latency: multiplicative factor). */
+  /** Largest change applied in one month (latency: multiplicative factor). Not applied to the live intercept/dslope. */
   MAX_STEP: { intercept: 0.3, slope: 0.15, time: 0.2, disc: 0.2, counter: 0.3, discountPct: 1, share: 0.1, latency: 1.5 },
-  BOUNDS: { intercept: [-1, 1], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], share: [0.7, 1.3], latency: [0.5, 12] },
+  /** Asymmetric intercept bounds: engines err by optimism, a user's sellers can be much tougher than the prior. */
+  BOUNDS: { intercept: [-3, 1.5], dslope: [-1, 0.4], slope: [0.7, 1.3], time: [-0.6, 0.6], disc: [-0.6, 0.6], counter: [-1, 1], discountPct: [10, 30], share: [0.7, 1.3], latency: [0.5, 12] },
+  /**
+   * Live recalibration (learning.js liveProfile): the intercept and the discount slope are re-fitted on every change
+   * of the watchlist and applied at the posterior mode, with these gates instead of a monthly step.
+   *   MIN_EFFECTIVE   weighted outcomes before the intercept may move; GATE_Z: |θ̂| must exceed this many posterior sd
+   *   SLOPE_*         dslope needs 15 weighted outcomes spread over at least two discount arms (≥ 3 each) and a LOO gain
+   *   DSLOPE_MAX      the corrected curve must keep falling with the discount (80% of the engine's 0,088 logit/point
+   *                   margin, minus the part the knots may already take): in practice +0,4 per 10 points
+   *   HYSTERESIS      a new value replaces the applied one only when it differs by this much (no flicker on every tap)
+   *   FREEZE_DAYS     after a rollback (or «Annulla») the live values stay at the checkpoint for this long; the checkpoint
+   *                   itself is the live profile applied at least this many days ago
+   */
+  LIVE: { MIN_EFFECTIVE: 6, GATE_Z: 1.0, SLOPE_MIN_EFFECTIVE: 15, SLOPE_MIN_PER_ARM: 3, DSLOPE_MAX: 0.4, HYSTERESIS: 0.1, FREEZE_DAYS: 30 },
   /** No move while the current value is within this many posterior sd of the target (noise). */
   EVIDENCE_GATE_SD: 0.5,
   /** The slope and the group offsets join only when leave-one-out says they predict better (nats, and ≥ 1 se). */

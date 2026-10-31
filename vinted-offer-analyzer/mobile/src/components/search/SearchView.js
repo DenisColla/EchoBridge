@@ -325,7 +325,7 @@ export function SearchView({ search, reference, onClose, onOpenLab }) {
           {run.market && run.market.n >= 2 ? (
             <Card muted>
               <SectionLabel>Mercato di questo articolo</SectionLabel>
-              <Body>Mediana {formatEuro(run.market.medianPrice)} · metà degli annunci tra {formatEuro(run.market.p25Price)} e {formatEuro(run.market.p75Price)} ({run.market.n} confrontati).</Body>
+              <Body>Prezzo tipico {formatEuro(run.market.medianPrice)} · metà degli annunci tra {formatEuro(run.market.p25Price)} e {formatEuro(run.market.p75Price)} ({run.market.n} confrontati).</Body>
               {Number.isFinite(run.market.gapPct) ? <Body small muted>L'annuncio di partenza è {run.market.gapPct >= 0 ? `${run.market.gapPct}% sopra` : `${-run.market.gapPct}% sotto`} la mediana: {run.market.gapPct > 10 ? 'puoi trattare con decisione.' : run.market.gapPct < -10 ? 'è già un affare, non tirare troppo.' : 'è nella norma.'}</Body> : null}
               <Body small muted>Questi numeri entrano nel calcolo dell'offerta in Calcola per questo annuncio.</Body>
             </Card>

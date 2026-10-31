@@ -1,129 +1,147 @@
-import { useState } from 'react'
-import { Linking, StyleSheet, Text, View } from 'react-native'
-import { capitalize, formatEuro, formatLongDate, formatRelativeDay, formatTime, toPercent } from '../../core/index.js'
-import { copyText } from '../services/clipboard.js'
-import { STATUSES, statusMeta } from '../services/storage.js'
-import { space, useTheme } from '../theme.js'
-import { Badge, Body, Button, ButtonRow, Card, Chip, Note, Row, SectionLabel, Title } from './ui.js'
-import { negotiationLine } from './CounterView.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { StyleSheet, View } from 'react-native'
+import { inSegment, matchesQuery, sectionsFor, segmentCounts, segmentLabel, segmentOf } from '../services/segments.js'
+import { radius, space, useTheme } from '../theme.js'
+import { Body, Button, Card, InlineAction, SectionLabel, Title } from './ui.js'
+import { ListToolbar } from './list/ListToolbar.js'
+import { OfferRow } from './list/OfferRow.js'
 
-const hostOf = (link) => {
-  try {
-    return new URL(link).hostname.replace(/^www\./, '') || link
-  } catch {
-    return link
-  }
+const EMPTY = {
+  open: { title: 'Nessuna offerta in corso', body: 'Tutte le tue offerte hanno un esito: le trovi in Accettate, Rifiutate o Tutte.' },
+  won: { title: 'Ancora nessuna accettata', body: "Quando un venditore accetta, segna l'esito dalla scheda dell'offerta." },
+  lost: { title: 'Nessuna rifiutata', body: 'Qui finiscono rifiuti, mancate risposte, articoli venduti ad altri e offerte lasciate perdere.' },
+  all: { title: 'Nessuna offerta', body: 'Le offerte salvate compaiono qui.' },
 }
 
-function ItemCard({ item, highlighted, onStatus, onRemove, onCalendar, onCounter, onCounterSent, now }) {
+const UNDO_MS = 8000
+
+/**
+ * The Lista: toolbar (search, segments, honesty line), the rows grouped as the segment asks, the empty states.
+ * `segment` and `query` live here and reset on every mount. `actions` is the whole useWatchlist object.
+ * `onGoInfo` and `scrollRef` are optional extras (Info tab for «Perché →», page ScrollView for scrolling to a row).
+ */
+export function WatchlistView({ items, ready, highlightId, now, stats, actions, onStatus, onRemove, onCalendar, onCounter, onCounterSent, onGoCalcola, onGoInfo, onReanalyze, onToast, scrollRef }) {
   const t = useTheme()
-  const [copied, setCopied] = useState(false)
-  const [showOutcome, setShowOutcome] = useState(false)
-  const sendAt = new Date(item.sendAt)
-  const meta = statusMeta(item.status)
-  const past = sendAt.getTime() < now.getTime()
-  const plan = item.counterPlan
-  const history = item.negotiation || []
-  const lastEntry = history[history.length - 1]
-  const hasCounter = history.some((e) => e.by === 'seller')
-  const pendingCounter = item.status === 'countered' && plan && plan.price != null && !plan.sentAt
-  const awaitingReply = item.status === 'sent' && lastEntry && lastEntry.by === 'buyer'
-  const estimate = pendingCounter ? plan.pAccept : awaitingReply && hasCounter ? (lastEntry.pAccept ?? null) : hasCounter ? null : item.probability
+  const [segment, setSegment] = useState('open')
+  const [query, setQuery] = useState('')
+  const [undo, setUndo] = useState(null) // { id }: «Segnata come inviata · Annulla» for a few seconds
+  const [outcomeFor, setOutcomeFor] = useState(null) // row whose outcome panel opens (a «com'è andata?» tap)
+  const undoTimer = useRef(null)
+  // Latest props for the deferred highlight handler: the effect must not re-run on every parent render.
+  const itemsRef = useRef(items)
+  const toastRef = useRef(onToast)
+  useEffect(() => { itemsRef.current = items }, [items])
+  useEffect(() => { toastRef.current = onToast }, [onToast])
+  useEffect(() => () => { if (undoTimer.current) clearTimeout(undoTimer.current) }, [])
 
-  const copyMessage = async () => {
-    const ok = await copyText(item.message)
-    setCopied(ok)
-    if (ok) setTimeout(() => setCopied(false), 2000)
+  // A notification tap lands on its row: the segment that holds it, no query, outcome panel open for a sent offer.
+  useEffect(() => {
+    if (!ready || !highlightId) return undefined
+    const timer = setTimeout(() => {
+      const item = itemsRef.current.find((it) => it.id === highlightId)
+      if (!item) {
+        if (toastRef.current) toastRef.current('Offerta non più in lista')
+        return
+      }
+      setQuery('')
+      setSegment(segmentOf(item))
+      setOutcomeFor(item.status === 'sent' ? item.id : null)
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [highlightId, ready])
+
+  const changeSegment = (id) => {
+    setSegment(id)
+    setOutcomeFor(null) // a hand-picked segment ends the notification's "open the outcome panel" request
   }
 
-  return (
-    <Card style={highlighted ? { borderColor: t.accent, borderWidth: 2 } : null}>
-      <Row style={{ justifyContent: 'space-between' }}>
-        <Badge tone={meta.tone}>{meta.label}</Badge>
-        {estimate != null ? <Text style={{ color: t.ink3, fontSize: 12 }}>{toPercent(estimate)}% stimato</Text> : null}
-      </Row>
-      <Title>{item.title || 'Articolo senza titolo'}</Title>
-      <Body muted small>
-        Listino {formatEuro(item.listPrice)} · prima offerta {formatEuro(item.targetPrice)} · sconto {Math.round(item.discountPct)}%
-      </Body>
-      {hasCounter ? <Body small>Trattativa: {negotiationLine(item)}</Body> : null}
-      {pendingCounter ? (
-        <Body>
-          <Text style={{ fontWeight: '700' }}>Rispondi con {formatEuro(plan.price)}: </Text>
-          {capitalize(formatLongDate(sendAt, now))} alle {formatTime(sendAt)} ({formatRelativeDay(sendAt, now)}){plan.windowLabel ? ` · ${plan.windowLabel.toLowerCase()}` : ''}
-        </Body>
-      ) : item.status === 'countered' && plan && plan.accept ? (
-        <Note tone="good">Conviene comprare alla sua cifra: premi «Acquista» e poi segna l'esito «Accettata».</Note>
-      ) : awaitingReply && hasCounter ? (
-        <Body>Hai proposto {formatEuro(lastEntry.price)}{lastEntry.isFinal ? ' (ultima offerta)' : ''}: aspetta la sua risposta.</Body>
-      ) : item.status === 'planned' ? (
-        <Body>
-          <Text style={{ fontWeight: '700' }}>{!past ? 'Invia ' : 'Momento consigliato: '}</Text>
-          {capitalize(formatLongDate(sendAt, now))} alle {formatTime(sendAt)} ({formatRelativeDay(sendAt, now)}){item.windowLabel ? ` · ${item.windowLabel.toLowerCase()}` : ''}
-        </Body>
-      ) : null}
-      {item.status === 'planned' && past && <Note tone="warn">La finestra consigliata è passata: ricalcola l'offerta o segna l'esito.</Note>}
-      {pendingCounter && past && <Note tone="warn">Il momento consigliato è passato: tocca «Ricalcola» per un nuovo piano.</Note>}
-      {item.notificationId || (plan && Object.keys(plan.reminderIds || {}).length) ? <Body muted small>Promemoria impostato.</Body> : item.status === 'planned' ? <Body muted small>Nessun promemoria attivo (troppo vicino o permesso negato).</Body> : null}
-      {item.decision && item.decision.exploration ? <Body muted small>Variante di test: {item.decision.exploration.label}.</Body> : null}
-      {item.link ? <Body muted small numberOfLines={1}>{hostOf(item.link)}</Body> : null}
-      <ButtonRow>
-        {item.link ? <Button label="Apri annuncio" onPress={() => Linking.openURL(item.link).catch(() => {})} /> : null}
-        <Button label={copied ? 'Copiato!' : 'Copia messaggio'} variant={item.link ? 'secondary' : 'primary'} onPress={copyMessage} />
-      </ButtonRow>
-      {pendingCounter && (
-        <ButtonRow>
-          <Button label="Ho inviato la nuova offerta" small onPress={() => onCounterSent(item.id)} />
-          <Button label="Ricalcola" variant="secondary" small onPress={() => onCounter(item)} />
-        </ButtonRow>
-      )}
-      {(awaitingReply || (item.status === 'planned' && past)) && (
-        <Button label={hasCounter ? 'Ha risposto con un\'altra cifra' : 'Ha fatto una controproposta'} variant="secondary" small onPress={() => onCounter(item)} />
-      )}
-      <View style={styles.actions}>
-        {(item.status === 'planned' || pendingCounter) && !past ? <Button label={item.calendarOpenedAt ? 'Calendario aperto' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} /> : null}
-        <Button label={showOutcome ? 'Chiudi esito' : 'Segna esito'} variant="ghost" small onPress={() => setShowOutcome((v) => !v)} />
-        <Button label="Elimina" variant="ghostDanger" small onPress={() => onRemove(item.id)} />
-      </View>
-      {showOutcome && (
-        <View style={{ gap: space.sm }}>
-          <SectionLabel>Com'è andata?</SectionLabel>
-          <Row>
-            {STATUSES.map((s) => (
-              <Chip key={s.id} compact label={s.label} active={item.status === s.id} onPress={() => { setShowOutcome(false); if (s.id === 'countered') onCounter(item); else onStatus(item.id, s.id) }} />
-            ))}
-          </Row>
-          <Body muted small>«Controproposta» apre il calcolo della tua risposta. Gli esiti restano sul telefono e ogni mese ritarano il motore: segna anche «Venduto ad altri» o «Lasciato perdere».</Body>
-        </View>
-      )}
-    </Card>
-  )
-}
+  const counts = useMemo(() => segmentCounts(items), [items])
 
-export function WatchlistView({ items, ready, highlightId, onStatus, onRemove, onCalendar, onCounter, onCounterSent, now }) {
+  const sections = useMemo(() => sectionsFor(items.filter((it) => matchesQuery(it, query)), segment, now), [items, query, segment, now])
+  const shown = sections.reduce((n, s) => n + s.items.length, 0)
+  const elsewhere = useMemo(() => {
+    if (shown > 0 || !query.trim() || segment === 'all') return null
+    const count = items.filter((it) => !inSegment(it, segment) && matchesQuery(it, query)).length
+    return count ? { count, segmentLabel: segmentLabel(segment) } : null
+  }, [items, query, segment, shown])
+
+  const noteSent = (item) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    setUndo({ id: item.id })
+    undoTimer.current = setTimeout(() => setUndo(null), UNDO_MS)
+    if (onToast) onToast('Segnata come inviata')
+  }
+  const undoSent = async () => {
+    const id = undo && undo.id
+    setUndo(null)
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    if (!id) return
+    await onStatus(id, 'planned')
+    if (onToast) onToast('Rimessa tra quelle da inviare')
+  }
+
   if (!ready) return <Card><Body muted>Carico la lista…</Body></Card>
   if (items.length === 0) {
     return (
-      <Card muted>
-        <SectionLabel>Lista da comprare</SectionLabel>
-        <Title>Ancora vuota</Title>
-        <Body muted>Calcola un'offerta e premi "Salva e ricordamelo": qui troverai articolo, link, momento consigliato e messaggio pronto, con il promemoria impostato.</Body>
+      <Card>
+        <Title>Nessuna offerta salvata</Title>
+        <Body muted>Analizza un annuncio in Calcola e tocca «Salva e ricordamelo»: la troverai qui con orario e messaggio pronti.</Body>
+        {onGoCalcola ? <Button label="Vai a Calcola" onPress={onGoCalcola} /> : null}
       </Card>
     )
   }
-  const sorted = [...items].sort((a, b) => {
-    const rank = (it) => (it.status === 'planned' || (it.status === 'countered' && it.counterPlan && it.counterPlan.price != null && !it.counterPlan.sentAt) ? 0 : 1)
-    return rank(a) - rank(b) || new Date(a.sendAt) - new Date(b.sendAt)
-  })
+
+  const empty = EMPTY[segment] || EMPTY.all
   return (
     <View style={{ gap: space.lg }}>
-      {sorted.map((item) => (
-        <ItemCard key={item.id} item={item} highlighted={item.id === highlightId} onStatus={onStatus} onRemove={onRemove} onCalendar={onCalendar} onCounter={onCounter} onCounterSent={onCounterSent} now={now} />
-      ))}
+      <ListToolbar query={query} onQuery={setQuery} segment={segment} onSegment={changeSegment} counts={counts} stats={stats} onGoInfo={onGoInfo} elsewhere={elsewhere} />
+      {undo ? (
+        <View style={[styles.undo, { backgroundColor: t.cardMuted }]}>
+          <Body small style={styles.undoText}>Segnata come inviata.</Body>
+          <InlineAction label="Annulla" onPress={undoSent} />
+        </View>
+      ) : null}
+      {shown === 0 ? (
+        query.trim() ? (
+          <Card muted>
+            <Title>Nessun risultato per «{query.trim()}»</Title>
+            <Button label="Cancella la ricerca" variant="ghost" small onPress={() => setQuery('')} />
+          </Card>
+        ) : (
+          <Card muted>
+            <Title>{empty.title}</Title>
+            <Body muted>{empty.body}</Body>
+          </Card>
+        )
+      ) : (
+        sections.map((section) => [
+          section.label ? <SectionLabel key={`label-${section.id}`}>{section.label}</SectionLabel> : null,
+          ...section.items.map((item) => (
+            <OfferRow
+              key={item.id}
+              item={item}
+              now={now}
+              highlighted={item.id === highlightId}
+              openOutcome={item.id === outcomeFor}
+              actions={actions}
+              onStatus={onStatus}
+              onRemove={onRemove}
+              onCalendar={onCalendar}
+              onCounter={onCounter}
+              onCounterSent={onCounterSent}
+              onReanalyze={onReanalyze}
+              onToast={onToast}
+              onSent={noteSent}
+              scrollRef={scrollRef}
+            />
+          )),
+        ])
+      )}
     </View>
   )
 }
 
 const styles = StyleSheet.create({
-  actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: space.xs },
+  undo: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: space.sm },
+  undoText: { flexShrink: 1, minWidth: 0 },
 })

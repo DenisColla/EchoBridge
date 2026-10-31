@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   PSYCH_SCHEMA, VERIFY_SCHEMA, blindOrder, engineFactsFor, labRecheck, labWorkbook, pairsToRecheck, parseVintedCatalog, psychPrompt, readModelJson,
   schemaProblems, scorePsychology, scoreVerification, verifyPrompt,
-} from '../src/core/index.js'
+ formatEuro } from '../src/core/index.js'
 
 const fixture = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', name), 'utf8')
 const { items } = parseVintedCatalog(fixture('vinted-catalog-2026-10.html'))
@@ -23,11 +23,13 @@ test('lab: the verification prompt carries both listings and asks for the schema
 })
 
 test('lab: psychology prompt is grounded on the engine numbers of the candidate', () => {
-  const facts = engineFactsFor(items[0], {}, new Date('2026-10-11T10:00:00Z'))
-  assert.ok(facts && facts.target > 0 && facts.target < items[0].price)
+  // 1.4.0: an 8 € listing is a «buy, do not offer» case (gap under 2 €), so the grounded prompt is tested on a 28 € one.
+  const candidate = { ...items[0], price: 28, total: 30.1 }
+  const facts = engineFactsFor(candidate, {}, new Date('2026-10-11T10:00:00Z'))
+  assert.ok(facts && facts.target > 0 && facts.target < candidate.price)
   assert.ok(facts.probability > 0 && facts.probability < 100)
-  const p = psychPrompt({ candidate: items[0], facts, label: 'same' })
-  assert.match(p.text, /offerta consigliata: 6,50 €/)
+  const p = psychPrompt({ candidate, facts, label: 'same' })
+  assert.match(p.text, new RegExp(`offerta consigliata: ${formatEuro(facts.target).replace('.', '\\.')}`))
   assert.match(p.text, new RegExp(`probabilità stimata che la accetti: ${facts.probability}%`))
   assert.match(p.text, /commissione acquirente 5% \+ 0,70 €/)
   assert.match(p.system, /non inventare numeri/)

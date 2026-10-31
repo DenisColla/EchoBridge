@@ -3,10 +3,12 @@ import { AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, Scrol
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
-  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationBudget, explorationKey, explorationPlan, failureRiskFor, formatEuro, monthKeyOf,
-  nextGoalFor, optimizeOffer, parseVintedItemHtml,
+  analyzeOffer, buildFormFromExtraction, defaultDiscountFor, explorationBudget, explorationKey, explorationPlan, failureRiskFor, formatEuro, leversFor, monthKeyOf,
+  nextGoalFor, optimizeOffer, parseVintedItemHtml, quickDiscountsFor,
 } from './core/index.js'
-import { EMPTY_FORM, OfferForm } from './src/components/OfferForm.js'
+import { EMPTY_FORM } from './src/components/formDefaults.js'
+import { LinkEntry } from './src/components/LinkEntry.js'
+import { DataForm, dataSummaryOf } from './src/components/DataForm.js'
 import { ResultView } from './src/components/ResultView.js'
 import { WatchlistView } from './src/components/WatchlistView.js'
 import { InfoView } from './src/components/InfoView.js'
@@ -18,11 +20,13 @@ import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
 import { useSearch } from './src/hooks/useSearch.js'
+import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
+import { badgeCountOf, counterStatsOf } from './src/services/segments.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
-import { Body, Button, Card } from './src/components/ui.js'
+import { Collapsible } from './src/components/ui.js'
 
 const TABS = [
   { id: 'calcola', label: 'Calcola' },
@@ -30,16 +34,13 @@ const TABS = [
   { id: 'info', label: 'Info' },
 ]
 
-const EXAMPLE_FORM = { ...EMPTY_FORM, itemTitle: 'Nike Air Force 1 bianche, 42', category: 'sneakers', listPrice: '60', targetPrice: '45', listingAge: 'weeks_1_2' }
-
-
 const EXTRACT_ERRORS = {
   not_a_vinted_link: 'Serve un link a un articolo Vinted, del tipo vinted.it/items/… .',
   timeout: 'Vinted non ha risposto in tempo. Controlla la connessione e riprova.',
   network: 'Nessuna connessione: non riesco a scaricare l\'annuncio. Puoi compilare i dati a mano.',
   challenge: 'Vinted ha chiesto una verifica anti-robot che non si è completata. Riprova tra poco o compila i dati a mano: il link resta salvato per il promemoria.',
-  cancelled: 'Verifica annullata. Puoi riprovare con «Estrai e calcola» o compilare i dati a mano.',
-  crashed: 'Il browser interno si è chiuso all\'improvviso. Riprova con «Estrai e calcola» o compila i dati a mano.',
+  cancelled: 'Verifica annullata. Puoi riprovare con «Leggi e calcola» o compilare i dati a mano.',
+  crashed: 'Il browser interno si è chiuso all\'improvviso. Riprova con «Leggi e calcola» o compila i dati a mano.',
   cferror: 'Vinted ha risposto con una pagina di errore di Cloudflare (blocco o sito non raggiungibile). Riprova tra poco, magari passando da Wi-Fi a dati mobili, oppure compila i dati a mano.',
   empty: 'Ho aperto la pagina ma non contiene i dati dell\'annuncio: forse è stato rimosso o nascosto. Compila i dati a mano.',
 }
@@ -54,6 +55,16 @@ const extractErrorFor = (page) => {
   return EXTRACT_ERRORS[page.reason] || EXTRACT_ERRORS.network
 }
 
+/** The form of a saved item, for «Ricalcola» from the list: the one it was analysed with, else rebuilt from its fields. */
+const formOfItem = (item) => item.form || {
+  ...EMPTY_FORM,
+  itemTitle: item.title || '',
+  category: item.category || '',
+  listPrice: String(item.listPrice ?? '').replace('.', ','),
+  targetPrice: String(item.targetPrice ?? '').replace('.', ','),
+  link: item.link || '',
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -66,7 +77,7 @@ function Main() {
   const t = useTheme()
   const insets = useSafeAreaInsets()
   const [tab, setTab] = useState('calcola')
-  const [form, setForm] = useState(EXAMPLE_FORM)
+  const [form, setForm] = useState(EMPTY_FORM)
   const [errors, setErrors] = useState({})
   const [result, setResult] = useState(null)
   const [saveState, setSaveState] = useState(null)
@@ -80,10 +91,12 @@ function Main() {
   /** null | 'browser' (in-app browser passing Vinted's check) | 'verify' (the check is shown to the user) */
   const [extractPhase, setExtractPhase] = useState(null)
   const pageLoaderRef = useRef(null)
-  /** Set synchronously: a second tap (link button, banner, «Incolla») never starts a parallel extraction. */
+  /** Set synchronously: a second tap (link button, clipboard card, «Incolla») never starts a parallel extraction. */
   const extractingRef = useRef(false)
   const [extraction, setExtraction] = useState(null)
   const [clipboardLink, setClipboardLink] = useState(null)
+  /** The «Dati dell'offerta» fold: closed by default, opened by «Modifica», by validation errors or by the manual path. */
+  const [dataOpen, setDataOpen] = useState(false)
   const [counterContext, setCounterContext] = useState(null)
   /** «Laboratorio AI» open in place of the tab content. */
   const [labOpen, setLabOpen] = useState(false)
@@ -165,6 +178,30 @@ function Main() {
   const marketInfoFor = (f) => search.marketFor(normalizeVintedLink(f && f.link) || (f && f.link))
   const marketInfo = useMemo(() => marketInfoFor(form), [form.link, search.run, search.store]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Measures the form at tap time (its offset moves when sections above fold or unfold), with the last layout as fallback. */
+  const scrollToForm = () => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const go = (y) => scroller.scrollTo({ y: Math.max(0, y - 8), animated: true })
+    const node = formViewRef.current
+    const inner = scroller.getInnerViewRef ? scroller.getInnerViewRef() : (scroller.getInnerViewNode ? scroller.getInnerViewNode() : null)
+    if (node && inner && typeof node.measureLayout === 'function') {
+      try {
+        node.measureLayout(inner, (x, y) => go(y), () => go(formYRef.current))
+        return
+      } catch {
+        // fall through to the last known layout
+      }
+    }
+    go(formYRef.current)
+  }
+
+  /** Opens the «Dati dell'offerta» fold and brings it on screen (the fold needs a render before it can be measured). */
+  const openDataForm = () => {
+    setDataOpen(true)
+    setTimeout(scrollToForm, 80)
+  }
+
   /**
    * `explore` only for fresh analyses (Calcola, link): a pinned moment or an applied option is the user's own choice.
    * About 1 offer in 5 gets its flagged test variation, the same one every time the offer is re-analysed this month.
@@ -186,12 +223,14 @@ function Main() {
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
+      // The fields to fix are inside the fold: open it and go there.
+      openDataForm()
       return null
     }
     setErrors({})
     setResult(outcome)
     setSaveState(null)
-    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability))
+    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability, outcome.maxProbability))
     setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
     return outcome
   }
@@ -210,8 +249,15 @@ function Main() {
     runAnalysis(form, null)
   }
 
-  /** Re-runs the analysis keeping the moment chosen through the optimizer (used after edits). */
+  /** Re-runs the analysis keeping the moment chosen through the optimizer or «Scegli» (used after edits). */
   const recalcKeepingPin = () => runAnalysis(form, pinnedSendAt)
+
+  /** «Scegli» on another moment: the analysis re-runs pinned to it (the hero then says «Orario scelto da te»). */
+  const pickMoment = (date) => {
+    setPlan(null)
+    setPinnedSendAt(date)
+    runAnalysis(form, date)
+  }
 
   const optimize = () => {
     setOptimizing(true)
@@ -235,7 +281,7 @@ function Main() {
     if (outcome) showToast(`Applicato: ${option.label.toLowerCase()} → ${Math.round(outcome.probability * 100)}%`)
   }
 
-  /** «Usa X come offerta» from the expected-price curve: same as typing the price and recalculating. */
+  /** «Usa N €» from the hero: same as typing the price and recalculating. */
   const applyPrice = (price) => {
     const nextForm = { ...form, targetPrice: String(price).replace('.', ',') }
     setForm(nextForm)
@@ -266,6 +312,7 @@ function Main() {
     }
   }
 
+  /** «Nuova analisi» / «Svuota»: back to the empty screen with the fold closed. */
   const reset = () => {
     setForm(EMPTY_FORM)
     setErrors({})
@@ -274,32 +321,15 @@ function Main() {
     setPlan(null)
     setPinnedSendAt(null)
     setExtraction(null)
+    setDataOpen(false)
   }
 
   useEffect(() => { formRef.current = form }, [form])
 
-  /** Measures the form at tap time (its offset moves when sections above fold or unfold), with the last layout as fallback. */
-  const scrollToForm = () => {
-    const scroller = scrollRef.current
-    if (!scroller) return
-    const go = (y) => scroller.scrollTo({ y: Math.max(0, y - 8), animated: true })
-    const node = formViewRef.current
-    const inner = scroller.getInnerViewRef ? scroller.getInnerViewRef() : (scroller.getInnerViewNode ? scroller.getInnerViewNode() : null)
-    if (node && inner && typeof node.measureLayout === 'function') {
-      try {
-        node.measureLayout(inner, (x, y) => go(y), () => go(formYRef.current))
-        return
-      } catch {
-        // fall through to the last known layout
-      }
-    }
-    go(formYRef.current)
-  }
-
   /**
    * The one-tap path: download the public listing page, read title, price, upload age and seller activity,
-   * map them onto the form (target = list price −20%) and run the analysis. Every failure ends in a message,
-   * never in a silent no-op, and the link stays in the form so the manual path still works.
+   * map them onto the form (target from the price-band policy, or list price −20%) and run the analysis. Every failure
+   * ends in a message, never in a silent no-op, and the link stays in the form so the manual path still works.
    */
   const extractFromLink = async (rawLink) => {
     if (extractingRef.current) return
@@ -340,8 +370,13 @@ function Main() {
         setExtraction({ ok: false, message: EXTRACT_ERRORS.empty })
         return
       }
-      // Default ask: −20% (the "medium risk" band), or the starting discount learned from the user's own outcomes.
-      const built = buildFormFromExtraction(ex, { link, targetDiscountPct: defaultDiscountFor(learning.profile), previousForm: { ...EMPTY_FORM, link } })
+      // The ask comes from the price-band policy (band × age, modifiers, learned shift) with this listing's market and
+      // demand signals when «Cerca altrove» has them; the learned default discount stays as the policy's fallback.
+      const mk = marketInfoFor({ link })
+      const built = buildFormFromExtraction(ex, {
+        link, policy: true, profile: learning.engineProfile, market: mk ? mk.market : null, signals: mk ? mk.signals : null,
+        targetDiscountPct: defaultDiscountFor(learning.profile), previousForm: { ...EMPTY_FORM, link },
+      })
       setForm(built.form)
       setPlan(null)
       setPinnedSendAt(null)
@@ -352,10 +387,7 @@ function Main() {
         source: 'vinted', id: idMatch ? idMatch[1] : link, url: link, title: ex.title, brand: ex.brand, size: null, condition: ex.condition, price: ex.listPrice,
         photo: ex.photo || null, thumb: ex.photo || null, description: ex.description || null, categoryText: ex.categoryText || null,
       })
-      if (!outcome) {
-        showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
-        setTimeout(scrollToForm, 80)
-      }
+      if (!outcome) showToast(ex.listPrice ? 'Letto l\'annuncio: controlla i campi evidenziati.' : 'Letto l\'annuncio ma non il prezzo: inseriscilo a mano.')
     } catch (error) {
       setExtraction({ ok: false, message: `Errore inatteso durante la lettura: ${String(error && error.message ? error.message : error)}` })
     } finally {
@@ -390,6 +422,22 @@ function Main() {
     return () => sub.remove()
   }, [checkClipboard])
 
+  /** Typing in the link field dismisses the clipboard proposal: the field then holds the user's own text. */
+  const changeLink = (value) => {
+    if (clipboardLink) {
+      offeredLinkRef.current = clipboardLink
+      setClipboardLink(null)
+    }
+    setField('link', value)
+  }
+
+  /** «Ignora» on the clipboard proposal. The field is emptied only without a result: a saved analysis keeps its link. */
+  const ignoreClipboard = () => {
+    offeredLinkRef.current = clipboardLink
+    setClipboardLink(null)
+    if (!result) setField('link', '')
+  }
+
   const saveCurrent = async () => {
     if (!result || result.kind === 'no_offer_needed') return
     const { item, reminder, replaced } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
@@ -401,6 +449,36 @@ function Main() {
     }
     const outcome = messages[reminder]
     setSaveState({ saved: true, itemId: item.id, ...outcome, message: replaced ? outcome.message.replace(/^Salvato/, 'Aggiornato (sostituisce il piano precedente per questo annuncio)') : outcome.message })
+  }
+
+  /** «L'ho inviata adesso»: saved and marked sent in one tap (sentAtSource 'tap'); the outcome is then set from the list. */
+  const saveAndMarkSent = async () => {
+    if (!result || result.kind === 'no_offer_needed') return
+    const { item } = await watchlist.addFromAnalysis({ result, link: form.link, form, profile: learning.engineProfile })
+    await watchlist.setStatus(item.id, 'sent')
+    const message = 'Segnata come inviata: segna l\'esito dalla Lista.'
+    setSaveState({ saved: true, itemId: item.id, tone: 'good', message })
+    showToast(message, 4000)
+  }
+
+  /** «Ricalcola» from the list: the saved form (or the link) back into Calcola, analysed again. */
+  const reanalyzeItem = (item) => {
+    setCounterContext(null)
+    setLabOpen(false)
+    setSearchOpen(false)
+    setTab('calcola')
+    setPlan(null)
+    setPinnedSendAt(null)
+    setExtraction(null)
+    setSaveState(null)
+    if (!item.form && item.link) {
+      setForm({ ...EMPTY_FORM, link: item.link })
+      extractFromLink(item.link)
+      return
+    }
+    const nextForm = formOfItem(item)
+    setForm(nextForm)
+    runAnalysis(nextForm, null)
   }
 
   const calendarPayload = (source) => {
@@ -423,7 +501,7 @@ function Main() {
   const [calendarBusy, setCalendarBusy] = useState(false)
 
   /**
-   * "Metti in calendario": opens the phone's calendar app on a pre-filled "new event" screen (no permission);
+   * «Calendario»: opens the phone's calendar app on a pre-filled "new event" screen (no permission);
    * the user taps Save there. Falls back to Google Calendar and to a .ics file on its own; every outcome is a toast.
    */
   const addCalendar = async (source, itemId, explicitPayload = null) => {
@@ -556,19 +634,31 @@ function Main() {
 
   /** Failure risk of the offer on screen, calibrated on the user's outcomes when there are any. */
   const risk = useMemo(() => (result && result.ok && result.kind !== 'no_offer_needed' ? failureRiskFor(result, { profile: learning.engineProfile, records: learning.records, now: result.now }) : null), [result, learning.engineProfile, learning.records])
+  /** The moves beyond the offer (value.js), from the analysed input and the market of this listing. */
+  const levers = useMemo(() => (result && result.ok ? leversFor({ result, form, market: marketInfo ? marketInfo.market : null, signals: marketInfo && marketInfo.signals ? marketInfo.signals : {}, now: result.now }) : []), [result, form, marketInfo])
+  /** The expected-price curve, once per analysis, shared by the hero tile and the price table. */
+  const curve = useExpectedCurve({ result, profile: learning.engineProfile, market: marketInfo ? marketInfo.market : null })
+  const badgeCount = badgeCountOf(watchlist.items, now)
+  const searchJob = search.run && search.run.job ? search.run.job : null
 
   const topInset = insets.top || (Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) : 44)
   const bottomInset = Math.max(insets.bottom, 8)
+
+  /** The «Dati dell'offerta» fold, the same node on the empty screen and under the result (A4 / B8). */
+  const dataFold = (
+    <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
+      <Collapsible title="Dati dell'offerta" summary={dataSummaryOf(form, Boolean(result))} open={dataOpen} onToggle={setDataOpen}>
+        <DataForm form={form} errors={errors} onChange={setField} onSubmit={result ? recalcKeepingPin : analyze} onReset={reset} hasResult={Boolean(result)} quickDiscounts={quickDiscountsFor(form.policy)} />
+      </Collapsible>
+    </View>
+  )
 
   return (
     <View style={[styles.root, { backgroundColor: t.bg, paddingTop: topInset }]}>
       <StatusBar style="auto" />
       <View style={[styles.header, { borderBottomColor: t.line }]}>
         <View style={[styles.logo, { backgroundColor: t.accent }]}><Text style={[styles.logoText, { color: t.onAccent }]}>€</Text></View>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.appName, { color: t.ink }]} numberOfLines={1}>Offerta Vinted Timing</Text>
-          <Text style={[styles.appTagline, { color: t.ink3 }]} numberOfLines={1}>Il momento giusto per proporre il tuo prezzo</Text>
-        </View>
+        <Text style={[styles.appName, { color: t.ink, flex: 1 }]} numberOfLines={1}>Offerta Vinted Timing</Text>
       </View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -583,71 +673,83 @@ function Main() {
               calendarBusy={calendarBusy}
               profile={learning.engineProfile}
               market={marketInfoFor(counterContext.form) ? marketInfoFor(counterContext.form).market : null}
+              counterStats={counterStatsOf(watchlist.allItems)}
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />
           )}
           {!counterContext && !labOpen && searchOpen && <SearchView search={search} reference={lastListing} onClose={closeSearch} onOpenLab={openLab} />}
           {!counterContext && !labOpen && !searchOpen && tab === 'calcola' && (
             <View style={{ gap: space.lg }}>
-              {clipboardLink && !extracting && (
-                <View style={[styles.banner, { backgroundColor: t.accentSoft, borderColor: t.accent }]}>
-                  <Text style={{ color: t.accentInk, fontSize: 14, flex: 1, minWidth: 0 }} numberOfLines={2}>Hai copiato un link Vinted: lo leggo e calcolo subito?</Text>
-                  <View style={{ flexDirection: 'row', gap: space.sm }}>
-                    <Pressable onPress={() => extractFromLink(clipboardLink)} style={[styles.bannerButton, { backgroundColor: t.accent }]} accessibilityRole="button"><Text style={{ color: t.onAccent, fontWeight: '700', fontSize: 14 }}>Estrai e calcola</Text></Pressable>
-                    <Pressable onPress={() => { offeredLinkRef.current = clipboardLink; setClipboardLink(null) }} style={styles.bannerButton} accessibilityRole="button"><Text style={{ color: t.accentInk, fontWeight: '700', fontSize: 14 }}>Ignora</Text></Pressable>
-                  </View>
-                </View>
-              )}
-              {result && (
-                <ResultView
-                  result={result}
-                  saveState={saveState}
-                  onSave={saveCurrent}
-                  onCalendar={() => addCalendar(result, saveState && saveState.itemId)}
-                  calendarBusy={calendarBusy}
-                  goal={goal}
-                  onGoal={setGoal}
-                  plan={plan}
-                  onOptimize={optimize}
-                  onApply={applyOption}
-                  optimizing={optimizing}
-                  onRecalc={recalcKeepingPin}
-                  extraction={extraction}
-                  onEditData={scrollToForm}
-                  onCounter={openCounterFromAnalysis}
-                  risk={risk}
-                  onSkipExploration={result.exploration ? skipExploration : null}
-                  form={form}
-                  profile={learning.engineProfile}
-                  marketInfo={marketInfo}
-                  onRecalc={recalcKeepingPin}
-                  onOpenSearch={lastListing && form.link === lastListing.url ? () => openSearch(true) : null}
-                  onApplyPrice={applyPrice}
-                  onLever={scheduleLever}
-                />
-              )}
-              {(lastListing && result && form.link === lastListing.url) || (search.run && search.run.job && search.run.job.running) ? (
-                <Card muted>
-                  <Body small muted>{search.run && search.run.job && search.run.job.running
-                    ? `Cerca altrove: verifica in corso, ${search.run.job.done} di ${search.run.job.total}.`
-                    : 'Stesso articolo su Vinted, Subito o Wallapop a un prezzo finale più basso?'}</Body>
-                  <Button label={search.run && search.run.job && search.run.job.running ? 'Torna alla ricerca' : 'Cerca lo stesso articolo altrove'} variant="secondary" onPress={() => openSearch(true)} />
-                </Card>
-              ) : null}
-              <View ref={formViewRef} onLayout={(e) => { formYRef.current = e.nativeEvent.layout.y }}>
-                <OfferForm
-                  form={form}
-                  errors={errors}
-                  onChange={setField}
-                  onSubmit={analyze}
-                  onReset={reset}
+              {result && clipboardLink && !extracting ? (
+                // A link copied while a result is on screen: the one-tap path stays one tap away (clipboard variant).
+                <LinkEntry
+                  link={form.link}
+                  onChangeLink={changeLink}
                   onExtract={extractFromLink}
                   onPasteLink={pasteLink}
                   extracting={extracting}
                   extractPhase={extractPhase}
-                  extraction={extraction}
+                  extraction={null}
+                  clipboardLink={clipboardLink}
+                  onIgnoreClipboard={ignoreClipboard}
+                  onManual={openDataForm}
                 />
-              </View>
+              ) : null}
+              {result ? (
+                <ResultView
+                  result={result}
+                  risk={risk}
+                  levers={levers}
+                  curve={curve}
+                  extraction={extraction}
+                  marketInfo={marketInfo}
+                  policy={form.policy || null}
+                  saveState={saveState}
+                  calendarBusy={calendarBusy}
+                  now={now}
+                  goal={goal}
+                  onGoal={setGoal}
+                  plan={plan}
+                  optimizing={optimizing}
+                  onOptimize={optimize}
+                  onApply={applyOption}
+                  onSave={saveCurrent}
+                  onSaveAndMarkSent={saveAndMarkSent}
+                  onCalendar={() => addCalendar(result, saveState && saveState.itemId)}
+                  onCounter={openCounterFromAnalysis}
+                  onSkipExploration={result.exploration ? skipExploration : null}
+                  onApplyPrice={applyPrice}
+                  onLever={scheduleLever}
+                  onPickMoment={pickMoment}
+                  onOpenSearch={(lastListing && form.link === lastListing.url) || (searchJob && searchJob.running) ? () => openSearch(true) : null}
+                  searchJob={searchJob}
+                  onRecalc={recalcKeepingPin}
+                  onEditData={openDataForm}
+                  onReset={reset}
+                  dataFold={dataFold}
+                />
+              ) : (
+                <>
+                  <LinkEntry
+                    link={form.link}
+                    onChangeLink={changeLink}
+                    onExtract={extractFromLink}
+                    onPasteLink={pasteLink}
+                    extracting={extracting}
+                    extractPhase={extractPhase}
+                    extraction={extraction}
+                    clipboardLink={clipboardLink}
+                    onIgnoreClipboard={ignoreClipboard}
+                    onManual={openDataForm}
+                  />
+                  {dataFold}
+                  {badgeCount > 0 ? (
+                    <Pressable onPress={() => setTab('lista')} accessibilityRole="button" style={styles.hint}>
+                      <Text style={{ color: t.ink3, fontSize: 13 }}>{badgeCount} {badgeCount === 1 ? 'offerta' : 'offerte'} da fare → Lista</Text>
+                    </Pressable>
+                  ) : null}
+                </>
+              )}
             </View>
           )}
           {!counterContext && !labOpen && !searchOpen && tab === 'lista' && (
@@ -656,11 +758,18 @@ function Main() {
               ready={watchlist.ready}
               highlightId={highlightId}
               now={now}
+              stats={watchlist.stats}
+              actions={watchlist}
               onStatus={watchlist.setStatus}
               onRemove={watchlist.remove}
               onCalendar={(item) => addCalendar(item, item.id)}
               onCounter={openCounterFromItem}
               onCounterSent={counterSent}
+              onGoCalcola={() => setTab('calcola')}
+              onGoInfo={() => setTab('info')}
+              onReanalyze={reanalyzeItem}
+              onToast={showToast}
+              scrollRef={scrollRef}
             />
           )}
           {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} />}
@@ -675,7 +784,7 @@ function Main() {
       <View style={[styles.tabBar, { backgroundColor: t.card, borderTopColor: t.line, paddingBottom: bottomInset }]}>
         {TABS.map((item) => {
           const active = tab === item.id
-          const count = item.id === 'lista' ? watchlist.stats.planned : 0
+          const count = item.id === 'lista' ? badgeCount : 0
           return (
             <Pressable key={item.id} onPress={() => { setCounterContext(null); setLabOpen(false); setSearchOpen(false); setTab(item.id); if (item.id !== 'lista') setHighlightId(null) }} style={styles.tab} accessibilityRole="tab" accessibilityState={{ selected: active && !counterContext }}>
               <Text style={[styles.tabLabel, { color: active ? t.accent : t.ink3, fontWeight: active ? '700' : '500' }]}>
@@ -693,15 +802,13 @@ function Main() {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.md, borderBottomWidth: 1 },
-  logo: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  logoText: { fontSize: 20, fontWeight: '800' },
+  header: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.sm, borderBottomWidth: 1 },
+  logo: { width: 36, height: 36, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  logoText: { fontSize: 18, fontWeight: '800' },
   appName: { fontSize: 17, fontWeight: '700' },
-  appTagline: { fontSize: 12 },
   content: { padding: space.lg, paddingBottom: 96, gap: space.lg },
   toast: { position: 'absolute', left: space.lg, right: space.lg, borderRadius: 12, padding: space.md },
-  banner: { borderWidth: 1, borderRadius: 12, padding: space.md, gap: space.sm },
-  bannerButton: { minHeight: 40, borderRadius: 10, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  hint: { paddingVertical: 6, paddingHorizontal: space.xs, alignSelf: 'flex-start' },
   tabBar: { flexDirection: 'row', borderTopWidth: 1 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 12 },
   tabLabel: { fontSize: 14 },

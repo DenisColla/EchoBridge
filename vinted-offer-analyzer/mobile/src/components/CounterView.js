@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
   COUNTER_RECEIVED_AGO, TONES, analyzeCounter, capitalize, counterFromPercent, counterPreview, formatEuro, formatLongDate,
-  formatSignedPoints, formatTime, parsePercent, parsePrice, reservationPosterior, toPercent,
+  formatSignedPoints, formatTime, parsePercent, parsePrice, policyDiscountFor, reservationPosterior, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
 import { radius, space, toneForProbability, useTheme } from '../theme.js'
@@ -11,15 +11,27 @@ import { Badge, Body, Button, ButtonRow, Card, Chip, Collapsible, Field, Note, R
 const pctText = (v) => String(Math.round(v * 10) / 10).replace('.', ',')
 const priceText = (v) => (Math.abs(v - Math.round(v)) > 0.004 ? v.toFixed(2) : String(Math.round(v))).replace('.', ',')
 
+/** The price the policy (price band × age, modifiers) would have asked for this listing: the form's own policy when it has one. */
+const policyTargetFor = (form, { market, profile }) => {
+  if (form && form.policy && Number.isFinite(form.policy.targetPrice)) return form.policy.targetPrice
+  const pol = form ? policyDiscountFor({
+    listPrice: form.listPrice, listingAge: form.listingAge, category: form.category, sellerProfile: form.sellerProfile,
+    listingSignal: form.listingSignal, signals: form.signals, market, profile,
+  }) : null
+  return pol && pol.kind === 'offer' ? pol.targetPrice : null
+}
+
 /**
  * "Il venditore ha fatto una controproposta": the user types the seller's number (in € or as % over the offer),
  * the engine returns the best reply price, the moment to send it, the plan for the next round and the message.
  * `context` comes from a fresh analysis ({ form }) or from a saved item ({ itemId, form, history }).
+ * `counterStats` = { recountered, closed } from the user's own negotiations (the «nel tuo storico» line), optional.
  */
-export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null, market = null }) {
+export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy = false, clock = () => new Date(), onScrollTo = null, profile = null, market = null, counterStats = null }) {
   const t = useTheme()
   const pendingScroll = useRef(false)
   const history = useMemo(() => (Array.isArray(context.history) ? context.history : []), [context.history])
+  const policyTarget = useMemo(() => policyTargetFor(context.form, { market, profile }), [context.form, market, profile])
   const last = history[history.length - 1]
   // Our last offer: the latest buyer entry of a saved negotiation, else the analysed target price.
   const lastBuyer = [...history].reverse().find((e) => e.by === 'buyer')
@@ -76,9 +88,13 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
   }
 
   const run = (opts = {}) => {
-    // The learned profile (monthly report) corrects the acceptance of our counter for this user's sellers.
+    // The learned profile (monthly report) corrects the acceptance of our counter for this user's sellers; the policy
+    // target and the user's own counter history feed the accept rule.
     const raw = buildRaw()
-    const outcome = analyzeCounter(raw, clock(), { ...opts, ...(profile ? { profile } : {}), ...(market ? { market } : {}) })
+    const outcome = analyzeCounter(raw, clock(), {
+      ...opts, ...(profile ? { profile } : {}), ...(market ? { market } : {}),
+      ...(policyTarget != null ? { policyTarget } : {}), ...(counterStats ? { counterStats } : {}),
+    })
     // What the seller's answers say about the lowest price they would take (a soft posterior, shown as a range).
     if (outcome.ok) {
       try {
@@ -93,12 +109,13 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
     if (!outcome.ok) {
       setErrors(outcome.errors)
       setResult(null)
-      return
+      return null
     }
     setErrors({})
     setResult(outcome)
     setSaveState(null)
     pendingScroll.current = true
+    return outcome
   }
 
   const calculate = () => {
@@ -111,11 +128,18 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
     run({ forcePrice: option.apply.counterPrice, preferredSendAt: option.apply.preferredSendAt })
   }
 
-  const save = async () => {
+  const save = async (toSave = result) => {
     // The list updates at once; the reminder waits for the notification permission, if Android asks for it.
     setSaveState({ saved: true, tone: 'neutral', message: 'Salvato nella lista. Imposto il promemoria…' })
-    const outcome = await onSave(result, buildRaw())
+    const outcome = await onSave(toSave, buildRaw())
     setSaveState(outcome)
+  }
+
+  /** «Accetto a N €»: the engine rebuilds the page as the purchase at his price, then it is saved like any accepted counter. */
+  const acceptNow = async () => {
+    setApplied(null)
+    const outcome = run({ acceptNow: true })
+    if (outcome) await save(outcome)
   }
 
   return (
@@ -170,7 +194,8 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
           applied={applied}
           onApply={applyOption}
           onReset={calculate}
-          onSave={save}
+          onSave={() => save()}
+          onAcceptNow={acceptNow}
           saveState={saveState}
           onCalendar={() => onCalendar(result)}
           calendarBusy={calendarBusy}
@@ -181,15 +206,37 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
   )
 }
 
-function CounterResult({ result, applied, onApply, onReset, onSave, saveState, onCalendar, calendarBusy }) {
+/**
+ * The accept rule's verdict (engine-spec §7), before any counter proposal: his price is already at or under what the
+ * user expected to pay, the policy's ask or the user's maximum. One primary action: accept and save.
+ */
+function AcceptFirstCard({ result, onAcceptNow }) {
+  const t = useTheme()
+  const accept = result.accept
+  return (
+    <Card style={{ borderColor: t.good }}>
+      <Note tone="good">{accept.line}</Note>
+      {accept.history ? <Body muted small>{accept.history}</Body> : null}
+      <ButtonRow>
+        <Button label={`Accetto a ${formatEuro(result.negotiation.sellerCounter)}`} onPress={onAcceptNow} />
+      </ButtonRow>
+    </Card>
+  )
+}
+
+function CounterResult({ result, applied, onApply, onReset, onSave, onAcceptNow, saveState, onCalendar, calendarBusy }) {
   const t = useTheme()
   const n = result.negotiation
+  // The rule speaks only when the plan itself does not already say «compra»; then its card comes first.
+  const planAccepts = Boolean(result.recommended && result.recommended.id === 'accept')
+  const acceptFirst = Boolean(result.accept && result.accept.recommended && !planAccepts && !(saveState && saveState.saved))
   if (!result.optimal) {
     // Short answers: buy now, walk away, stop after three counters.
     const accept = result.options[0]
     return (
       <View style={{ gap: space.lg }}>
         {result.warnings.map((w) => <Note key={w.id} tone="warn">{w.text}</Note>)}
+        {acceptFirst && <AcceptFirstCard result={result} onAcceptNow={onAcceptNow} />}
         <Card>
           <SectionLabel>La tua risposta</SectionLabel>
           <Title>{result.kind === 'walk_away' ? 'Lascia perdere per ora' : result.kind === 'stop' ? 'Fermati qui' : `Compra a ${formatEuro(n.sellerCounter)}`}</Title>
@@ -208,6 +255,7 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
   return (
     <View style={{ gap: space.lg }}>
       {result.warnings.map((w) => <Note key={w.id} tone="warn">{w.text}</Note>)}
+      {acceptFirst && <AcceptFirstCard result={result} onAcceptNow={onAcceptNow} />}
       {applied && (
         <Note>
           Hai scelto «{applied.label}»: piano ricalcolato su {formatEuro(applied.price)}.{' '}
@@ -252,7 +300,7 @@ function CounterResult({ result, applied, onApply, onReset, onSave, saveState, o
         </Body>
         {saveState && saveState.message ? <Note tone={saveState.tone}>{saveState.message}</Note> : null}
         <ButtonRow>
-          <Button label={saveState && saveState.saved ? 'Salvato nella lista' : 'Salva e ricordamelo'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
+          <Button label={saveState && saveState.saved ? 'Salvato nella lista' : acceptFirst ? 'Preferisco rilanciare: salva il piano' : 'Salva e ricordamelo'} variant={acceptFirst ? 'secondary' : 'primary'} onPress={onSave} disabled={Boolean(saveState && saveState.saved)} />
           {!acceptRecommended && <Button label={calendarBusy ? 'Apro il calendario…' : 'Metti in calendario'} variant="secondary" onPress={onCalendar} disabled={calendarBusy} />}
         </ButtonRow>
       </Card>

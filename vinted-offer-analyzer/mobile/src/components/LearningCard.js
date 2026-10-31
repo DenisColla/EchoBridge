@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { View } from 'react-native'
-import { COUNTER, LEARNING, MONTHS_IT, formatEuro, monthLabel, prepArticleFor, profileIsActive } from '../../core/index.js'
+import { COUNTER, LEARNING, MONTHS_IT, formatEuro, formatLongDate, monthLabel, prepArticleFor, profileIsActive } from '../../core/index.js'
 import { openReport, shareReport } from '../services/reports.js'
 import { space } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title, Toggle } from './ui.js'
@@ -9,6 +9,36 @@ import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title, Toggle } from
 const POINTS_PER_LOGIT = 23.5
 const signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : '0')
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`)
+const logitText = (v) => `${v < 0 ? '−' : v > 0 ? '+' : ''}${Math.abs(Math.round(v * 100) / 100).toFixed(2).replace('.', ',')} logit`
+const dayText = (iso, now) => (iso ? formatLongDate(new Date(iso), now) : '')
+
+/**
+ * The live correction (engine-spec §1.5): what is in use, on how many outcomes, when it was last checked; the frozen
+ * state after a rollback or «Annulla»; or why nothing is applied yet. All in points the user can check on a 50% offer.
+ */
+function LiveStatus({ live, now }) {
+  if (!live) return null
+  if (live.frozen) {
+    const why = live.frozenReason === 'undo' ? 'le hai annullate tu' : 'prevedevano peggio di quelle precedenti'
+    return <Note tone="warn">Correzioni dal vivo ferme fino al {dayText(live.frozenUntil, now)}: {why}. Fino ad allora il motore usa i valori di prima.</Note>
+  }
+  if (live.applied) {
+    const pts = signed(Math.round(live.intercept * POINTS_PER_LOGIT))
+    const slope = Math.abs(live.dslope) > 1e-9 ? ` · sconti più profondi del 20%: ${signed(Math.round(live.dslope * POINTS_PER_LOGIT))} punti ogni 10 punti di sconto in più` : ''
+    return (
+      <Body small>
+        Correzione in uso: {pts} punti su un'offerta al 50% ({logitText(live.intercept)}), basata su {live.basedOn} {live.basedOn === 1 ? 'tuo esito' : 'tuoi esiti'}{slope} · ultima verifica {formatLongDate(live.checkedAt || now, now)}.
+      </Body>
+    )
+  }
+  const min = LEARNING.LIVE.MIN_EFFECTIVE
+  const enough = live.nEff >= min
+  return (
+    <Body muted small>
+      Nessuna correzione dal vivo: {live.basedOn} {live.basedOn === 1 ? 'esito maturo' : 'esiti maturi'} finora{enough ? ', scarto dal motore ancora dentro il margine di incertezza' : ` (ne servono almeno ${min}, da 7 giorni dall'invio)`}.
+    </Body>
+  )
+}
 
 /** One applied change in words the user can check: points of probability, percent, or a factor. */
 export function describeChange(c) {
@@ -34,10 +64,13 @@ const SAVED_TO = {
 export function LearningCard({ learning, onToast }) {
   const [busy, setBusy] = useState(false)
   if (!learning || !learning.ready) return null
-  const { profile, folder, reports, exploration, canUndo, nextReportAt } = learning
+  const { profile, folder, reports, exploration, canUndo, canUndoLive, liveStatus, nextReportAt } = learning
   const last = reports[0] || null
+  const now = new Date()
+  const liveOn = Boolean(liveStatus && liveStatus.applied)
   const active = profileIsActive(profile) && profile.month
   const next = nextReportAt ? `${nextReportAt.getDate()} ${MONTHS_IT[nextReportAt.getMonth()]}` : ''
+  const title = liveOn ? `Motore ritarato sui tuoi esiti (${liveStatus.basedOn} ${liveStatus.basedOn === 1 ? 'esito' : 'esiti'})` : active ? `Motore ritarato sui tuoi esiti (${monthLabel(profile.month)})` : 'Il motore impara dai tuoi esiti'
 
   const run = async (fn) => {
     if (busy) return
@@ -70,11 +103,15 @@ export function LearningCard({ learning, onToast }) {
 
   return (
     <Card>
-      <SectionLabel>Apprendimento mensile</SectionLabel>
-      <Title>{active ? `Motore ritarato sui tuoi esiti (${monthLabel(profile.month)})` : 'Il motore impara dai tuoi esiti'}</Title>
+      <SectionLabel>Apprendimento</SectionLabel>
+      <Title>{title}</Title>
       <Body muted small>
-        Il primo del mese, alla prima apertura dell'app, creo l'Excel del mese chiuso (affari conclusi e persi, controproposte, salite, tempi di risposta, fasce orarie e sconti) e correggo il motore: piccoli passi, solo quando i dati bastano. Prossimo report: {next}.
+        A ogni esito che segni il motore ricalcola dal vivo quanto accettano i tuoi venditori (e quanto pesa la profondità dello sconto). Il primo del mese, alla prima apertura dell'app, creo l'Excel del mese chiuso (affari conclusi e persi, controproposte, salite, tempi di risposta, fasce orarie e sconti) e correggo il resto a piccoli passi, solo quando i dati bastano. Prossimo report: {next}.
       </Body>
+      <LiveStatus live={liveStatus} now={now} />
+      {canUndoLive ? (
+        <Button label="Annulla le correzioni dal vivo" variant="ghostDanger" small disabled={busy || learning.busy} onPress={() => run(async () => { if (await learning.undoLast()) onToast('Correzioni annullate: per 30 giorni il motore usa i valori di prima.') })} />
+      ) : null}
 
       {folder ? (
         <Body small>Cartella del report: <Body small style={{ fontWeight: '700' }}>{folder.label}</Body></Body>
@@ -115,7 +152,7 @@ export function LearningCard({ learning, onToast }) {
       )}
 
       <Toggle label={`Varianti di test: circa 1 offerta su ${Math.round(1 / LEARNING.EXPLORE_SHARE)} esce ±1 ora o circa ±2 punti di sconto, sempre segnalata`} value={exploration} onChange={(v) => { if (!learning.busy) learning.setExploration(v) }} />
-      <Body muted small>Le varianti costano al massimo {Math.round(LEARNING.EXPLORE_MAX_COST * 100)} punti di probabilità e servono a capire se orari e sconti vicini rendono di più. Puoi sempre scegliere «Usa il piano migliore».</Body>
+      <Body muted small>Le varianti costano {LEARNING.EXPLORE_MAX_COST ? `al massimo ${Math.round(LEARNING.EXPLORE_MAX_COST * 100)} punti di probabilità` : 'poco'} e servono a capire se orari e sconti vicini rendono di più. Puoi sempre scegliere «Usa il piano migliore».</Body>
       <Button label={busy || learning.busy ? 'Preparo l\'Excel…' : 'Esporta adesso il mese in corso'} variant="secondary" small onPress={exportNow} disabled={busy || learning.busy} />
       <Body muted small>Per imparare servono gli esiti: segna «Inviata» quando mandi l'offerta e poi com'è andata, anche «Venduto ad altri» o «Lasciato perdere».</Body>
     </Card>

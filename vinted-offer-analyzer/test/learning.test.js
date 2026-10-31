@@ -2,11 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { inflateRawSync } from 'node:zlib'
 import {
-  DEFAULT_PROFILE, EXPLORATION_ARMS, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, analyzeCounter, analyzeOffer, buildDataset, buildXlsx,
+  DEFAULT_PROFILE, ENGINE_VERSION, EXPLORATION_ARMS, LEARNING, LEARNING_DISCOUNT_KNOTS, LEARNING_TIME_GROUPS, LIVE_KEYS, analyzeCounter, analyzeOffer, applyCheckpoint, buildDataset, buildXlsx,
   calibrationMetrics, counterAnalytics, decisionSnapshot, isoAcceptanceDiscount, timeWindowAt, defaultDiscountFor, discKnotOf, discKnotWeights, discOffset, dueMonths, explorationBudget,
-  explorationKey, explorationPlan, failureRiskFor, fitCorrection, fitFirstOffers, kaplanMeier, learnedOfferRow, learningRecord, monotoneDisc,
-  monthKeyOf, monthLabel, monthlyReport, normalizeProfile, optimalDiscount, pickMoments, normalizeInput, predictWith, profileIsActive, proposeProfile,
-  reportFileName, reportWorkbook, scoreAt, shiftMonth, squash, timeGroupOf, unsquash, xlsxBase64, xlsxColumn, xlsxCrc32, xlsxDateSerial, xlsxEscape,
+  explorationKey, explorationPlan, failureRiskFor, firstOfferCorrected, fitCorrection, fitFirstOffers, kaplanMeier, learnedOfferRow, learningRecord, liveCheckpoint, liveDiffers, liveProfile, monotoneDisc,
+  monthKeyOf, monthLabel, monthlyReport, normalizeProfile, optimalDiscount, pickMoments, normalizeInput, predictWith, predictiveInterval, prequentialScore, profileIsActive, profileIsStale, proposeProfile,
+  reportFileName, reportWorkbook, scoreAt, shiftMonth, squash, timeGroupOf, unsquash, withLiveHistory, xlsxBase64, xlsxColumn, xlsxCrc32, xlsxDateSerial, xlsxEscape,
   xlsxSheetName, xlsxUtf8,
 } from '../src/core/index.js'
 
@@ -322,42 +322,114 @@ test('fit: a general shift does not leak into the time groups that hold the data
   near(weighted, 0, 1e-6, 'time offsets are centred')
 })
 
-test('guardrails: minimum data, bounded steps, evidence gate', () => {
-  const now = new Date(2026, 9, 1)
-  const fit = (theta, nEff, cov = null) => ({ theta: { intercept: 0, ...theta }, nEff: { intercept: 0, ...nEff }, keys: ['intercept'], cov, n: nEff.intercept || 0, weightTotal: nEff.intercept || 0, ladder: {} })
-  let out = proposeProfile({ previous: null, firstFit: fit({ intercept: -0.8 }, { intercept: 5 }), month: '2026-09', now })
-  assert.equal(out.profile.intercept, 0)
-  assert.equal(out.changes.find((c) => c.key === 'intercept').status, 'waiting_data')
-  out = proposeProfile({ previous: null, firstFit: fit({ intercept: -0.8 }, { intercept: 20 }, [[0.04]]), month: '2026-09', now })
-  assert.equal(out.profile.intercept, -LEARNING.MAX_STEP.intercept)
-  assert.equal(out.changes.find((c) => c.key === 'intercept').status, 'capped')
-  assert.equal(out.profile.id, '2026-09')
-  assert.equal(out.profile.parentId, 'default')
-  out = proposeProfile({ previous: { intercept: -0.3, id: '2026-09' }, firstFit: fit({ intercept: -0.4 }, { intercept: 20 }, [[0.09]]), month: '2026-10', now })
-  assert.equal(out.profile.intercept, -0.3, 'within half a posterior sd: no move')
-  assert.equal(out.profile.id, '2026-09', 'no move, same profile')
+/** Hand-built decided records: `rawLogit` 0 (a 50% offer), sent `daysAgo` days before `now`, outcome `y`. */
+const rec = (id, y, { rawLogit = 0, discountPct = 20, daysAgo = 20, now = new Date(2026, 9, 1), appliedCorrection = null, k = 1 } = {}) => ({
+  id, y, rawLogit, k, discountPct, knot: discKnotOf(discountPct), discW: discKnotWeights(discountPct), timeGroup: 'prime_evening',
+  sentAt: new Date(now.getTime() - daysAgo * 86400e3), appliedCorrection, priceBand: 'from_20_to_50',
 })
 
-test('rollback: a profile that predicts worse than its parent comes back to the parent and freezes for a month', () => {
+test('live gates: too few outcomes → no correction; enough → the posterior mode, no monthly step, inside the wide bounds', () => {
+  const now = new Date(2026, 9, 1)
+  // 5 refusals of 50% offers: a clear miss, but under MIN_EFFECTIVE (6) nothing moves.
+  const five = liveProfile(Array.from({ length: 5 }, (_, i) => rec(`a${i}`, 0, { now })), now)
+  assert.equal(five.status.intercept, 'waiting_data')
+  assert.equal(five.profile.intercept, 0)
+  assert.equal(five.profile.live, false)
+  assert.ok(five.fitted.intercept < -0.5, 'the fit itself says the sellers are tougher')
+  assert.equal(five.basedOn, 5)
+  assert.ok(five.profile.cov && five.profile.paramKeys.length === 2, 'the posterior covariance is kept for the interval')
+  // 20 refusals: applied at the posterior mode, far beyond the old monthly step of 0,3 and the old −1 bound.
+  const twenty = liveProfile(Array.from({ length: 20 }, (_, i) => rec(`b${i}`, 0, { now })), now)
+  assert.equal(twenty.status.intercept, 'applied')
+  assert.ok(twenty.profile.intercept < -1.2, `${twenty.profile.intercept}`)
+  assert.ok(twenty.profile.intercept >= LEARNING.BOUNDS.intercept[0])
+  assert.equal(twenty.profile.live, true)
+  assert.equal(twenty.profile.engine, ENGINE_VERSION)
+  assert.match(twenty.profile.id, /^live\.2026-10-01$/)
+  assert.equal(twenty.profile.checkpointId, 'default')
+  assert.equal(twenty.status.dslope, 'waiting_data', 'one discount arm only: no slope')
+  // Mixed evidence near the engine's own estimate: |θ̂| under one posterior sd → no correction (no flicker).
+  const mixed = liveProfile(Array.from({ length: 12 }, (_, i) => rec(`c${i}`, i % 2, { now })), now)
+  assert.equal(mixed.status.intercept, 'waiting_data')
+  assert.ok(Math.abs(mixed.fitted.intercept) < LEARNING.LIVE.GATE_Z * mixed.sd.intercept)
+  // Hysteresis: one more refusal moves the fit by less than 0,1 → the applied value stays.
+  const more = liveProfile(Array.from({ length: 21 }, (_, i) => rec(`b${i}`, 0, { now })), now, { previous: twenty.profile })
+  assert.ok(Math.abs(more.fitted.intercept - twenty.fitted.intercept) < LEARNING.LIVE.HYSTERESIS)
+  assert.equal(more.profile.intercept, twenty.profile.intercept)
+  assert.equal(more.profile.id, twenty.profile.id)
+  assert.equal(more.profile.appliedAt, twenty.profile.appliedAt)
+  assert.equal(more.changed, true, 'the data basis grew, so the stored profile is updated anyway')
+  assert.equal(liveProfile(Array.from({ length: 21 }, (_, i) => rec(`b${i}`, 0, { now })), now, { previous: more.profile }).changed, false, 'same data twice: nothing to store')
+  // Ten acceptances on top move it a lot: new value, new id.
+  const swing = liveProfile([...Array.from({ length: 20 }, (_, i) => rec(`b${i}`, 0, { now })), ...Array.from({ length: 10 }, (_, i) => rec(`d${i}`, 1, { now }))], new Date(2026, 9, 2), { previous: twenty.profile })
+  assert.ok(swing.profile.intercept > twenty.profile.intercept + 0.3)
+  assert.equal(swing.profile.id, 'live.2026-10-02')
+  assert.equal(swing.profile.parentId, twenty.profile.id)
+})
+
+test('monthly rollback: a time-group offset that predicts worse than its parent comes back and freezes for a month; the live level is not judged', () => {
   const now = new Date(2026, 10, 1)
-  const fit = { theta: { intercept: -0.9 }, nEff: { intercept: 30 }, keys: ['intercept'], cov: [[0.01]], n: 30, weightTotal: 30, ladder: {} }
-  // The active profile says sellers are tough; last month they accepted almost everything.
-  const active = { id: '2026-09', intercept: -1, parent: { intercept: 0 }, changes: [{ key: 'intercept' }] }
+  const fit = { theta: { intercept: 0 }, nEff: { intercept: 30 }, keys: ['intercept'], cov: [[0.01]], n: 30, weightTotal: 30, ladder: {} }
+  // The active profile says prime evenings are much worse than the engine thinks; last month they accepted almost everything there.
+  const active = { id: '2026-09', intercept: -0.5, live: true, time: { prime_evening: -0.6 }, parent: { intercept: 0, time: { prime_evening: 0 } }, changes: [{ key: 'time.prime_evening' }] }
   const recs = Array.from({ length: 12 }, (_, i) => ({ rawLogit: 1, k: 1, timeGroup: 'prime_evening', discountPct: 20, y: i < 11 ? 1 : 0 }))
   const out = proposeProfile({ previous: active, firstFit: fit, month: '2026-10', now, lastMonthRecords: recs })
   assert.ok(out.score < LEARNING.ROLLBACK_LOG_BF, `score ${out.score}`)
   assert.equal(out.rollback, true)
-  assert.equal(out.profile.intercept, 0, 'parent values restored')
-  const row = out.changes.find((c) => c.key === 'intercept')
+  assert.equal(out.profile.time.prime_evening, 0, 'parent offsets restored')
+  const row = out.changes.find((c) => c.key === 'time.prime_evening')
   assert.equal(row.status, 'rollback')
-  assert.deepEqual([row.from, row.to], [-1, 0])
-  assert.equal(out.changes.filter((c) => c.key === 'intercept').length, 1, 'one row per parameter')
-  assert.equal(out.profile.frozen.intercept, '2026-11')
+  assert.deepEqual([row.from, row.to], [-0.6, 0])
+  assert.equal(out.profile.frozen.time, '2026-11')
   assert.equal(out.profile.parentId, '2026-09')
   assert.ok(out.profile.changes.some((c) => c.status === 'rollback'), 'the rollback is undoable')
-  // A good profile accumulates evidence instead.
-  const good = proposeProfile({ previous: { ...active, intercept: 1.2 }, firstFit: fit, month: '2026-10', now, lastMonthRecords: recs })
+  // The live intercept is the live fit's business: with no records it is waiting for data, and it is never a monthly rollback row.
+  const live = out.changes.find((c) => c.key === 'intercept')
+  assert.equal(live.status, 'waiting_data')
+  assert.ok(!out.changes.some((c) => LIVE_KEYS.includes(c.key) && c.status === 'rollback'))
+  // Only the monthly families are judged: the same intercept on both sides, so a profile whose offsets are right is not rolled back.
+  const good = proposeProfile({ previous: { ...active, time: { prime_evening: 0.3 } }, firstFit: fit, month: '2026-10', now, lastMonthRecords: recs })
   assert.equal(good.rollback, false)
+  const levelOnly = proposeProfile({ previous: { id: '2026-09', intercept: -1.5, live: true, parent: { intercept: 0 }, changes: [{ key: 'intercept' }] }, firstFit: fit, month: '2026-10', now, lastMonthRecords: recs })
+  assert.equal(levelOnly.rollback, false, 'a live level alone is never judged by the monthly path')
+})
+
+test('live rollback: when the corrections really applied predict worse than the checkpoint by 2 nats, the values go back and freeze for 30 days', () => {
+  const now = new Date(2026, 10, 1)
+  // The live profile has said −1 logit since 1 September; the ten offers sent since then (with that −1 applied) were mostly accepted.
+  const previous = normalizeProfile({ id: 'live.2026-09-01', intercept: -1, live: true, appliedAt: new Date(2026, 8, 1).toISOString(), cov: [[0.1, 0], [0, 0.12]], paramKeys: ['intercept', 'dslope'], basedOn: 15 })
+  const later = Array.from({ length: 10 }, (_, i) => rec(`l${i}`, i < 8 ? 1 : 0, { now, daysAgo: 10 + i, appliedCorrection: -1 }))
+  const judged = prequentialScore(later, previous, null, now)
+  assert.equal(judged.n, 10)
+  assert.ok(judged.score < LEARNING.ROLLBACK_LOG_BF, `score ${judged.score}`)
+  const out = liveProfile(later, now, { previous, checkpoint: null })
+  assert.equal(out.status.intercept, 'rollback')
+  assert.ok(out.rollback && out.rollback.n === 10)
+  assert.equal(out.profile.intercept, 0, 'back to the checkpoint (the plain engine)')
+  assert.equal(out.profile.checkpointId, 'default')
+  assert.equal(out.profile.frozenReason, 'rollback')
+  assert.equal(out.profile.frozenUntil, new Date(now.getTime() + LEARNING.LIVE.FREEZE_DAYS * 86400e3).toISOString())
+  // While frozen the fit still runs (the ten acceptances would push the level up) but nothing is applied.
+  const frozen = liveProfile(later, new Date(2026, 10, 5), { previous: out.profile, checkpoint: null })
+  assert.equal(frozen.status.intercept, 'frozen')
+  assert.equal(frozen.frozen, true)
+  assert.equal(frozen.profile.intercept, 0)
+  assert.ok(frozen.fitted.intercept > 0.5)
+  // After the freeze the live fit applies again.
+  const thawed = liveProfile(later.map((r) => ({ ...r, sentAt: new Date(r.sentAt.getTime() + 40 * 86400e3) })), new Date(2026, 11, 10), { previous: out.profile, checkpoint: null })
+  assert.notEqual(thawed.status.intercept, 'frozen')
+  // Records sent before the checkpoint was applied, or without a stored correction, do not count.
+  const checkpoint = { ...previous, id: 'live.2026-08-01', appliedAt: new Date(2026, 7, 1).toISOString(), intercept: -0.5 }
+  const early = rec('e', 1, { now, daysAgo: 100, appliedCorrection: -1 })
+  const bare = rec('b', 1, { now, daysAgo: 15 })
+  assert.equal(prequentialScore([early, bare], null, checkpoint, now).n, 0)
+  assert.equal(prequentialScore([bare], previous, checkpoint, now).n, 1, 'a bare record sent while the applied profile was in force uses its correction')
+  // «Annulla»: the same move, by the user, frozen for 30 days.
+  const undone = applyCheckpoint(previous, null, now, { reason: 'undo' })
+  assert.equal(undone.intercept, 0)
+  assert.equal(undone.frozenReason, 'undo')
+  assert.equal(undone.parentId, 'live.2026-09-01')
+  assert.ok(liveProfile(later, new Date(2026, 10, 2), { previous: undone }).status.intercept === 'frozen')
 })
 
 test('discount: no data → the default stays; the target moves only with data, by one point a month', () => {
@@ -444,9 +516,17 @@ test('failure risk: complement of the estimate, a range, reasons, failure mix an
   const risk2 = failureRiskFor(r2, { profile, records: report.records, now })
   assert.equal(risk2.basis, 'history')
   assert.ok(risk2.similar && risk2.similar.n >= 3)
+  assert.ok(risk2.similar.band === null || typeof risk2.similar.bandLabel === 'string', 'band-matched when the band has enough offers')
   assert.ok(['low', 'medium', 'high'].includes(risk2.level))
-  // The synthetic sellers counter 35% of the time and decline the rest: the mix must lean on counters.
-  assert.equal(risk2.failureMix[0].id, 'countered')
+  // The synthetic sellers counter 35% of the time, decline or stay silent otherwise: a proper mix led by one of those.
+  near(risk2.failureMix.reduce((s, m) => s + m.share, 0), 1, 1e-9)
+  assert.ok(['countered', 'no_reply', 'declined'].includes(risk2.failureMix[0].id))
+  // The range is the 90% predictive interval of the corrected estimate.
+  const band = predictiveInterval(r2, profile, { level: 0.9 })
+  near(risk2.range[0], 1 - band.high, 1e-12)
+  near(risk2.range[1], 1 - band.low, 1e-12)
+  // Even an active seller misses one offer in ten: the read reason is there without saying «inattivo».
+  assert.ok(risk.reasons.some((x) => x.id === 'read' && !x.text.includes('inattivo')))
 })
 
 test('calibration: equal-mass bins with Wilson intervals, observed vs expected, Spiegelhalter Z', () => {
@@ -498,9 +578,9 @@ test('ladder: the slope stays out when the engine already ranks offers right', (
   assert.ok(fit.cov && fit.cov.length === fit.keys.length, 'joint covariance')
 })
 
-test('report: learns a tough market month after month, never by more than one step', () => {
-  // 14 offers a month (the user's volume is under 15). The ladder only moves when the sample really shows the shift,
-  // so a seed whose sample hides it may stay put: judge the behaviour across seeds, and never in the wrong direction.
+test('report: learns a tough market month after month; the live level moves in one step, the monthly families by at most one step', () => {
+  // 14 offers a month (the user's volume is under 15). The live intercept moves as soon as its gates open, the monthly
+  // families only when the sample really shows a difference between groups: judge across seeds, never the wrong way.
   const finals = []
   for (const seed of [1, 7, 11, 13, 21]) {
     const items = syntheticItems({ months: 6, perMonth: 14, shift: -0.8, seed })
@@ -510,7 +590,12 @@ test('report: learns a tough market month after month, never by more than one st
       const now = new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 1, 9)
       const visible = items.filter((it) => new Date(it.sentAt) < now)
       const rep = monthlyReport({ items: visible, month, now, previous: profile, profileHistory: history })
+      assert.equal(rep.nextProfile.intercept, rep.live.profile.intercept, 'the monthly report carries the live level, never a second correction')
       for (const c of rep.changes) {
+        if (LIVE_KEYS.includes(c.key)) {
+          assert.ok(['live', 'waiting_data', 'frozen', 'rollback_live'].includes(c.status), `${month} ${c.key} ${c.status}`)
+          continue
+        }
         if (c.key === 'sellerReplyHours') {
           assert.ok(c.from == null || c.to / c.from <= LEARNING.MAX_STEP.latency + 1e-9, `${month} ${c.key} ${c.from}→${c.to}`)
           continue
@@ -527,8 +612,8 @@ test('report: learns a tough market month after month, never by more than one st
     const ll = (p) => decided.reduce((s, r) => s - (r.y ? Math.log(predictWith(p, r)) : Math.log(1 - predictWith(p, r))), 0)
     assert.ok(ll(profile) <= ll(null) + 1e-9, `seed ${seed}: the learned profile predicts the history at least as well as the plain engine`)
   }
-  assert.ok(finals.filter((x) => x < -0.1).length >= 3, `seeds that learned the shift: ${finals}`)
-  assert.ok(finals.reduce((a, b) => a + b, 0) / finals.length < -0.25, `mean intercept ${finals}`)
+  assert.ok(finals.filter((x) => x < -0.3).length >= 4, `seeds that learned the shift: ${finals}`)
+  assert.ok(finals.reduce((a, b) => a + b, 0) / finals.length < -0.4, `mean intercept ${finals}`)
 })
 
 test('report: with an engine that is already right, the profile barely moves', () => {
@@ -540,12 +625,12 @@ test('report: with an engine that is already right, the profile barely moves', (
       const now = new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 1, 9)
       profile = monthlyReport({ items: items.filter((it) => new Date(it.sentAt) < now), month, now, previous: profile }).nextProfile
     }
-    // A lucky streak (seed 11 sees 90% acceptances for three months) may move it: never by more than the bound.
-    assert.ok(Math.abs(profile.intercept) <= 0.45, `seed ${seed}: intercept ${profile.intercept}`)
+    // A lucky streak may open the live gate (|θ̂| ≥ one posterior sd, about one seed in three): never by much.
+    assert.ok(Math.abs(profile.intercept) <= 0.7, `seed ${seed}: intercept ${profile.intercept}`)
     assert.ok(Math.abs(profile.discountPct - 20) <= 3, `seed ${seed}: discount ${profile.discountPct}`)
     finals.push(profile.intercept)
   }
-  assert.ok(Math.abs(finals.reduce((a, b) => a + b, 0) / finals.length) <= 0.2, `mean intercept ${finals}`)
+  assert.ok(Math.abs(finals.reduce((a, b) => a + b, 0) / finals.length) <= 0.3, `mean intercept ${finals}`)
 })
 
 test('report: month numbers, counters, workbook, deterministic output', () => {
@@ -556,7 +641,7 @@ test('report: month numbers, counters, workbook, deterministic output', () => {
   assert.equal(s.offersSent, rep.inMonth.length)
   assert.equal(s.accepted + s.countered + s.declined + s.noReply + s.soldOther, s.decidedFirst)
   assert.equal(s.closedDeals + s.lostDeals + s.pending, s.offersSent)
-  if (s.sellerCounters) near(s.avgSellerRaisePct, 30, 2)
+  if (s.sellerCounters) assert.ok(s.avgSellerRaisePct > 0 && s.avgSellerRaisePct <= 30 + 1e-9, `${s.avgSellerRaisePct}`) // counters at ×1,3, capped at the list price
   assert.equal(reportFileName(rep), 'Offerte-Vinted-2026-05.xlsx')
   const a = reportWorkbook(rep)
   const b = reportWorkbook(monthlyReport({ items, month: '2026-05', now }))
@@ -600,15 +685,19 @@ test('determinism: the same month twice gives the same profile; item order does 
 
 test('no signal: with the engine already right, most seeded runs move nothing', () => {
   let still = 0
+  let liveMoved = 0
   const runs = 20
   for (let seed = 1; seed <= runs; seed++) {
     const items = syntheticItems({ months: 3, perMonth: 10, shift: 0, seed: seed * 7 + 1 })
     const rep = monthlyReport({ items, month: '2026-06', now: new Date(2026, 6, 1, 9) })
     // First-offer engine only: the synthetic sellers really concede little in counters, so those parameters may move.
-    const firstOffer = (k) => k === 'intercept' || k === 'slope' || k.startsWith('time.') || k.startsWith('disc.')
+    const firstOffer = (k) => k === 'slope' || k.startsWith('time.') || k.startsWith('disc.')
     if (!rep.changes.some((x) => (x.status === 'applied' || x.status === 'capped') && firstOffer(x.key))) still++
+    if (rep.live.status.intercept === 'applied') liveMoved++
   }
   assert.ok(still >= runs * 0.75, `${still}/${runs} runs without engine changes`)
+  // The live gate is one posterior sd: a right engine still gets a (small) correction in about one run in three.
+  assert.ok(liveMoved <= runs * 0.6, `${liveMoved}/${runs} runs with a live correction`)
 })
 
 test('review fixes: plans never sent, tapped outcomes after a counter, missing estimates, off-plan counters', () => {
@@ -702,4 +791,179 @@ test('engine review: a test variation never says «send now», and the price sug
     assert.equal(out.result.sendNow.reason, 'exploration')
     if (out.result.suggestedPrice) near(out.result.suggestedPrice.date.getTime(), out.result.optimal.date.getTime(), 6 * 60000)
   }
+})
+
+/* ───────── live recalibration (engine-spec §1) ───────── */
+
+/** The user's first month (12 decided first offers, 1 accepted), anonymised: titles and links removed, everything the fit reads kept. */
+const REAL_LIKE = [{"id":"r1","title":"Articolo 1","link":"","createdAt":"2026-10-28T09:55:39.638Z","status":"bought","outcomeAt":"2026-10-31T08:47:03.556Z","listPrice":20,"targetPrice":17,"discountPct":15,"finalPrice":20,"probability":0.7833120224010645,"category":"collectible","form":{"category":"collectible","listPrice":"20","targetPrice":"17","listingAge":"weeks_1_2","sellerProfile":"expert","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":17,"at":"2026-10-28T20:50:00.000Z","planned":true}],"decision":{"engine":"1.3.0","rawLogit":1.3950408600966813,"learnedWeight":0,"k":1,"probability":0.7833120224010645,"recommendedAt":"2026-10-28T20:50:00.000Z","profileId":"default"}},{"id":"r2","title":"Articolo 2","link":"","createdAt":"2026-10-17T13:44:31.810Z","sentAt":"2026-10-18T20:45:21.855Z","sentAtSource":"tap","status":"sent","outcomeAt":"2026-10-18T20:45:21.855Z","listPrice":22,"targetPrice":18,"discountPct":18.181818,"probability":0.6506557439589186,"category":"collectible","form":{"category":"collectible","listPrice":"22","targetPrice":"18","listingAge":"today","sellerProfile":"expert","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":18,"at":"2026-10-18T20:45:21.855Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.7022173201829003,"learnedWeight":0,"k":0.988,"probability":0.6506557439589186,"recommendedAt":"2026-10-18T19:55:00.000Z","profileId":"default"}},{"id":"r3","title":"Articolo 3","link":"","createdAt":"2026-10-14T07:10:54.203Z","sentAt":"2026-10-14T19:45:00.000Z","sentAtSource":"imputed","status":"accepted","firstOutcome":"accepted","firstOutcomeAt":"2026-10-14T21:07:02.362Z","outcomeAt":"2026-10-14T21:07:02.362Z","listPrice":419,"targetPrice":335,"discountPct":20.047733,"finalPrice":335,"probability":0.6754826093648181,"category":"electronics","form":{"category":"electronics","listPrice":"419","targetPrice":"335","listingAge":"today","sellerProfile":"new_seller","listingSignal":"clearing_out"},"negotiation":[{"by":"buyer","kind":"offer","price":335,"at":"2026-10-14T19:45:00.000Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.7846602158424603,"learnedWeight":0,"k":1,"probability":0.6754826093648181,"recommendedAt":"2026-10-14T19:45:00.000Z","profileId":"default"}},{"id":"r4","title":"Articolo 4","link":"","createdAt":"2026-10-13T13:43:50.758Z","sentAt":"2026-10-13T20:35:41.066Z","sentAtSource":"tap","status":"declined","firstOutcome":"countered","firstOutcomeAt":"2026-10-17T17:12:37.711Z","outcomeAt":"2026-10-18T20:43:44.805Z","listPrice":469,"targetPrice":375,"discountPct":20.042644,"probability":0.5742120568444927,"category":"electronics","form":{"category":"electronics","listPrice":"469","targetPrice":"375","listingAge":"today","sellerProfile":"new_seller","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":375,"at":"2026-10-13T20:35:41.066Z","planned":false},{"by":"seller","kind":"counter","price":440,"rawPrice":440,"at":"2026-10-17T17:12:37.711Z"},{"by":"buyer","kind":"counter","price":407,"at":"2026-10-17T20:01:39.153Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.3184604105328631,"learnedWeight":0,"k":1,"probability":0.5742120568444927,"recommendedAt":"2026-10-13T19:35:00.000Z","profileId":"default"}},{"id":"r5","title":"Articolo 5","link":"","createdAt":"2026-10-11T15:08:34.723Z","sentAt":"2026-10-11T19:50:00.000Z","sentAtSource":"imputed","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-12T08:07:38.096Z","outcomeAt":"2026-10-12T08:07:38.096Z","listPrice":30,"targetPrice":24,"discountPct":20,"probability":0.7079816862604636,"category":"collectible","form":{"category":"collectible","listPrice":"30","targetPrice":"24","listingAge":"over_month","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":24,"at":"2026-10-11T19:50:00.000Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.9507058750728903,"learnedWeight":0,"k":1,"probability":0.7079816862604636,"recommendedAt":"2026-10-11T19:50:00.000Z","profileId":"default"}},{"id":"r6","title":"Articolo 6","link":"","createdAt":"2026-10-10T22:33:18.812Z","sentAt":"2026-10-11T20:44:00.141Z","sentAtSource":"tap","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-18T20:43:23.927Z","outcomeAt":"2026-10-18T20:43:23.927Z","listPrice":500,"targetPrice":380,"discountPct":24,"probability":0.614940514867817,"category":"electronics","form":{"category":"electronics","listPrice":"500","targetPrice":"380","listingAge":"weeks_1_2","sellerProfile":"new_seller","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":380,"at":"2026-10-11T20:44:00.141Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.4992248188842454,"learnedWeight":0,"k":1,"probability":0.614940514867817,"recommendedAt":"2026-10-11T19:45:00.000Z","profileId":"default"}},{"id":"r7","title":"Articolo 7","link":"","createdAt":"2026-10-10T20:14:41.418Z","sentAt":"2026-10-11T20:44:34.329Z","sentAtSource":"tap","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-31T08:47:32.949Z","outcomeAt":"2026-10-31T08:47:32.949Z","listPrice":9,"targetPrice":7,"discountPct":22.222222,"probability":0.6317572111541501,"category":"collectible","form":{"category":"collectible","listPrice":"9","targetPrice":"7","listingAge":"weeks_1_2","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":7,"at":"2026-10-11T20:44:34.329Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.5937455203281463,"learnedWeight":0,"k":0.994,"probability":0.6317572111541501,"recommendedAt":"2026-10-11T19:55:00.000Z","profileId":"default"}},{"id":"r8","title":"Articolo 8","link":"","createdAt":"2026-10-08T08:55:11.938Z","sentAt":"2026-10-11T07:49:43.437Z","sentAtSource":"tap","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-11T20:45:11.970Z","outcomeAt":"2026-10-11T20:45:11.970Z","listPrice":30,"targetPrice":22,"discountPct":26.666667,"probability":0.5323656912947824,"category":"collectible","form":{"category":"collectible","listPrice":"30","targetPrice":"22","listingAge":"over_month","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":22,"at":"2026-10-11T07:49:43.437Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.1379446731902035,"learnedWeight":0,"k":1,"probability":0.5323656912947824,"recommendedAt":"2026-10-08T19:55:00.000Z","profileId":"default"}},{"id":"r9","title":"Articolo 9","link":"","createdAt":"2026-10-08T07:00:38.865Z","sentAt":"2026-10-11T10:46:20.960Z","sentAtSource":"imputed","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-11T10:46:20.960Z","outcomeAt":"2026-10-11T10:46:20.960Z","listPrice":15,"targetPrice":10,"discountPct":33.333333,"probability":0.5184397955113325,"category":"other","form":{"category":"other","listPrice":"15","targetPrice":"10","listingAge":"days_2_6","sellerProfile":"new_seller","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":10,"at":"2026-10-11T10:46:20.960Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.2135351124967937,"learnedWeight":0,"k":0.9426333351250001,"probability":0.5184397955113325,"recommendedAt":"2026-10-11T19:45:00.000Z","profileId":"default"}},{"id":"r10","title":"Articolo 10","link":"","createdAt":"2026-10-05T15:47:43.719Z","status":"declined","firstOutcome":"countered","firstOutcomeAt":"2026-10-07T09:22:08.666Z","outcomeAt":"2026-10-11T20:44:57.198Z","listPrice":27,"targetPrice":18,"discountPct":33.333333,"probability":0.5424160135310869,"category":"other","form":{"category":"other","listPrice":"27","targetPrice":"18","listingAge":"unknown","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":18,"at":"2026-10-05T19:55:00.000Z","planned":false},{"by":"seller","kind":"counter","price":24,"at":"2026-10-07T09:22:08.666Z"},{"by":"buyer","kind":"counter","price":19.8,"at":"2026-10-08T06:52:01.444Z","planned":false}]},{"id":"r11","title":"Articolo 11","link":"","createdAt":"2026-10-05T14:24:00.329Z","status":"declined","firstOutcome":"countered","firstOutcomeAt":"2026-10-07T19:25:30.562Z","outcomeAt":"2026-10-08T18:16:28.325Z","listPrice":13.5,"targetPrice":8.5,"discountPct":37.037037,"probability":0.28516853409864334,"category":"other","form":{"category":"other","listPrice":"13,5","targetPrice":"8,5","listingAge":"unknown","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":8.5,"at":"2026-10-07T19:45:00.000Z","planned":false},{"by":"seller","kind":"counter","price":12,"at":"2026-10-07T19:25:30.562Z"},{"by":"buyer","kind":"counter","price":9.8,"at":"2026-10-08T17:11:48.245Z","planned":false}]},{"id":"r12","title":"Articolo 12","link":"","createdAt":"2026-10-05T09:04:28.216Z","sentAt":"2026-10-07T19:34:34.807Z","sentAtSource":"imputed","status":"declined","firstOutcome":"declined","firstOutcomeAt":"2026-10-07T19:34:34.807Z","outcomeAt":"2026-10-07T19:34:34.807Z","listPrice":35,"targetPrice":23,"discountPct":34.285714,"probability":0.4002499001393909,"category":"other","form":{"category":"other","listPrice":"35","targetPrice":"23","listingAge":"unknown","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":23,"at":"2026-10-07T19:40:00.000Z","planned":false}]},{"id":"r13","title":"Articolo 13","link":"","createdAt":"2026-10-10T22:30:33.343Z","sentAt":"2026-10-11T19:40:00.000Z","sentAtSource":"imputed","status":"sold_other","firstOutcome":"sold_other","firstOutcomeAt":"2026-10-11T20:43:00.736Z","outcomeAt":"2026-10-11T20:43:00.736Z","listPrice":500,"targetPrice":355,"discountPct":29,"probability":0.509380175566363,"category":"electronics","form":{"category":"electronics","listPrice":"500","targetPrice":"355","listingAge":"weeks_2_4","sellerProfile":"unknown","listingSignal":"none"},"negotiation":[{"by":"buyer","kind":"offer","price":355,"at":"2026-10-11T19:40:00.000Z","planned":false}],"decision":{"engine":"1.3.0","rawLogit":0.039920941635578994,"learnedWeight":0,"k":1,"probability":0.509380175566363,"recommendedAt":"2026-10-11T19:40:00.000Z","profileId":"default"},"deletedAt":"2026-10-13T13:39:44.198Z"}]
+const REAL_NOW = new Date('2026-11-01T08:47:32.952Z')
+
+test('live fit on the real-like month: the engine prior lands under a third, the fit pulls further toward the observed 1 in 12', () => {
+  const records = buildDataset(REAL_LIKE, REAL_NOW)
+  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit))
+  assert.equal(decided.length, 12)
+  assert.equal(decided.filter((r) => r.y === 1).length, 1)
+  const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length
+  assert.ok(mean(decided.map((r) => r.pShown)) > 0.5, 'the 1.3.0 engine showed over 50% on average')
+  const engineMean = mean(decided.map((r) => predictWith(null, r)))
+  assert.ok(engineMean >= 0.18 && engineMean <= 0.35, `prior reset: mean ${engineMean}`)
+  const live = liveProfile(records, REAL_NOW)
+  assert.equal(live.basedOn, 12)
+  assert.ok(live.nEff > 10)
+  assert.ok(live.fitted.intercept <= -0.5, `fitted intercept ${live.fitted.intercept}`)
+  assert.ok(live.sd.intercept > 0.5 && live.sd.intercept < 0.9, `sd ${live.sd.intercept}`)
+  assert.equal(live.status.dslope, 'waiting_data', 'two discount arms but under 15 weighted outcomes')
+  assert.equal(live.profile.dslope, 0)
+  // Whether the one-sd gate is open depends on the exact logits (0,8–1,0 sd here): applied → the mode; otherwise 0.
+  if (live.status.intercept === 'applied') assert.ok(live.profile.intercept <= -0.5)
+  else assert.equal(live.profile.intercept, 0)
+  const fitted = normalizeProfile({ intercept: live.fitted.intercept })
+  const correctedMean = mean(decided.map((r) => predictWith(fitted, r)))
+  assert.ok(correctedMean >= 0.1 && correctedMean <= 0.25, `corrected mean ${correctedMean}`)
+  assert.ok(Math.abs(calibrationMetrics(decided.map((r) => [predictWith(fitted, r), r.y])).oeZ) < 1.5)
+  // The plan never sent (bought at list price) is not a record; the two counter-screen items date their first offer
+  // from the negotiation history, so all 12 records calibrate the first offer.
+  assert.equal(records.length, 12)
+  assert.ok(records.every((r) => r.sentKnown))
+  assert.equal(REAL_LIKE.length, 13)
+  // The honest range on a typical item with this profile: no wider than 30 points, lower bound near the observed rate.
+  const profile = { ...live.profile, intercept: live.fitted.intercept, live: true }
+  const typical = analyzeOffer({ category: 'collectible', listPrice: '30', targetPrice: '24', listingAge: 'weeks_1_2', sellerProfile: 'unknown', listingSignal: 'none' }, new Date(2026, 9, 7, 15, 0), { profile })
+  assert.equal(typical.probabilityRange.n, 12)
+  assert.ok(typical.probabilityRange.high - typical.probabilityRange.low <= 0.3)
+  assert.ok(typical.probabilityRange.low <= 0.12)
+  assert.ok(typical.probability >= 0.1 && typical.probability <= 0.25)
+})
+
+test('live fit: outcomes generated by the engine itself leave it alone; one discount arm never earns a slope', () => {
+  for (const seed of [1, 2, 3]) {
+    const items = syntheticItems({ months: 4, perMonth: 10, shift: 0, seed })
+    const now = new Date(2026, 7, 10)
+    const live = liveProfile(buildDataset(items, now), now)
+    assert.ok(live.basedOn >= 35, `${live.basedOn} outcomes`)
+    assert.ok(Math.abs(live.profile.intercept) < 0.3, `seed ${seed}: intercept ${live.profile.intercept} (fitted ${live.fitted.intercept})`)
+    assert.equal(live.profile.dslope, 0, `seed ${seed}: dslope`)
+    assert.ok(live.gain == null || !live.gain.admitted)
+  }
+  // 30 outcomes all at −20%: tougher sellers, but no slope (one arm).
+  const flat = Array.from({ length: 30 }, (_, i) => rec(`f${i}`, i % 5 === 0 ? 1 : 0, { discountPct: 20, now: new Date(2026, 9, 1) }))
+  const out = liveProfile(flat, new Date(2026, 9, 1))
+  assert.ok(out.profile.intercept < -0.5)
+  assert.equal(out.profile.dslope, 0)
+  assert.equal(out.status.dslope, 'waiting_data')
+  assert.deepEqual(Object.keys(out.arms), ['d20'])
+  // Two arms with a real slope: deep asks refused, soft asks accepted → a negative slope, bounded, curve still falling.
+  const twoArms = [
+    ...Array.from({ length: 16 }, (_, i) => rec(`s${i}`, i % 4 === 0 ? 0 : 1, { discountPct: 10, now: new Date(2026, 9, 1) })),
+    ...Array.from({ length: 16 }, (_, i) => rec(`d${i}`, i % 8 === 0 ? 1 : 0, { discountPct: 32, now: new Date(2026, 9, 1) })),
+  ]
+  const sloped = liveProfile(twoArms, new Date(2026, 9, 1))
+  assert.equal(sloped.status.dslope, 'applied', `gain ${JSON.stringify(sloped.gain)}`)
+  assert.ok(sloped.profile.dslope < 0 && sloped.profile.dslope >= LEARNING.BOUNDS.dslope[0])
+  assert.equal(sloped.status.intercept, 'applied', 'the pair is applied together')
+  assert.ok(sloped.profile.cov.length === 2 && sloped.profile.paramKeys[1] === 'dslope')
+  const row = learnedOfferRow(sloped.profile, { logit: 0, windowId: 'sunday_night', discountPct: 30 })
+  near(row.learned.dslope, sloped.profile.dslope, 1e-12)
+  assert.ok(learnedOfferRow(sloped.profile, { logit: 0, windowId: 'sunday_night', discountPct: 10 }).weight > row.weight)
+})
+
+test('engine bump: a profile fitted against another engine drops its first-offer corrections and keeps the counter side', () => {
+  const fitted = normalizeProfile({ intercept: -0.8, dslope: -0.2, slope: 1.1, time: { prime_evening: -0.2 }, disc: { d30: -0.3 }, counter: -0.3, counterShare: 1.2, sellerReplyHours: 5, basedOn: 20, cov: [[0.1, 0], [0, 0.1]], paramKeys: ['intercept', 'dslope'], live: true, appliedAt: '2026-10-01T00:00:00.000Z' })
+  assert.equal(fitted.engine, ENGINE_VERSION)
+  assert.equal(fitted.intercept, -0.8)
+  const stale = normalizeProfile({ ...fitted, engine: '1.3.0' })
+  assert.ok(profileIsStale({ ...fitted, engine: '1.3.0' }))
+  assert.equal(stale.intercept, 0)
+  assert.equal(stale.dslope, 0)
+  assert.equal(stale.slope, 1)
+  assert.equal(stale.time.prime_evening, 0)
+  assert.equal(stale.disc.d30, 0)
+  assert.equal(stale.cov, null)
+  assert.equal(stale.basedOn, 0)
+  assert.equal(stale.live, false)
+  assert.equal(stale.counter, -0.3)
+  assert.equal(stale.counterShare, 1.2)
+  assert.equal(stale.sellerReplyHours, 5)
+  assert.equal(stale.engine, ENGINE_VERSION)
+  assert.equal(firstOfferCorrected(stale), false)
+  // A stored v2 profile (no stamp) is stale; a bare hand-built correction is current.
+  assert.equal(normalizeProfile({ version: 2, intercept: -0.5, counter: 0.2 }).intercept, 0)
+  assert.equal(normalizeProfile({ version: 2, intercept: -0.5, counter: 0.2 }).counter, 0.2)
+  assert.equal(normalizeProfile({ intercept: -0.5 }).intercept, -0.5)
+  assert.equal(profileIsStale(DEFAULT_PROFILE), false)
+  // The decision snapshot carries the engine, so the replay can tell which prior showed each estimate.
+  assert.equal(decisionSnapshot(analyzeOffer(FORM, NOW), { now: NOW }).engine, ENGINE_VERSION)
+})
+
+test('scale leak: a pure shift the intercept prior cannot absorb does not earn the offsets an admission', () => {
+  const saved = LEARNING.PRIOR_SD.intercept
+  LEARNING.PRIOR_SD.intercept = 0.5
+  try {
+    for (const seed of [1, 2, 3]) {
+      const items = syntheticItems({ months: 4, perMonth: 10, shift: -2.5, seed })
+      const now = new Date(2026, 7, 10)
+      const fit = fitFirstOffers(buildDataset(items, now), now)
+      assert.ok(fit.n >= 35)
+      assert.ok(fit.theta.intercept > -1.6, `the 0,5 prior shrinks the −2,5 shift to ${fit.theta.intercept}`)
+      assert.equal(fit.ladder.offsets.admitted, false, `seed ${seed}: offsets gain ${fit.ladder.offsets.gain}`)
+      const offsets = Object.entries(fit.theta).filter(([k]) => k.startsWith('time.') || k.startsWith('disc.'))
+      assert.ok(offsets.every(([, v]) => Math.abs(v) < 0.5), `seed ${seed}: ${JSON.stringify(offsets)}`)
+      const timeKeys = offsets.filter(([k]) => k.startsWith('time.') && fit.nEff[k] > 0)
+      near(timeKeys.reduce((s, [k, v]) => s + fit.nEff[k] * v, 0), 0, 1e-6, 'centred: the leaked shift is not in the offsets')
+    }
+  } finally {
+    LEARNING.PRIOR_SD.intercept = saved
+  }
+})
+
+test('live fit inside the monthly report: one correction, shown as live; the offsets fit the residual after it', () => {
+  const items = syntheticItems({ months: 6, perMonth: 14, shift: -0.8, seed: 7 })
+  const now = new Date(2026, 9, 1, 9)
+  const rep = monthlyReport({ items, month: '2026-09', now })
+  assert.ok(['applied', 'waiting_data'].includes(rep.live.status.intercept))
+  const row = rep.changes.find((c) => c.key === 'intercept')
+  assert.equal(row.status, rep.live.status.intercept === 'applied' ? 'live' : 'waiting_data')
+  assert.equal(row.minEffective, LEARNING.LIVE.MIN_EFFECTIVE)
+  assert.ok(rep.changes.some((c) => c.key === 'dslope'))
+  assert.ok(!rep.changes.some((c) => c.key === 'slope'), 'the monthly slope is no longer a parameter of the profile')
+  assert.equal(rep.nextProfile.intercept, rep.live.profile.intercept)
+  assert.equal(rep.nextProfile.basedOn, rep.live.basedOn)
+  assert.deepEqual(rep.nextProfile.paramKeys, ['intercept', 'dslope'])
+  assert.equal(rep.byPriceBand.length, 3)
+  assert.equal(rep.byPriceBand.reduce((s, b) => s + b.n, 0), rep.records.filter((r) => r.y != null && Number.isFinite(r.rawLogit)).length)
+  const files = unzip(reportWorkbook(rep))
+  assert.ok(files['xl/worksheets/sheet7.xml'].includes('fascia di prezzo'))
+  if (rep.live.status.intercept === 'applied') {
+    assert.ok(files['xl/worksheets/sheet10.xml'].includes('Applicata (dal vivo)'))
+    assert.ok(rep.notes.some((n) => n.includes('dal vivo')))
+  }
+  for (const xml of Object.values(files)) assert.ok(!/undefined|NaN|\[object Object\]/.test(xml))
+  // The corrected engine predicts the history at least as well as the plain one.
+  const decided = rep.records.filter((r) => r.y != null)
+  const ll = (p) => decided.reduce((s, r) => s - (r.y ? Math.log(predictWith(p, r)) : Math.log(1 - predictWith(p, r))), 0)
+  assert.ok(ll(rep.nextProfile) <= ll(null) + 1e-9)
+})
+
+test('live history and checkpoints: one entry per day, monthly entries untouched, the checkpoint is the live profile applied 30 days ago', () => {
+  const day = (d) => new Date(2026, 9, d, 12)
+  const prof = (d, intercept) => normalizeProfile({ id: `live.2026-10-${String(d).padStart(2, '0')}`, intercept, live: true, appliedAt: day(d).toISOString(), month: '2026-09' })
+  let history = [{ id: '2026-09', month: '2026-09', intercept: 0, changes: [] }]
+  history = withLiveHistory(history, prof(1, -0.5))
+  history = withLiveHistory(history, prof(1, -0.6))
+  history = withLiveHistory(history, prof(3, -0.7))
+  assert.equal(history.length, 3)
+  assert.equal(history.find((p) => p.id === 'live.2026-10-01').intercept, -0.6, 'the newest value of the day wins')
+  assert.equal(history[0].id, '2026-09', 'monthly entries stay')
+  assert.ok(history.filter((p) => p.live).every((p) => p.month === null), 'live entries carry no month')
+  for (let d = 4; d <= 20; d++) history = withLiveHistory(history, prof(d, -0.7))
+  assert.equal(history.filter((p) => p.live).length, 12, 'at most 12 live entries')
+  assert.ok(history.some((p) => p.id === '2026-09'))
+  assert.equal(liveCheckpoint(history, day(25)), null, 'nothing applied 30 days ago yet')
+  assert.equal(liveCheckpoint(history, new Date(2026, 10, 12)).id, 'live.2026-10-12')
+  assert.equal(liveCheckpoint(history, new Date(2026, 10, 15)).id, 'live.2026-10-15')
+  assert.equal(liveCheckpoint(null, day(1)), null)
+  assert.equal(liveDiffers(prof(3, -0.7), prof(3, -0.7)), false)
+  assert.equal(liveDiffers(prof(3, -0.7), prof(3, -0.75)), true)
+  assert.equal(withLiveHistory(history, normalizeProfile({ intercept: 0 })).length, history.length, 'an inactive profile adds nothing')
 })

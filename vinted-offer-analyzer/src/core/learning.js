@@ -3,12 +3,17 @@
  *
  *   dataset      every first offer and every counter with its outcome, re-scored by the current engine at the moment
  *                it was really sent (so the fit always measures the engine the user is running);
+ *   live fit     the general shift (intercept) and the discount slope, re-fitted on every change of the list (MAP +
+ *                Laplace, wide priors), applied at the posterior mode behind small gates (enough outcomes, |θ̂| ≥ 1 sd,
+ *                leave-one-out gain for the slope), with hysteresis; judged prequentially against a 30-day checkpoint
+ *                through the corrections the app really applied, and rolled back (and frozen) when they predict worse;
  *   fit          Bayesian logistic correction of the engine (MAP + Laplace) with priors centred on "no change",
  *                older months down-weighted by a half-life; general shift first, then centred time and discount
  *                offsets, each family admitted only when leave-one-out says it predicts better;
- *   profile      the correction actually applied next month: each value moves toward the fit only with enough data,
- *                beyond half a posterior sd and by a bounded step; a profile that predicts worse than its parent
- *                (prequential log Bayes factor < −2) is rolled back;
+ *   profile      the monthly families (time groups, discount knots, counter, concession share, reply time, default
+ *                discount): each value moves toward the fit only with enough data, beyond half a posterior sd and by a
+ *                bounded step; a profile that predicts worse than its parent (prequential log Bayes factor < −2) is
+ *                rolled back;
  *   discount     the default starting discount, moved only by what the data change in the expected-saving optimum;
  *   counters     seller concession share and reply time (Kaplan–Meier), fed to the counter engine with gates;
  *   exploration  a deterministic, flagged ±1 h / ±2 points variation on about 1 offer in 5, drawn from the safe
@@ -26,7 +31,8 @@ import { clamp, formatPoints, hashString, squash } from './math.js'
 import { formatEuro } from './messages.js'
 import { prepArticleFor } from './reasoning.js'
 import {
-  DEFAULT_PROFILE, discKnotOf, discKnotWeights, discOffset, monotoneDisc, normalizeProfile, profileIsActive, profileParams, timeGroupOf,
+  DEFAULT_PROFILE, correctionFeature, discKnotOf, discKnotWeights, discOffset, dslopeOffset, firstOfferCorrected, monotoneDisc,
+  normalizeProfile, predictiveInterval, profileIsActive, profileParams, timeGroupOf,
 } from './profile.js'
 import { availabilityAfter, readProbability } from './scheduler.js'
 import { scoreAt, timeWindowAt } from './scoring.js'
@@ -44,6 +50,8 @@ const lrnIso = (v) => {
   const d = lrnDate(v)
   return d ? d.toISOString() : null
 }
+/** Local calendar day 'YYYY-MM-DD' (ids of the live checkpoints). */
+const lrnDayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 const lrnR2 = (x) => Math.round(x * 100) / 100
 const lrnR4 = (x) => Math.round(x * 10000) / 10000
 const lrnSigma = (z) => 1 / (1 + Math.exp(-z))
@@ -123,10 +131,19 @@ export function decisionSnapshot(result, { now, profile = null, exploration = nu
     learnedWeight: score.learnedWeight || 0,
     k: optimal.pAvailable * optimal.pRead,
     probability: result.probability,
+    probabilityRange: result.probabilityRange || null,
     blockRisk: result.blockRisk ? result.blockRisk.level : null,
     exploration: exploration || null,
   }
 }
+
+/** Price band of a listing for the report tables (engine-spec §2.3): under 20 €, 20–50 €, over 50 €. */
+export const priceBandOf = (listPrice) => (!(listPrice > 0) ? null : listPrice < 20 ? 'under_20' : listPrice <= 50 ? 'from_20_to_50' : 'over_50')
+export const PRICE_BANDS = [
+  { id: 'under_20', label: 'Sotto 20 €' },
+  { id: 'from_20_to_50', label: 'Da 20 a 50 €' },
+  { id: 'over_50', label: 'Oltre 50 €' },
+]
 
 /* ───────── dataset ───────── */
 
@@ -285,6 +302,7 @@ export function learningRecord(item, now) {
     price,
     discountPct,
     knot: discKnotOf(discountPct),
+    priceBand: priceBandOf(listPrice),
     discW: discKnotWeights(discountPct),
     sentAt,
     sentKnown,
@@ -319,6 +337,10 @@ export function learningRecord(item, now) {
     rounds,
     exploration: decision && decision.exploration ? decision.exploration : null,
     profileId: decision ? decision.profileId : 'default',
+    engine: decision && decision.engine ? decision.engine : null,
+    // The learned correction the app really added when it showed this estimate: the prequential rollback compares
+    // the predictions actually made, never a re-fit.
+    appliedCorrection: decision && Number.isFinite(lrnNum(decision.learnedWeight)) ? lrnNum(decision.learnedWeight) : null,
     deletedAt: item.deletedAt || null,
   }
 }
@@ -380,15 +402,8 @@ const lrnInverse = (A) => {
 
 /* ───────── the fit ───────── */
 
-/** Feature value of record `r` for parameter `key` (slope multiplies the engine's own logit). */
-const lrnFeature = (key, r) => {
-  if (key === 'intercept') return 1
-  if (key === 'slope') return r.rawLogit - LEARNING.SLOPE_CENTER
-  const [kind, id] = key.split('.')
-  if (kind === 'time') return r.timeGroup === id ? 1 : 0
-  if (kind === 'disc') return (r.discW && r.discW[id]) || 0
-  return 0
-}
+/** Feature value of record `r` for parameter `key` (profile.js: intercept 1, dslope (d−20)/10, slope, group and knot indicators). */
+const lrnFeature = correctionFeature
 const lrnPriorSd = (key) => LEARNING.PRIOR_SD[key.split('.')[0]] || 0.35
 
 /** p, dp/dz of one record at correction vector `theta` over `keys`. */
@@ -481,12 +496,14 @@ const lrnGain = (a, b) => {
   return { gain, se, admitted: gain >= LEARNING.LADDER_MIN_ELPD_GAIN && gain >= se }
 }
 
+/** The learned logit correction of record `r` under a (normalised) profile: what learnedOfferRow adds in the engine. */
+const lrnCorrection = (P, r) => (P.slope - 1) * (r.rawLogit - LEARNING.SLOPE_CENTER) + P.intercept + dslopeOffset(P, r.discountPct) + (P.time[r.timeGroup] || 0) + discOffset(P, r.discountPct)
+
 /** Predicted probability of record `r` under a profile (or the raw engine with profile = null). */
 export function predictWith(profile, r) {
   if (!profile) return lrnClip(r.k * squash(r.rawLogit))
   const P = normalizeProfile(profile)
-  const z = r.rawLogit + (P.slope - 1) * (r.rawLogit - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, r.discountPct)
-  return lrnClip(r.k * squash(z))
+  return lrnClip(r.k * squash(r.rawLogit + lrnCorrection(P, r)))
 }
 
 export const logLoss = (pairs) => (pairs.length ? -pairs.reduce((s, [p, y]) => s + (y ? Math.log(lrnClip(p)) : Math.log(1 - lrnClip(p))), 0) / pairs.length : null)
@@ -549,20 +566,26 @@ export function calibrationMetrics(pairs) {
 
 /** First offers old enough for a verdict: a fixed horizon, so fast answers do not dominate the fit. */
 const lrnMature = (r, now) => now.getTime() - r.sentAt.getTime() >= LEARNING.NO_REPLY_AFTER_DAYS * DAY_MS
+/** The records a first-offer fit may use, with their recency weights. */
+const lrnDecided = (records, now) => {
+  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && lrnMature(r, now))
+  return { decided, weights: decided.map((r) => recencyWeight(r.sentAt, now)) }
+}
 
 /**
  * Fits the first-offer correction on every decided, mature first offer (weighted by recency), as a ladder where each
  * step must beat the simpler model by ≥ 1 nat and ≥ 1 se of leave-one-out log score (Vergouwe 2017):
  *   1. intercept: the general shift between the engine and this user's sellers;
- *      + slope, only with ≥ 40 weighted outcomes;
+ *      + slope, only with ≥ 40 weighted outcomes (diagnostic: the monthly path no longer applies either, see liveProfile);
  *   2. time-group and discount-knot offsets on what stage 1 leaves unexplained, admitted as a family only with the
  *      same leave-one-out test, centred (weighted by data) so they express differences BETWEEN groups, and with the
  *      discount curve projected to stay monotone.
+ * `live` (liveProfile output): when given, stage 2 works on the residual after the LIVE correction (intercept and
+ * discount slope), so the knots never re-learn what the live slope already explains.
  * The covariance is the full joint inverse Fisher information at the final values.
  */
-export function fitFirstOffers(records, now) {
-  const decided = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && lrnMature(r, now))
-  const weights = decided.map((r) => recencyWeight(r.sentAt, now))
+export function fitFirstOffers(records, now, { live = null } = {}) {
+  const { decided, weights } = lrnDecided(records, now)
   const total = weights.reduce((s, w) => s + w, 0)
   const offsetKeys = [...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`)]
   const allKeys = ['intercept', 'slope', ...offsetKeys]
@@ -580,12 +603,14 @@ export function fitFirstOffers(records, now) {
     slope = lrnGain(lrnLoo(decided, ['intercept'], weights, base.vector), lrnLoo(decided, ['intercept', 'slope'], weights, withSlope.vector))
     if (slope.admitted) stage1 = withSlope
   }
-  const shiftOf = (r) => r.rawLogit + (stage1.theta.slope || 0) * (r.rawLogit - LEARNING.SLOPE_CENTER) + stage1.theta.intercept
+  const liveP = live && live.profile ? normalizeProfile(live.profile) : null
+  const shiftOf = (r) => (liveP
+    ? r.rawLogit + liveP.intercept + dslopeOffset(liveP, r.discountPct)
+    : r.rawLogit + (stage1.theta.slope || 0) * (r.rawLogit - LEARNING.SLOPE_CENTER) + stage1.theta.intercept)
   const shifted = decided.map((r) => ({ ...r, rawLogit: shiftOf(r) }))
 
   // Stage 2: offsets as a family, centred, monotone discount curve.
   const s2 = fitCorrection(shifted, offsetKeys, weights)
-  const offsets = lrnGain(lrnLoo(shifted, [], weights, []), lrnLoo(shifted, offsetKeys, weights, s2.vector))
   const theta2 = { ...s2.theta }
   for (const prefix of ['time.', 'disc.']) {
     const ks = offsetKeys.filter((k) => k.startsWith(prefix) && nEff[k] > 0)
@@ -596,6 +621,10 @@ export function fitFirstOffers(records, now) {
   }
   const projected = monotoneDisc(Object.fromEntries(LEARNING_DISCOUNT_KNOTS.map((k) => [k.id, theta2[`disc.${k.id}`]])), 1 + (stage1.theta.slope || 0))
   for (const k of LEARNING_DISCOUNT_KNOTS) theta2[`disc.${k.id}`] = projected[k.id]
+  // The family is judged on its CENTRED values: the uncentred MAP also absorbs whatever general shift the intercept's
+  // prior shrank away, and that leaked shift used to earn the offsets an admission they did not deserve (scale leak).
+  const centred = offsetKeys.map((k) => theta2[k])
+  const offsets = lrnGain(lrnLoo(shifted, [], weights, []), lrnLoo(shifted, offsetKeys, weights, centred))
 
   const keys = [...stage1.keys, ...offsetKeys]
   const theta = { slope: 0, ...stage1.theta, ...theta2 }
@@ -732,7 +761,7 @@ export function isoAcceptanceDiscount(records, profile, now) {
   const nEff = weights.reduce((s, w) => s + w, 0)
   if (!nEff) return { target: null, targetAcceptance: null, curve: [], nEff: 0, n: 0 }
   const z0At = (r, d) => scoreAt(withPrices(r.input, r.listPrice, Math.round(r.listPrice * (1 - d / 100) * 100) / 100), r.sentAt, r.daysWaited).logit
-  const corrected = (r, d, z0) => r.k * squash(z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d))
+  const corrected = (r, d, z0) => r.k * squash(z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + dslopeOffset(P, d) + (P.time[r.timeGroup] || 0) + discOffset(P, d))
   const d0 = LEARNING.DEFAULT_DISCOUNT_PCT
   const targetAcceptance = usable.reduce((s, r, i) => s + weights[i] * r.k * squash(z0At(r, d0)), 0) / nEff
   const [lo, hi] = LEARNING.BOUNDS.discountPct
@@ -776,7 +805,7 @@ export function optimalDiscount(records, profile, now, { priorsOnly = false } = 
       const price = Math.round(r.listPrice * (1 - share) * 100) / 100
       const input = withPrices(r.input, r.listPrice, price)
       const z0 = scoreAt(input, r.sentAt, r.daysWaited).logit
-      const z = z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + (P.time[r.timeGroup] || 0) + discOffset(P, d)
+      const z = z0 + (P.slope - 1) * (z0 - LEARNING.SLOPE_CENTER) + P.intercept + dslopeOffset(P, d) + (P.time[r.timeGroup] || 0) + discOffset(P, d)
       const p = r.k * squash(z)
       es += weights[i] * (p * share + (1 - p) * (qd * rho * share - (1 - qd) * LEARNING.LOSS_COST_SHARE))
       pSum += weights[i] * p
@@ -787,10 +816,226 @@ export function optimalDiscount(records, profile, now, { priorsOnly = false } = 
   return { target: best ? best.discountPct : null, curve, closeAfterFail: q, continuationRatio: rho, nEff, n: usable.length }
 }
 
+/* ───────── live recalibration: intercept and discount slope, on every outcome (engine-spec §1) ───────── */
+
+export const LIVE_KEYS = Object.freeze(['intercept', 'dslope'])
+
+/** Weighted outcomes per discount arm (nearest knot: 10 / 20 / 30%): the slope needs two arms with data. */
+const lrnArms = (decided, weights) => {
+  const arms = {}
+  decided.forEach((r, i) => { const a = discKnotOf(r.discountPct); arms[a] = (arms[a] || 0) + weights[i] })
+  return arms
+}
+const lrnSd = (cov, i) => (cov && cov[i] && Number.isFinite(cov[i][i]) ? Math.sqrt(Math.max(0, cov[i][i])) : null)
+const lrnAfter = (date) => (date ? lrnDate(date) : null)
+
+/**
+ * Prequential score of the corrections the app REALLY applied against a checkpoint (engine-spec §1.2): over the mature
+ * decided first offers sent after the checkpoint was applied, Σ log p(y | z + applied correction) − log p(y | z +
+ * checkpoint correction). The applied correction is the `learnedWeight` stored with each decision, so the score judges
+ * the estimates the user saw and never a re-fit; `applied` (the profile in force) fills it only for records that lack
+ * a snapshot but were sent while it was in force. `checkpoint` null = the engine without correction.
+ */
+export function prequentialScore(records, applied, checkpoint, now) {
+  const C = normalizeProfile(checkpoint)
+  const A = applied ? normalizeProfile(applied) : null
+  const since = lrnAfter(checkpoint && checkpoint.appliedAt)
+  const appliedSince = lrnAfter(A && A.appliedAt)
+  let score = 0
+  let n = 0
+  for (const r of records || []) {
+    if (r.y == null || !Number.isFinite(r.rawLogit) || !lrnMature(r, now)) continue
+    if (since && r.sentAt.getTime() <= since.getTime()) continue
+    let correction = r.appliedCorrection
+    if (correction == null) {
+      if (!A || !appliedSince || r.sentAt.getTime() <= appliedSince.getTime()) continue
+      correction = lrnCorrection(A, r)
+    }
+    const pa = lrnClip(r.k * squash(r.rawLogit + correction))
+    const pc = lrnClip(r.k * squash(r.rawLogit + lrnCorrection(C, r)))
+    score += r.y ? Math.log(pa) - Math.log(pc) : Math.log(1 - pa) - Math.log(1 - pc)
+    n++
+  }
+  return { score, n }
+}
+
+/**
+ * The checkpoint the live values are judged against: the newest live profile applied at least FREEZE_DAYS ago (from
+ * the stored history), else null, which stands for the engine without correction.
+ */
+export function liveCheckpoint(history, now) {
+  const limit = now.getTime() - LEARNING.LIVE.FREEZE_DAYS * DAY_MS
+  const eligible = (history || []).filter((p) => p && p.live && !p.reverted && lrnDate(p.appliedAt) && lrnDate(p.appliedAt).getTime() <= limit)
+  if (!eligible.length) return null
+  return eligible.reduce((a, b) => (lrnDate(b.appliedAt) > lrnDate(a.appliedAt) ? b : a))
+}
+
+/**
+ * The live values set back to a checkpoint (a rollback, or «Annulla le correzioni») and frozen for FREEZE_DAYS: the fit
+ * keeps running but is not applied until then. Everything else in `previous` (monthly families, counter values) stays.
+ */
+export function applyCheckpoint(previous, checkpoint, now, { reason = 'rollback' } = {}) {
+  const prev = normalizeProfile(previous)
+  const C = normalizeProfile(checkpoint)
+  return normalizeProfile({
+    ...prev,
+    intercept: C.intercept,
+    dslope: C.dslope,
+    cov: C.cov,
+    paramKeys: C.paramKeys,
+    basedOn: C.basedOn,
+    id: `live.${lrnDayKey(now)}`,
+    parentId: prev.id,
+    engine: ENGINE_VERSION,
+    live: true,
+    appliedAt: lrnIso(now),
+    checkpointId: checkpoint && checkpoint.id ? checkpoint.id : 'default',
+    frozenUntil: lrnIso(new Date(now.getTime() + LEARNING.LIVE.FREEZE_DAYS * DAY_MS)),
+    frozenReason: reason,
+  })
+}
+
+/** True when storing `next` over `previous` changes what the engine or the UI would see (values, data basis, state). */
+export function liveDiffers(next, previous) {
+  const a = normalizeProfile(next)
+  const b = normalizeProfile(previous)
+  if (Math.abs(a.intercept - b.intercept) > 1e-9 || Math.abs(a.dslope - b.dslope) > 1e-9) return true
+  if (a.basedOn !== b.basedOn || a.live !== b.live || a.appliedAt !== b.appliedAt || a.frozenUntil !== b.frozenUntil || a.checkpointId !== b.checkpointId || a.id !== b.id) return true
+  return JSON.stringify(a.cov) !== JSON.stringify(b.cov) || JSON.stringify(a.paramKeys) !== JSON.stringify(b.paramKeys)
+}
+
+/**
+ * The stored history with the live profile added as a checkpoint candidate (one entry per day, the newest wins), the
+ * monthly entries untouched and at most `keep` live entries kept. Live entries carry no month, so the monthly trend
+ * never mistakes them for a month's correction.
+ */
+export function withLiveHistory(history, profile, { keep = 12 } = {}) {
+  const list = Array.isArray(history) ? history : []
+  if (!profile || !profile.live || !profile.appliedAt) return list
+  const entry = { ...profile, cov: profile.cov ? profile.cov.map((row) => row.map(lrnR4)) : null, month: null }
+  const others = list.filter((p) => !(p && p.id === entry.id))
+  const live = others.filter((p) => p && p.live && !p.month)
+  const drop = new Set(live.slice(0, Math.max(0, live.length + 1 - keep)).map((p) => p.id))
+  return [...others.filter((p) => !drop.has(p && p.id)), entry]
+}
+
+/**
+ * The live correction of the first-offer estimate (engine-spec §1.1): the general shift θ₀ and the discount slope θ_d
+ * (per 10 points away from 20%), fitted by MAP + Laplace on every decided, mature first offer (recency-weighted),
+ * applied at the posterior mode. Gates (LEARNING.LIVE): the intercept needs MIN_EFFECTIVE weighted outcomes and
+ * |θ̂₀| ≥ GATE_Z posterior sd; the slope needs SLOPE_MIN_EFFECTIVE outcomes spread over two discount arms (≥ 3 each),
+ * a leave-one-out gain over the intercept alone and a curve that keeps falling with the discount (≤ DSLOPE_MAX). A
+ * new value replaces the applied one only beyond HYSTERESIS. `previous` is the profile in force (its monthly families
+ * are kept); `checkpoint` is the live profile applied ≥ FREEZE_DAYS ago (liveCheckpoint), null = plain engine: when the
+ * corrections really applied since then predict worse than it by ROLLBACK_LOG_BF nats (prequentialScore), the values
+ * go back to the checkpoint and stay frozen for FREEZE_DAYS (status 'rollback', then 'frozen').
+ * Returns { profile, status: { intercept, dslope }, nEff, cov, keys, basedOn, fitted, sd, gain, arms, rollback, frozen, changed }.
+ */
+export function liveProfile(records, now, { previous = null, checkpoint = null } = {}) {
+  const prev = normalizeProfile(previous)
+  const G = LEARNING.LIVE
+  const B = LEARNING.BOUNDS
+  const { decided, weights } = lrnDecided(records || [], now)
+  const nEff = weights.reduce((s, w) => s + w, 0)
+  const arms = lrnArms(decided, weights)
+  const fitted = { intercept: 0, dslope: 0 }
+  const sd = { intercept: null, dslope: null }
+  const status = { intercept: 'waiting_data', dslope: 'waiting_data' }
+  let cov = null
+  let gain = null
+  let intercept = 0
+  let dslope = 0
+  if (decided.length) {
+    const base = fitCorrection(decided, ['intercept'], weights)
+    fitted.intercept = base.theta.intercept
+    sd.intercept = lrnSd(base.cov, 0)
+    cov = [[sd.intercept != null ? sd.intercept ** 2 : LEARNING.PRIOR_SD.intercept ** 2, 0], [0, LEARNING.PRIOR_SD.dslope ** 2]]
+    const twoArms = Object.values(arms).filter((w) => w >= G.SLOPE_MIN_PER_ARM).length >= 2
+    if (nEff >= G.SLOPE_MIN_EFFECTIVE && twoArms) {
+      const joint = fitCorrection(decided, [...LIVE_KEYS], weights)
+      gain = lrnGain(lrnLoo(decided, ['intercept'], weights, base.vector), lrnLoo(decided, [...LIVE_KEYS], weights, joint.vector))
+      fitted.dslope = joint.theta.dslope
+      sd.dslope = lrnSd(joint.cov, 1)
+      if (gain.admitted) {
+        fitted.intercept = joint.theta.intercept
+        sd.intercept = lrnSd(joint.cov, 0) ?? sd.intercept
+        cov = joint.cov || cov
+        dslope = clamp(Math.min(joint.theta.dslope, G.DSLOPE_MAX), B.dslope[0], B.dslope[1])
+        status.dslope = 'applied'
+      }
+    }
+    // A slope without its level is not a model: when the slope is admitted the pair is applied together.
+    if (status.dslope === 'applied' || (nEff >= G.MIN_EFFECTIVE && sd.intercept != null && Math.abs(fitted.intercept) >= G.GATE_Z * sd.intercept)) {
+      intercept = clamp(fitted.intercept, B.intercept[0], B.intercept[1])
+      status.intercept = 'applied'
+    }
+  }
+  const active = status.intercept === 'applied' || status.dslope === 'applied'
+  const frozen = Boolean(lrnDate(prev.frozenUntil) && lrnDate(prev.frozenUntil).getTime() > now.getTime())
+  const checkpointId = checkpoint && checkpoint.id ? checkpoint.id : 'default'
+  let profile
+  let rollback = null
+  if (frozen) {
+    // After a rollback or «Annulla»: the values stay where they were put; the fit is only reported.
+    status.intercept = 'frozen'
+    status.dslope = 'frozen'
+    profile = normalizeProfile({ ...prev, basedOn: decided.length })
+  } else {
+    const judged = prev.live && firstOfferCorrected(prev) ? prequentialScore(records, prev, checkpoint, now) : null
+    if (judged && judged.n > 0 && judged.score < LEARNING.ROLLBACK_LOG_BF) {
+      rollback = judged
+      status.intercept = 'rollback'
+      status.dslope = 'rollback'
+      profile = applyCheckpoint(prev, checkpoint, now, { reason: 'rollback' })
+    } else {
+      // Hysteresis: the applied values move only beyond HYSTERESIS, so the percentages do not jump on every tap.
+      if (Math.abs(intercept - prev.intercept) < G.HYSTERESIS && Math.abs(dslope - prev.dslope) < G.HYSTERESIS) {
+        intercept = prev.intercept
+        dslope = prev.dslope
+      }
+      const moved = Math.abs(intercept - prev.intercept) > 1e-9 || Math.abs(dslope - prev.dslope) > 1e-9
+      const wasLive = Boolean(prev.live)
+      const isLive = active || (wasLive && (Math.abs(intercept) > 1e-9 || Math.abs(dslope) > 1e-9))
+      profile = normalizeProfile({
+        ...prev,
+        intercept,
+        dslope,
+        cov: decided.length ? cov.map((row) => row.map(lrnR4)) : null,
+        paramKeys: decided.length ? [...LIVE_KEYS] : null,
+        basedOn: decided.length,
+        engine: ENGINE_VERSION,
+        live: isLive,
+        appliedAt: moved || (isLive && !prev.appliedAt) ? lrnIso(now) : prev.appliedAt,
+        id: moved ? `live.${lrnDayKey(now)}` : prev.id,
+        parentId: moved ? prev.id : prev.parentId,
+        checkpointId: isLive ? checkpointId : prev.checkpointId,
+        frozenUntil: null,
+        frozenReason: null,
+      })
+    }
+  }
+  return {
+    profile,
+    status,
+    nEff,
+    cov: profile.cov,
+    keys: [...LIVE_KEYS],
+    basedOn: decided.length,
+    fitted,
+    sd,
+    gain,
+    arms,
+    rollback,
+    frozen,
+    changed: liveDiffers(profile, prev),
+  }
+}
+
 /* ───────── from fit to next month's profile (guardrails) ───────── */
 
 const PARAM_LABELS = {
   intercept: 'Correzione generale della probabilità',
+  dslope: 'Correzione per la profondità dello sconto',
   slope: 'Fiducia nelle differenze tra offerte',
   counter: 'Correzione delle tue controproposte',
   counterShare: 'Quanto scendono i tuoi venditori',
@@ -804,7 +1049,7 @@ export const paramLabel = (key) => {
   if (kind === 'disc') return `${(LEARNING_DISCOUNT_KNOTS.find((k) => k.id === id) || { label: id }).label}`
   return key
 }
-const SCALARS = new Set(['intercept', 'slope', 'counter', 'counterShare', 'sellerReplyHours', 'discountPct'])
+const SCALARS = new Set(['intercept', 'dslope', 'slope', 'counter', 'counterShare', 'sellerReplyHours', 'discountPct'])
 const getParam = (P, key) => {
   if (SCALARS.has(key)) return P[key]
   const [kind, id] = key.split('.')
@@ -818,20 +1063,28 @@ const setParam = (P, key, value) => {
   }
 }
 /** Parameter family of a key (what a rollback freezes). */
-const familyOf = (key) => ({ intercept: 'intercept', slope: 'slope', counter: 'counter', counterShare: 'share', sellerReplyHours: 'latency', discountPct: 'discount' })[key] || key.split('.')[0]
+const familyOf = (key) => ({ intercept: 'intercept', dslope: 'dslope', slope: 'slope', counter: 'counter', counterShare: 'share', sellerReplyHours: 'latency', discountPct: 'discount' })[key] || key.split('.')[0]
+/** True when a monthly family (anything but the live intercept and slope) differs from the engine default. */
+const monthlyActive = (P) => profileIsActive({ ...P, intercept: 0, dslope: 0 })
 
 /**
  * Next month's profile.
- *  - Rollback: the prequential log Bayes factor of the active profile against its parent, summed over the months it
- *    was active, below −2 → the parent's values come back and the families that had changed are frozen for a month.
- *  - Each parameter then moves from its current value toward the fit's target only when it has enough weighted
+ *  - The intercept and the discount slope come from the LIVE fit (liveProfile, computed here when not given): their
+ *    rows carry its status (live / waiting_data / frozen / rollback_live) and no monthly step or bound applies to them.
+ *  - Rollback of the monthly families: the prequential log Bayes factor of the active profile against its parent (both
+ *    at the live level, so only the monthly families are judged), summed over the months it was active, below −2 →
+ *    the parent's values come back and the families that had changed are frozen for a month.
+ *  - Each monthly parameter then moves from its current value toward the fit's target only when it has enough weighted
  *    outcomes, its family passed the leave-one-out ladder, the gap exceeds half a posterior sd, by at most MAX_STEP,
  *    inside BOUNDS; tiny moves are skipped.
- * Returns { profile, changes: [{ key, label, from, to, target, nEff, minEffective, status, reason }], rollback, … }.
+ * Returns { profile, changes: [{ key, label, from, to, target, nEff, minEffective, status, reason }], rollback, live, … }.
  */
-export function proposeProfile({ previous, firstFit, counterFit = null, counterStats = null, records = [], month, now, lastMonthRecords = [] }) {
+export function proposeProfile({ previous, firstFit, counterFit = null, counterStats = null, records = [], month, now, lastMonthRecords = [], live = null, checkpoint = null }) {
   const prev = normalizeProfile(previous)
-  const parent = prev.parent ? normalizeProfile(prev.parent) : null
+  const L = live || liveProfile(records, now, { previous: prev, checkpoint })
+  const parentRaw = prev.parent ? normalizeProfile(prev.parent) : null
+  // The monthly rollback judges the monthly families only: the parent is compared at the live level.
+  const parent = normalizeProfile({ ...(parentRaw || {}), intercept: prev.intercept, dslope: prev.dslope })
   const pairs = lastMonthRecords.filter((r) => r.y != null && Number.isFinite(r.rawLogit))
   const logBF = pairs.reduce((s, r) => {
     const pa = predictWith(prev, r)
@@ -839,17 +1092,17 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
     return s + (r.y ? Math.log(pa) - Math.log(pp) : Math.log(1 - pa) - Math.log(1 - pp))
   }, 0)
   const score = prev.score + logBF
-  const rollback = profileIsActive(prev) && score < LEARNING.ROLLBACK_LOG_BF
+  const rollback = monthlyActive(prev) && score < LEARNING.ROLLBACK_LOG_BF
   const frozen = Object.fromEntries(Object.entries(prev.frozen || {}).filter(([, until]) => until > month))
-  if (rollback) for (const c of prev.changes || []) frozen[familyOf(c.key)] = shiftMonth(month, LEARNING.FREEZE_MONTHS)
-  const start = rollback ? normalizeProfile({ ...prev, ...profileParams(parent || DEFAULT_PROFILE) }) : prev
+  if (rollback) for (const c of prev.changes || []) if (!LIVE_KEYS.includes(c.key)) frozen[familyOf(c.key)] = shiftMonth(month, LEARNING.FREEZE_MONTHS)
+  const start = rollback ? normalizeProfile({ ...prev, ...profileParams(parentRaw || DEFAULT_PROFILE), intercept: prev.intercept, dslope: prev.dslope }) : prev
   const next = normalizeProfile({ ...start, time: { ...start.time }, disc: { ...start.disc } })
 
   const changes = []
   // A rollback is a change of its own: every parameter that goes back to the parent's value is listed (and undoable).
   const rolledBack = new Set()
   if (rollback) {
-    const keys = ['intercept', 'slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct']
+    const keys = ['slope', ...LEARNING_TIME_GROUPS.map((g) => `time.${g.id}`), ...LEARNING_DISCOUNT_KNOTS.map((k) => `disc.${k.id}`), 'counter', 'counterShare', 'sellerReplyHours', 'discountPct']
     for (const key of keys) {
       // null reply time = the engine default (2 h): show the number, not «null».
       const orDefault = (v) => (key === 'sellerReplyHours' && v == null ? COUNTER.SELLER_REPLY_HOURS : v)
@@ -898,11 +1151,25 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   }
 
   const ladder = firstFit.ladder || {}
-  // Without a ladder verdict (hand-built fits) the intercept is judged by the gates alone.
-  consider('intercept', firstFit.theta.intercept, firstFit.nEff.intercept, 'intercept', { sd: sdOf('intercept'), eligible: !ladder.intercept || ladder.intercept.admitted })
-  consider('slope', firstFit.keys.includes('slope') ? 1 + firstFit.theta.slope : null, firstFit.nEff.slope ?? firstFit.weightTotal, 'slope', {
-    sd: sdOf('slope'), eligible: Boolean(ladder.slope && ladder.slope.admitted), notEligible: 'Con questi dati non migliora le previsioni: resta com\'è.',
-  })
+  // The live rows: already in force on the phone, listed here so the sheet shows one correction, not a second one.
+  const LIVE_REASONS = {
+    live: 'Applicata dal vivo a ogni esito, al valore stimato: nessun passo massimo.',
+    waiting_data: (key) => (key === 'intercept'
+      ? `Servono almeno ${LEARNING.LIVE.MIN_EFFECTIVE} esiti pesati e uno scarto di almeno ${LEARNING.LIVE.GATE_Z} deviazione standard dal motore.`
+      : `Servono almeno ${LEARNING.LIVE.SLOPE_MIN_EFFECTIVE} esiti pesati su due fasce di sconto e un guadagno leave-one-out.`),
+    frozen: 'Ferma fino alla fine del blocco dopo il ritorno ai valori precedenti.',
+    rollback_live: 'Le correzioni in uso prevedevano peggio di quelle del punto di controllo (log Bayes factor sotto −2): torno a quel valore e blocco per 30 giorni.',
+  }
+  for (const key of LIVE_KEYS) {
+    const st = L.status[key]
+    const status = st === 'applied' ? 'live' : st === 'rollback' ? 'rollback_live' : st
+    const reason = typeof LIVE_REASONS[status] === 'function' ? LIVE_REASONS[status](key) : LIVE_REASONS[status] || ''
+    changes.push({
+      key, label: paramLabel(key), from: lrnR4(prev[key]), to: lrnR4(L.profile[key]), target: L.fitted ? lrnR4(L.fitted[key]) : null, nEff: lrnR2(L.nEff),
+      minEffective: key === 'intercept' ? LEARNING.LIVE.MIN_EFFECTIVE : LEARNING.LIVE.SLOPE_MIN_EFFECTIVE, status, reason,
+    })
+    setParam(next, key, L.profile[key])
+  }
   const offsetsOk = Boolean(ladder.offsets && ladder.offsets.admitted)
   for (const g of LEARNING_TIME_GROUPS) consider(`time.${g.id}`, firstFit.theta[`time.${g.id}`], firstFit.nEff[`time.${g.id}`], 'time', { sd: sdOf(`time.${g.id}`), eligible: offsetsOk })
   for (const k of LEARNING_DISCOUNT_KNOTS) consider(`disc.${k.id}`, firstFit.theta[`disc.${k.id}`], firstFit.nEff[`disc.${k.id}`], 'disc', { sd: sdOf(`disc.${k.id}`), eligible: offsetsOk })
@@ -920,6 +1187,7 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
   const moved = changes.filter((c) => c.status === 'applied' || c.status === 'capped' || c.status === 'rollback')
   const renewed = moved.length > 0 || rollback
   next.version = DEFAULT_PROFILE.version
+  next.engine = ENGINE_VERSION
   next.frozen = frozen
   if (renewed) {
     next.id = prev.id === month ? `${month}.2` : month
@@ -931,17 +1199,17 @@ export function proposeProfile({ previous, firstFit, counterFit = null, counterS
     next.score = 0
     next.scoreMonths = 0
   } else {
-    next.id = prev.id
-    next.parentId = prev.parentId
+    // No monthly move: the profile keeps its identity, unless the live fit moved the values in this very call.
+    next.id = L.profile.id
+    next.parentId = L.profile.parentId
     next.parent = prev.parent
     next.changes = prev.changes
     next.score = score
     next.scoreMonths = prev.scoreMonths + (pairs.length ? 1 : 0)
   }
-  next.basedOn = firstFit.n
-  next.paramKeys = firstFit.keys
-  next.cov = firstFit.cov ? firstFit.cov.map((row) => row.map(lrnR4)) : null
-  return { profile: next, changes, rollback, logBF, score, discountFit }
+  // The live fit owns the first-offer covariance and the data basis (predictive interval, «basata su N tuoi esiti»).
+  for (const key of ['cov', 'paramKeys', 'basedOn', 'live', 'appliedAt', 'checkpointId', 'frozenUntil', 'frozenReason']) next[key] = L.profile[key]
+  return { profile: next, changes, rollback, logBF, score, discountFit, live: L }
 }
 
 /* ───────── exploration (flagged variations that make the fit possible) ───────── */
@@ -1067,9 +1335,11 @@ const lrnLevel = (pFail) => (pFail >= 0.6 ? 'high' : pFail >= 0.35 ? 'medium' : 
 const REASON_LABELS = { countered: 'Controproposta', declined: 'Rifiuto', no_reply: 'Nessuna risposta', sold_other: 'Venduto ad altri' }
 
 /**
- * Probability that this offer fails even at the recommended moment and price, a 90% range, why (engine factors), how
- * failures split by kind (engine shares smoothed with the user's own mix) and the chance the negotiation still closes
- * (each kind of failure has its own chance of a deal later). `records` = buildDataset(...) (optional).
+ * Probability that this offer fails even at the recommended moment and price, a 90% range (predictiveInterval), why
+ * (engine factors), how failures split by kind (engine shares smoothed with the user's own mix) and the chance the
+ * negotiation still closes (each kind of failure has its own chance of a deal later). `records` = buildDataset(...)
+ * (optional). `basis` is 'history' only when a first-offer correction fitted on enough of this user's outcomes is in
+ * force (counter-side changes do not touch this estimate); otherwise the range is the prior on the correction.
  */
 export function failureRiskFor(result, { profile = null, records = null, now = null } = {}) {
   if (!result || !result.ok || !result.optimal || result.kind === 'no_offer_needed') return null
@@ -1078,35 +1348,21 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
   const A = optimal.pAvailable
   const R = optimal.pRead
   const z = optimal.score.logit
-  let lo = result.probabilityRange ? result.probabilityRange[0] : p
-  let hi = result.probabilityRange ? result.probabilityRange[1] : p
   const P = profile ? normalizeProfile(profile) : null
-  let basis = 'engine'
-  // «Calibrated» only when the FIRST-OFFER correction moved (counter-side changes do not touch this estimate).
-  const firstOfferCorrected = P && (Math.abs(P.intercept) > 1e-9 || Math.abs(P.slope - 1) > 1e-9
-    || Object.values(P.time).some((v) => Math.abs(v) > 1e-9) || Object.values(P.disc).some((v) => Math.abs(v) > 1e-9))
-  if (firstOfferCorrected && P.basedOn >= LEARNING.MIN_EFFECTIVE.intercept && P.cov && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length) {
-    const r = { rawLogit: optimal.score.rawLogit ?? z, timeGroup: timeGroupOf(optimal.score.timeWindow.id), discW: discKnotWeights(input.discountPct) }
-    const x = P.paramKeys.map((key) => lrnFeature(key, r))
-    let v = 0
-    for (let i = 0; i < x.length; i++) for (let j = 0; j < x.length; j++) v += x[i] * (P.cov[i][j] || 0) * x[j]
-    const sd = Math.sqrt(Math.max(0, v))
-    lo = Math.min(lo, A * R * squash(z - 1.645 * sd))
-    hi = Math.max(hi, A * R * squash(z + 1.645 * sd))
-    basis = 'history'
-  } else {
-    // Without a calibrated profile the engine is unvalidated for this user's sellers: the range is the prior on the
-    // general correction (sd 0,5 logit, 90%).
-    const half = 1.645 * LEARNING.PRIOR_SD.intercept
-    lo = Math.min(lo, A * R * squash(z - half))
-    hi = Math.max(hi, A * R * squash(z + half))
-  }
+  const calibrated = Boolean(P && firstOfferCorrected(P) && P.basedOn >= LEARNING.LIVE.MIN_EFFECTIVE && Array.isArray(P.cov) && Array.isArray(P.paramKeys) && P.cov.length === P.paramKeys.length)
+  const band = predictiveInterval(result, calibrated ? P : null, { level: 0.9 })
+  const lo = band ? band.low : p
+  const hi = band ? band.high : p
+  const basis = calibrated ? 'history' : 'engine'
   const reasons = []
   const negatives = (result.factors && result.factors.rows ? result.factors.rows : []).filter((f) => f.deltaPoints < 0).sort((a, b) => a.deltaPoints - b.deltaPoints)
   if (input.discountPct >= 15) reasons.push({ id: 'discount', text: `Sconto ${prepArticleFor('di', input.discountPct)}${Math.round(input.discountPct)}%: parte ${prepArticleFor('da', result.factors.basePct)}${result.factors.basePct}% di accettazione` })
   for (const f of negatives.slice(0, 3)) reasons.push({ id: f.id, text: `${f.label}: ${formatPoints(f.deltaPoints)}` })
   if (A < 0.9) reasons.push({ id: 'available', text: `Può essere venduto ad altri prima: resta disponibile ${prepArticleFor('a', A * 100)}${Math.round(A * 100)}%` })
-  if (R < 0.99) reasons.push({ id: 'read', text: `Venditore inattivo: legge l'offerta solo ${Math.round(R * 100) === 50 ? 'una volta su due' : `nel ${Math.round(R * 100)}% dei casi`}` })
+  if (R < 0.99) {
+    const who = input.sellerProfile === 'inactive' ? 'Venditore inattivo' : input.sellerProfile === 'quiet' ? 'Venditore poco attivo' : 'Anche un venditore attivo'
+    reasons.push({ id: 'read', text: `${who}: legge l'offerta ${Math.round(R * 100) === 50 ? 'una volta su due' : `nel ${Math.round(R * 100)}% dei casi`}` })
+  }
   if (result.blockRisk && result.blockRisk.level !== 'low') reasons.push({ id: 'block', text: `Rischio di rifiuto secco ${result.blockRisk.label.toLowerCase()}` })
 
   // How a failure happens: engine shares for this offer, smoothed with the user's own mix of failed first offers.
@@ -1130,18 +1386,26 @@ export function failureRiskFor(result, { profile = null, records = null, now = n
   const rescue = mix.reduce((s, m) => s + m.share * m.closeAfter, 0)
   const pClose = p + (1 - p) * rescue
 
+  // The user's own track record on offers like this one: same price band and same discount knot when there are at
+  // least 3, else the same knot alone (engine-spec §7: «nel tuo storico, sotto 20 € con sconto ≥ 18%: 0 su 8»).
   let similar = null
   if (Array.isArray(records) && records.length) {
     const knot = discKnotOf(input.discountPct)
-    const same = records.filter((r) => r.y != null && r.knot === knot)
-    if (same.length >= 3) similar = { n: same.length, successes: same.filter((r) => r.y === 1).length, knot }
+    const band = priceBandOf(input.listPrice)
+    const sameKnot = records.filter((r) => r.y != null && r.knot === knot)
+    const sameBoth = sameKnot.filter((r) => r.priceBand === band)
+    const pick = sameBoth.length >= 3 ? sameBoth : sameKnot
+    if (pick.length >= 3) {
+      const bandLabel = (PRICE_BANDS.find((b) => b.id === band) || {}).label || null
+      similar = { n: pick.length, successes: pick.filter((r) => r.y === 1).length, knot, band: pick === sameBoth ? band : null, bandLabel: pick === sameBoth ? bandLabel : null }
+    }
   }
   const pFail = 1 - p
   const plan = []
   if (pFail >= 0.35 && mix[0].id === 'countered') plan.push('Il fallimento più probabile è una controproposta: non accettarla subito, usa «Ha fatto una controproposta» per la tua mossa.')
   else if (pFail >= 0.35) plan.push('Se arriva una controproposta, non accettarla subito: usa «Ha fatto una controproposta» per la tua mossa.')
   if (pFail >= 0.5 && input.discountPct > 20) plan.push('Se rifiuta, riprova tra qualche giorno con 2–3 punti di sconto in meno.')
-  if (R < 0.99) plan.push('Con un venditore inattivo scrivi prima un messaggio: l\'offerta da sola rischia di scadere senza risposta.')
+  if (input.sellerProfile === 'inactive' || input.sellerProfile === 'quiet') plan.push('Con un venditore che entra di rado scrivi prima un messaggio: l\'offerta da sola rischia di scadere senza risposta.')
   return {
     pSuccess: p,
     pFail,
@@ -1181,15 +1445,17 @@ const groupStats = (records, keyOf, ids, profileBefore, profileAfter, kind) => i
  * month. The fit uses ALL history up to `now` (late outcomes of earlier months included); the month's numbers use the
  * offers sent in that month. Returns everything the workbook and the app's report card show.
  */
-export function monthlyReport({ items, month, now, previous = null, profileHistory = [], explorationEnabled = true, applied = true }) {
+export function monthlyReport({ items, month, now, previous = null, profileHistory = [], explorationEnabled = true, applied = true, checkpoint = null }) {
   const records = buildDataset(items, now)
   const inMonth = records.filter((r) => r.month === month)
   const prev = normalizeProfile(previous)
 
-  const firstFit = fitFirstOffers(records, now)
+  // The live fit first: the monthly offsets are fitted on what it leaves unexplained, so nothing is counted twice.
+  const live = liveProfile(records, now, { previous: prev, checkpoint: checkpoint || liveCheckpoint(profileHistory, now) })
+  const firstFit = fitFirstOffers(records, now, { live })
   const counterFit = fitCounters(records, now, prev.time)
   const counterStats = counterAnalytics(records, now)
-  const proposal = proposeProfile({ previous: prev, firstFit, counterFit, counterStats, records, month, now, lastMonthRecords: inMonth })
+  const proposal = proposeProfile({ previous: prev, firstFit, counterFit, counterStats, records, month, now, lastMonthRecords: inMonth, live })
   const next = proposal.profile
   const discountFit = proposal.discountFit
 
@@ -1259,10 +1525,13 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     ladder: firstFit.ladder,
     logBF: proposal.logBF,
     score: proposal.score,
+    live: { intercept: live.profile.intercept, dslope: live.profile.dslope, status: live.status, nEff: live.nEff, basedOn: live.basedOn, sd: live.sd, fitted: live.fitted, rollback: live.rollback, frozen: live.frozen },
   }
 
   const byTimeGroup = groupStats(records, (r) => r.timeGroup, LEARNING_TIME_GROUPS, prev, next, 'time')
   const byKnot = groupStats(records, (r) => r.knot, LEARNING_DISCOUNT_KNOTS, prev, next, 'disc')
+  // Engine vs reality by price band (engine-spec §2.3): where the cheap-item miss shows up.
+  const byPriceBand = groupStats(records, (r) => r.priceBand, PRICE_BANDS, prev, next, null)
   const exploration = [{ id: 'none', label: 'Nessuna variante' }, ...EXPLORATION_ARMS].map((arm) => {
     const rs = records.filter((r) => r.y != null && Number.isFinite(r.rawLogit) && (arm.id === 'none' ? !r.exploration : r.exploration && r.exploration.arm === arm.id))
     const expected = rs.reduce((s, r) => s + predictWith(prev, r), 0)
@@ -1279,6 +1548,9 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
   if (young) notes.push(`${young} ${young === 1 ? 'offerta inviata negli ultimi 7 giorni entra' : 'offerte inviate negli ultimi 7 giorni entrano'} nella correzione del mese prossimo (orizzonte fisso, per non contare solo le risposte veloci).`)
   if (summary.noReplyImplicit) notes.push(`${summary.noReplyImplicit} ${summary.noReplyImplicit === 1 ? 'offerta senza esito da oltre 7 giorni è contata' : 'offerte senza esito da oltre 7 giorni sono contate'} come «nessuna risposta».`)
   if (proposal.rollback) notes.push('Le correzioni in uso prevedevano peggio di quelle di prima: ho ripristinato i valori precedenti e li blocco per un mese.')
+  if (live.status.intercept === 'applied') notes.push(`Correzione generale dal vivo in uso: ${String(lrnR2(live.profile.intercept)).replace('.', ',')} logit su ${live.basedOn} esiti; il report non la somma a una seconda correzione.`)
+  else if (live.status.intercept === 'rollback') notes.push('Le correzioni dal vivo prevedevano peggio del punto di controllo: tornate al valore precedente e ferme per 30 giorni.')
+  else if (live.status.intercept === 'frozen') notes.push(`Correzioni dal vivo ferme fino al ${String(live.profile.frozenUntil || '').slice(0, 10)}.`)
   if (!applied) notes.push('Correzioni solo proposte: questo report non modifica il motore (anteprima o mese recuperato).')
   if (!explorationEnabled) notes.push('Le varianti di test sono spente: il motore impara più lentamente sugli orari e sugli sconti.')
 
@@ -1291,8 +1563,10 @@ export function monthlyReport({ items, month, now, previous = null, profileHisto
     calibration,
     byTimeGroup,
     byKnot,
+    byPriceBand,
     exploration,
     discount: discountFit,
+    live,
     counterFit,
     counterStats,
     firstFit: { keys: firstFit.keys, theta: firstFit.theta, nEff: firstFit.nEff, n: firstFit.n, ladder: firstFit.ladder, df: firstFit.df },
@@ -1357,7 +1631,10 @@ const yesNo = (b) => (b == null ? '' : b ? 'Sì' : 'No')
 const lrnTyped = (value, format) => (value == null || format == null || format === 'text' ? value : { value, format })
 const num4 = (x) => (x == null || !Number.isFinite(x) ? null : lrnR4(x))
 const pm = (v, se) => (v == null ? null : `${String(lrnR4(v)).replace('.', ',')}${se != null ? ` ± ${String(lrnR4(se)).replace('.', ',')}` : ''}`)
-const STATUS_LABELS = { applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata', rollback: 'Tornata al valore precedente', proposed: 'Proposta, non applicata' }
+const STATUS_LABELS = {
+  applied: 'Applicata', capped: 'Applicata (limitata)', unchanged: 'Invariata', waiting_data: 'In attesa di dati', frozen: 'Bloccata', rollback: 'Tornata al valore precedente',
+  proposed: 'Proposta, non applicata', live: 'Applicata (dal vivo)', rollback_live: 'Tornata al valore precedente (dal vivo)',
+}
 const SENT_SOURCE_LABELS = { tap: 'toccato «Inviata»', imputed: 'stimato', unknown: 'sconosciuto' }
 
 /** The month's .xlsx: summary, offers, negotiations, counter analysis, time and discount groups, calibration, tests, engine changes, trend, notes. */
@@ -1508,6 +1785,12 @@ export function reportWorkbook(report) {
       rows: [
         ...report.byKnot.map((b) => [b.label, b.n, b.successes, b.expected, b.oe, num4(b.before), num4(b.after)]),
         [],
+        ['Motore contro realtà per fascia di prezzo', 'Prime offerte', 'Accettate', 'Attese', 'Osservate − attese', 'Tasso reale', 'Intervallo 90%'],
+        ...(report.byPriceBand || []).map((b) => {
+          const [lo, hi] = lrnWilson(b.successes, b.n)
+          return [b.label, b.n, b.successes, b.expected, b.oe, lrnTyped(b.observedRate, 'pct'), b.n ? `${Math.round(lo * 100)}% – ${Math.round(hi * 100)}%` : null]
+        }),
+        [],
         ['Sconto di partenza', 'Accettazione stimata', 'Risparmio atteso'],
         ...report.discount.curve.filter((p) => Number.isInteger(p.discountPct)).map((p) => [`${p.discountPct}%`, lrnTyped(p.pAccept, 'pct'), lrnTyped(p.expectedSavingShare, 'pct')]),
       ],
@@ -1551,7 +1834,7 @@ export function reportWorkbook(report) {
       title: report.applied === false ? 'Correzioni proposte (non applicate)' : `Correzioni per ${monthLabel(shiftMonth(report.month, 1))}`,
       note: report.applied === false
         ? 'Anteprima o mese recuperato: il motore non è stato modificato. Le correzioni valgono solo nel report dell\'ultimo mese chiuso.'
-        : report.rollback ? 'Ritorno ai valori precedenti: le correzioni in uso prevedevano peggio. Le famiglie toccate restano bloccate per un mese.' : 'Ogni valore si muove solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al mese.',
+        : report.rollback ? 'Ritorno ai valori precedenti: le correzioni in uso prevedevano peggio. Le famiglie toccate restano bloccate per un mese.' : 'La correzione generale e quella per la profondità dello sconto si aggiornano dal vivo a ogni esito (qui solo riportate); ogni altro valore si muove solo con abbastanza esiti, oltre il margine di incertezza e al massimo di un passo al mese.',
       columns: [{ header: 'Parametro', width: 46 }, { header: 'Prima', format: 'num' }, { header: 'Dopo', format: 'num' }, { header: 'Obiettivo dai dati', format: 'num' }, { header: 'Esiti pesati', format: 'num' },
         { header: 'Minimo richiesto', format: 'int' }, { header: 'Stato', width: 18 }, { header: 'Motivo', width: 64 }],
       rows: report.changes.map((x) => [x.label, x.from, x.to, x.target, x.nEff, x.minEffective, STATUS_LABELS[x.status] || x.status, x.reason]),

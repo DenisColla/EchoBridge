@@ -1,16 +1,20 @@
-import { NEGLIGIBLE_DISCOUNT_PCT, SUGGESTED_PRICE_TARGET, SUGGESTED_PRICE_TARGET_HIGH_BLOCK, VINTED } from './constants.js'
+import { NEGLIGIBLE_DISCOUNT_PCT, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, VINTED } from './constants.js'
 import { deviceOffsetMinutes, romeOffsetMinutes } from './dates.js'
 import { buildMessages, formatEuro, recommendedToneFor } from './messages.js'
 import { buildReasons, buildTimingNote, buildTips, buildVerdict, openingSentence } from './reasoning.js'
-import { avoidWindows, avoidWindowsOn, pickMoments, readProbability } from './scheduler.js'
+import { predictiveInterval } from './profile.js'
+import { avoidWindows, avoidWindowsOn, pickMoments } from './scheduler.js'
 import {
   attributeFactors, blockRiskAt, computeDiscountPct, findCategory, findListingAge, findListingSignal,
   riskBandFor, scoreAt, uncertaintyFor,
 } from './scoring.js'
 
-/** Below this discount (or euro gap) an offer is pointless: buy at list price. */
+/**
+ * Below this discount (or euro gap) an offer is pointless: buy at list price, or ask for shipping included / a bundle.
+ * 2 € is the fixed cost of bargaining for the seller (engine-spec §2.1): under it even a yes is not worth the exchange.
+ */
 const MIN_MEANINGFUL_DISCOUNT_PCT = 0.5
-const MIN_MEANINGFUL_GAP_EUR = 0.5
+export const MIN_MEANINGFUL_GAP_EUR = 2
 
 /**
  * Parses a price typed the Italian way: "12,50", "1.200", "1.200,50", "45 €".
@@ -123,6 +127,21 @@ export function suggestPrice(input, now, targetProbability, { exactSendAt = null
   }
 }
 
+/**
+ * The best overall probability this listing can reach: the offer at the top of the price grid (one step under the list
+ * price, the same point suggestPrice probes first), at its own best moment. Relative goals (the suggested price, the
+ * optimiser's goals) are set against it, never against a fixed percentage the listing may not be able to reach at all.
+ * Null when the user's target already sits at the top of the grid.
+ */
+export function maxReachable(input, now, { exactSendAt = null } = {}) {
+  const step = priceStepFor(input.listPrice)
+  const price = Math.round((input.listPrice - step) * 100) / 100
+  if (!(price > input.targetPrice)) return null
+  const candidate = withPrices(input, input.listPrice, price)
+  const moments = pickMoments(candidate, now, { exactSendAt })
+  return { price, discountPct: candidate.discountPct, probability: moments.chosen.pOverall, date: moments.chosen.date }
+}
+
 /** Opening/closing prices for a two-step negotiation, only when the opening offer is still credible and sendable. */
 export function twoStepFor(input, chosen) {
   if (input.riskBand.id !== 'high') return null
@@ -156,11 +175,18 @@ function buildAnalysis(input, now, options = {}) {
   const uncertainty = uncertaintyFor(input)
   const verdict = buildVerdict(chosen, sendNow, now, moments.best)
   const twoStep = twoStepFor(input, chosen)
-  // The read probability is the one factor a higher price cannot change, so the price target is scaled by it.
-  const targetProbability = (blockRisk.level === 'high' ? SUGGESTED_PRICE_TARGET_HIGH_BLOCK : SUGGESTED_PRICE_TARGET) * readProbability(input)
-  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability, { exactSendAt: chosen.exact ? chosen.date : null }) : null
+  // Relative goal (engine-spec §7): the suggested price aims at a share of the BEST probability this listing can reach,
+  // never below the floor. A fixed 55% was unreachable on most cheap listings once the prior stopped promising it.
+  const exactSendAt = chosen.exact ? chosen.date : null
+  const ceiling = maxReachable(input, now, { exactSendAt })
+  const maxProbability = Math.max(chosen.pOverall, ceiling ? ceiling.probability : 0)
+  const targetProbability = Math.max(SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX * maxProbability)
+  const suggestedPrice = chosen.pOverall < targetProbability ? suggestPrice(input, now, targetProbability, { exactSendAt }) : null
   const ambition = moments.maxAccept < 0.15 ? 'unrealistic' : moments.maxAccept < 0.3 ? 'ambitious' : null
   const messageBeforeOffer = blockRisk.level === 'high' || input.sellerProfile === 'inactive'
+  // Honest range: the posterior uncertainty of the learned correction (or its prior, before any outcome), not the
+  // ±4 points per blank field, which stays as the hint «indica … per restringerla».
+  const probabilityRange = predictiveInterval({ probability: chosen.pOverall, optimal: chosen, input }, input.profile || null)
 
   return {
     ok: true,
@@ -168,7 +194,10 @@ function buildAnalysis(input, now, options = {}) {
     input,
     now,
     probability: chosen.pOverall,
-    probabilityRange: [Math.max(0.01, chosen.pOverall - uncertainty), Math.min(0.99, chosen.pOverall + uncertainty)],
+    probabilityRange,
+    maxProbability,
+    targetProbability,
+    ceiling,
     uncertainty,
     components: { pAccept: chosen.score.pAccept, pAvailable: chosen.pAvailable, pRead: chosen.pRead },
     riskBand: input.riskBand,
@@ -229,7 +258,7 @@ export function analyzeOffer(raw, now = new Date(), options = {}) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.')
   }
   if (input.discountPct < MIN_MEANINGFUL_DISCOUNT_PCT || input.listPrice - input.targetPrice < MIN_MEANINGFUL_GAP_EUR) {
-    return noOfferNeeded(input, now, `Lo sconto richiesto è simbolico (${formatEuro(input.listPrice - input.targetPrice)}): compra a prezzo pieno o chiedi la spedizione inclusa, un'offerta non ha senso.`)
+    return noOfferNeeded(input, now, `Risparmieresti solo ${formatEuro(input.listPrice - input.targetPrice)}: compra a prezzo pieno, oppure chiedi la spedizione inclusa o un lotto con un altro articolo. Un'offerta così piccola non vale lo scambio.`)
   }
 
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {

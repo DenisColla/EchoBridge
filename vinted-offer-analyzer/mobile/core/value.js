@@ -79,6 +79,29 @@ export function marketFromRows(rows, { referencePrice = null } = {}) {
 /* ───────── expected price curve ───────── */
 
 /**
+ * Expected price paid for one offer: the target when it is accepted, the fallback (the list price, bought here at full
+ * price) otherwise. The counter screen's accept rule compares the seller's counter with this number (spec §7).
+ */
+export const expectedFinalPrice = ({ listPrice, targetPrice, probability }) => {
+  const p = Number(probability)
+  const T = Number(targetPrice)
+  const L = Number(listPrice)
+  if (!Number.isFinite(p) || !Number.isFinite(T) || !Number.isFinite(L)) return null
+  const q = Math.min(1, Math.max(0, p))
+  return valR2(q * T + (1 - q) * L)
+}
+
+/**
+ * The app's own expected final price for a first-offer form (what the result shows as «Prezzo atteso»): one analysis
+ * at the form's target with the same profile and market as the screen. Null when the form is invalid or needs no offer.
+ */
+export function expectedFinalPriceFor(form, now = new Date(), { profile = null, market = null } = {}) {
+  const r = analyzeOffer(form, now, { ...(profile ? { profile } : {}), ...(market ? { market } : {}) })
+  if (!r.ok || !r.input || !Number.isFinite(r.probability)) return null
+  return expectedFinalPrice({ listPrice: r.input.listPrice, targetPrice: r.input.targetPrice, probability: r.probability })
+}
+
+/**
  * Expected price paid as a function of the discount asked (integer percentages 1..maxDiscountPct): each point runs the
  * full analysis at that target (same moment, profile and market as the one on screen) and weighs the price by its
  * overall probability, the fallback by the rest. The fallback is the listing price itself (a refused offer leaves the
@@ -107,7 +130,7 @@ export function expectedPriceCurve(form, now, { profile = null, market = null, m
     const result = analyzeOffer({ ...form, targetPrice: price }, now, options)
     if (!result.ok || result.kind !== 'analysis') continue
     const p = result.probability
-    points.push({ discountPct: result.input.discountPct, price, probability: p, expected: valR2(p * price + (1 - p) * fallback) })
+    points.push({ discountPct: result.input.discountPct, price, probability: p, expected: expectedFinalPrice({ listPrice: fallback, targetPrice: price, probability: p }) })
   }
   if (!points.length) return null
   const best = points.reduce((a, b) => (b.expected < a.expected ? b : a))

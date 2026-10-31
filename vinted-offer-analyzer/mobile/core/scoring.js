@@ -1,6 +1,6 @@
 import {
-  AGE_CURVE, BASE_CURVE, CATEGORIES, GAP_CURVE, HOLIDAY_WINDOW_LABELS, HOLIDAY_WINDOW_WHY, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
-  MONTH_END_WEIGHT, MONTH_START_WEIGHT, MONTH_WINDOWS, NEGATIVE_CAP, NEUTRAL_WINDOW, POSITIVE_CAP,
+  AGE_CURVE, BASE_CURVE, CATEGORIES, GAP_EUR_CURVE, HOLIDAY_WINDOW_LABELS, HOLIDAY_WINDOW_WHY, INACTIVE_TIME_DAMPING, LISTING_AGES, LISTING_SIGNALS,
+  MONTH_END_WEIGHT, MONTH_START_WEIGHT, MONTH_WINDOWS, NEGATIVE_CAP, NEUTRAL_WINDOW, POSITIVE_CAP, PRICE_BAND_CURVE,
   RISK_BANDS, TIME_WINDOWS, UNCERTAINTY_MAX, UNCERTAINTY_PER_UNKNOWN,
 } from './constants.js'
 import { clamp, interpolate, interpolateLogit, ramp, squash } from './math.js'
@@ -37,7 +37,11 @@ export const interactionWeight = (category, discountPct) => {
   return 0
 }
 
-export const gapWeight = (listPrice, targetPrice) => interpolate(GAP_CURVE, Math.max(0, listPrice - targetPrice))
+/** Price band of the listing: cheap items leave the seller nothing to gain from a discount, expensive ones leave room. */
+export const priceBandWeight = (listPrice) => interpolate(PRICE_BAND_CURVE, Math.max(0, listPrice))
+
+/** The absolute euro gap weighs on its own only when it is large (60 € and more). */
+export const gapEuroWeight = (listPrice, targetPrice) => interpolate(GAP_EUR_CURVE, Math.max(0, listPrice - targetPrice))
 
 export const signalWeight = (signal) => (signal ? signal.weight : 0)
 
@@ -171,7 +175,8 @@ export function scoreAt(input, sendDate, daysWaited = 0) {
   const raw = [
     { id: 'category', group: 'category', label: category ? `Categoria ${category.label.toLowerCase()}` : 'Categoria', weight: categoryWeight(category) },
     { id: 'interaction', group: 'category', label: category && category.premium ? 'Sconto alto su categoria di valore' : 'Categoria tollerante agli sconti alti', weight: interactionWeight(category, discountPct) },
-    { id: 'gap', group: 'price', label: `Differenza di ${Math.round(listPrice - targetPrice)} €`, weight: gapWeight(listPrice, targetPrice) },
+    { id: 'price_band', group: 'price', label: `Prezzo in annuncio ${formatBandPrice(listPrice)}`, weight: priceBandWeight(listPrice) },
+    { id: 'gap_eur', group: 'price', label: `Differenza di ${Math.round(listPrice - targetPrice)} €`, weight: gapEuroWeight(listPrice, targetPrice) },
     { id: 'signal', group: 'signal', label: listingSignal.id === 'none' ? 'Testo annuncio' : `Annuncio: ${listingSignal.label.toLowerCase()}`, weight: signalWeight(listingSignal) },
     { id: 'age', group: 'age', label: listingAge.id === 'unknown' ? 'Anzianità non indicata' : `Annuncio ${listingAge.label.toLowerCase()}`, weight: age.today },
     { id: 'wait', group: 'age', label: daysWaited > 0 ? `Attesa di ${daysWaited} ${daysWaited === 1 ? 'giorno' : 'giorni'}` : 'Nessuna attesa', weight: age.wait },
@@ -209,7 +214,9 @@ export function scoreAt(input, sendDate, daysWaited = 0) {
 }
 
 const sellerLabel = (id) =>
-  ({ new_seller: 'Venditore nuovo', expert: 'Venditore esperto', inactive: 'Venditore inattivo' })[id] || 'Venditore non indicato'
+  ({ new_seller: 'Venditore nuovo', expert: 'Venditore esperto', quiet: 'Venditore poco attivo', inactive: 'Venditore inattivo' })[id] || 'Venditore non indicato'
+
+const formatBandPrice = (listPrice) => `${(Number.isInteger(listPrice) ? String(listPrice) : listPrice.toFixed(2)).replace('.', ',')} €`
 
 /**
  * Sequential attribution in the fixed factor order: each row is the probability

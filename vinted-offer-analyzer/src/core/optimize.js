@@ -1,16 +1,43 @@
 import { VINTED } from './constants.js'
 import { formatLongDate, formatRelativeDay, formatTime, isSameDay } from './dates.js'
 import { formatEuro } from './messages.js'
-import { normalizeInput, priceStepFor, withContext, withPrices } from './analyze.js'
+import { maxReachable, normalizeInput, priceStepFor, withContext, withPrices } from './analyze.js'
 import { evaluateSlot, pickMoments } from './scheduler.js'
 
-/** Next "round" goal above the current probability: 63% → 70%, 88% → 93%, capped at 95%. */
-export const nextGoalFor = (p) => {
-  if (p >= 0.9) return 0.95
-  return Math.min(0.9, Math.ceil((p + 0.03) * 10) / 10)
-}
+const roundGoal = (v) => Math.round(v * 100) / 100
 
+/**
+ * The next goal above the current probability: +10 points, never above what this listing can reach (`pMax`, the
+ * analysis' `maxProbability`; 0,95 when unknown). Goals are relative (engine-spec §7): a fixed 70% is out of reach for
+ * most cheap listings once the prior stopped promising it.
+ */
+export const nextGoalFor = (p, pMax = 0.95) => roundGoal(Math.min(Math.max(p, pMax), p + 0.1))
+
+/** Legacy absolute goals (web OptimizeCard, older mobile builds); the app offers goalChoicesFor(result) instead. */
 export const GOAL_CHOICES = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+/**
+ * The goals the optimiser offers for an analysis: +10 points, +20 points and the ceiling (the probability at the top of
+ * the price grid, `result.maxProbability`), each capped at the ceiling and only when above the current probability;
+ * the ceiling's label says the discount it stands for («il massimo (−3%)»). A step that lands on the ceiling is shown
+ * as the ceiling. Returns [{ id, label, probability, deltaPoints }].
+ */
+export function goalChoicesFor(result) {
+  if (!result || !result.ok || result.kind === 'no_offer_needed' || !Number.isFinite(result.probability)) return []
+  const p = result.probability
+  const pMax = Number.isFinite(result.maxProbability) ? Math.max(p, result.maxProbability) : Math.max(p, 0.95)
+  const maxDiscount = result.ceiling ? Math.round(result.ceiling.discountPct) : null
+  const raw = [
+    { id: 'plus10', label: '+10 punti', probability: Math.min(pMax, p + 0.1) },
+    { id: 'plus20', label: '+20 punti', probability: Math.min(pMax, p + 0.2) },
+    { id: 'max', label: maxDiscount != null ? `il massimo (−${maxDiscount}%)` : 'il massimo', probability: pMax },
+  ]
+  const rounded = raw.map((g) => ({ ...g, probability: roundGoal(g.probability) })).filter((g) => g.probability > p + 0.005)
+  // Duplicates resolve toward the ceiling: «+20 punti» that equals the maximum is shown as the maximum.
+  return rounded
+    .filter((g, i) => !rounded.slice(i + 1).some((later) => Math.abs(later.probability - g.probability) < 0.005))
+    .map((g) => ({ ...g, deltaPoints: Math.round((g.probability - p) * 100) }))
+}
 
 const roundPrice = (v) => Math.round(v * 100) / 100
 
@@ -53,7 +80,8 @@ export function optimizeOffer(raw, now = new Date(), { targetProbability = null,
   // `exactSendAt`: the test variation on screen is the starting point, so "go back to the best moment" is an option.
   const current = pickMoments(input, now, { exactSendAt })
   const currentP = current.chosen.pOverall
-  const target = targetProbability || nextGoalFor(currentP)
+  const ceiling = maxReachable(input, now, { exactSendAt })
+  const target = targetProbability || nextGoalFor(currentP, Math.max(currentP, ceiling ? ceiling.probability : 0))
   const step = priceStepFor(input.listPrice)
   const gridSize = Math.max(0, Math.ceil((input.listPrice - input.targetPrice) / step) - 1)
   const priceAt = (i) => roundPrice(Math.min(input.listPrice - step, input.targetPrice + i * step))

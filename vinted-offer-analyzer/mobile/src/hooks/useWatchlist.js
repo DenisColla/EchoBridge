@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { buildCounterReminders, decisionSnapshot } from '../../core/index.js'
+import { LEARNING, buildCounterReminders, decisionSnapshot } from '../../core/index.js'
 import { loadArchive, loadItems, newId, saveArchive, saveItems } from '../services/storage.js'
 import { cancelReminder, ensureNotificationPermission, scheduleOfferReminder, scheduleReminderAt } from '../services/notifications.js'
+import { outcomeReminderTimes } from '../services/segments.js'
 
 /** Links typed without a scheme would not open: default to https. */
 const normalizeLink = (link) => {
@@ -12,14 +13,50 @@ const normalizeLink = (link) => {
 
 const iso = (d) => (d ? new Date(d).toISOString() : null)
 
-/** Every notification an item may own: the first-offer reminder and the counter plan's reminders. */
-export const reminderIdsOf = (item) => [item.notificationId, ...Object.values((item.counterPlan && item.counterPlan.reminderIds) || {})].filter(Boolean)
+/** Every notification an item may own: the first-offer reminder, the counter plan's reminders and the «com'è andata?» nudges. */
+export const reminderIdsOf = (item) => [
+  item.notificationId,
+  ...Object.values((item.counterPlan && item.counterPlan.reminderIds) || {}),
+  ...(Array.isArray(item.outcomeReminderIds) ? item.outcomeReminderIds : []),
+].filter(Boolean)
 
 const cancelAll = async (item) => {
   for (const id of reminderIdsOf(item)) await cancelReminder(id)
 }
 
 const OUTCOMES = ['accepted', 'countered', 'declined', 'no_reply', 'sold_other', 'abandoned', 'bought']
+
+/** Did the seller answer the offer? true for a reply of any kind, false for silence, null when the status says nothing. */
+const answeredFor = (status) => (['accepted', 'bought', 'declined', 'countered'].includes(status) ? true : status === 'no_reply' ? false : null)
+
+/** Fields added for the 1.7 data log; older items simply lack them (schema stays 3, nothing reads them as required). */
+const LOG_FIELDS = { messageCopiedAt: null, messageSentAt: null, userOverride: null, answered: null, outcomeReminderIds: [] }
+
+/**
+ * «Com'è andata?» at +36 h and +7 d after a first offer went out (outside the quiet hours). Returns the notification
+ * ids; [] when permission is missing, the moments are past or scheduling fails. Never throws.
+ */
+async function scheduleOutcomeReminders(item, sentAt) {
+  try {
+    const allowed = await ensureNotificationPermission()
+    if (!allowed) return []
+    const name = item.title && item.title.trim() ? item.title.trim() : "l'articolo"
+    const [first, second] = outcomeReminderTimes(sentAt)
+    const plans = [
+      { at: first, title: "Com'è andata?", body: `${name}: tocca per segnare l'esito dell'offerta.` },
+      { at: second, title: 'Ancora nessuna risposta?', body: `${name}: dopo ${LEARNING.NO_REPLY_AFTER_DAYS} giorni il silenzio conta come un no. Segna l'esito.` },
+    ]
+    const ids = []
+    for (const p of plans) {
+      if (!p.at) continue
+      const id = await scheduleReminderAt({ itemId: item.id, link: item.link, at: p.at, title: p.title, body: p.body, kind: 'outcome' })
+      if (id) ids.push(id)
+    }
+    return ids
+  } catch {
+    return []
+  }
+}
 
 /** Append-only log of what happened to an item: the monthly report reads it, nothing ever rewrites it. */
 const withEvent = (item, type, data = {}) => ({ ...item, events: [...(Array.isArray(item.events) ? item.events : []), { at: new Date().toISOString(), type, ...data }] })
@@ -107,8 +144,9 @@ export function useWatchlist() {
   /**
    * Saves an analysis as a planned offer and schedules its reminder. Returns { item, reminder }.
    * Stores the decision snapshot (what the engine recommended, with which profile, and the test variation if any).
+   * `userOverride`: the price the user typed in place of the suggested one (null when the suggestion was kept).
    */
-  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null }) => {
+  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null }) => {
     const { input, optimal, probability, messages, recommendedTone } = result
     const message = (messages.find((m) => m.tone === recommendedTone) || messages[0]).text
     const now = new Date()
@@ -149,6 +187,8 @@ export function useWatchlist() {
       finalPrice: null,
       decision: decisionSnapshot(result, { now, profile, exploration: result.exploration || null }),
       events: [{ at: now.toISOString(), type: 'saved', price: input.targetPrice, recommendedAt: optimal.date.toISOString(), probability, exploration: result.exploration ? result.exploration.arm : null }],
+      ...LOG_FIELDS,
+      userOverride: userOverride ?? null,
     }
     // The same listing saved again before sending replaces the old plan: one negotiation, one item in the data.
     const sameLink = item.link ? itemsRef.current.filter((it) => it.link === item.link && it.status === 'planned' && !it.sentAt) : []
@@ -195,6 +235,7 @@ export function useWatchlist() {
     if (status !== 'planned') {
       await cancelAll(target)
       patch.notificationId = null
+      patch.outcomeReminderIds = []
       if (target.counterPlan) patch.counterPlan = { ...target.counterPlan, reminderIds: {} }
     }
     const history = Array.isArray(target.negotiation) ? target.negotiation : []
@@ -206,6 +247,10 @@ export function useWatchlist() {
     // Back to «Da inviare» with no counter: a correction. Undo the send and the outcome, re-plan the first offer.
     if (status === 'planned' && !hasSeller) {
       const plannedAt = (target.decision && target.decision.recommendedAt) || target.sendAt || (history[0] && history[0].at) || null
+      // The «com'è andata?» nudges belong to the send that is being undone.
+      for (const rid of Array.isArray(target.outcomeReminderIds) ? target.outcomeReminderIds : []) await cancelReminder(rid)
+      patch.outcomeReminderIds = []
+      patch.answered = null
       patch.sentAt = null
       patch.sentAtSource = null
       patch.firstOutcome = null
@@ -257,7 +302,26 @@ export function useWatchlist() {
     const last = (patch.negotiation || history)[(patch.negotiation || history).length - 1]
     const atList = status === 'bought' && (boughtWithoutOffer || REFUSALS.includes(target.status))
     patch.finalPrice = status === 'accepted' || status === 'bought' ? (atList ? target.listPrice : last ? last.price : null) : null
+    // Did he answer? A reply or a deal says yes, silence says no; «venduto ad altri» and «lasciato perdere» keep what is known.
+    if (OUTCOMES.includes(status)) patch.answered = answeredFor(status) ?? target.answered ?? null
     await update(id, patch, { type: 'status', data: { from: target.status, to: status, finalPrice: patch.finalPrice } })
+    // A first offer really sent now: ask how it went at +36 h and +7 d. Saved after the status, never blocking it.
+    if (status === 'sent' && patch.sentAtSource === 'tap') {
+      const ids = await scheduleOutcomeReminders(target, now)
+      if (ids.length) await persist((prev) => prev.map((it) => (it.id === id && it.status === 'sent' ? { ...it, outcomeReminderIds: ids } : it)))
+    }
+  }, [update, persist])
+
+  /** «Copia messaggio» on a saved offer: when the text was copied (the log tells a sent message from a bare offer). */
+  const markMessageCopied = useCallback(async (id) => {
+    const now = new Date().toISOString()
+    await update(id, { messageCopiedAt: now }, { type: 'message_copied' })
+  }, [update])
+
+  /** The user confirmed the offer went out after copying the message: the message went with it. */
+  const markMessageSent = useCallback(async (id) => {
+    const now = new Date().toISOString()
+    await update(id, { messageSentAt: now }, { type: 'message_sent' })
   }, [update])
 
   /**
@@ -291,7 +355,7 @@ export function useWatchlist() {
       const negotiation = [...base, sellerEntry]
       const firstChanged = iB === 0 && Math.abs(existing.targetPrice - n.previousOffer) > 0.004
       item = {
-        ...existing, negotiation, status: 'countered', outcomeAt: new Date().toISOString(), notificationId: null, calendarOpenedAt: null, finalPrice: null, counterPlan: plan,
+        ...existing, negotiation, status: 'countered', outcomeAt: new Date().toISOString(), notificationId: null, outcomeReminderIds: [], answered: true, calendarOpenedAt: null, finalPrice: null, counterPlan: plan,
         firstOutcomeAt: existing.firstOutcome === 'no_reply' && !(existing.negotiation || []).some((e) => e.by === 'seller') ? sellerEntry.at
           : existing.firstOutcomeAt || (existing.firstOutcome ? existing.outcomeAt : sellerEntry.at),
         ...(firstChanged ? {
@@ -313,6 +377,7 @@ export function useWatchlist() {
         form: form ? { ...form, targetPrice: String(n.firstOffer).replace('.', ','), link: normalizeLink(link) } : null,
         negotiation: [{ by: 'buyer', kind: 'offer', price: n.previousOffer, at: null, planned: false }, sellerEntry],
         sentAt: null, counterPlan: plan, firstOutcome: 'countered', firstOutcomeAt: sellerEntry.at, finalPrice: null, decision: null, events: [],
+        ...LOG_FIELDS, answered: true,
       }
     }
     item = withEvent(item, 'counter_received', { price: n.sellerCounter, previousOffer: n.previousOffer, plan: plan.price, accept: plan.accept })
@@ -340,7 +405,7 @@ export function useWatchlist() {
       rawLogit: plan.rawLogit ?? null, learnedWeight: plan.learnedWeight ?? 0, pRead: plan.pRead ?? 1, windowId: plan.windowId ?? null, plannedAt: plan.sendAt,
     }
     const next = withEvent({
-      ...target, negotiation: [...(target.negotiation || []), entry], status: 'sent', outcomeAt: now.toISOString(), notificationId: null,
+      ...target, negotiation: [...(target.negotiation || []), entry], status: 'sent', outcomeAt: now.toISOString(), notificationId: null, outcomeReminderIds: [],
       counterPlan: { ...plan, sentAt: now.toISOString(), reminderIds: {} },
     }, 'counter_sent', { price: plan.price, plannedAt: plan.sendAt })
     await persist((prev) => prev.map((it) => (it.id === itemId ? next : it)))
@@ -397,6 +462,7 @@ export function useWatchlist() {
       soldOther,
       archived: archive.length,
       // Same population as the prediction: only items that carried a first-offer estimate.
+      decided: decidedItems.length,
       acceptanceRate: decidedItems.length ? decidedItems.filter((it) => ['accepted', 'bought'].includes(first(it))).length / decidedItems.length : null,
       predictedAverage: decidedItems.length ? decidedItems.reduce((s, it) => s + (it.probability || 0), 0) / decidedItems.length : null,
       averageSaving: closed.length ? closed.reduce((s, it) => s + (it.listPrice - it.finalPrice), 0) / closed.length : null,
@@ -406,5 +472,5 @@ export function useWatchlist() {
     }
   }, [items, archive])
 
-  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, update, setStatus, remove, stats }
+  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, update, setStatus, remove, stats }
 }

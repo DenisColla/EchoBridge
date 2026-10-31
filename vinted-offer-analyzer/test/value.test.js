@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  analyzeCounter, analyzeOffer, availabilityAfter, buildMessages, demandWeight, expectedPriceCurve, leversFor, marketFromRows,
+  analyzeCounter, analyzeOffer, availabilityAfter, buildMessages, demandWeight, expectedFinalPrice, expectedFinalPriceFor, expectedPriceCurve, leversFor, marketFromRows,
   marketGapWeight, marketHazardMultiplier, normalizeCounterInput, normalizeInput, optimizeOffer, percentile, portfolioPlan,
   reservationPosterior, scoreAt, MARKET_TONE, TONES,
 } from '../src/core/index.js'
@@ -99,7 +99,8 @@ test('marketHazardMultiplier: 1.5 at or under p25, 0.7 at or over p75, linear in
 test('scoreAt adds the market and demand factors only when the input carries them, before the time factors', () => {
   const { input } = normalizeInput(base)
   const plain = scoreAt(input, SUNDAY_AFTERNOON, 0)
-  assert.deepEqual(plain.factors.map((f) => f.id), ['category', 'interaction', 'gap', 'signal', 'age', 'wait', 'seller', 'time', 'month'])
+  // Engine 1.4.0: the discount gap factor became the price band of the listing plus the euro gap (large gaps only).
+  assert.deepEqual(plain.factors.map((f) => f.id), ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'time', 'month'])
   assert.equal(normalizeInput(base).input.signals, undefined)
   assert.equal(normalizeInput({ ...base, signals: {} }).input.signals, undefined)
   assert.equal(normalizeInput({ ...base, signals: { favourites: 'abc' } }).input.signals, undefined)
@@ -108,7 +109,7 @@ test('scoreAt adds the market and demand factors only when the input carries the
   const market = { n: 5, medianPrice: 80, p25Price: 70, p75Price: 95 }
   const withMarket = scoreAt({ ...input, market }, SUNDAY_AFTERNOON, 0)
   const ids = withMarket.factors.map((f) => f.id)
-  assert.deepEqual(ids, ['category', 'interaction', 'gap', 'signal', 'age', 'wait', 'seller', 'market', 'time', 'month'])
+  assert.deepEqual(ids, ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'market', 'time', 'month'])
   const mf = withMarket.factors.find((f) => f.id === 'market')
   assert.equal(mf.group, 'price')
   assert.equal(mf.label, 'Prezzo 25% sopra il mercato')
@@ -120,7 +121,7 @@ test('scoreAt adds the market and demand factors only when the input carries the
   assert.equal(scoreAt({ ...input, market: { n: 1, medianPrice: 80 } }, SUNDAY_AFTERNOON, 0).factors.some((f) => f.id === 'market'), false)
 
   const withSignals = scoreAt({ ...input, signals: { favourites: 12 } }, SUNDAY_AFTERNOON, 0)
-  assert.deepEqual(withSignals.factors.map((f) => f.id), ['category', 'interaction', 'gap', 'signal', 'age', 'wait', 'seller', 'demand', 'time', 'month'])
+  assert.deepEqual(withSignals.factors.map((f) => f.id), ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'demand', 'time', 'month'])
   const df = withSignals.factors.find((f) => f.id === 'demand')
   assert.equal(df.label, '12 preferiti')
   assert.equal(df.group, 'signal')
@@ -130,7 +131,7 @@ test('scoreAt adds the market and demand factors only when the input carries the
   assert.equal(scoreAt({ ...input, signals: { sellerItems: 5 } }, SUNDAY_AFTERNOON, 0).factors.some((f) => f.id === 'demand'), false)
 
   const both = scoreAt({ ...input, market, signals: { favourites: 0 } }, SUNDAY_AFTERNOON, 0)
-  assert.deepEqual(both.factors.map((f) => f.id).slice(6, 10), ['seller', 'market', 'demand', 'time'])
+  assert.deepEqual(both.factors.map((f) => f.id).slice(7, 11), ['seller', 'market', 'demand', 'time'])
 })
 
 test('analyzeOffer is byte-identical without a market (null or absent) and carries a market summary with one', () => {
@@ -439,4 +440,23 @@ test('review fixes: posterior never suggests a refused price, buy-now needs a re
 
   const unknown = leversFor({ result: analyzeOffer({ ...base, listingAge: 'unknown', targetPrice: '80' }, SUNDAY_AFTERNOON) }).map((l) => l.id)
   assert.ok(!unknown.includes('patience'))
+})
+
+/* ───────── expected final price (engine 1.4.0, spec §7) ───────── */
+
+test('expectedFinalPrice: p · target + (1 − p) · list, clamped probabilities, null on junk; the curve uses it', () => {
+  assert.equal(expectedFinalPrice({ listPrice: 469, targetPrice: 375, probability: 0.4 }), 431.4)
+  assert.equal(expectedFinalPrice({ listPrice: 100, targetPrice: 80, probability: 0 }), 100)
+  assert.equal(expectedFinalPrice({ listPrice: 100, targetPrice: 80, probability: 1 }), 80)
+  assert.equal(expectedFinalPrice({ listPrice: 100, targetPrice: 80, probability: 1.4 }), 80)
+  assert.equal(expectedFinalPrice({ listPrice: '100', targetPrice: '80', probability: '0.5' }), 90)
+  assert.equal(expectedFinalPrice({ listPrice: 100, targetPrice: NaN, probability: 0.5 }), null)
+  assert.equal(expectedFinalPrice({ listPrice: 100, targetPrice: 80 }), null)
+  const r = analyzeOffer(base, SUNDAY_AFTERNOON)
+  assert.equal(expectedFinalPriceFor(base, SUNDAY_AFTERNOON), expectedFinalPrice({ listPrice: 100, targetPrice: 80, probability: r.probability }))
+  const curve = expectedPriceCurve(base, SUNDAY_AFTERNOON)
+  for (const p of curve.points) assert.equal(p.expected, expectedFinalPrice({ listPrice: 100, targetPrice: p.price, probability: p.probability }))
+  assert.equal(expectedFinalPriceFor({ ...base, targetPrice: '100' }, SUNDAY_AFTERNOON), null, 'no offer needed → no expected price')
+  assert.equal(expectedFinalPriceFor({ ...base, listPrice: '' }, SUNDAY_AFTERNOON), null)
+  assert.equal(expectedFinalPriceFor({ ...base, targetPrice: '50' }, SUNDAY_AFTERNOON) > 50, true, 'over the cap the capped price is the target')
 })

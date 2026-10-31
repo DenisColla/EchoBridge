@@ -22,10 +22,17 @@ import { buildAcceptMessages, buildCounterMessages, formatEuro, recommendedCount
 import { buildVerdict } from './reasoning.js'
 import { avoidWindowsOn } from './scheduler.js'
 import { ageCurve, attributeFactors, effectiveWeekday, marketHazardMultiplier, monthWindowAt, sellerWeight, timeWeight, timeWindowAt, uncertaintyFor } from './scoring.js'
-import { buildWarnings, normalizeInput, parsePrice, priceStepFor } from './analyze.js'
+import { analyzeOffer, buildWarnings, normalizeInput, parsePrice, priceStepFor } from './analyze.js'
 import { counterShareOf, learnedCounterRow, sellerReplyHoursOf } from './profile.js'
 
 const CTR_EPS = 1e-9
+/**
+ * Accept rule (spec §7): his price is close enough to an anchor when it is within COUNTER.CLOSE_GAP_EUR or this share
+ * of the list price (the fixed cost of one more round); a seller who does not move may be accepted up to 5% over the
+ * user's maximum. Three real counters (440/469, 12/13,5, 24/27) were all re-countered and all lost.
+ */
+const CTR_ACCEPT_TOLERANCE_SHARE = 0.03
+const CTR_ACCEPT_STANCE_OVER_MAX = 1.05
 const ctrR2 = (v) => Math.round(v * 100) / 100
 const ctrHours = (from, to) => (to.getTime() - from.getTime()) / 3_600_000
 const ctrClamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
@@ -596,17 +603,111 @@ const ctrNegotiation = (state) => ({
   sellerPriceSurvives: state.theta, maxPrice: state.W,
 })
 
-function ctrShortResult(state, warnings, kind, message, { stale = false } = {}) {
+function ctrShortResult(state, warnings, kind, message, { stale = false, accept: rule = null } = {}) {
   const accept = ctrAcceptOption(state, { stale, recommended: kind === 'accept' || kind === 'accept_counter' })
   const tips = []
   if (kind === 'stop' || kind === 'walk_away') tips.push(ctrFavouriteTip)
   const buyNow = kind === 'accept' || kind === 'accept_counter'
+  const engineReason = kind === 'accept_counter' ? 'at_or_below_offer' : 'no_saving'
   return {
     ok: true, kind, input: state.input, now: state.now, negotiation: ctrNegotiation(state), message, warnings,
     options: [accept], recommended: buyNow ? accept : null, tips,
     messages: buyNow ? buildAcceptMessages({ stale }) : [], recommendedTone: 'cordiale',
     messageFooter: buyNow ? ctrBuyFooter(state, stale) : null,
+    accept: ctrMergeAccept(state, rule, buyNow ? engineReason : null),
     disclaimer: ctrDisclaimer, reminders: [],
+  }
+}
+
+/* ───────── accept rule (spec §7) ───────── */
+
+/** «Nel tuo storico: 3 controproposte rilanciate, 0 chiuse.» from the user's own re-countered negotiations, or null. */
+const ctrHistoryLine = (stats) => {
+  if (!stats || !Number.isFinite(Number(stats.recountered)) || Number(stats.recountered) < 1) return null
+  const n = Math.round(Number(stats.recountered))
+  const k = Math.max(0, Math.round(Number(stats.closed) || 0))
+  return `Nel tuo storico: ${n} contropropost${n === 1 ? 'a rilanciata' : 'e rilanciate'}, ${k} chius${k === 1 ? 'a' : 'e'}.`
+}
+
+/**
+ * Deterministic rule, evaluated before the plan: accept the seller's price S when
+ *  - S ≤ maxPrice (the user said so), or
+ *  - S ≤ expectedPrice + tol: the app's own expected final price for the first offer (p·target + (1 − p)·list), or
+ *  - S ≤ policyTarget + tol: the price the §2 policy would have asked, or
+ *  - the seller does not move (stance hold/firm) and S ≤ 1,05·maxPrice,
+ * with tol = max(COUNTER.CLOSE_GAP_EUR, 3% of the list price). The expected-price and policy anchors apply only when
+ * the price respects the user's maximum. Returns { recommended, reason, reasons, line, lines, tolerance, maxPrice,
+ * policyTarget, expectedPrice, history }; `line` is the sentence the UI shows («Accetta: 440 € è già sotto il tuo
+ * prezzo atteso»), `history` the optional «nel tuo storico» line from `counterStats` = { recountered, closed }.
+ */
+export function acceptRule(state, { maxPrice = state.W ?? null, policyTarget = null, expectedPrice = null, counterStats = null } = {}) {
+  const { S, L, stance } = state
+  const tolerance = ctrR2(Math.max(COUNTER.CLOSE_GAP_EUR, CTR_ACCEPT_TOLERANCE_SHARE * L))
+  const W = Number.isFinite(maxPrice) && maxPrice > 0 ? maxPrice : null
+  const E = Number.isFinite(expectedPrice) && expectedPrice > 0 ? expectedPrice : null
+  const P = Number.isFinite(policyTarget) && policyTarget > 0 ? policyTarget : null
+  const within = (anchor) => anchor !== null && S <= anchor + tolerance + CTR_EPS
+  const price = formatEuro(S)
+  const reasons = []
+  if (W !== null && S <= W + CTR_EPS) reasons.push({ id: 'max_price', line: `Accetta: ${price} è entro il massimo che hai indicato (${formatEuro(W)}).` })
+  if (W === null || S <= W + CTR_EPS) {
+    if (within(E)) {
+      reasons.push({ id: 'expected_price', line: S <= E + CTR_EPS ? `Accetta: ${price} è già sotto il tuo prezzo atteso.` : `Accetta: ${price} è a un passo dal tuo prezzo atteso (${formatEuro(E)}).` })
+    }
+    if (within(P)) {
+      reasons.push({ id: 'policy_target', line: S <= P + CTR_EPS ? `Accetta: ${price} è già sotto la cifra che avresti chiesto (${formatEuro(P)}).` : `Accetta: ${price} è vicino alla cifra che avresti chiesto (${formatEuro(P)}).` })
+    }
+  } else if ((stance === 'hold' || stance === 'firm') && S <= CTR_ACCEPT_STANCE_OVER_MAX * W + CTR_EPS) {
+    reasons.push({ id: 'stance', line: `Accetta: non si muove e ${price} supera di poco il tuo massimo (${formatEuro(W)}).` })
+  }
+  return {
+    recommended: reasons.length > 0,
+    reason: reasons.length ? reasons[0].id : null,
+    reasons: reasons.map((r) => r.id),
+    line: reasons.length ? reasons[0].line : null,
+    lines: reasons.map((r) => r.line),
+    tolerance, maxPrice: W, policyTarget: P, expectedPrice: E, history: ctrHistoryLine(counterStats),
+  }
+}
+
+/**
+ * The app's own expected final price for the FIRST offer of this negotiation, recomputed with the current engine,
+ * profile and market: p · first offer + (1 − p) · list price. Null when the first offer cannot be analysed.
+ */
+function ctrFirstOfferExpected(state, raw, options) {
+  try {
+    const form = {
+      itemTitle: raw.itemTitle, category: raw.category, listPrice: raw.listPrice, targetPrice: state.buyers[0],
+      listingAge: raw.listingAge, sellerProfile: raw.sellerProfile, listingSignal: raw.listingSignal,
+      ...(raw.signals ? { signals: raw.signals } : {}),
+    }
+    const r = analyzeOffer(form, state.now, { ...(options.profile ? { profile: options.profile } : {}), ...(options.market ? { market: options.market } : {}) })
+    if (!r.ok || !r.input || !Number.isFinite(r.probability)) return null
+    const p = Math.min(1, Math.max(0, r.probability))
+    return ctrR2(p * r.input.targetPrice + (1 - p) * state.L)
+  } catch {
+    return null
+  }
+}
+
+/** The rule for this state: anchors from the options (`policyTarget`, `expectedPrice`, `counterStats`), the expected price computed when not given. */
+const ctrAcceptFor = (state, raw, options) => acceptRule(state, {
+  maxPrice: state.W,
+  policyTarget: Number.isFinite(options.policyTarget) ? options.policyTarget : null,
+  expectedPrice: options.expectedPrice !== undefined ? options.expectedPrice : ctrFirstOfferExpected(state, raw, options),
+  counterStats: options.counterStats || null,
+})
+
+/** The engine's own verdict (accepting saves too little, his price is at or below our offer) joins the rule's reasons. */
+const ctrMergeAccept = (state, rule, engineReason) => {
+  const base = rule || acceptRule(state, { maxPrice: state.W })
+  if (!engineReason) return base
+  const line = engineReason === 'at_or_below_offer'
+    ? `Accetta: ${formatEuro(state.S)} è pari o sotto la cifra che avevi già messo sul tavolo.`
+    : `Accetta: rilanciare non ti farebbe risparmiare quasi nulla.`
+  return {
+    ...base, recommended: true, reason: base.reason || engineReason,
+    reasons: [...base.reasons, engineReason], line: base.line || line, lines: [...base.lines, line],
   }
 }
 
@@ -616,7 +717,11 @@ function ctrShortResult(state, warnings, kind, message, { stale = false } = {}) 
  * Entry point. Returns { ok: false, errors } or a result whose `kind` is:
  * 'counter' (reply with a price), 'counter_stale' (same, after more than 30 h), 'accept' (countering saves too little),
  * 'accept_counter' (his price is at or below our offer or goal), 'walk_away' (over budget, no room), 'stop' (3 counters sent).
- * options: { preferredSendAt, forcePrice, validityHours } — forcePrice evaluates one price only (the UI's «Applica»).
+ * options: { preferredSendAt, forcePrice, validityHours, policyTarget, expectedPrice, counterStats, acceptNow } —
+ * forcePrice evaluates one price only (the UI's «Applica»); policyTarget (policy.js policyDiscountFor on the first
+ * offer) and expectedPrice feed the accept rule (the expected price is computed here when not given); acceptNow makes
+ * the result the purchase at his price (the UI's «Accetto a N €»), whatever the plan would have said.
+ * Every result carries `accept` (acceptRule): the UI shows its `line` before any counter proposal when `recommended`.
  */
 export function analyzeCounter(raw, now = new Date(), options = {}) {
   const norm = normalizeCounterInput(raw, now, options)
@@ -624,23 +729,24 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
   const state = norm.state
   const warnings = norm.warnings
   const { S, B, L } = state
+  const accept = ctrAcceptFor(state, raw, options)
 
   if (S <= B + CTR_EPS) {
     const extra = S < B - 0.5 ? ' Controlla la cifra: è sotto la tua offerta.' : ''
-    return ctrShortResult(state, warnings, 'accept_counter', `È pari o sotto la tua offerta: ${ctrBuyHow(state)} e compra subito.${extra}`)
+    return ctrShortResult(state, warnings, 'accept_counter', `È pari o sotto la tua offerta: ${ctrBuyHow(state)} e compra subito.${extra}`, { accept })
   }
   if (state.goalPrice != null && S <= state.goalPrice + CTR_EPS) {
-    return ctrShortResult(state, warnings, 'accept_counter', `È già al tuo obiettivo: ${ctrBuyHow(state)} e compra subito.`)
+    return ctrShortResult(state, warnings, 'accept_counter', `È già al tuo obiettivo: ${ctrBuyHow(state)} e compra subito.`, { accept })
   }
   if (state.n >= COUNTER.MAX_BUYER_COUNTERS) {
-    return ctrShortResult(state, warnings, 'stop', `Hai già rilanciato tre volte: o compri a ${formatEuro(S)} o lasci perdere e riprovi tra 7–10 giorni.`)
+    return ctrShortResult(state, warnings, 'stop', `Hai già rilanciato tre volte: o compri a ${formatEuro(S)} o lasci perdere e riprovi tra 7–10 giorni.`, { accept })
   }
   // Our last offer was announced as the maximum: raising now would make it a bluff and cost credibility.
   if (state.n >= 1 && state.lastBuyerFinal) {
     const message = S <= state.Wcap + CTR_EPS
       ? `Avevi detto che ${formatEuro(B)} era il tuo massimo: rilanciare adesso ti toglierebbe credibilità. Se lo vuoi davvero, ${ctrBuyHow(state)}; altrimenti lascia perdere per ora e segui l'articolo.`
       : `Avevi detto che ${formatEuro(B)} era il tuo massimo e la sua cifra supera il tuo budget: lascia perdere per ora e segui l'articolo.`
-    return ctrShortResult(state, warnings, 'stop', message)
+    return ctrShortResult(state, warnings, 'stop', message, { accept })
   }
 
   const stale = ctrHours(state.receivedAt, now) > COUNTER.STALE_AFTER_HOURS
@@ -663,8 +769,8 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     }
   }
   if (!cand.list.length) {
-    if (S <= state.Wcap + CTR_EPS) return ctrShortResult(state, warnings, 'accept', `Non c'è spazio per un'altra offerta sensata: ${ctrBuyHow(state, stale || state.expired)}.`, { stale: stale || state.expired })
-    return ctrShortResult(state, warnings, 'walk_away', `${formatEuro(S)} supera il tuo massimo e non c'è spazio per un'altra offerta: lascia perdere per ora e segui l'articolo.`)
+    if (S <= state.Wcap + CTR_EPS) return ctrShortResult(state, warnings, 'accept', `Non c'è spazio per un'altra offerta sensata: ${ctrBuyHow(state, stale || state.expired)}.`, { stale: stale || state.expired, accept })
+    return ctrShortResult(state, warnings, 'walk_away', `${formatEuro(S)} supera il tuo massimo e non c'è spazio per un'altra offerta: lascia perdere per ora e segui l'articolo.`, { accept })
   }
   const fixedFinal = Boolean(move && move.isFinal)
   const isFinalFor = (price) => fixedFinal || cand.mode === 'budget_final' || (state.n === 0 && state.stance === 'hold' && price !== null)
@@ -772,7 +878,8 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
   const splitRow = rows.find((r) => r.score.isSplit)
   const splitOption = splitRow && splitRow !== balanced && splitRow.price > balanced.price ? splitRow : null
   const thetaAcc = Math.max(L < COUNTER.SMALL_ITEM_EUR ? COUNTER.MIN_SAVING_EUR_SMALL : COUNTER.MIN_SAVING_EUR, (COUNTER.MIN_SAVING_PCT / 100) * S)
-  const acceptWins = options.forcePrice == null && S <= state.Wcap + CTR_EPS && S - balanced.expectedPrice < thetaAcc
+  // «Accetto a N €» (acceptNow) turns the whole page into the purchase, even when the plan would counter.
+  const acceptWins = options.acceptNow === true || (options.forcePrice == null && S <= state.Wcap + CTR_EPS && S - balanced.expectedPrice < thetaAcc)
   const kind = stale ? 'counter_stale' : acceptWins ? 'accept' : 'counter'
 
   // Re-score the reported moments at the recommended price, so that their differences mean something.
@@ -898,6 +1005,7 @@ export function analyzeCounter(raw, now = new Date(), options = {}) {
     reasons: ctrReasons(ctx), tips: ctrTips(ctx), ladder: lines.ladder, plan: lines.plan, lines,
     messages, recommendedTone, messageBeforeOffer: false,
     messageFooter: acceptWins ? ctrBuyFooter(state, stale || state.expired) : "Prima invia la nuova offerta con «Fai un'offerta» nella chat, poi incolla subito il messaggio.",
+    accept: ctrMergeAccept(state, accept, acceptWins && options.acceptNow !== true ? 'no_saving' : null),
     avoidToday: avoidWindowsOn(optimal.date), nowInAvoid: nowWindow.weight < 0, disclaimer: ctrDisclaimer,
   }
   result.reminders = buildCounterReminders(result)

@@ -1,5 +1,5 @@
 import { Sparkles, Target, Wand2 } from 'lucide-react'
-import { GOAL_CHOICES, formatPoints, toPercent } from '../core/index.js'
+import { formatPoints, goalChoicesFor, toPercent } from '../core/index.js'
 import { SURFACE, TONE, cx } from '../theme.js'
 import { Button } from './ui/Button.jsx'
 import { Card } from './ui/Card.jsx'
@@ -12,18 +12,18 @@ export function OptimizeCard({ result, goal, onGoal, plan, onOptimize, onApply }
   return (
     <Card eyebrow="Obiettivo" title="Quante probabilità vorresti?" icon={Target}>
       <div role="radiogroup" aria-label="Probabilità desiderata" className="flex flex-wrap gap-2">
-        {GOAL_CHOICES.map((g) => {
-          const active = Math.abs(goal - g) < 0.001
+        {goalChoicesFor(result).map((g) => {
+          const active = Math.abs(goal - g.probability) < 0.001
           return (
             <button
-              key={g}
+              key={g.id}
               type="button"
               role="radio"
               aria-checked={active}
-              onClick={() => onGoal(g)}
+              onClick={() => onGoal(g.probability)}
               className={cx('rounded-full px-3.5 py-2 text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-600', active ? SURFACE.chipActive : SURFACE.chip)}
             >
-              {Math.round(g * 100)}%
+              {g.label} · {Math.round(g.probability * 100)}%
             </button>
           )
         })}

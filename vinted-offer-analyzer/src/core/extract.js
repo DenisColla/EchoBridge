@@ -7,9 +7,14 @@
  * - data-testid="seller-last-logged-in": "Ultima visita 26 min fa".
  * - data-testid="profile-username" and a rating aria-label "valutazione di 5 su 5 stelle".
  * - itemProp="upload_date": "un minuto fa", "3 giorni fa", "2 settimane fa"…
+ *
+ * Engine 1.4.0 (spec §3.1): the hydrated DOM of the in-app WebView may also show views («N visualizzazioni»),
+ * interested buyers («N interessati»), a crossed-out previous price, a bundle discount and the seller's other items.
+ * They are read into `signals`, every field nullable, never guessed; the probe may pass what it scraped as `details`.
  */
 
 import { CATEGORIES, SELLER_PROFILES } from './constants.js'
+import { policyBandOf, policyDiscountFor } from './policy.js'
 
 const CONDITION_LABELS = { New: 'nuovo con etichetta', NewWithTags: 'nuovo con etichetta', NewWithoutTags: 'nuovo senza etichetta', Used: 'usato', Refurbished: 'ricondizionato', Damaged: 'danneggiato' }
 
@@ -56,15 +61,76 @@ const firstMatch = (html, re) => {
   const m = html.match(re)
   return m ? m[1] : null
 }
+const firstOf = (html, regexes) => {
+  for (const re of regexes) {
+    const v = firstMatch(html, re)
+    if (v !== null) return v
+  }
+  return null
+}
 
-/** Parses the HTML of a Vinted item page. Every field may be null; `found`/`missing` list what was recognised. */
-export function parseVintedItemHtml(html) {
+/* ───────── DOM-only signals (views, interested, previous price, bundle, seller activity) ───────── */
+
+/** "1.234" / "1 234" / 1234 → 1234; null when there is no digit. Counts are integers, a dot before three digits is a thousands separator. */
+const exCount = (raw) => {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : null
+  const s = String(raw ?? '').replace(/\s/g, '').replace(/\.(?=\d{3}(?!\d))/g, '')
+  const m = s.match(/\d+/)
+  return m ? Number(m[0]) : null
+}
+/** A euro amount as a page shows it ("25,00", "1.250,00", "25.5" in JSON) → number, or null. */
+const exMoney = (raw) => {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : null
+  let s = String(raw ?? '').replace(/€/g, '').replace(/\s/g, '')
+  if (!s) return null
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.')
+  else if (/\.\d{3}$/.test(s)) s = s.replace(/\./g, '')
+  const v = Number(s)
+  return Number.isFinite(v) && v > 0 ? v : null
+}
+const exIntOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : null)
+
+const VIEW_RES = [
+  /\\"view_count\\":\s*(\d+)/, /"view_count":\s*(\d+)/,
+  /data-testid="[^"]*view[_-]?count[^"]*"[^>]*>\s*(?:<[^>]+>\s*)*([\d.]+)/i,
+  /(\d[\d.]*)\s*(?:<[^>]+>\s*)*visualizzazion[ei]\b/i,
+  /visualizzazion[ei]\s*(?:<\/?[^>]+>\s*)*([\d.]+)\s*</i,
+]
+const INTEREST_RES = [
+  /\\"favourite_count\\":\s*(\d+)/, /"favourite_count":\s*(\d+)/,
+  /data-testid="[^"]*favou?rite[_-]?count[^"]*"[^>]*>\s*(?:<[^>]+>\s*)*([\d.]+)/i,
+  /(\d[\d.]*)\s*(?:<[^>]+>\s*)*(?:persone\s+)?interessat[eoi]\b/i,
+  /interessat[eoi]\s*(?:<\/?[^>]+>\s*)*([\d.]+)\s*</i,
+]
+const OLD_PRICE_RES = [
+  /<(?:s|del|span)[^>]*(?:line-through|strikethrough)[^>]*>\s*(?:<[^>]+>\s*)*(?:€\s*)?(\d[\d.]*(?:,\d{1,2})?)\s*(?:€|<)/i,
+  /\\"original_price\\"[^}]{0,80}?\\"amount\\":\\"([\d.]+)\\"/,
+]
+/** Listing text that hints at a bundle discount («sconto sui lotti», «più pezzi»); the percentage is read only when written. */
+export const BUNDLE_HINT = /sconto (?:sui|per i|sul|per il) (?:lotti|lotto|bundle)|sconto bundle|bundle discount|più pezzi|più articoli/i
+const BUNDLE_PCT_RES = [
+  /(?:sconto|risparmi\w*)[^.]{0,80}?(?:lott[io]|bundle)[^.]{0,80}?(\d{1,2})\s*%/i,
+  /(?:lott[io]|bundle)[^.]{0,60}?(?:fino al|fino a|del|di|al)\s*-?\s*(\d{1,2})\s*%/i,
+  /-?\s*(\d{1,2})\s*%[^.]{0,60}?(?:lott[io]|bundle|più pezzi)/i,
+]
+const EX_TIME_PHRASE = "((?:oggi|ieri|adesso|poco fa)\\b|(?:\\d+|un'?|una|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\\s*(?:min(?:ut[oi])?|or[ae]|giorn[oi]|gg|settiman[ae]|mes[ei]|ann[oi])\\b(?:\\s*fa)?)"
+/** «visto 5 giorni fa», «attivo oggi», «ultimo accesso 2 settimane fa» in the visible text (the data-testid span wins when present). */
+const SELLER_SEEN_RE = new RegExp(`(?:ultima visita|ultimo accesso|vist[oa]|attiv[oa]|online)\\s*:?\\s*${EX_TIME_PHRASE}`, 'i')
+/** «caricato 3 giorni fa», «in vendita da 2 settimane», «pubblicato ieri» in the visible text. */
+const LISTING_AGE_RE = new RegExp(`(?:caricato|pubblicato|inserito|in vendita da|online da)\\s*:?\\s*${EX_TIME_PHRASE}`, 'i')
+
+/** The page without scripts, styles and tags: where sentences such as «sconto sui lotti» mean what they say. */
+const exVisibleText = (src) => stripTags(src.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<\/(?:div|p|li|span|h\d)>/gi, '. '))
+
+/** Parses the HTML of a Vinted item page. Every field may be null; `found`/`missing` list what was recognised; `signals` holds the DOM-only readings (nullable), `unread` the ones this page did not show. `details` is the WebView probe's optional scrape ({ attributes, strikethrough, bundleText, sellerItemCards, flight }). */
+export function parseVintedItemHtml(html, details = null) {
   const src = String(html || '').replace(/<!--[\s\S]*?-->/g, '')
   const out = {
     title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null, photo: null,
     uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
     sellerBusiness: null, sellerBadges: [],
-    found: [], missing: [],
+    signals: { views: null, interested: null, oldPrice: null, priceDropped: null, priceDrop: null, bundleOffered: null, bundleDiscountPct: null, lastSeenDays: null, sellerItems: null, reserved: null },
+    found: [], missing: [], unread: [],
   }
 
   const ldScripts = [...src.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)]
@@ -136,12 +202,64 @@ export function parseVintedItemHtml(html) {
   const badgeBlock = firstMatch(src, /\\"badges\\":\[([^\]]*)\][^}]{0,80}\\"username\\"/)
   if (badgeBlock) out.sellerBadges = [...badgeBlock.matchAll(/\\"type\\":\\"([A-Z_]+)\\"/g)].map((m) => m[1])
 
+  // Visible-text fallbacks for the two dates when the structured markers are missing (phrases, never guesses).
+  const visible = exVisibleText(src)
+  if (out.uploadedText === null) {
+    const phrase = firstMatch(visible, LISTING_AGE_RE)
+    const days = phrase ? parseRelativeItalian(phrase) : null
+    if (days !== null) { out.uploadedText = phrase.trim(); out.uploadedDays = days }
+  }
+  if (out.sellerLastSeenText === null) {
+    const phrase = firstMatch(visible, SELLER_SEEN_RE)
+    const days = phrase ? parseRelativeItalian(phrase) : null
+    if (days !== null) { out.sellerLastSeenText = phrase.trim(); out.sellerLastSeenDays = days }
+  }
+
+  // DOM-only signals: the probe's scrape first (what the hydrated page showed), then regexes on the HTML.
+  const sig = out.signals
+  const d = details && typeof details === 'object' ? details : {}
+  const flight = d.flight && typeof d.flight === 'object' ? d.flight : {}
+  sig.views = exIntOrNull(flight.view_count)
+  sig.interested = exIntOrNull(flight.favourite_count)
+  sig.sellerItems = exIntOrNull(flight.item_count) ?? exIntOrNull(d.sellerItemCards)
+  sig.reserved = typeof flight.is_reserved === 'boolean' ? flight.is_reserved : null
+  for (const pair of Array.isArray(d.attributes) ? d.attributes : []) {
+    if (!Array.isArray(pair) || pair.length < 2) continue
+    const [label, value] = pair
+    if (/visualizzazion/i.test(String(label)) && sig.views === null) sig.views = exCount(value)
+    else if (/interessat/i.test(String(label)) && sig.interested === null) sig.interested = exCount(value)
+    else if (/caricato|pubblicato/i.test(String(label)) && out.uploadedText === null) {
+      const days = parseRelativeItalian(String(value))
+      if (days !== null) { out.uploadedText = String(value).trim(); out.uploadedDays = days }
+    }
+  }
+  if (sig.views === null) sig.views = exCount(firstOf(src, VIEW_RES))
+  if (sig.interested === null) sig.interested = exCount(firstOf(src, INTEREST_RES))
+  const struck = (Array.isArray(d.strikethrough) ? d.strikethrough : []).map((t) => exMoney(String(t).match(/\d[\d.]*(?:,\d{1,2})?/) ? String(t).match(/\d[\d.]*(?:,\d{1,2})?/)[0] : '')).find((v) => v !== null)
+  sig.oldPrice = struck ?? exMoney(firstOf(src, OLD_PRICE_RES))
+  if (sig.oldPrice !== null && out.listPrice !== null && sig.oldPrice > out.listPrice + 0.004) {
+    sig.priceDropped = true
+    sig.priceDrop = { from: sig.oldPrice, to: out.listPrice, hoursAgo: null }
+  } else if (sig.oldPrice !== null && out.listPrice !== null) {
+    // A crossed-out price at or below the current one is not a drop.
+    sig.oldPrice = null
+  }
+  // The listing text (title, description) sits in the JSON-LD script, which the visible text excludes: scan it too.
+  const bundleText = [typeof d.bundleText === 'string' ? d.bundleText : '', out.title || '', out.description || '', visible].join('. ')
+  if (BUNDLE_HINT.test(bundleText)) sig.bundleOffered = true
+  const pct = firstOf(bundleText, BUNDLE_PCT_RES)
+  if (pct !== null && BUNDLE_HINT.test(bundleText)) sig.bundleDiscountPct = Number(pct)
+  sig.lastSeenDays = out.sellerLastSeenDays
+
   const labels = [
     ['title', 'titolo'], ['listPrice', 'prezzo'], ['brand', 'marca'], ['categoryText', 'categoria'], ['condition', 'condizioni'],
     ['uploadedText', 'data di caricamento'], ['sellerLastSeenText', 'attività del venditore'], ['sellerRating', 'valutazione del venditore'],
     ['sellerFeedbackCount', 'numero di recensioni'], ['description', 'descrizione'],
   ]
   for (const [key, label] of labels) (out[key] !== null && out[key] !== undefined ? out.found : out.missing).push(label)
+  // DOM-only fields are optional: read ones join `found`, the others go to `unread` (never to `missing`).
+  const domLabels = [['views', 'visualizzazioni'], ['interested', 'interessati'], ['oldPrice', 'prezzo precedente'], ['bundleDiscountPct', 'sconto sui lotti'], ['sellerItems', 'altri articoli del venditore']]
+  for (const [key, label] of domLabels) (sig[key] !== null ? out.found : out.unread).push(label)
   return out
 }
 
@@ -209,15 +327,20 @@ export function listingAgeGuess(days) {
   return 'over_month'
 }
 
+/** Days since the seller's last visit: from 14 the seller is `inactive`, from 3 `quiet` (reads the offer later, if at all). */
+export const SELLER_INACTIVE_DAYS = 14
+export const SELLER_QUIET_DAYS = 3
+
 export function sellerProfileGuess({ lastSeenDays = null, feedbackCount = null, rating = null }) {
-  if (lastSeenDays !== null && lastSeenDays >= 14) return { id: 'inactive', reason: `ultima visita ${Math.round(lastSeenDays)} giorni fa` }
+  if (lastSeenDays !== null && lastSeenDays >= SELLER_INACTIVE_DAYS) return { id: 'inactive', reason: `ultima visita ${Math.round(lastSeenDays)} giorni fa` }
+  if (lastSeenDays !== null && lastSeenDays >= SELLER_QUIET_DAYS) return { id: 'quiet', reason: `ultima visita ${Math.round(lastSeenDays)} giorni fa` }
   if (feedbackCount !== null && feedbackCount < 5) return { id: 'new_seller', reason: `${feedbackCount} recension${feedbackCount === 1 ? 'e' : 'i'}` }
   if (feedbackCount !== null && feedbackCount >= 20 && rating !== null && rating >= 4.8) return { id: 'expert', reason: `${feedbackCount} recensioni, ${rating} stelle` }
   if (feedbackCount === null && rating !== null && rating >= 4.8 && lastSeenDays !== null && lastSeenDays < 2) return { id: 'unknown', reason: 'valutazione alta ma recensioni non lette' }
   return { id: 'unknown', reason: 'dati insufficienti' }
 }
 
-const FIXED_PRICE = /\b(prezzo (fisso|non trattabile|non negoziabile|bloccato)|non trattabile|non negoziabile|no offerte|no offers|niente offerte|non accetto offerte|offerte? non accettat[ea]|no sconti|non faccio sconti|no trattative)\b/i
+const FIXED_PRICE = /\b(prezzo (fisso|non trattabile|non negoziabile|bloccato)|non trattabile|non negoziabile|no offerte|no offers|niente offerte|non accetto offerte|offerte? non accettat[ea]|no sconti|non faccio sconti|no trattative|ultimo prezzo|prezzo minimo|già ribassato|prezzo già basso|no perditempo|non scendo)\b/i
 const OPEN_TO_OFFERS = /\b(accetto offerte|trattabile|trattabili|fate offerte|fatemi offerte|aperto a offerte|offerte benvenute|offerte ben accette|prezzo trattabile|si accettano offerte|accetto proposte|ascolto offerte)\b/i
 const CLEARING_OUT = /\b(svuoto (l')?armadio|svuoto tutto|faccio spazio|vendo tutto|sgombero|devo liberare|cambio casa|trasloc[oa]|svendo|svendita|tutto deve andare|prezzi stracciati)\b/i
 
@@ -240,12 +363,39 @@ export function findPriceInText(text) {
 
 const roundTarget = (value, listPrice) => (listPrice >= 20 ? Math.round(value) : Math.round(value * 2) / 2)
 const euro = (n) => `${(Number.isInteger(n) ? String(n) : n.toFixed(2)).replace('.', ',')} €`
+const formPrice = (n) => String(n).replace('.', ',')
+
+/** The DOM signals of the page merged with the caller's (search favourites, seller items): non-null values only, or null. */
+const exMergeSignals = (fromPage, fromCaller) => {
+  const out = {}
+  for (const source of [fromPage, fromCaller]) {
+    if (!source || typeof source !== 'object') continue
+    for (const [k, v] of Object.entries(source)) if (v !== null && v !== undefined) out[k] = v
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** What the form carries when the policy is off or has no inputs: the legacy fixed discount, said as such. */
+const exDefaultPolicy = (listPrice, pct, targetPrice) => {
+  const band = policyBandOf(listPrice)
+  return {
+    kind: 'offer', noOffer: false, source: 'default', discountPct: pct, effectiveDiscountPct: Math.round(((listPrice - targetPrice) / listPrice) * 1000) / 10, targetPrice,
+    floor: null, band: band ? band.id : null, bandLabel: band ? band.label : null, ageTier: null, ageDays: null, table: null, modifiers: [], caps: [], shift: 0,
+    reason: [`Sconto predefinito −${pct}%: senza i dati dell'annuncio la tabella per fascia di prezzo non si applica.`],
+    summary: `−${pct}%: sconto predefinito`,
+  }
+}
 
 /**
  * Turns an extraction into form values plus a human summary. Fields the page did not provide
  * keep the previous form value (or the neutral default).
+ * options: { link, targetDiscountPct (legacy default, 20), previousForm, policy, profile, market, signals }.
+ * `policy: true` asks policy.js for the target (price band × age, modifiers, learned shift) instead of the fixed
+ * discount; a policy object is used as is; `false` keeps the legacy default. A «no offer» policy sets the target to
+ * the list price (the engine then says «compra»). The policy used, or the default said as such, is `form.policy`;
+ * the page's DOM signals merged with `signals` become `form.signals`.
  */
-export function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20, previousForm = {} } = {}) {
+export function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20, previousForm = {}, policy = false, profile = null, market = null, signals = null } = {}) {
   const found = []
   const guessed = []
   const missing = []
@@ -253,14 +403,37 @@ export function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20,
 
   const title = cleanTitle(ex.title)
   if (title) { form.itemTitle = title; found.push(`Titolo: ${title.length > 60 ? `${cleanTitle(title, 60)}…` : title}`) } else missing.push('titolo')
-  if (ex.listPrice) {
-    form.listPrice = String(ex.listPrice).replace('.', ',')
-    const target = roundTarget(ex.listPrice * (1 - targetDiscountPct / 100), ex.listPrice)
-    form.targetPrice = String(target).replace('.', ',')
-    found.push(`Prezzo ${euro(ex.listPrice)} (target proposto ${euro(target)}, −${targetDiscountPct}%)`)
-  } else missing.push('prezzo')
 
   const cat = categoryGuess(ex)
+  const seller = sellerProfileGuess({ lastSeenDays: ex.sellerLastSeenDays, feedbackCount: ex.sellerFeedbackCount, rating: ex.sellerRating })
+  const signal = signalFromText(`${ex.title || ''} ${ex.description || ''}`)
+  const merged = exMergeSignals(ex.signals, signals)
+  if (merged) form.signals = { ...(previousForm.signals || {}), ...merged }
+
+  if (ex.listPrice) {
+    form.listPrice = formPrice(ex.listPrice)
+    let pol = policy && typeof policy === 'object' ? policy : null
+    if (!pol && policy) {
+      pol = policyDiscountFor({
+        listPrice: ex.listPrice, ageDays: ex.uploadedDays, category: cat.id, sellerProfile: seller.id, listingSignal: signal.id,
+        sellerBusiness: ex.sellerBusiness, signals: merged, market, profile,
+      })
+    }
+    if (pol && pol.kind === 'offer' && pol.targetPrice) {
+      form.targetPrice = formPrice(pol.targetPrice)
+      found.push(`Prezzo ${euro(ex.listPrice)} · target proposto ${euro(pol.targetPrice)} (${pol.summary})`)
+    } else if (pol && pol.kind === 'no_offer') {
+      form.targetPrice = form.listPrice
+      found.push(`Prezzo ${euro(ex.listPrice)} · meglio non offrire: ${pol.reason[0]}`)
+    } else {
+      const target = roundTarget(ex.listPrice * (1 - targetDiscountPct / 100), ex.listPrice)
+      form.targetPrice = formPrice(target)
+      found.push(`Prezzo ${euro(ex.listPrice)} (target proposto ${euro(target)}, −${targetDiscountPct}%)`)
+      pol = exDefaultPolicy(ex.listPrice, targetDiscountPct, target)
+    }
+    form.policy = pol
+  } else missing.push('prezzo')
+
   form.category = cat.id
   guessed.push(`Categoria: ${labelOf(CATEGORIES, cat.id)} (${cat.reason})`)
 
@@ -269,7 +442,6 @@ export function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20,
     found.push(`Caricato ${ex.uploadedText}`)
   } else { form.listingAge = previousForm.listingAge || 'unknown'; missing.push('data di caricamento') }
 
-  const seller = sellerProfileGuess({ lastSeenDays: ex.sellerLastSeenDays, feedbackCount: ex.sellerFeedbackCount, rating: ex.sellerRating })
   form.sellerProfile = seller.id
   const sellerBits = [
     ex.sellerUsername ? ex.sellerUsername : null,
@@ -283,9 +455,19 @@ export function buildFormFromExtraction(ex, { link = '', targetDiscountPct = 20,
   guessed.push(`Venditore: ${labelOf(SELLER_PROFILES, seller.id).toLowerCase()} (${seller.reason})`)
   if (ex.sellerFeedbackCount === null) missing.push('numero di recensioni')
 
-  const signal = signalFromText(`${ex.title || ''} ${ex.description || ''}`)
   form.listingSignal = signal.id
   if (signal.id !== 'none') found.push(`Nell'annuncio: ${signal.reason}`)
+
+  // DOM-only readings, when the page showed them.
+  const sig = ex.signals || {}
+  const interest = [
+    sig.views !== null && sig.views !== undefined ? `${sig.views} visualizzazioni` : null,
+    sig.interested !== null && sig.interested !== undefined ? `${sig.interested} interessati` : null,
+  ].filter(Boolean)
+  if (interest.length) found.push(`Interesse: ${interest.join(', ')}`)
+  if (sig.priceDropped === true && sig.oldPrice) found.push(`Prezzo ribassato: prima ${euro(sig.oldPrice)}`)
+  if (sig.bundleDiscountPct) found.push(`Sconto sui lotti fino al ${sig.bundleDiscountPct}%`)
+  else if (sig.bundleOffered === true) found.push('Il venditore propone sconti sui lotti')
 
   return { form, summary: { found, guessed, missing, condition: ex.condition, brand: ex.brand } }
 }

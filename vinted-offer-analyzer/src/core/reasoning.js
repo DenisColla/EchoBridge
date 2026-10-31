@@ -1,5 +1,6 @@
 import { VINTED } from './constants.js'
 import { calendarDaysBetween, capitalize, formatLongDate, formatRelativeDay, formatTime, isItalianHoliday, isSameDay } from './dates.js'
+import { formatEuro } from './messages.js'
 import { computeDiscountPct } from './scoring.js'
 
 const roundPct = (v) => Math.round(v)
@@ -132,9 +133,12 @@ export function buildReasons(input, chosen, attribution) {
         if (row.weight < 0) text = 'Su una categoria di valore uno sconto così alto viene letto come un affronto.'
         else if (row.weight > 0) text = 'In questa categoria anche uno sconto alto viene preso in considerazione.'
         break
-      case 'gap':
-        if (positive) text = `In euro chiedi solo ${Math.round(listPrice - targetPrice)} € in meno: per il venditore pesa poco.`
-        else if (row.weight < 0) text = `In euro la differenza è di ${Math.round(listPrice - targetPrice)} €: il venditore ragiona anche in valore assoluto.`
+      case 'price_band':
+        if (row.weight < 0) text = `Su un articolo da ${formatEuro(listPrice)} lo sconto vale pochi euro: al venditore conviene tenere il prezzo e aspettare.`
+        else if (positive) text = `Su un prezzo da ${formatEuro(listPrice)} c'è margine per trattare: il venditore se lo aspetta.`
+        break
+      case 'gap_eur':
+        if (row.weight < 0) text = `In euro la differenza è di ${Math.round(listPrice - targetPrice)} €: il venditore ragiona anche in valore assoluto.`
         break
       case 'signal':
         if (listingSignal.id === 'fixed_price') text = 'L\'annuncio dice "prezzo non trattabile": ogni offerta parte in salita.'
@@ -145,6 +149,7 @@ export function buildReasons(input, chosen, attribution) {
         if (sellerProfile === 'new_seller') text = 'Un venditore nuovo vuole le prime recensioni e accetta più volentieri, ma può reagire d\'impulso.'
         else if (sellerProfile === 'expert') text = positive ? 'Un venditore esperto chiude volentieri gli sconti ragionevoli.' : 'Un venditore esperto conosce il mercato e rifiuta gli sconti aggressivi.'
         else if (sellerProfile === 'inactive') text = 'Il venditore è inattivo: la priorità è farsi leggere, più del tempismo perfetto.'
+        else if (sellerProfile === 'quiet') text = 'Il venditore entra di rado: può leggere l\'offerta con giorni di ritardo, conta più farsi leggere che il minuto esatto.'
         break
       default:
         break

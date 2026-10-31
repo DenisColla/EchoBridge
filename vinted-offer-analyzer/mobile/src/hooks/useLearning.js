@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  DEFAULT_PROFILE, buildDataset, dueMonths, monthKeyOf, monthStartOf, monthlyReport, normalizeProfile, profileIsActive,
-  reportFileName, reportHeadline, reportWorkbook, shiftMonth,
+  DEFAULT_PROFILE, applyCheckpoint, buildDataset, dueMonths, firstOfferCorrected, liveCheckpoint, liveProfile, monthKeyOf, monthStartOf, monthlyReport,
+  normalizeProfile, profileIsActive, reportFileName, reportHeadline, reportWorkbook, shiftMonth, withLiveHistory,
 } from '../../core/index.js'
 import { loadLearningState, saveLearningState } from '../services/storage.js'
 import { chooseReportFolder, copyReportToFolder, shareReport, writeReport } from '../services/reports.js'
@@ -46,9 +46,13 @@ const nextMonthlyAt = (now) => {
 }
 
 /**
- * The monthly learning loop on the phone. At the first app open of a new month (or from the 1st-of-month
- * notification) it builds the closed month's report from the list and the archive, saves the Excel file (chosen
- * folder + private copy) and applies the new engine profile automatically, keeping the previous one for «Annulla».
+ * The learning loop on the phone, in two rhythms.
+ *  - Live (engine-spec §1.5): on every change of the list the general correction and the discount slope are re-fitted
+ *    from the outcomes (liveProfile) and persisted when they move beyond hysteresis, roll back or rest on more data;
+ *    the history keeps one live checkpoint per day, the rollback is judged against the one applied 30 days ago.
+ *  - Monthly: at the first app open of a new month (or from the 1st-of-month notification) it builds the closed month's
+ *    report from the list and the archive, saves the Excel file (chosen folder + private copy) and applies the monthly
+ *    families of the profile automatically, keeping the previous one for «Annulla».
  */
 export function useLearning({ items, ready }) {
   const [state, setState] = useState(null)
@@ -79,6 +83,34 @@ export function useLearning({ items, ready }) {
   /** Engine options: no profile object at all while it changes nothing (the engine then runs exactly as before). */
   const engineProfile = useMemo(() => (profile && (profileIsActive(profile) || profile.cov) ? profile : null), [profile])
   const records = useMemo(() => buildDataset(items, new Date()), [items])
+
+  /** Live recalibration: the fit runs on every change of the records or of the stored state; stored only when it changes something. */
+  const checkpoint = useMemo(() => (state ? liveCheckpoint(state.history, new Date()) : null), [state])
+  const live = useMemo(() => (state ? liveProfile(records, new Date(), { previous: state.profile, checkpoint }) : null), [records, state, checkpoint])
+  useEffect(() => {
+    if (!live || !live.changed || !ready || runningRef.current) return
+    const s = stateRef.current
+    if (!s) return
+    // After this persist the memo recomputes with `previous` = the stored profile and reports no change: no loop.
+    persist({ ...s, profile: live.profile, history: withLiveHistory(s.history, live.profile) })
+  }, [live, ready, persist])
+  const liveStatus = useMemo(() => (live ? {
+    intercept: live.profile.intercept,
+    dslope: live.profile.dslope,
+    status: live.status,
+    nEff: live.nEff,
+    basedOn: live.basedOn,
+    sd: live.sd,
+    fitted: live.fitted,
+    applied: live.status.intercept === 'applied' || live.status.dslope === 'applied' || (live.frozen && firstOfferCorrected(live.profile)),
+    frozen: live.frozen,
+    frozenUntil: live.profile.frozenUntil,
+    frozenReason: live.profile.frozenReason,
+    rollback: live.rollback,
+    appliedAt: live.profile.appliedAt,
+    checkpointId: live.profile.checkpointId,
+    checkedAt: new Date(),
+  } : null), [live])
 
   /** The repeating 1st-of-month notification; re-checked at every run because a force-stop clears alarms. */
   const ensureMonthlyReminder = useCallback(async (s) => {
@@ -143,16 +175,30 @@ export function useLearning({ items, ready }) {
     }
   }, [ready, persist, ensureMonthlyReminder])
 
-  /** «Annulla le correzioni»: back to the profile active before the last monthly run. */
+  /**
+   * «Annulla le correzioni»: the monthly families go back to the profile active before the last monthly run, and the
+   * live values go back to their checkpoint and stay frozen for 30 days (so the button means something between closes).
+   */
   const undoLast = useCallback(async () => {
     const s = stateRef.current
-    if (!s || !s.undo) return false
-    const reports = (s.reports || []).map((r) => (r.month === s.undo.month
-      ? { ...r, reverted: true, headline: r.headline.replace(/[^·]*$/, ' correzioni annullate').replace(/\s+/g, ' ').trim() }
-      : r))
-    // The undone profile stays in the history only as «reverted»: later trends count no corrections for that month.
-    const history = (s.history || []).map((p) => (p.month === s.undo.month ? { ...p, changes: [], reverted: true } : p))
-    await persist({ ...s, profile: s.undo.profile, undo: null, reports, history })
+    if (!s) return false
+    const now = new Date()
+    let next = s
+    if (s.undo) {
+      const reports = (s.reports || []).map((r) => (r.month === s.undo.month
+        ? { ...r, reverted: true, headline: r.headline.replace(/[^·]*$/, ' correzioni annullate').replace(/\s+/g, ' ').trim() }
+        : r))
+      // The undone profile stays in the history only as «reverted»: later trends count no corrections for that month.
+      const history = (s.history || []).map((p) => (p.month === s.undo.month ? { ...p, changes: [], reverted: true } : p))
+      next = { ...s, profile: s.undo.profile, undo: null, reports, history }
+    }
+    const current = next.profile ? normalizeProfile(next.profile) : null
+    if (current && current.live && firstOfferCorrected(current) && !(current.frozenUntil && new Date(current.frozenUntil) > now)) {
+      const frozen = applyCheckpoint(current, liveCheckpoint(next.history, now), now, { reason: 'undo' })
+      next = { ...next, profile: frozen, history: withLiveHistory(next.history, frozen) }
+    }
+    if (next === s) return false
+    await persist(next)
     return true
   }, [persist])
 
@@ -204,6 +250,8 @@ export function useLearning({ items, ready }) {
     folder: state ? state.folder : null,
     reports: state ? state.reports || [] : [],
     canUndo: Boolean(state && state.undo),
+    canUndoLive: Boolean(live && !live.frozen && live.profile.live && firstOfferCorrected(live.profile)),
+    liveStatus,
     nextReportAt: state ? nextMonthlyAt(new Date()) : null,
     discountPct: (profile || DEFAULT_PROFILE).discountPct,
     runDue,

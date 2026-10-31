@@ -26,7 +26,7 @@ export function ScoreCard({ result }) {
           <p className={cx('mt-2 text-sm', SURFACE.muted)}>
             probabilità complessiva nel momento consigliato
             {uncertainty > 0 && (
-              <span className="block">stima tra {toPercent(probabilityRange[0])}% e {toPercent(probabilityRange[1])}%: indica {missing} per restringerla</span>
+              <span className="block">stima tra {toPercent(probabilityRange.low)}% e {toPercent(probabilityRange.high)}%: indica {missing} per restringerla</span>
             )}
           </p>
         </div>

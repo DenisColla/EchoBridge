@@ -1,6 +1,6 @@
 import {
-  CANONICAL_SLOTS, HORIZON_AVAILABILITY_FLOOR, HORIZON_MAX_DAYS, HORIZON_MIN_DAYS, HORIZON_STALE_LISTING_DAYS,
-  IMPATIENCE_PER_DAY, INACTIVE_READ_PROBABILITY, JITTER_MINUTES, NEAR_TIE_ABS, NEAR_TIE_REL,
+  ACTIVE_READ_PROBABILITY, CANONICAL_SLOTS, HORIZON_AVAILABILITY_FLOOR, HORIZON_MAX_DAYS, HORIZON_MIN_DAYS, HORIZON_STALE_LISTING_DAYS,
+  IMPATIENCE_PER_DAY, INACTIVE_READ_PROBABILITY, JITTER_MINUTES, NEAR_TIE_ABS, NEAR_TIE_REL, QUIET_READ_PROBABILITY,
   QUICK_ALTERNATIVE_MIN_HOURS, SEND_NOW_TOLERANCE, TIME_WINDOWS, TIMING_MATTERS_SPREAD, VINTED, ageHazardMultiplier,
 } from './constants.js'
 import { addDays, addMinutes, atTime, calendarDaysBetween, ceilToMinutes, formatDayList, formatRange, isSameDay, startOfDay } from './dates.js'
@@ -22,8 +22,16 @@ export const availabilityAfter = (input, days) => {
   return p
 }
 
-/** Probability that the seller even opens the offer before it lapses. */
-export const readProbability = (input) => (input.sellerProfile === 'inactive' ? INACTIVE_READ_PROBABILITY : 1)
+/**
+ * Probability that the seller even opens the offer before it lapses: by the seller's activity (last seen ≥ 14 days →
+ * inactive, 3–13 days → quiet, otherwise active). An unknown seller is scored as active: the 10% miss is the share of
+ * offers that lapse unread even for sellers who were online yesterday.
+ */
+export const readProbability = (input) => {
+  if (input.sellerProfile === 'inactive') return INACTIVE_READ_PROBABILITY
+  if (input.sellerProfile === 'quiet') return QUIET_READ_PROBABILITY
+  return ACTIVE_READ_PROBABILITY
+}
 
 /** Days ahead worth considering: stop when the item would likely be gone; stale listings do not justify long waits. */
 export function horizonFor(input) {

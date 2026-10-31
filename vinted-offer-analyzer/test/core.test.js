@@ -6,6 +6,8 @@ import {
   parsePrice, riskBandFor, romeOffsetMinutes, timeWindowAt, CATEGORIES, LISTING_AGES, SELLER_PROFILES, LISTING_SIGNALS, TONES,
   nextGoalFor, optimizeOffer, parseVintedItemHtml, parseRelativeItalian, buildFormFromExtraction, categoryGuess, signalFromText, cleanTitle,
   sellerProfileGuess, listingAgeGuess, findPriceInText, detectVintedChallenge,
+  MONTH_END_WEIGHT, POSITIVE_CAP, QUIET_READ_PROBABILITY, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, goalChoicesFor, maxReachable,
+  normalizeProfile, predictiveInterval, priceBandWeight, readProbability, scoreAt,
 } from '../src/core/index.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -21,7 +23,8 @@ const base = { category: 'sneakers', listPrice: '100', targetPrice: '80', listin
 test('enum ids match the spec', () => {
   assert.deepEqual(CATEGORIES.map((c) => c.id), ['sneakers', 'fast_fashion', 'collectible', 'electronics', 'kids', 'luxury', 'other'])
   assert.deepEqual(LISTING_AGES.map((a) => a.id), ['unknown', 'today', 'days_2_6', 'weeks_1_2', 'weeks_2_4', 'over_month'])
-  assert.deepEqual(SELLER_PROFILES.map((s) => s.id), ['unknown', 'new_seller', 'expert', 'inactive'])
+  assert.deepEqual(SELLER_PROFILES.map((s) => s.id), ['unknown', 'new_seller', 'expert', 'quiet', 'inactive'])
+  assert.equal(SELLER_PROFILES.find((s) => s.id === 'quiet').label, 'Poco attivo')
   assert.deepEqual(LISTING_SIGNALS.map((s) => s.id), ['none', 'fixed_price', 'open_to_offers', 'clearing_out'])
   assert.deepEqual(TONES.map((t) => t.id), ['cordiale', 'diretto', 'impegno', 'motivato'])
 })
@@ -101,9 +104,10 @@ test('lunch is the worst window of the week, Sunday night the best', () => {
 
 test('month windows ramp instead of jumping and follow the end of the month', () => {
   assert.equal(monthWindowAt(new Date(2026, 9, 25)).id, 'month_end')
-  assert.equal(monthWindowAt(new Date(2026, 9, 25)).weight, 0.2)
+  assert.equal(MONTH_END_WEIGHT, 0.1)
+  assert.equal(monthWindowAt(new Date(2026, 9, 25)).weight, MONTH_END_WEIGHT)
   assert.equal(monthWindowAt(new Date(2026, 9, 24)).id, 'month_late')
-  assert.ok(monthWindowAt(new Date(2026, 9, 24)).weight > 0.15 && monthWindowAt(new Date(2026, 9, 24)).weight < 0.2)
+  assert.ok(monthWindowAt(new Date(2026, 9, 24)).weight > 0.75 * MONTH_END_WEIGHT && monthWindowAt(new Date(2026, 9, 24)).weight < MONTH_END_WEIGHT)
   assert.equal(monthWindowAt(new Date(2026, 9, 18)).weight, 0)
   assert.equal(monthWindowAt(new Date(2026, 9, 12)).id, 'month_mid')
   assert.equal(monthWindowAt(new Date(2026, 9, 3)).id, 'month_start')
@@ -142,7 +146,9 @@ test('analysis returns the full result shape', () => {
   assert.equal(r.ok, true)
   assert.equal(r.kind, 'analysis')
   assert.ok(r.probability > 0 && r.probability < 1)
-  assert.ok(r.probabilityRange[0] <= r.probability && r.probability <= r.probabilityRange[1])
+  assert.ok(r.probabilityRange.low <= r.probability && r.probability <= r.probabilityRange.high)
+  assert.equal(r.probabilityRange.n, 0, 'no learned profile: the range is the prior, verified on no outcome')
+  assert.ok(r.maxProbability >= r.probability && r.targetProbability > 0)
   assert.ok(r.optimal.date instanceof Date)
   assert.match(r.verdict.headline, /^Invia l'offerta /)
   assert.ok(r.verdict.expiresLabel.length > 5)
@@ -225,16 +231,20 @@ test('quick alternative exists only when the recommended moment is more than 36 
   if (edge.quick) assert.ok(edge.quick.date.getTime() < edge.optimal.date.getTime())
 })
 
-test('suggested price appears only when the probability is low and is above the target', () => {
+test('suggested price appears only when the probability is under the relative target and is above the target price', () => {
   const r = analyzeOffer({ ...base, category: 'luxury', listPrice: '500', targetPrice: '300', sellerProfile: 'expert' }, SUNDAY_AFTERNOON)
   assert.ok(r.suggestedPrice, 'expected a suggested price')
   assert.ok(r.suggestedPrice.price > 300 && r.suggestedPrice.price < 500)
-  assert.ok(r.suggestedPrice.probability >= 0.55)
+  // The target is relative: 75% of what the listing can reach at the top of the price grid, never under 25%.
+  assert.ok(Math.abs(r.targetProbability - Math.max(SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX * r.maxProbability)) < 1e-12)
+  assert.ok(r.suggestedPrice.probability >= r.targetProbability)
+  assert.ok(r.probability < r.targetProbability)
   assert.ok(['unrealistic', 'ambitious'].includes(r.ambition))
 
   const easy = analyzeOffer({ ...base, targetPrice: '95' }, SUNDAY_AFTERNOON)
   assert.equal(easy.suggestedPrice, null)
   assert.equal(easy.ambition, null)
+  assert.ok(easy.probability >= easy.targetProbability)
 })
 
 test('inactive sellers: send soon, read probability halves the headline', () => {
@@ -314,7 +324,7 @@ test('prices typed the Italian way are parsed, garbage is rejected', () => {
 test('"Adesso?" is never a yes inside an unfavourable window', () => {
   const inputs = [
     { ...base, targetPrice: '85', sellerProfile: 'inactive' },
-    { ...base, category: 'kids', listPrice: '10', targetPrice: '9.5' },
+    { ...base, category: 'kids', listPrice: '10', targetPrice: '8' },
     { ...base, category: 'collectible', targetPrice: '80', listingAge: 'over_month', sellerProfile: 'inactive', listingSignal: 'fixed_price' },
     { ...base, targetPrice: '97', listingAge: 'over_month' },
   ]
@@ -359,12 +369,13 @@ test('weekday "fasce da evitare" lead with the lunch break', () => {
   assert.equal(weekday[0].id, 'lunch')
 })
 
-test('inactive sellers get a suggested price scaled on the read probability, quickly', () => {
+test('inactive sellers get a suggested price relative to what they can reach (the read probability caps it), quickly', () => {
   const started = Date.now()
   const r = analyzeOffer({ ...base, category: 'luxury', listPrice: '500', targetPrice: '300', sellerProfile: 'inactive' }, SUNDAY_AFTERNOON)
   assert.ok(Date.now() - started < 400)
   assert.ok(r.suggestedPrice, 'expected a suggested price for an inactive seller')
-  assert.ok(r.suggestedPrice.probability >= 0.55 * 0.5)
+  assert.ok(r.maxProbability <= 0.5, 'half the offers lapse unread: the ceiling is under 50%')
+  assert.ok(r.suggestedPrice.probability >= r.targetProbability && r.suggestedPrice.probability <= r.maxProbability + 1e-9)
   assert.ok(r.messageBeforeOffer)
   assert.ok(r.messages.every((m) => !m.text.includes('ho inviato') && !m.text.includes('ho appena inviato')))
 })
@@ -391,9 +402,12 @@ test('over-cap prices are formatted in Italian and tiny prices fall back to "buy
   assert.ok(r.message.includes('22,20 €'))
   assert.ok(r.capAdvice.some((a) => a.includes('22,20 €')))
   const tiny = analyzeOffer({ ...base, listPrice: '1', targetPrice: '0.5' }, SUNDAY_AFTERNOON)
-  assert.equal(tiny.kind, 'no_offer_needed') // 60% of 1 € leaves a gap under 0,50 €: nothing worth offering
+  assert.equal(tiny.kind, 'no_offer_needed') // 60% of 1 € leaves a gap under 2 €: nothing worth offering
   const symbolic = analyzeOffer({ ...base, listPrice: '250', targetPrice: '249.9' }, SUNDAY_AFTERNOON)
   assert.equal(symbolic.kind, 'no_offer_needed')
+  // The floor is 2 €: 1,90 € of saving is not an offer, 2 € is.
+  assert.equal(analyzeOffer({ ...base, listPrice: '20', targetPrice: '18.1' }, SUNDAY_AFTERNOON).kind, 'no_offer_needed')
+  assert.equal(analyzeOffer({ ...base, listPrice: '20', targetPrice: '18' }, SUNDAY_AFTERNOON).kind, 'analysis')
 })
 
 test('holiday verdicts do not talk about Sunday', () => {
@@ -412,9 +426,11 @@ test('plural helpers and articles', () => {
 })
 
 test('optimizer: goal steps, reachable options and applying an option raises the probability', () => {
-  assert.equal(nextGoalFor(0.63), 0.7)
-  assert.equal(nextGoalFor(0.68), 0.8)
+  // Relative goals: +10 points, capped at what the listing can reach (0,95 when the ceiling is unknown).
+  assert.equal(nextGoalFor(0.63), 0.73)
+  assert.equal(nextGoalFor(0.63, 0.7), 0.7)
   assert.equal(nextGoalFor(0.92), 0.95)
+  assert.equal(nextGoalFor(0.5, 0.4), 0.5, 'never below the current probability')
   const raw = { ...base, category: 'sneakers', listPrice: '100', targetPrice: '70', listingAge: 'weeks_1_2' }
   const before = analyzeOffer(raw, WEDNESDAY_LUNCH)
   const plan = optimizeOffer(raw, WEDNESDAY_LUNCH, { targetProbability: 0.7 })
@@ -549,8 +565,11 @@ test('extractor: mapping onto the form, with a default −20% target', () => {
   assert.ok(summary.found.some((f) => f.includes('1626 recensioni') && f.includes('spedisce in fretta')))
   assert.ok(summary.found.length >= 3)
   assert.ok(summary.guessed.some((g) => g.startsWith('Categoria')))
+  // 8,90 € → 7 € saves 1,90 €: under the 2 € floor an offer is not worth the exchange (engine-spec §2.1).
   const r = analyzeOffer(form, SUNDAY_AFTERNOON)
-  assert.equal(r.kind, 'analysis')
+  assert.equal(r.kind, 'no_offer_needed')
+  assert.ok(r.message.includes('spedizione'))
+  assert.equal(analyzeOffer({ ...form, targetPrice: '6,5' }, SUNDAY_AFTERNOON).kind, 'analysis')
 })
 
 test('extractor: category, seller and signal heuristics', () => {
@@ -574,4 +593,89 @@ test('extractor: category, seller and signal heuristics', () => {
   assert.equal(signalFromText('Giacca in ottime condizioni').id, 'none')
   assert.equal(findPriceInText('Vendo a 12,50 € spedizione esclusa'), 12.5)
   assert.equal(findPriceInText('nessun prezzo'), null)
+})
+
+/* ───────── engine 1.4.0: prior reset, read probability, honest range, relative goals ───────── */
+
+const TYPICAL = { category: 'collectible', listPrice: '30', targetPrice: '24', listingAge: 'weeks_1_2', sellerProfile: 'unknown', listingSignal: 'none' }
+const TYPICAL_NOW = new Date(2026, 9, 7, 15, 0)
+
+test('prior reset: typical cheap item at −20% shows ≤ 40% before any learning; the price band weighs on cheap listings', () => {
+  const at20 = analyzeOffer(TYPICAL, TYPICAL_NOW)
+  assert.ok(at20.probability <= 0.4 && at20.probability >= 0.2, `${at20.probability}`)
+  const at12 = analyzeOffer({ ...TYPICAL, targetPrice: '26.4' }, TYPICAL_NOW)
+  const at30 = analyzeOffer({ ...TYPICAL, targetPrice: '21' }, TYPICAL_NOW)
+  assert.ok(at12.probability > at20.probability && at20.probability > at30.probability)
+  assert.ok(at12.probability <= 0.55 && at30.probability <= 0.25)
+  assert.equal(POSITIVE_CAP, 0.7)
+
+  const cheap = scoreAt(normalizeInput({ ...base, category: 'collectible', listPrice: '9', targetPrice: '7' }).input, SUNDAY_AFTERNOON, 0)
+  assert.deepEqual(cheap.factors.map((f) => f.id), ['category', 'interaction', 'price_band', 'gap_eur', 'signal', 'age', 'wait', 'seller', 'time', 'month'])
+  assert.ok(cheap.factors.find((f) => f.id === 'price_band').rawWeight <= -0.4, 'a 9 € listing: the discount is worth a few euros to the seller')
+  assert.equal(cheap.factors.find((f) => f.id === 'gap_eur').rawWeight, 0, 'the euro gap weighs on its own only when large')
+  assert.match(cheap.factors.find((f) => f.id === 'price_band').label, /^Prezzo in annuncio 9 €$/)
+  const dear = scoreAt(normalizeInput({ ...base, listPrice: '500', targetPrice: '300' }).input, SUNDAY_AFTERNOON, 0)
+  assert.ok(dear.factors.find((f) => f.id === 'price_band').rawWeight > 0)
+  assert.ok(dear.factors.find((f) => f.id === 'gap_eur').rawWeight < 0)
+  assert.equal(priceBandWeight(40), 0)
+  assert.ok(analyzeOffer({ ...base, category: 'collectible', listPrice: '9', targetPrice: '7' }, SUNDAY_AFTERNOON).reasons.some((t) => t.includes('9 €')))
+})
+
+test('read probability by seller activity: active 0,9, quiet 0,75, inactive 0,5', () => {
+  const at = (sellerProfile) => analyzeOffer({ ...base, sellerProfile }, SUNDAY_AFTERNOON)
+  assert.equal(at('unknown').components.pRead, 0.9)
+  assert.equal(at('quiet').components.pRead, QUIET_READ_PROBABILITY)
+  assert.equal(QUIET_READ_PROBABILITY, 0.75)
+  assert.equal(at('inactive').components.pRead, 0.5)
+  assert.ok(at('quiet').probability < at('unknown').probability && at('quiet').probability > at('inactive').probability)
+  assert.equal(readProbability({ sellerProfile: 'quiet' }), 0.75)
+  assert.equal(readProbability({ sellerProfile: 'expert' }), 0.9)
+  assert.ok(at('quiet').reasons.some((t) => t.includes('entra di rado')) || at('quiet').optimal.score.factors.some((f) => f.label === 'Venditore poco attivo'))
+})
+
+test('predictive interval: a wide prior band without outcomes, a narrower one with a fitted profile, always around the estimate', () => {
+  const r = analyzeOffer(TYPICAL, TYPICAL_NOW)
+  const { low, high, n } = r.probabilityRange
+  assert.equal(n, 0)
+  assert.ok(low <= r.probability && r.probability <= high)
+  assert.ok(high - low >= 0.4, `width ${high - low}`)
+  assert.ok(low <= 0.13, `lower bound ${low} reaches the Wilson range of 1 acceptance in 12 (2–30%)`)
+  // A profile fitted on 12 outcomes (the user's October): ≈ −0,66 ± 0,71 logit.
+  const profile = normalizeProfile({ intercept: -0.66, cov: [[0.5, 0], [0, 0.1225]], paramKeys: ['intercept', 'dslope'], basedOn: 12 })
+  const rp = analyzeOffer(TYPICAL, TYPICAL_NOW, { profile })
+  assert.equal(rp.probabilityRange.n, 12)
+  assert.ok(rp.probability < r.probability)
+  assert.ok(rp.probabilityRange.low <= rp.probability && rp.probability <= rp.probabilityRange.high)
+  assert.ok(rp.probabilityRange.high - rp.probabilityRange.low <= 0.3, `width ${rp.probabilityRange.high - rp.probabilityRange.low}`)
+  assert.ok(rp.probabilityRange.low <= 0.12)
+  const direct = predictiveInterval(rp, profile)
+  assert.ok(Math.abs(direct.low - rp.probabilityRange.low) < 1e-12 && Math.abs(direct.high - rp.probabilityRange.high) < 1e-12)
+  const wider = predictiveInterval(rp, profile, { level: 0.9 })
+  assert.ok(wider.low < direct.low && wider.high > direct.high)
+  // The slope term widens the band away from −20%.
+  const far = predictiveInterval(analyzeOffer({ ...TYPICAL, targetPrice: '19.5' }, TYPICAL_NOW, { profile }), profile)
+  assert.ok(far.sd > direct.sd)
+  assert.equal(predictiveInterval(null), null)
+})
+
+test('relative goals: the suggested price and the optimiser aim at a share of what the listing can reach', () => {
+  const r = analyzeOffer({ ...base, targetPrice: '70', listingAge: 'weeks_1_2' }, WEDNESDAY_LUNCH)
+  assert.ok(r.ceiling && r.ceiling.price === 99 && r.ceiling.probability >= r.probability)
+  assert.ok(Math.abs(r.maxProbability - Math.max(r.probability, r.ceiling.probability)) < 1e-12)
+  assert.ok(Math.abs(r.targetProbability - Math.max(SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX * r.maxProbability)) < 1e-12)
+  assert.ok(r.suggestedPrice && r.suggestedPrice.probability >= r.targetProbability && r.suggestedPrice.price > 70)
+  const goals = goalChoicesFor(r)
+  assert.deepEqual(goals.map((g) => g.id), ['plus10', 'plus20', 'max'])
+  assert.ok(Math.abs(goals[0].probability - Math.round((r.probability + 0.1) * 100) / 100) < 1e-9)
+  assert.equal(goals[2].probability, Math.round(r.maxProbability * 100) / 100)
+  assert.match(goals[2].label, /^il massimo \(−\d+%\)$/)
+  assert.ok(goals.every((g) => g.deltaPoints > 0 && g.probability > r.probability))
+  // The optimiser's default goal is +10 points, capped at the ceiling.
+  const plan = optimizeOffer({ ...base, targetPrice: '70', listingAge: 'weeks_1_2' }, WEDNESDAY_LUNCH)
+  assert.ok(Math.abs(plan.target - Math.min(plan.maxAchievable.probability + 1e-9, r.probability + 0.1)) < 0.011 || plan.target <= r.probability + 0.1 + 1e-9)
+  // Near the ceiling only the ceiling remains (or nothing); a «compra» result has no goals.
+  const high = analyzeOffer({ ...base, targetPrice: '97' }, SUNDAY_AFTERNOON)
+  assert.ok(goalChoicesFor(high).length <= 1)
+  assert.deepEqual(goalChoicesFor({ ok: true, kind: 'no_offer_needed' }), [])
+  assert.equal(maxReachable(normalizeInput({ ...base, targetPrice: '99' }).input, SUNDAY_AFTERNOON), null)
 })

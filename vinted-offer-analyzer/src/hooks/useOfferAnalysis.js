@@ -82,7 +82,7 @@ export function useOfferAnalysis({ initialForm = EXAMPLE_FORM, clock = () => new
     }
     setErrors({})
     setResult(outcome)
-    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability))
+    if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability, outcome.maxProbability))
     return outcome
   }, [clock])
 
