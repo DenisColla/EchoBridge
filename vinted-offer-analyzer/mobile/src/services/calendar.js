@@ -1,0 +1,198 @@
+/**
+ * Calendar without permissions: "Metti in calendario" opens the phone's calendar app on its own
+ * "new event" screen, already filled in (title, start, end, notes). The user checks and taps Save.
+ *
+ * Paths, tried in order until one opens something:
+ *  1. Android ACTION_INSERT on the calendar provider (Samsung Calendar, Google Calendar, any calendar app).
+ *  2. Google Calendar pre-filled link (the Google Calendar app claims it; otherwise the browser).
+ *  3. A .ics file handed to the share sheet, for calendar apps that answer neither.
+ * Nothing here asks for the READ/WRITE_CALENDAR permission.
+ */
+import * as IntentLauncher from 'expo-intent-launcher'
+import * as FileSystem from 'expo-file-system/legacy'
+import * as Sharing from 'expo-sharing'
+import { Linking, Platform } from 'react-native'
+import { formatEuro } from '../../core/index.js'
+
+const EVENT_MINUTES = 30
+const pad = (n) => String(n).padStart(2, '0')
+const localStamp = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`
+const utcStamp = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`
+
+/** Last outcome of a calendar operation, shown in the Info tab so a silent failure can be reported. */
+export const calendarDiagnostics = { last: null }
+const note = (entry) => { calendarDiagnostics.last = { at: new Date().toISOString(), ...entry } }
+const errorText = (error) => String(error && error.message ? error.message : error)
+
+const deviceTimeZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Rome'
+  } catch {
+    return 'Europe/Rome'
+  }
+}
+
+export const eventTitleFor = (title, subject = "Invia l'offerta") => `${subject}: ${title && title.trim() ? title.trim() : 'articolo Vinted'}`
+
+export const eventNotesFor = ({ link, targetPrice, probability, message }) => [
+  targetPrice && Number.isFinite(Number(String(targetPrice).replace(',', '.'))) ? `Offerta: ${formatEuro(Number(String(targetPrice).replace(',', '.')))}` : null,
+  probability ? `Probabilità stimata: ${Math.round(probability * 100)}%` : null,
+  link ? `Annuncio: ${link}` : null,
+  message ? `\nMessaggio da incollare:\n${message}` : null,
+].filter(Boolean).join('\n')
+
+const eventWindow = (sendAt) => {
+  const start = new Date(sendAt)
+  const end = new Date(start.getTime() + EVENT_MINUTES * 60_000)
+  return { start, end }
+}
+
+/**
+ * Path 1: the calendar app's own "new event" screen (Android ACTION_INSERT, no permission).
+ * Resolves when the user comes back from the calendar app; Android does not say whether they saved.
+ */
+export async function openCalendarInsert({ title, link, sendAt, notes, subject }) {
+  if (Platform.OS !== 'android') return { ok: false, reason: 'not_android' }
+  const { start, end } = eventWindow(sendAt)
+  try {
+    const result = await IntentLauncher.startActivityAsync('android.intent.action.INSERT', {
+      data: 'content://com.android.calendar/events',
+      type: 'vnd.android.cursor.dir/event',
+      extra: {
+        title: eventTitleFor(title, subject),
+        description: notes || (link ? `Annuncio: ${link}` : ''),
+        beginTime: start.getTime(),
+        endTime: end.getTime(),
+        allDay: false,
+        eventTimezone: deviceTimeZone(),
+      },
+    })
+    note({ step: 'insert-intent', resultCode: result && result.resultCode })
+    return { ok: true, via: 'intent', resultCode: result && result.resultCode }
+  } catch (error) {
+    note({ step: 'insert-intent-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
+  }
+}
+
+/** Path 2: Google Calendar with the event pre-filled (the app claims the link when installed). */
+export async function openGoogleCalendar({ title, sendAt, notes, subject }) {
+  const { start, end } = eventWindow(sendAt)
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: eventTitleFor(title, subject),
+    dates: `${localStamp(start)}/${localStamp(end)}`,
+    details: notes || '',
+    ctz: deviceTimeZone(),
+  })
+  try {
+    await Linking.openURL(`https://calendar.google.com/calendar/render?${params.toString()}`)
+    note({ step: 'google-calendar' })
+    return { ok: true, via: 'google' }
+  } catch (error) {
+    note({ step: 'google-calendar-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
+  }
+}
+
+const icsEscape = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
+
+/** Builds a standard .ics (iCalendar) text for the reminder event, with a 10-minute alarm. */
+export function buildIcs({ title, sendAt, notes, uid, subject }) {
+  const { start, end } = eventWindow(sendAt)
+  return [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Offerta Vinted Timing//IT',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:${uid || `${start.getTime()}@offertavinted`}`,
+    `DTSTAMP:${utcStamp(new Date())}`,
+    `DTSTART:${utcStamp(start)}`,
+    `DTEND:${utcStamp(end)}`,
+    `SUMMARY:${icsEscape(eventTitleFor(title, subject))}`,
+    `DESCRIPTION:${icsEscape(notes)}`,
+    'BEGIN:VALARM',
+    'TRIGGER:-PT10M',
+    'ACTION:DISPLAY',
+    'DESCRIPTION:Invia l\'offerta',
+    'END:VALARM',
+    'END:VEVENT',
+    'END:VCALENDAR',
+    '',
+  ].join('\r\n')
+}
+
+/**
+ * Path 3: a .ics file. Calendar apps register ACTION_VIEW for text/calendar (import), so that is tried first
+ * through a content URI; the share sheet (ACTION_SEND) is the last resort for apps that answer neither.
+ */
+export async function shareIcs(payload) {
+  try {
+    const dir = FileSystem.cacheDirectory
+    if (!dir) return { ok: false, reason: 'no_fs' }
+    const uri = `${dir}offerta-vinted-${Date.now()}.ics`
+    await FileSystem.writeAsStringAsync(uri, buildIcs(payload), { encoding: FileSystem.EncodingType.UTF8 })
+    if (Platform.OS === 'android') {
+      try {
+        const contentUri = await FileSystem.getContentUriAsync(uri)
+        await IntentLauncher.startActivityAsync('android.intent.action.VIEW', { data: contentUri, type: 'text/calendar', flags: 1 /* FLAG_GRANT_READ_URI_PERMISSION */ })
+        note({ step: 'ics-view', uri })
+        return { ok: true, via: 'ics_view' }
+      } catch (error) {
+        note({ step: 'ics-view-error', error: errorText(error) })
+      }
+    }
+    if (!(await Sharing.isAvailableAsync())) return { ok: false, reason: 'no_share' }
+    await Sharing.shareAsync(uri, { mimeType: 'text/calendar', dialogTitle: 'Apri con il calendario', UTI: 'public.calendar-event' })
+    note({ step: 'ics-shared', uri })
+    return { ok: true, via: 'ics' }
+  } catch (error) {
+    note({ step: 'ics-error', error: errorText(error) })
+    return { ok: false, reason: 'error', error: errorText(error) }
+  }
+}
+
+/**
+ * The one entry point behind "Metti in calendario": tries the three paths in order and returns the first
+ * that opened something, as { ok, via: 'intent' | 'google' | 'ics_view' | 'ics' } or { ok: false, errors: [...] }.
+ */
+export async function openCalendarWithEvent(payload) {
+  const errors = []
+  // Explicit names: function .name is minified in release bundles.
+  const steps = [['app Calendario', openCalendarInsert], ['Google Calendar', openGoogleCalendar], ['file .ics', shareIcs]]
+  for (const [name, step] of steps) {
+    const outcome = await step(payload)
+    if (outcome.ok) {
+      if (errors.length && calendarDiagnostics.last) calendarDiagnostics.last = { ...calendarDiagnostics.last, fallbackFrom: errors }
+      return outcome
+    }
+    errors.push(`${name}: ${outcome.error || outcome.reason}`)
+  }
+  note({ step: 'all-failed', error: errors.join(' | ') })
+  return { ok: false, errors }
+}
+
+/** Shown when the user is back in the app (the intent resolves on return, so the wording must hold after the fact). */
+export const VIA_LABEL = {
+  intent: 'Se hai toccato Salva, l\'evento è nel tuo calendario.',
+  google: 'Se hai toccato Salva in Google Calendar, l\'evento è nel tuo calendario.',
+  ics_view: 'File evento aperto nel calendario: conferma l\'importazione.',
+  ics: 'Scegli un\'app calendario nella finestra di condivisione per importare l\'evento.',
+}
+
+/** Italian names for the diagnostics steps shown in the Info tab. */
+export const STEP_LABEL = {
+  'insert-intent': 'app Calendario aperta (nuovo evento)',
+  'insert-intent-error': 'app Calendario non disponibile',
+  'google-calendar': 'Google Calendar aperto',
+  'google-calendar-error': 'Google Calendar non apribile',
+  'ics-view': 'file .ics aperto nel calendario',
+  'ics-view-error': 'file .ics non apribile',
+  'ics-shared': 'file .ics condiviso',
+  'ics-error': 'file .ics non creato',
+  'all-failed': 'nessuna via ha risposto',
+}
+
+export const openAppSettings = () => Linking.openSettings().catch(() => {})
