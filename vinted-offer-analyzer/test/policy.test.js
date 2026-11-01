@@ -25,7 +25,7 @@ const REAL_ITEMS = [
   { id: 'muv0wxmg-txv3i2', category: 'other', listPrice: 35, targetPrice: 23, status: 'declined', listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none' },
   { id: 'mv2ywtq7-7txbsu', category: 'electronics', listPrice: 500, targetPrice: 355, status: 'sold_other', listingAge: 'weeks_2_4', sellerProfile: 'unknown', listingSignal: 'none' },
 ]
-const BACKUP_PATH = '/tmp/claude-0/-home-user-EchoBridge/761db82f-e2be-5764-a4b5-e03d35827261/scratchpad/userdata/backup-2026-10-31.json'
+const BACKUP_PATH = new URL('./fixtures/backup-2026-10.json', import.meta.url)
 
 const policyOf = (item, extra = {}) => policyDiscountFor({ listPrice: item.listPrice, listingAge: item.listingAge, category: item.category, sellerProfile: item.sellerProfile, listingSignal: item.listingSignal, ...extra })
 const market = (p25, median, p75) => ({ n: 4, p25Price: p25, medianPrice: median, p75Price: p75 })
