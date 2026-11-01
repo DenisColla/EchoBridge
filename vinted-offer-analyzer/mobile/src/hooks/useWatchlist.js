@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as core from '../../core/index.js'
 import { LEARNING, buildCounterReminders, decisionSnapshot } from '../../core/index.js'
-import { loadArchive, loadItems, newId, normalizeItem, saveArchive, saveItems } from '../services/storage.js'
+import { MAX_CHARS, loadArchive, loadItems, newId, normalizeItem, saveArchive, saveItems } from '../services/storage.js'
 import { cancelReminder, ensureNotificationPermission, scheduleAfterReplyReminder, scheduleOfferReminder, scheduleReminderAt } from '../services/notifications.js'
-import { linkIdOf, outcomeReminderTimes, outsideQuietHours } from '../services/segments.js'
+import { linkIdOf, outcomeReminderTimes, outsideQuietHours, overflowSplit } from '../services/segments.js'
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 24 * HOUR_MS
@@ -37,12 +37,20 @@ export const extractionOf = (ex) => {
   return out
 }
 
+/** Hours since the seller's last price drop, when the page or the search said so (the same fields the gate reads); else null. */
+const dropHoursOf = (sig) => {
+  if (!sig || typeof sig !== 'object') return null
+  if (sig.priceDrop && typeof sig.priceDrop === 'object' && Number.isFinite(sig.priceDrop.hoursAgo)) return sig.priceDrop.hoursAgo
+  return Number.isFinite(sig.priceDropHoursAgo) ? sig.priceDropHoursAgo : null
+}
+
 /**
  * Gate rule 7 without the core export: the same listing id (…/items/<id>…) refused or left unanswered within 14 days
- * blocks a new plan. Exempt: a negotiation with a seller counter, and a listing whose price is now lower than the one
- * refused (the seller moved). Returns null or { until, outcome, at }.
+ * blocks a new plan. Exempt, as in the core: a negotiation with a seller counter, a listing whose price is now lower
+ * than the one refused, and a price drop dated after the refusal (either way the seller moved). Returns null or
+ * { until, outcome, at }.
  */
-export const localReofferBlock = (records, link, now, listPrice = null) => {
+export const localReofferBlock = (records, link, now, { listPrice = null, dropHoursAgo = null } = {}) => {
   const id = linkIdOf(link)
   if (!id) return null
   const t = now.getTime()
@@ -54,16 +62,21 @@ export const localReofferBlock = (records, link, now, listPrice = null) => {
     if ((Array.isArray(it.negotiation) ? it.negotiation : []).some((e) => e && e.by === 'seller')) continue
     const oldPrice = Number(it.listPrice)
     if (Number.isFinite(listPrice) && Number.isFinite(oldPrice) && listPrice < oldPrice - 0.004) continue
+    if (Number.isFinite(dropHoursAgo) && t - dropHoursAgo * HOUR_MS > at) continue
     if (!hit || at > hit.at.getTime()) hit = { until: new Date(at + REOFFER_BLOCK_DAYS * DAY_MS), outcome: it.status, at: new Date(at) }
   }
   return hit
 }
 
-/** The core's reofferBlock when the engine exports it (part 2), else the local check above. */
-const reofferBlockFor = (records, link, now, listPrice) => {
+/**
+ * The core's reofferBlock when the engine exports it (part 2), else the local check above. Both get the listing's
+ * current price and the age of its last price drop: the exemptions the gate applies, so «Salva» never refuses an
+ * offer the hero asked for.
+ */
+const reofferBlockFor = (records, link, now, { listPrice = null, dropHoursAgo = null } = {}) => {
   if (typeof core.reofferBlock === 'function') {
     try {
-      const block = core.reofferBlock(records, link, now)
+      const block = core.reofferBlock(records, link, now, { listPrice, dropHoursAgo })
       if (!block || !block.until) return null
       const until = new Date(block.until)
       return { until, outcome: block.outcome || 'declined', at: block.at ? new Date(block.at) : new Date(until.getTime() - REOFFER_BLOCK_DAYS * DAY_MS) }
@@ -71,7 +84,7 @@ const reofferBlockFor = (records, link, now, listPrice) => {
       // a core still being wired: the local rule decides
     }
   }
-  return localReofferBlock(records, link, now, listPrice)
+  return localReofferBlock(records, link, now, { listPrice, dropHoursAgo })
 }
 
 /** The last moment an item changed: for the restore merge, the newer copy of the same id wins. */
@@ -213,9 +226,25 @@ export function useWatchlist() {
     })
   }, [])
 
-  /** Applies `updater` to the LATEST list (not the one captured at render time) and saves it. */
+  /**
+   * Applies `updater` to the LATEST list (not the one captured at render time) and saves it. A list that no longer fits
+   * its storage row (MAX_CHARS: Android could never read it back) first moves its oldest closed negotiations to the
+   * archive, where they keep feeding the monthly analysis; the archive is written before the list, so a crash in
+   * between duplicates an item rather than losing it (buildDataset reads each id once).
+   */
   const persist = useCallback(async (updater) => {
-    const next = typeof updater === 'function' ? updater(itemsRef.current) : updater
+    let next = typeof updater === 'function' ? updater(itemsRef.current) : updater
+    const { keep, moved } = overflowSplit(next, MAX_CHARS)
+    if (moved.length) {
+      next = keep
+      const at = new Date().toISOString()
+      const gone = new Set(moved.map((it) => it.id))
+      // Newest first, like the rest of the archive: the last one moved sits on top, the oldest is dropped first by the cap.
+      const archived = [...moved.map((it) => withEvent({ ...it, deletedAt: at, notificationId: null }, 'archived', { reason: 'storage' })).reverse(), ...archiveRef.current.filter((it) => !gone.has(it.id))]
+      archiveRef.current = archived
+      setArchive(archived)
+      await saveArchive(archived)
+    }
     itemsRef.current = next
     setItems(next)
     await saveItems(next)
@@ -235,9 +264,14 @@ export function useWatchlist() {
     const message = (messages.find((m) => m.tone === recommendedTone) || messages[0]).text
     const now = new Date()
     const cleanLink = normalizeLink(link)
-    const blocked = reofferBlockFor([...itemsRef.current, ...archiveRef.current], cleanLink, now, input.listPrice)
-    if (blocked) return { item: null, reminder: 'skipped', replaced: 0, blocked }
     const signals = (form && form.signals && typeof form.signals === 'object' ? form.signals : null) || input.signals || null
+    // The gate ran rule 7 on these very records and this link: a verdict past it (rules 8–10) is trusted as it stands.
+    // An earlier rule (1–6) or no gate at all (an older engine) leaves the check to the shared rule, with the same
+    // exemptions the gate applies (the seller moved: a lower price, or a drop after our refusal).
+    const verdict = gate || result.gate || null
+    const pastRule7 = Boolean(verdict && Number.isFinite(Number(verdict.rule)) && Number(verdict.rule) > 7)
+    const blocked = pastRule7 ? null : reofferBlockFor([...itemsRef.current, ...archiveRef.current], cleanLink, now, { listPrice: input.listPrice, dropHoursAgo: dropHoursOf(signals) })
+    if (blocked) return { item: null, reminder: 'skipped', replaced: 0, blocked }
     const marketUsed = market || result.market || null
     const extractionLog = extractionOf(extraction)
     const gateLog = gate && typeof gate === 'object' ? { kind: gate.kind || null, rule: gate.rule ?? null, reason: gate.reason || null, waitHours: gate.waitHours ?? null, alternative: gate.alternative || null } : null
@@ -450,8 +484,10 @@ export function useWatchlist() {
   /**
    * «Ripristina da JSON» (Info): merges a backup into the list. Accepts the array Info exports or { items, archive }.
    * Items are matched by id and the newer copy wins (touchedAt); every item goes through normalizeItem, so an older
-   * schema is upgraded. An item deleted here (in the archive) is only refreshed in the archive. Notification ids from
-   * the other device are dropped. Returns { added, updated, skipped, invalid, total }.
+   * schema is upgraded. An item deleted here (in the archive) is only refreshed in the archive; one deleted on the other
+   * device (it carries deletedAt) leaves the list for the archive. Notification ids from the other device are dropped,
+   * and this device's own are cancelled when its copy is replaced. A plan without a send moment is invalid.
+   * Returns { added, updated, skipped, invalid, total }.
    */
   const restoreItems = useCallback(async (payload) => {
     const raw = Array.isArray(payload) ? payload
@@ -460,7 +496,8 @@ export function useWatchlist() {
     const incoming = []
     for (const entry of raw) {
       const it = normalizeItem(entry)
-      if (it && typeof it.id === 'string' && it.id && typeof it.status === 'string') incoming.push(withoutReminders(it))
+      const wellFormed = it && typeof it.id === 'string' && it.id && typeof it.status === 'string' && (it.status !== 'planned' || finiteMs(it.sendAt) !== null)
+      if (wellFormed) incoming.push(withoutReminders(it))
       else invalid += 1
     }
     const next = [...itemsRef.current]
@@ -472,7 +509,18 @@ export function useWatchlist() {
     for (const it of incoming) {
       const i = next.findIndex((x) => x.id === it.id)
       if (i >= 0) {
-        if (touchedAt(it) > touchedAt(next[i])) { next[i] = it; updated += 1 } else skipped += 1
+        if (touchedAt(it) > touchedAt(next[i])) {
+          // The reminders belong to the copy being replaced: cancelled here, as remove() does, never orphaned.
+          await cancelAll(next[i])
+          if (it.deletedAt) {
+            next.splice(i, 1)
+            const dup = archive.findIndex((x) => x.id === it.id)
+            if (dup >= 0) archive.splice(dup, 1)
+            archive.unshift(it)
+            archiveChanged = true
+          } else next[i] = it
+          updated += 1
+        } else skipped += 1
         continue
       }
       const a = archive.findIndex((x) => x.id === it.id)

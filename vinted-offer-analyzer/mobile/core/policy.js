@@ -139,11 +139,27 @@ export function precisePriceFor(value, listPrice, { min = 0, max = Infinity } = 
   }
   while (n < min) n++
   if (n % 5 === 0) n++
+  // Stepping under the list price: the skip of a multiple of 5 may not cross the floor (the multiple stays when it is
+  // the only integer left in [min, max)), or the policy would ask under the floor it promises never to go below.
   while (n >= max && n - 1 >= min) {
     n--
-    if (n % 5 === 0) n--
+    if (n % 5 === 0 && n - 1 >= min) n--
   }
   return n > 0 ? n : null
+}
+
+/**
+ * True when a policy computed earlier (buildFormFromExtraction) still describes the listing: its band and age tier,
+ * when stamped, are the ones `listPrice` and `ageDays` (null = unknown) fall in. The form may still carry the policy
+ * after the user edited the price or the age; the gate and the arms must not trust it then. A policy without the
+ * stamps (hand-built, the legacy default) is kept.
+ */
+export function policyFitsListing(policy, { listPrice, ageDays = null } = {}) {
+  if (!policy || typeof policy !== 'object') return false
+  const band = policyBandOf(listPrice)
+  if (typeof policy.band === 'string' && band && policy.band !== band.id) return false
+  if (typeof policy.ageTier === 'string' && policy.ageTier !== policyAgeTierOf(ageDays).id) return false
+  return true
 }
 
 /**

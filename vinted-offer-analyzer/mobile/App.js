@@ -5,7 +5,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import * as core from './core/index.js'
 import {
   MONTHS_IT, analyzeOffer, buildFormFromExtraction, explorationKey, explorationPlan, failureRiskFor, formatEuro, leversFor, monthKeyOf,
-  nextGoalFor, optimizeOffer, parseVintedItemHtml, quickDiscountsFor,
+  nextGoalFor, optimizeOffer, parsePrice, parseVintedItemHtml, policyDiscountFor, quickDiscountsFor,
 } from './core/index.js'
 import { EMPTY_FORM } from './src/components/formDefaults.js'
 import { LinkEntry } from './src/components/LinkEntry.js'
@@ -72,6 +72,9 @@ const dayOf = (value) => {
   const d = new Date(value)
   return Number.isFinite(d.getTime()) ? `${d.getDate()} ${MONTHS_IT[d.getMonth()]}` : '…'
 }
+
+/** The form fields the price-band policy depends on (band, age tier, modifiers): an edit of one of them re-derives it. */
+const POLICY_FIELDS = ['listPrice', 'listingAge', 'category', 'sellerProfile', 'listingSignal']
 
 /** Non-null demand signals of the page (already on the form) and of the search for this listing, the page's reading winning. */
 const mergeSignals = (fromForm, fromSearch) => {
@@ -204,13 +207,34 @@ function Main() {
     return () => sub.remove()
   }, [])
 
-  const setField = (name, value) => setForm((prev) => ({ ...prev, [name]: value }))
-
   /** Engine options with the learned profile (none until the monthly report has something to correct). */
   const engineOptions = (extra = {}) => ({ ...extra, ...(learning.engineProfile ? { profile: learning.engineProfile } : {}) })
   /** The market picture of the listing on screen (from «Cerca altrove», when it searched this very listing). */
   const marketInfoFor = (f) => search.marketFor(normalizeVintedLink(f && f.link) || (f && f.link))
   const marketInfo = useMemo(() => marketInfoFor(form), [form.link, search.run, search.store]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * A field edit. The policy the link read put on the form describes the listing AS READ: when the price, the age or a
+   * modifier changes, it is rebuilt from the edited form (the exact days online survive while the age is not the edited
+   * field, as does the business cap), so the quick chips, the Thompson base and gate rule 3 judge the listing on screen
+   * and not a stale table verdict. The typed target is left as typed; without a usable price there is no policy.
+   */
+  const setField = (name, value) => setForm((prev) => {
+    const next = { ...prev, [name]: value }
+    if (!POLICY_FIELDS.includes(name) || !prev.policy || prev.policy.source !== 'policy') return next
+    const L = parsePrice(next.listPrice)
+    if (!(Number.isFinite(L) && L > 0)) return { ...next, policy: null }
+    const mk = marketInfoFor(next)
+    const prevCaps = Array.isArray(prev.policy.caps) ? prev.policy.caps : []
+    return {
+      ...next,
+      policy: policyDiscountFor({
+        listPrice: L, listingAge: next.listingAge, ageDays: name !== 'listingAge' && Number.isFinite(prev.policy.ageDays) ? prev.policy.ageDays : null,
+        category: next.category, sellerProfile: next.sellerProfile, listingSignal: next.listingSignal, sellerBusiness: prevCaps.some((c) => c && c.id === 'business') || null,
+        signals: next.signals || null, market: mk ? mk.market : null, profile: learning.engineProfile,
+      }),
+    }
+  })
 
   /** Measures the form at tap time (its offset moves when sections above fold or unfold), with the last layout as fallback. */
   const scrollToForm = () => {
@@ -493,8 +517,15 @@ function Main() {
   const savePayload = () => {
     const mk = marketInfoFor(form)
     const raw = extraction && extraction.ok && extraction.raw && extraction.link === normalizeVintedLink(form.link) ? extraction.raw : null
+    // userOverride (engine-spec §4): the ask the user typed when it is not the policy's suggestion (its target, or the
+    // list price when it said not to offer). The typed price, not the analysed one: an arm the engine varied is its
+    // own test, not the user's choice.
+    const typed = parsePrice(form.targetPrice)
+    const asked = Number.isFinite(typed) ? typed : result.input.targetPrice
+    const suggested = form.policy ? (form.policy.kind === 'no_offer' ? result.input.listPrice : form.policy.targetPrice) : null
+    const userOverride = Number.isFinite(suggested) && Math.abs(asked - suggested) > 0.004 ? asked : null
     return {
-      result, link: form.link, form: withSignals(form, mk), profile: learning.engineProfile,
+      result, link: form.link, form: withSignals(form, mk), profile: learning.engineProfile, userOverride,
       market: mk ? mk.market : null, extraction: raw, policy: form.policy || null, gate: result.gate || null, messagePolicy: result.messagePolicy || null,
     }
   }
@@ -569,7 +600,8 @@ function Main() {
     return {
       title: source.title || source.input?.itemTitle || '',
       link: source.link || form.link,
-      sendAt: source.sendAt || source.optimal.date,
+      // A saved item has no `optimal`; a restored plan may have no sendAt either: null, and addCalendar says so.
+      sendAt: source.sendAt || (source.optimal && source.optimal.date) || null,
       subject: plan ? 'Invia la nuova offerta' : undefined,
       notes: eventNotesFor({
         link: source.link || form.link,
@@ -589,6 +621,10 @@ function Main() {
   const addCalendar = async (source, itemId, explicitPayload = null) => {
     if (calendarBusy) return
     const payload = explicitPayload || calendarPayload(source)
+    if (!payload.sendAt) {
+      showToast('Nessun momento di invio per questa offerta.')
+      return
+    }
     setCalendarBusy(true)
     showToast('Apro il calendario con l\'evento già compilato: controlla e tocca Salva.', 4000)
     try {

@@ -8,7 +8,7 @@ import {
   monthKeyOf, monthLabel, monthlyReport, normalizeProfile, optimalDiscount, pickMoments, normalizeInput, predictWith, predictiveInterval, prequentialScore, profileIsActive, profileIsStale, proposeProfile,
   reportFileName, reportWorkbook, scoreAt, shiftMonth, squash, timeGroupOf, unsquash, withLiveHistory, xlsxBase64, xlsxColumn, xlsxCrc32, xlsxDateSerial, xlsxEscape,
   xlsxSheetName, xlsxUtf8,
-  THOMPSON_ARMS, continuationPosterior, explorationStats, isoAcceptanceShift, snapshotSignals, thompsonArm,
+  THOMPSON_ARMS, continuationPosterior, explorationStats, isoAcceptanceShift, policyDiscountFor, snapshotSignals, thompsonArm,
 } from '../src/core/index.js'
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg || ''} ${a} ≠ ${b} (±${tol})`)
@@ -431,6 +431,30 @@ test('live rollback: when the corrections really applied predict worse than the 
   assert.equal(undone.frozenReason, 'undo')
   assert.equal(undone.parentId, 'live.2026-09-01')
   assert.ok(liveProfile(later, new Date(2026, 10, 2), { previous: undone }).status.intercept === 'frozen')
+})
+
+test('engine bump: records decided under another engine do not judge the new live correction (no rollback from stale corrections)', () => {
+  const now = new Date(2026, 10, 1)
+  // A profile fitted against 1.3.0 said +1 logit; the 30 old-engine offers carry that +1 as their applied correction and were mostly refused.
+  const previous = { id: 'live.2026-09-01', engine: '1.3.0', intercept: 1, live: true, appliedAt: new Date(2026, 8, 1).toISOString(), cov: [[0.05, 0], [0, 0.12]], paramKeys: ['intercept', 'dslope'], basedOn: 30 }
+  assert.equal(normalizeProfile(previous).live, false, 'the stale profile drops its first-offer corrections')
+  const old = Array.from({ length: 30 }, (_, i) => ({ ...rec(`o${i}`, i < 4 ? 1 : 0, { now, daysAgo: 10 + i, appliedCorrection: 1 }), engine: '1.3.0' }))
+  const first = liveProfile(old, now, { previous, checkpoint: null })
+  assert.equal(first.rollback, null, 'nothing to judge on the first run after the bump')
+  assert.equal(first.status.intercept, 'applied')
+  assert.ok(first.profile.intercept < 0 && first.profile.live, `the new fit says the sellers are tougher: ${first.profile.intercept}`)
+  // The next render judges the correction just applied: the old-engine records are not its predictions.
+  const second = liveProfile(old, new Date(now.getTime() + 3_600_000), { previous: first.profile, checkpoint: null })
+  assert.equal(second.rollback, null)
+  assert.notEqual(second.status.intercept, 'rollback')
+  near(second.profile.intercept, first.profile.intercept, 1e-9)
+  assert.equal(prequentialScore(old, first.profile, null, now).n, 0)
+  // The same records stamped with the running engine, or not stamped at all (pre-1.4 items), are judged as before…
+  assert.equal(prequentialScore(old.map((r) => ({ ...r, engine: ENGINE_VERSION })), first.profile, null, now).n, 30)
+  const unstamped = prequentialScore(old.map((r) => ({ ...r, engine: null })), first.profile, null, now)
+  assert.equal(unstamped.n, 30)
+  // …and the stale +1 against the plain engine is exactly the score that would have frozen the new correction.
+  assert.ok(unstamped.score < LEARNING.ROLLBACK_LOG_BF, `score ${unstamped.score}`)
 })
 
 test('discount: no data → the default stays; the target moves only with data, by one point a month', () => {
@@ -974,18 +998,24 @@ test('live history and checkpoints: one entry per day, monthly entries untouched
 const T_FORM = { itemTitle: 'Felpa', category: 'other', listPrice: '60', targetPrice: '48', listingAge: 'weeks_1_2', sellerProfile: 'unknown', listingSignal: 'none', link: 'https://www.vinted.it/items/777-felpa' }
 const propsOf = (out) => Object.fromEntries(out.exploration.arms.map((a) => [a.id, a.propensity]))
 
-test('thompson: three arms around the policy default, exact floor, sum one, same key and month → same arm, nothing under 12 €', () => {
+test('thompson: three precise arms around the policy default, the base arm is the analysis, equal shares without data, same key and month → same arm, nothing under 12 €', () => {
   const base = analyzeOffer(T_FORM, NOW)
   const a = thompsonArm(T_FORM, base, NOW, { key: 'www.vinted.it/items/777', month: '2026-10' })
   assert.ok(a, 'an arm is always drawn (the base arm is a plan too)')
   assert.deepEqual(THOMPSON_ARMS.map((x) => x.id), ['softer', 'base', 'deeper'])
   assert.deepEqual(a.exploration.arms.map((x) => x.id), ['softer', 'base', 'deeper'], 'p(d₀) ≥ 0,3, not premium, 60 €: the deeper arm is allowed')
   assert.equal(a.exploration.d0, 20, 'no policy on the form: d₀ is the current discount')
-  // Prices sit on the engine's 1 € grid (60 € → 50 / 48 / 46), so the discounts are the grid's, not exactly ±4.
-  assert.deepEqual(a.exploration.arms.map((x) => x.price), [50, 48, 46])
-  assert.deepEqual(a.exploration.arms.map((x) => x.discountPct), [16.7, 20, 23.3])
-  assert.equal(a.exploration.draws, LEARNING.THOMPSON_DRAWS)
+  // The base arm is the analysed price; softer and deeper are precise prices (§2.1: 50,40 € → 51, never 50), so their
+  // discounts are the precise prices', not exactly ±4.
+  assert.deepEqual(a.exploration.arms.map((x) => x.price), [51, 48, 46])
+  assert.deepEqual(a.exploration.arms.map((x) => x.discountPct), [15, 20, 23.3])
+  // Spec §5.2: without data every arm has at least 0,2 — the candidates share the propensity equally, no posterior draw.
   const mu = propsOf(a)
+  assert.equal(a.exploration.draws, 0)
+  assert.equal(a.exploration.posterior, 'prior')
+  for (const v of Object.values(mu)) assert.ok(v >= 0.2, `propensity ${v} under 0,2 without data`)
+  near(mu.softer, 1 / 3, 1e-3)
+  near(mu.deeper, 1 / 3, 1e-3)
   near(Object.values(mu).reduce((s, v) => s + v, 0), 1, 1e-6, 'Σμ = 1')
   for (const v of Object.values(mu)) assert.ok(v >= LEARNING.THOMPSON_MIN_PROPENSITY - 1e-9, `propensity ${v} under the floor`)
   assert.equal(a.exploration.propensity, mu[a.exploration.arm])
@@ -994,15 +1024,14 @@ test('thompson: three arms around the policy default, exact floor, sum one, same
   assert.equal(a.result.exploration, a.exploration)
   assert.equal(typeof a.exploration.costPoints, 'number')
   assert.equal(a.exploration.method, 'thompson')
-  assert.equal(a.exploration.posterior, 'prior')
   // Deterministic per listing and month.
   const b = thompsonArm(T_FORM, base, NOW, { key: 'www.vinted.it/items/777', month: '2026-10' })
   assert.deepEqual(b.exploration, a.exploration)
   assert.equal(b.result.input.targetPrice, a.result.input.targetPrice)
-  // Across listings every arm is drawn, with the logged propensities as frequencies (loosely).
+  // Across listings every arm is drawn, with the logged propensities as frequencies (loosely: a third each).
   const tally = { softer: 0, base: 0, deeper: 0 }
   for (let i = 0; i < 120; i++) tally[thompsonArm(T_FORM, base, NOW, { key: `k${i}`, month: '2026-10' }).exploration.arm]++
-  for (const id of Object.keys(tally)) assert.ok(tally[id] >= 4, `${id} drawn ${tally[id]} times in 120`)
+  for (const id of Object.keys(tally)) assert.ok(tally[id] >= 20 && tally[id] <= 60, `${id} drawn ${tally[id]} times in 120`)
   // The chosen arm's analysis is at the arm's price and the base moment; the base arm at the user's price is the analysis itself.
   const chosen = a.exploration.arms.find((x) => x.id === a.exploration.arm)
   assert.equal(a.result.input.targetPrice, chosen.price)
@@ -1013,11 +1042,65 @@ test('thompson: three arms around the policy default, exact floor, sum one, same
   const cheap = { ...T_FORM, listPrice: '11', targetPrice: '9' }
   assert.equal(thompsonArm(cheap, analyzeOffer(cheap, NOW), NOW, { key: 'k', month: '2026-10' }), null)
   assert.equal(LEARNING.EXPLORE_MIN_LIST_PRICE, 12)
-  // The policy default on the form sets d₀; a «no offer» policy falls back to the current discount.
-  const withPolicy = thompsonArm({ ...T_FORM, policy: { kind: 'offer', discountPct: 12 } }, base, NOW, { key: 'k', month: '2026-10' })
-  assert.equal(withPolicy.exploration.d0, 12)
-  assert.deepEqual(withPolicy.exploration.arms.map((x) => x.price), [55, 53, 50])
-  assert.equal(thompsonArm({ ...T_FORM, policy: { kind: 'no_offer', discountPct: null } }, base, NOW, { key: 'k', month: '2026-10' }).exploration.d0, 20)
+  // The policy on the form sets d₀ and its precise target is the base arm, so the analysis built from it (the app's
+  // path) IS the base arm: no re-analysis, varied false; softer and deeper never land on a multiple of 5 nor under the floor.
+  const pol = policyDiscountFor({ listPrice: 60, listingAge: 'weeks_1_2', category: 'other', sellerProfile: 'unknown', listingSignal: 'none' })
+  assert.deepEqual([pol.discountPct, pol.targetPrice, pol.floor], [15, 51, 36])
+  const policyForm = { ...T_FORM, targetPrice: String(pol.targetPrice), policy: pol }
+  const policyBase = analyzeOffer(policyForm, NOW)
+  const withPolicy = thompsonArm(policyForm, policyBase, NOW, { key: 'k', month: '2026-10' })
+  assert.equal(withPolicy.exploration.d0, 15)
+  assert.deepEqual(withPolicy.exploration.arms.map((x) => x.price), [53, 51, 49])
+  assert.equal(withPolicy.exploration.arms.find((x) => x.id === 'base').price, policyBase.input.targetPrice)
+  assert.equal(withPolicy.exploration.base.price, 51)
+  for (let i = 0; i < 60; i++) {
+    const o = thompsonArm(policyForm, policyBase, NOW, { key: `p${i}`, month: '2026-10' })
+    if (o.exploration.arm === 'base') {
+      assert.equal(o.exploration.varied, false)
+      assert.equal(o.result.input.targetPrice, policyBase.input.targetPrice)
+    } else assert.equal(o.exploration.varied, true)
+    for (const x of o.exploration.arms) if (x.price >= 20) assert.notEqual(x.price % 5, 0, `${x.id} at ${x.price} € is a multiple of 5`)
+    assert.ok(o.exploration.arms.every((x) => x.price >= pol.floor && x.price < 60))
+  }
+  // Spec §5.1: no exploration where the gate says not to offer. A «non offrire» policy makes the gate say «compra»
+  // (rule 3); heart-and-wait and wait gates are closed too; a message-first gate keeps the arm (an offer follows).
+  const noOffer = { ...T_FORM, policy: { kind: 'no_offer', discountPct: null } }
+  const noBase = analyzeOffer(noOffer, NOW)
+  assert.equal(noBase.gate.rule, 3)
+  assert.equal(thompsonArm(noOffer, noBase, NOW, { key: 'k', month: '2026-10' }), null)
+  const fixed = { ...T_FORM, listingSignal: 'fixed_price' }
+  const fixedBase = analyzeOffer(fixed, NOW)
+  assert.equal(fixedBase.gate.kind, 'favourite_wait')
+  assert.equal(thompsonArm(fixed, fixedBase, NOW, { key: 'k', month: '2026-10' }), null)
+  const reserved = { ...T_FORM, signals: { reserved: true } }
+  assert.equal(thompsonArm(reserved, analyzeOffer(reserved, NOW), NOW, { key: 'k', month: '2026-10' }), null)
+  assert.equal(base.gate.kind, 'message_first')
+})
+
+test('thompson: on the real-like month the live fit still waits for data, so the arms share the propensity and the deeper arm is never the modal arm', () => {
+  const records = buildDataset(REAL_LIKE, REAL_NOW)
+  const live = liveProfile(records, REAL_NOW)
+  assert.equal(live.status.intercept, 'waiting_data')
+  assert.ok(Array.isArray(live.profile.cov), 'the fit stores a cov before its gates open')
+  assert.equal(live.profile.live, false)
+  let explored = 0
+  let threeArms = 0
+  for (const it of REAL_LIKE) {
+    const base = analyzeOffer(it.form, REAL_NOW, { profile: live.profile })
+    const out = thompsonArm(it.form, base, REAL_NOW, { profile: live.profile, options: { profile: live.profile }, records, key: it.id, month: '2026-11' })
+    if (!out) continue
+    explored++
+    const mu = propsOf(out)
+    assert.equal(out.exploration.posterior, 'prior', it.id)
+    assert.equal(out.exploration.draws, 0)
+    for (const v of Object.values(mu)) assert.ok(v >= 0.2, `${it.id}: ${JSON.stringify(mu)}`)
+    if (mu.deeper != null) {
+      threeArms++
+      assert.ok(mu.deeper <= Math.max(mu.softer, mu.base) + 1e-9, `${it.id}: deeper is the modal arm ${JSON.stringify(mu)}`)
+    }
+  }
+  assert.ok(explored >= 8, `${explored} listings explored`)
+  assert.ok(threeArms >= 1, 'at least one listing offers the deeper arm')
 })
 
 test('thompson: a posterior that says «rifiutano dal 20% in su» sends the softer arm ≥ 70%; the deeper arm never under p(d₀) 0,3 nor on premium items', () => {
@@ -1028,6 +1111,7 @@ test('thompson: a posterior that says «rifiutano dal 20% in su» sends the soft
   const mu = propsOf(out)
   assert.ok(mu.softer >= 0.7, `softer ${mu.softer}`)
   assert.equal(out.exploration.posterior, 'live')
+  assert.equal(out.exploration.draws, LEARNING.THOMPSON_DRAWS, 'an identified live pair: the expected-saving draws decide')
   assert.ok(base.probability < LEARNING.THOMPSON_DEEPER_MIN_P, `p(d₀) ${base.probability}`)
   assert.ok(!out.exploration.arms.some((x) => x.id === 'deeper'), 'deeper excluded under 0,3')
   near(Object.values(mu).reduce((s, v) => s + v, 0), 1, 1e-6)

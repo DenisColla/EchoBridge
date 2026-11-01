@@ -1,7 +1,8 @@
-import { NEGLIGIBLE_DISCOUNT_PCT, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, VINTED } from './constants.js'
+import { LISTING_AGES, NEGLIGIBLE_DISCOUNT_PCT, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, VINTED } from './constants.js'
 import { deviceOffsetMinutes, romeOffsetMinutes } from './dates.js'
 import { decisionGate, messagePolicyFor, offerTierFor } from './gate.js'
 import { buildMessages, formatEuro, recommendedToneFor } from './messages.js'
+import { policyFitsListing } from './policy.js'
 import { buildReasons, buildTimingNote, buildTips, buildVerdict, openingSentence } from './reasoning.js'
 import { predictiveInterval } from './profile.js'
 import { avoidWindows, avoidWindowsOn, pickMoments } from './scheduler.js'
@@ -57,20 +58,44 @@ export function normalizeInput(raw) {
   if (Object.keys(errors).length) return { ok: false, errors, input: null }
 
   const signals = normalizeSignals(raw.signals)
+  const listingAge = findListingAge(raw.listingAge)
   const link = typeof raw.link === 'string' ? raw.link.trim() : ''
+  const policy = currentPolicy(raw.policy, listPrice, listingAge, signals)
   return { ok: true, errors: {}, input: withPrices({
     itemTitle: (raw.itemTitle || '').trim(),
     category,
-    listingAge: findListingAge(raw.listingAge),
+    listingAge,
     sellerProfile: raw.sellerProfile || 'unknown',
     listingSignal: findListingSignal(raw.listingSignal),
     // Listing signals (favourites, seller's other items, DOM readings) ride on the input only when the form carries one.
     ...(signals ? { signals } : {}),
     // The link (gate rule 7 looks up earlier offers on the same listing) and the policy that proposed the ask (the
-    // gate's «non offrire» wording), when the form carries them.
+    // gate's «non offrire» wording, the arms' d₀), when the form carries them and the policy still fits the listing.
     ...(link ? { link } : {}),
-    ...(raw.policy && typeof raw.policy === 'object' ? { policy: raw.policy } : {}),
+    ...(policy ? { policy } : {}),
   }, listPrice, targetPrice) }
+}
+
+/** The LISTING_AGES bucket a day count read from the page falls in (extract.js listingAgeGuess), or null. */
+const listingAgeBucketOf = (days) => LISTING_AGES.find((a) => a.maxDays !== null && days < a.maxDays) || null
+
+/**
+ * The policy that rode on the form (buildFormFromExtraction) is kept only while it still describes the listing: the
+ * user may have edited the price or the age since, and the gate would otherwise speak with a stale «non offrire» and
+ * the arms sit around a stale d₀. The age is read as the gate reads it (the DOM's day count first); the form's bucket
+ * is scored at a representative count that may sit one tier away from the exact count the policy was built on (30
+ * days online is «più di un mese» on the form and the table's middle tier), so that count wins while the form still
+ * shows the bucket it maps to.
+ */
+const currentPolicy = (raw, listPrice, listingAge, signals) => {
+  const policy = raw && typeof raw === 'object' ? raw : null
+  if (!policy) return null
+  const own = Number.isFinite(policy.ageDays) ? policy.ageDays : null
+  const ownBucket = own !== null ? listingAgeBucketOf(own) : null
+  const ageDays = signals && Number.isFinite(signals.uploadedDays) ? signals.uploadedDays
+    : ownBucket && ownBucket.id === listingAge.id ? own
+      : listingAge.id === 'unknown' ? null : listingAge.days
+  return policyFitsListing(policy, { listPrice, ageDays }) ? policy : null
 }
 
 const SIGNAL_NUMBER_KEYS = ['favourites', 'interested', 'views', 'sellerItems', 'bundleDiscountPct', 'oldPrice', 'lastSeenDays', 'uploadedDays', 'priceDropHoursAgo']

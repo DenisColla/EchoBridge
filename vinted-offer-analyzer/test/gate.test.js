@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  GATE, MESSAGE_POLICY, TIERS, analyzeOffer, buildVerdict, decisionGate, gateHeadline, hashUnit, listingIdOf, messagePolicyFor, normalizeInput, normalizeSignals,
+  GATE, LEARNING, MESSAGE_POLICY, TIERS, analyzeOffer, buildVerdict, decisionGate, gateHeadline, hashUnit, listingIdOf, messagePolicyFor, normalizeInput, normalizeSignals,
   offerTierFor, reofferBlock, tierAtLeastOffer,
 } from '../src/core/index.js'
 
@@ -57,13 +57,18 @@ test('gate: the twelve tabular cases of the spec, first match wins', () => {
   assert.match(dropped.alternative.title, /55,20 €/)
   assert.notEqual(gateOf({ targetPrice: '55', signals: { priceDrop: { from: 70, to: 60, hoursAgo: 10 } } }).rule, 6, 'an 8% ask is fine after a drop')
   assert.notEqual(gateOf({ signals: { priceDrop: { from: 70, to: 60, hoursAgo: 72 } } }).rule, 6, 'an old drop is no reason to wait')
-  // 7. A refusal of ours on the same listing within 14 days → wait; a seller price drop lifts it.
+  // 7. A refusal of ours on the same listing within 14 days → wait. The seller moving since lifts it: a price cut dated
+  //    after the refusal (48 h ago here) or a list price under the one we asked on; a crossed-out price alone does not.
   const blocked = gateOf({}, { records: [record()] })
   assert.equal(blocked.kind, 'wait')
   assert.equal(blocked.rule, 7)
   assert.ok(blocked.waitHours > 0 && blocked.waitHours <= 12 * 24)
   assert.equal(blocked.block.outcome, 'declined')
-  assert.notEqual(gateOf({ signals: { priceDrop: { from: 70, to: 60, hoursAgo: 72 } } }, { records: [record()] }).rule, 7)
+  assert.equal(gateOf({ targetPrice: '55', signals: { priceDropped: true } }, { records: [record()] }).rule, 7, 'a strikethrough says nothing about when the seller moved')
+  assert.equal(gateOf({ targetPrice: '55', signals: { priceDrop: { from: 70, to: 60, hoursAgo: 72 } } }, { records: [record()] }).rule, 7, 'a drop older than our refusal')
+  assert.notEqual(gateOf({ targetPrice: '55', signals: { priceDrop: { from: 70, to: 60, hoursAgo: 30 } } }, { records: [record()] }).rule, 7, 'a drop after the refusal lifts the block')
+  assert.notEqual(gateOf({ signals: { priceDropped: true } }, { records: [record({ listPrice: 70 })] }).rule, 7, 'the listing costs less than when we asked: the seller moved')
+  assert.equal(gateOf({}, { records: [record({ listPrice: 60 })] }).rule, 7, 'the same price as when we asked')
   assert.notEqual(gateOf({ link: 'https://www.vinted.it/items/556-altra' }, { records: [record()] }).rule, 7, 'another listing')
   // 8. Inactive seller → message first.
   assert.equal(gateOf({ sellerProfile: 'inactive' }).kind, 'message_first')
@@ -115,6 +120,22 @@ test('reofferBlock: declined or ignored within 14 days blocks, counters and plan
   // The latest block wins when two records touch the same listing.
   const two = reofferBlock([record({ id: 'a' }), record({ id: 'b', outcomeAt: new Date(now.getTime() - 1 * DAY).toISOString() })], FORM.link, now)
   assert.equal(two.recordId, 'b')
+  // A late tap records an old no, it does not renew it: the refusal moment is capped at sentAt + NO_REPLY_AFTER_DAYS.
+  const cap = LEARNING.NO_REPLY_AFTER_DAYS * DAY
+  const late = reofferBlock([record({ sentAt: new Date(now.getTime() - 20 * DAY).toISOString(), outcomeAt: new Date(now.getTime() - 1 * DAY).toISOString() })], FORM.link, now)
+  assert.equal(late.at.getTime(), now.getTime() - 20 * DAY + cap)
+  assert.equal(late.until.getTime(), now.getTime() - 20 * DAY + cap + GATE.REOFFER_BLOCK_DAYS * DAY)
+  assert.equal(reofferBlock([record({ sentAt: new Date(now.getTime() - 22 * DAY).toISOString(), outcomeAt: new Date(now.getTime() - 1 * DAY).toISOString() })], FORM.link, now), null, 'declined three weeks after the offer: the block has already run out')
+  const lateSilence = reofferBlock([record({ status: 'no_reply', firstOutcome: 'no_reply', sentAt: new Date(now.getTime() - 20 * DAY).toISOString(), outcomeAt: new Date(now.getTime() - 1 * DAY).toISOString() })], FORM.link, now)
+  assert.equal(lateSilence.at.getTime(), now.getTime() - 20 * DAY + cap, 'the same cap on a late «nessuna risposta»')
+  // The seller moved since (the options the gate and the save-time check both pass): exempt.
+  assert.equal(reofferBlock([record({ listPrice: 30 })], FORM.link, now, { listPrice: 25 }), null, 'the listing costs less than the 30 € we asked on')
+  assert.ok(reofferBlock([record({ listPrice: 30 })], FORM.link, now, { listPrice: 30 }), 'same price: still blocked')
+  assert.ok(reofferBlock([record({ listPrice: 30 })], FORM.link, now, { listPrice: 32 }), 'a higher price is not a move toward us')
+  assert.ok(reofferBlock([record()], FORM.link, now, { listPrice: 25 }), 'a record without a list price cannot be compared')
+  assert.equal(reofferBlock([record()], FORM.link, now, { dropHoursAgo: 24 }), null, 'a price cut after the refusal (48 h ago)')
+  assert.ok(reofferBlock([record()], FORM.link, now, { dropHoursAgo: 72 }), 'a price cut before it changes nothing')
+  assert.ok(reofferBlock([record()], FORM.link, now, { listPrice: null, dropHoursAgo: null }), 'null options: no exemption')
 })
 
 test('tier: thresholds on the corrected probability, labels as the spec writes them', () => {

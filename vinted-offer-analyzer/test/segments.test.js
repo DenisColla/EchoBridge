@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   SEGMENTS, GROUPS, OUTCOME_REMINDER_HOURS, badgeCountOf, categoryLabelOf, closedOrder, estimateOf, groupOf, hostOf, inSegment, lastBuyerAt, linkIdOf,
-  matchesQuery, momentLabel, nextStepOf, normalizeText, offerExpiryOf, openGroups, outcomeReminderTimes, outsideQuietHours, relativeDayLabel,
+  matchesQuery, momentLabel, nextStepOf, normalizeText, offerExpiryOf, openGroups, outcomeReminderTimes, outsideQuietHours, overflowSplit, relativeDayLabel,
   rowStateOf, sectionsFor, segmentCounts, segmentOf, shortDate, sinceLabel, timeLabelOf, whenLabel,
 } from '../mobile/src/services/segments.js'
 
@@ -81,6 +81,26 @@ test('rowStateOf and groupOf: the three open groups are disjoint and closed rows
     assert.equal(rowStateOf(closed(s, 1), NOW), 'closed')
     assert.equal(groupOf(closed(s, 1), NOW), null)
   }
+})
+
+test('a planned row without a send moment (hand-edited backup) is «Da aggiornare», never a 1970 moment', () => {
+  const noMoment = base({ sendAt: null, negotiation: [] })
+  assert.equal(rowStateOf(noMoment, NOW), 'planned_stale')
+  assert.equal(groupOf(noMoment, NOW), 'update')
+  assert.equal(badgeCountOf([noMoment], NOW), 1)
+  assert.equal(timeLabelOf(noMoment, NOW), '')
+  const step = nextStepOf(noMoment, NOW)
+  assert.equal(`${step.lead}${step.rest}`, "L'hai inviata? Segna com'è andata o lascia perdere")
+  assert.deepEqual(openGroups([noMoment, base({ id: 'future' })], NOW).map((g) => [g.id, g.items.length]), [['update', 1], ['todo', 1]])
+  // The row labels never turn a missing value into the epoch.
+  for (const v of [null, undefined, '', 'not a date']) {
+    assert.equal(relativeDayLabel(v, NOW), '')
+    assert.equal(momentLabel(v, NOW), '')
+    assert.equal(whenLabel(v, NOW), '')
+    assert.equal(shortDate(v), '')
+  }
+  assert.equal(relativeDayLabel(at(31, 20).toISOString(), NOW), 'oggi') // ISO strings and Dates still read
+  assert.equal(momentLabel(at(31, 21, 30).getTime(), NOW), 'oggi alle 21:30')
 })
 
 test('a sent row after our counter counts the silence from OUR last entry, not the first send', () => {
@@ -229,6 +249,38 @@ test('nextStepOf: one sentence per state, none for closed rows', () => {
   assert.equal(step(sent(72)), "Scaduta da 3 giorni: com'è andata?")
   assert.equal(step(sent(24 * 7 + 1)), "Scaduta da 7 giorni: com'è andata? · senza risposta conta come rifiuto")
   for (const s of ['accepted', 'bought', 'declined', 'no_reply', 'sold_other', 'abandoned']) assert.equal(step(closed(s, 1)), null)
+})
+
+test('overflowSplit: a list over the storage cap sheds its oldest closed rows first, never an open one', () => {
+  const pad = 'x'.repeat(400)
+  const items = [
+    base({ id: 'open-planned', pad }), sent(2, { id: 'open-sent', pad }), countered({ id: 'open-countered', pad }),
+    closed('declined', 10, { id: 'd-10', pad }), closed('accepted', 300, { id: 'a-300', pad }), closed('bought', 50, { id: 'b-50', pad, outcomeAt: null, createdAt: iso(hoursAgo(50)) }),
+    closed('no_reply', 200, { id: 'n-200', pad }), closed('sold_other', 1, { id: 's-1', pad }), closed('abandoned', 100, { id: 'ab-100', pad }),
+  ]
+  const full = JSON.stringify(items).length
+  // Fits: the very same array back, nothing moved.
+  const same = overflowSplit(items, full)
+  assert.equal(same.keep, items)
+  assert.deepEqual(same.moved, [])
+  // One row too many: the single oldest closed row goes (accepted 300 h ago), and the rest fits exactly.
+  const one = overflowSplit(items, full - 1)
+  assert.deepEqual(one.moved.map((it) => it.id), ['a-300'])
+  assert.deepEqual(one.keep.map((it) => it.id), items.filter((it) => it.id !== 'a-300').map((it) => it.id))
+  assert.ok(JSON.stringify(one.keep).length <= full - 1)
+  // A much smaller cap: closed rows leave by outcome time ascending (creation time when there is none) until it fits.
+  const sizeOf = (it) => JSON.stringify(it).length + 1 // the item and its comma inside the array
+  const cap = full - ['a-300', 'n-200', 'ab-100', 'b-50'].reduce((s, id) => s + sizeOf(items.find((it) => it.id === id)), 0)
+  const small = overflowSplit(items, cap)
+  assert.deepEqual(small.moved.map((it) => it.id), ['a-300', 'n-200', 'ab-100', 'b-50'])
+  assert.equal(JSON.stringify(small.keep).length, cap) // fits exactly: the per-item sizes add up to the array's JSON
+  assert.ok(JSON.stringify([...small.keep, small.moved[3]]).length > cap) // minimal: one fewer moved would not fit
+  // Open rows are never moved, even when the cap cannot be met: everything closed goes, the open rows stay.
+  const floor = overflowSplit(items, 10)
+  assert.deepEqual(floor.keep.map((it) => it.id), ['open-planned', 'open-sent', 'open-countered'])
+  assert.deepEqual(floor.moved.map((it) => it.id), ['a-300', 'n-200', 'ab-100', 'b-50', 'd-10', 's-1'])
+  assert.deepEqual(overflowSplit([], 10), { keep: [], moved: [] })
+  assert.deepEqual(overflowSplit(null, 10), { keep: [], moved: [] })
 })
 
 test('offerExpiryOf: 24 h after the real send, null before', () => {

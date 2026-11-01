@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import {
-  POLICY_BOUNDS, POLICY_MODIFIERS, TARGET_TABLE, policyAgeTierOf, policyBandOf, policyDiscountFor, precisePriceFor, quickDiscountsFor,
+  POLICY_BOUNDS, POLICY_MODIFIERS, TARGET_TABLE, policyAgeTierOf, policyBandOf, policyDiscountFor, policyFitsListing, precisePriceFor, quickDiscountsFor,
 } from '../src/core/policy.js'
 import { LISTING_AGES } from '../src/core/constants.js'
 
@@ -234,4 +234,37 @@ test('policy: the precise rounding never eats the 2 € minimum saving', () => {
   const r = policyDiscountFor({ listPrice: 12, ageDays: 10 })
   assert.equal(r.kind, 'no_offer')
   assert.equal(r.alternative, 'buy')
+})
+
+test('policy: the precise rounding never crosses the floor; a policy fits a listing while its band and age tier still match', () => {
+  // The %5 skip used to step one integer under `min`: 21 € with the market floor 19,55 gave 19 instead of 20.
+  assert.equal(precisePriceFor(20.5, 21, { min: 19.5, max: 21 }), 20)
+  assert.equal(precisePriceFor(25.2, 26, { min: 24.7, max: 26 }), 25, 'the multiple of 5 stays when it is the only integer left under the list price')
+  assert.equal(precisePriceFor(33, 60, { min: 35 }), 36, 'room above a floor that is a multiple of 5: the next integer, as before')
+  // Through the policy: 21 € fresh, p25 20,58 → floor 19,55 → 20 € saves only 1 €, and the 2 € rule finds 19 € under the
+  // floor → «compra». The old 19 € contradicted the policy's own «Mai sotto 19,55 €».
+  const p = policyDiscountFor({ listPrice: 21, ageDays: 2, market: { n: 5, p25Price: 20.58, medianPrice: 23.1, p75Price: 27.3 } })
+  assert.equal(p.kind, 'no_offer')
+  assert.equal(p.alternative, 'buy')
+  let offers = 0
+  for (let L = 20; L <= 40; L += 0.5) {
+    for (let p25 = L - 3; p25 < L; p25 += 0.25) {
+      for (const ageDays of [2, 10, 40]) {
+        const pol = policyDiscountFor({ listPrice: L, ageDays, market: { n: 5, p25Price: p25, medianPrice: p25 * 1.12, p75Price: p25 * 1.3 } })
+        if (pol.kind !== 'offer') continue
+        offers++
+        assert.ok(pol.targetPrice === null || pol.targetPrice >= pol.floor - 1e-9, `${L} € / p25 ${p25} / ${ageDays} d: ${pol.targetPrice} € under the floor ${pol.floor} €`)
+        assert.ok(pol.targetPrice < L && L - pol.targetPrice >= POLICY_BOUNDS.MIN_GAP_EUR - 1e-9, `${L} € / p25 ${p25}: ${pol.targetPrice} €`)
+      }
+    }
+  }
+  assert.ok(offers > 100, `${offers} offers in the sweep`)
+  // policyFitsListing: the stamps of a policy computed earlier against the listing as it is now.
+  const fresh = policyDiscountFor({ listPrice: 15, ageDays: 2 })
+  assert.equal(policyFitsListing(fresh, { listPrice: 15, ageDays: 2 }), true)
+  assert.equal(policyFitsListing(fresh, { listPrice: 15, ageDays: 40 }), false, 'another age tier')
+  assert.equal(policyFitsListing(fresh, { listPrice: 45, ageDays: 2 }), false, 'another band')
+  assert.equal(policyFitsListing(policyDiscountFor({ listPrice: 30 }), { listPrice: 30, ageDays: null }), true, 'unknown age on both sides: the middle tier')
+  assert.equal(policyFitsListing({ kind: 'no_offer', alternative: 'buy' }, { listPrice: 9 }), true, 'no stamps: kept')
+  assert.equal(policyFitsListing(null, { listPrice: 9 }), false)
 })

@@ -30,7 +30,7 @@ import { MONTHS_IT, WEEKDAYS_IT, calendarDaysBetween, minutesOfDay, pad2 } from 
 import { hashUnit } from './gate.js'
 import { clamp, formatPoints, hashString, squash } from './math.js'
 import { formatEuro } from './messages.js'
-import { policyAgeTierOf, policyDiscountFor } from './policy.js'
+import { POLICY_BOUNDS, policyAgeTierOf, policyDiscountFor, precisePriceFor } from './policy.js'
 import { prepArticleFor } from './reasoning.js'
 import {
   DEFAULT_PROFILE, correctionFeature, discKnotOf, discKnotWeights, discOffset, dslopeOffset, firstOfferCorrected, monotoneDisc,
@@ -995,7 +995,9 @@ const lrnAfter = (date) => (date ? lrnDate(date) : null)
  * decided first offers sent after the checkpoint was applied, Σ log p(y | z + applied correction) − log p(y | z +
  * checkpoint correction). The applied correction is the `learnedWeight` stored with each decision, so the score judges
  * the estimates the user saw and never a re-fit; `applied` (the profile in force) fills it only for records that lack
- * a snapshot but were sent while it was in force. `checkpoint` null = the engine without correction.
+ * a snapshot but were sent while it was in force. `checkpoint` null = the engine without correction. Records decided
+ * under another engine version are left out: their stored correction was fitted against another prior, and the current
+ * engine's re-scored logit plus that correction is a prediction nobody made.
  */
 export function prequentialScore(records, applied, checkpoint, now) {
   const C = normalizeProfile(checkpoint)
@@ -1007,6 +1009,7 @@ export function prequentialScore(records, applied, checkpoint, now) {
   for (const r of records || []) {
     if (r.y == null || !Number.isFinite(r.rawLogit) || !lrnMature(r, now)) continue
     if (since && r.sentAt.getTime() <= since.getTime()) continue
+    if (r.engine && r.engine !== ENGINE_VERSION) continue
     let correction = r.appliedCorrection
     if (correction == null) {
       if (!A || !appliedSince || r.sentAt.getTime() <= appliedSince.getTime()) continue
@@ -1553,34 +1556,37 @@ const lrnExpectedSavingWith = (p, discountPct, { q, rho }) => {
   return p * d + (1 - p) * (qd * rho * d - (1 - qd) * LEARNING.LOSS_COST_SHARE)
 }
 
-/** The arm's price on the engine's price grid, strictly under the list price and within Vinted's cap; null when there is none. */
-const lrnArmPrice = (L, discountPct) => {
-  const step = priceStepFor(L)
-  if (discountPct < 1 || discountPct > VINTED.MAX_DISCOUNT_PCT - 0.01) return null
-  let price = Math.round(Math.round((L * (1 - discountPct / 100)) / step) * step * 100) / 100
-  if (price >= L) price = Math.round((L - step) * 100) / 100
-  if (!(price > 0) || ((L - price) / L) * 100 > VINTED.MAX_DISCOUNT_PCT) return null
-  return price
-}
-
 /**
- * Thompson sampling over three discount arms around the policy default d₀ (form.policy.discountPct, else the current
- * discount): softer d₀ − 4, base d₀, deeper d₀ + 4; the deeper arm only when the corrected acceptance at d₀ is ≥ 0,3,
- * the category is not premium and the list price is ≥ 20 €. θ = [intercept, dslope] ~ N(θ̂, Σ) from the live profile
- * (its `cov`; the prior diag(1,0², 0,35²) without one); DRAWS draws (mulberry32 seeded by key|month, so the same
- * listing gets the same arm all month); for each draw the arm with the best expected saving ES̃(d) = p̃·d + (1 − p̃)·
- * [q·ρ·d − (1 − q)·LOSS] with p̃ = k·squash(z(d) + θ̃₀ + θ̃_d·(d − 20)/10) wins. The propensities are the win shares,
- * floored at MIN_PROPENSITY and renormalised, and the arm is drawn from THEM (so the logged propensity is the real
- * sampling probability); `records` (optional) give q and ρ. Mirrors explorationPlan's output:
+ * Thompson sampling over three discount arms around the policy default d₀ (input.policy.discountPct, else the current
+ * discount): softer d₀ − 4, base d₀, deeper d₀ + 4. The base arm IS the analysis: the policy's precise target when the
+ * policy proposed the ask, else the analysed price; softer and deeper go through the same precise rounding (§2.1: no
+ * multiple of 5 from 20 €, never under the policy floor), so no arm lands on a grid price the table forbids. The
+ * deeper arm only when the corrected acceptance at d₀ is ≥ 0,3, the category is not premium and the list price is
+ * ≥ 20 €. Nothing is drawn where the gate says not to offer (buy_now / favourite_wait / wait): the arm would move a
+ * price the user is told not to send; message_first stays, an offer follows the message.
+ * Propensities: once the live pair is applied (the profile's `cov` is identified by this user's outcomes) θ =
+ * [intercept, dslope] ~ N(θ̂, Σ), DRAWS draws (mulberry32 seeded by key|month, so the same listing gets the same arm
+ * all month), and for each draw the arm with the best expected saving ES̃(d) = p̃·d + (1 − p̃)·[q·ρ·d − (1 − q)·LOSS]
+ * with p̃ = k·squash(z(d) + θ̃₀ + θ̃_d·(d − 20)/10) wins; the win shares, floored at MIN_PROPENSITY and renormalised,
+ * are the propensities. Before that (no profile, or a live fit still waiting for data) the candidate arms share the
+ * propensity equally: under the prior the expected-saving ranking is the objective's own bias (its continuation term
+ * grows with d faster than the engine's p falls, so the deeper arm wins by construction), not information about this
+ * user's sellers. The arm is drawn from the propensities with the same seeded generator, so the logged propensity is
+ * the real sampling probability; `records` (optional) give q and ρ. Mirrors explorationPlan's output:
  * { result, exploration: { arms, arm, d0, propensity, draws, base: { price, probability }, label, costPoints, … } } or null.
  */
 export function thompsonArm(raw, base, now, { profile = null, key = null, month = null, options = {}, enabled = true, records = null } = {}) {
   if (!enabled || !base || !base.ok || base.kind !== 'analysis' || !base.optimal) return null
+  if (base.gate && base.gate.kind && base.gate.kind !== 'offer' && base.gate.kind !== 'message_first') return null
   const input = base.input
   const L = input.listPrice
   if (L < LEARNING.EXPLORE_MIN_LIST_PRICE) return null
-  const pol = raw && raw.policy && typeof raw.policy === 'object' ? raw.policy : input.policy || null
-  const d0 = pol && Number.isFinite(pol.discountPct) && pol.kind !== 'no_offer' ? pol.discountPct : input.discountPct
+  // The policy rides on the analysed input (normalizeInput keeps it only while it still describes the listing).
+  const pol = input.policy && typeof input.policy === 'object' ? input.policy : null
+  const policyOffer = Boolean(pol && pol.kind !== 'no_offer' && Number.isFinite(pol.discountPct))
+  const d0 = policyOffer ? pol.discountPct : input.discountPct
+  const anchor = policyOffer && Number.isFinite(pol.targetPrice) && pol.targetPrice > 0 && pol.targetPrice < L ? pol.targetPrice : input.targetPrice
+  const floorPrice = pol && Number.isFinite(pol.floor) ? pol.floor : POLICY_BOUNDS.FLOOR_SHARE * L
   const P = profile ? normalizeProfile(profile) : null
   const k = base.optimal.pAvailable * base.optimal.pRead
   const at = base.optimal.date
@@ -1592,16 +1598,20 @@ export function thompsonArm(raw, base, now, { profile = null, key = null, month 
     return score.rawLogit + fixed
   }
   const theta = P ? [P.intercept, P.dslope] : [0, 0]
-  const live = P && Array.isArray(P.cov) && Array.isArray(P.paramKeys) && P.paramKeys.length === 2 && P.paramKeys[0] === 'intercept' && P.paramKeys[1] === 'dslope' && P.cov.length === 2
-  const cov = live ? P.cov : [[LEARNING.PRIOR_SD.intercept ** 2, 0], [0, LEARNING.PRIOR_SD.dslope ** 2]]
+  const hasCov = P && Array.isArray(P.cov) && Array.isArray(P.paramKeys) && P.paramKeys.length === 2 && P.paramKeys[0] === 'intercept' && P.paramKeys[1] === 'dslope' && P.cov.length === 2
+  // Identified: the live pair is applied (liveProfile's gates passed). A fit still waiting for data stores a cov too,
+  // but one the prior still dominates: the arms then share the propensity equally.
+  const identified = Boolean(hasCov && P.live)
   const corrected = (d, z, th) => k * squash(z + th[0] + th[1] * (d - 20) / 10)
 
   const arms = []
   for (const arm of THOMPSON_ARMS) {
     const d = d0 + arm.offset
-    const price = lrnArmPrice(L, d)
-    if (price === null) continue
+    if (d < 1 || d > VINTED.MAX_DISCOUNT_PCT - 0.01) continue
+    const price = arm.offset === 0 ? anchor : precisePriceFor(L * (1 - d / 100), L, { min: floorPrice, max: L })
+    if (price === null || !(price > 0) || price >= L) continue
     const discountPct = Math.round(((L - price) / L) * 100 * 1e6) / 1e6
+    if (discountPct > VINTED.MAX_DISCOUNT_PCT) continue
     if (arms.some((a) => Math.abs(a.price - price) < 0.004)) continue
     arms.push({ id: arm.id, label: arm.label, offset: arm.offset, discountPct, price, z: armZ(discountPct, price) })
   }
@@ -1613,23 +1623,27 @@ export function thompsonArm(raw, base, now, { profile = null, key = null, month 
 
   const { q, rho } = continuationPosterior(records, now)
   const rnd = lrnMulberry32(hashString(`${key || explorationKey(raw)}|${month || monthKeyOf(now)}`))
-  const chol = lrnCholesky2(cov)
+  const draws = identified ? LEARNING.THOMPSON_DRAWS : 0
   const wins = Object.fromEntries(candidates.map((a) => [a.id, 0]))
-  for (let i = 0; i < LEARNING.THOMPSON_DRAWS; i++) {
-    const [n1, n2] = lrnNormalPair(rnd)
-    const th = [theta[0] + chol[0][0] * n1, theta[1] + chol[1][0] * n1 + chol[1][1] * n2]
-    let best = null
-    let bestEs = -Infinity
-    for (const a of candidates) {
-      const es = lrnExpectedSavingWith(corrected(a.discountPct, a.z, th), a.discountPct, { q, rho })
-      if (es > bestEs + 1e-12) { bestEs = es; best = a }
+  if (identified) {
+    const chol = lrnCholesky2(P.cov)
+    for (let i = 0; i < draws; i++) {
+      const [n1, n2] = lrnNormalPair(rnd)
+      const th = [theta[0] + chol[0][0] * n1, theta[1] + chol[1][0] * n1 + chol[1][1] * n2]
+      let best = null
+      let bestEs = -Infinity
+      for (const a of candidates) {
+        const es = lrnExpectedSavingWith(corrected(a.discountPct, a.z, th), a.discountPct, { q, rho })
+        if (es > bestEs + 1e-12) { bestEs = es; best = a }
+      }
+      wins[best.id]++
     }
-    wins[best.id]++
   }
-  // Win shares → propensities: the arms under the floor get exactly the floor, the others share the rest in proportion
-  // (repeated until no arm sits under the floor, so the floor is exact after the renormalisation); the arm is drawn from them.
+  // Win shares (equal shares before the live pair is identified) → propensities: the arms under the floor get exactly
+  // the floor, the others share the rest in proportion (repeated until no arm sits under the floor, so the floor is
+  // exact after the renormalisation); the arm is drawn from them.
   const floor = LEARNING.THOMPSON_MIN_PROPENSITY
-  const shares = candidates.map((a) => wins[a.id] / LEARNING.THOMPSON_DRAWS)
+  const shares = identified ? candidates.map((a) => wins[a.id] / draws) : candidates.map(() => 1 / candidates.length)
   const low = shares.map((v) => v < floor - 1e-12) // once an arm is floored it stays floored
   let mu = [...shares]
   for (let pass = 0; pass < candidates.length; pass++) {
@@ -1648,7 +1662,10 @@ export function thompsonArm(raw, base, now, { profile = null, key = null, month 
     acc += mu[i]
     if (u < acc) { pick = candidates[i]; break }
   }
-  const propensities = Object.fromEntries(candidates.map((a, i) => [a.id, lrnR4(mu[i])]))
+  // Rounded to 4 decimals, the first (softer) arm takes the remainder so the logged shares still sum to exactly 1.
+  const rounded = mu.map((v) => lrnR4(v))
+  if (rounded.length) rounded[0] = lrnR4(1 - rounded.slice(1).reduce((s, v) => s + v, 0))
+  const propensities = Object.fromEntries(candidates.map((a, i) => [a.id, rounded[i]]))
 
   // The chosen arm's full analysis at the same moment; the base arm at the user's own price is the analysis itself.
   const samePrice = Math.abs(pick.price - input.targetPrice) < 0.004
@@ -1662,7 +1679,7 @@ export function thompsonArm(raw, base, now, { profile = null, key = null, month 
     arm: pick.id,
     d0: Math.round(d0 * 10) / 10,
     propensity: propensities[pick.id],
-    draws: LEARNING.THOMPSON_DRAWS,
+    draws,
     base: { price: input.targetPrice, at: lrnIso(at), probability: base.probability },
     price: pick.price,
     at: lrnIso(result.optimal.date),
@@ -1670,7 +1687,7 @@ export function thompsonArm(raw, base, now, { profile = null, key = null, month 
     varied: !samePrice,
     costPoints: Math.round((base.probability - result.probability) * 100),
     savingCostPct: Math.round((expected[baseArm.id] - expected[pick.id]) * 1000) / 10,
-    posterior: live ? 'live' : 'prior',
+    posterior: identified ? 'live' : 'prior',
   }
   return { result: { ...result, exploration }, exploration }
 }

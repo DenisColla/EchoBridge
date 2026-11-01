@@ -112,14 +112,16 @@ export const offerExpiryOf = (item) => {
 }
 
 /**
- * One of: planned_future · planned_recent (past ≤ 24 h) · planned_stale (past > 24 h) · counter_pending · counter_accept ·
- * counter_other · sent_waiting (≤ 24 h) · sent_stale (> 24 h) · closed.
+ * One of: planned_future · planned_recent (past ≤ 24 h) · planned_stale (past > 24 h, or no moment at all) · counter_pending ·
+ * counter_accept · counter_other · sent_waiting (≤ 24 h) · sent_stale (> 24 h) · closed.
  */
 export const rowStateOf = (item, now) => {
   const t = now.getTime()
   if (item.status === 'planned') {
     const sendAt = ms(item.sendAt)
-    if (sendAt == null || sendAt > t) return 'planned_future'
+    // A plan without a moment (a hand-edited backup): nothing to send at, the user has to settle it.
+    if (sendAt == null) return 'planned_stale'
+    if (sendAt > t) return 'planned_future'
     return t - sendAt > UPDATE_AFTER_HOURS * HOUR ? 'planned_stale' : 'planned_recent'
   }
   if (item.status === 'sent') {
@@ -184,6 +186,29 @@ const byDesc = (key) => (a, b) => key(b) - key(a)
 
 /** Closed rows: last change first (outcome time, else creation). */
 export const closedOrder = (items) => [...items].sort(byDesc((it) => ms(it.outcomeAt) ?? ms(it.createdAt) ?? 0))
+
+/**
+ * Splits a list that no longer fits its storage row (its JSON longer than `maxChars`): the oldest closed negotiations
+ * (accepted, bought, declined, no reply, sold to others, abandoned; outcome time ascending, creation time as fallback)
+ * leave it, one at a time, until the rest fits. Open rows never move. Returns { keep, moved } with `moved` oldest
+ * first; `keep` is `items` itself when it already fits. Sizes are measured per item, so the list is serialised once.
+ */
+export const overflowSplit = (items, maxChars) => {
+  const list = Array.isArray(items) ? items : []
+  if (JSON.stringify(list).length <= maxChars) return { keep: list, moved: [] }
+  // JSON.stringify(array).length = 2 brackets + the items + (n − 1) commas = 1 + Σ(item + 1) for n ≥ 1.
+  const sizeOf = (it) => (it === undefined ? 4 : JSON.stringify(it).length) + 1
+  let total = 1 + list.reduce((s, it) => s + sizeOf(it), 0)
+  const closed = list.filter((it) => it && !inSegment(it, 'open')).sort(byAsc((it) => ms(it.outcomeAt) ?? ms(it.createdAt) ?? 0))
+  const moved = []
+  for (const it of closed) {
+    if (total <= maxChars) break
+    moved.push(it)
+    total -= sizeOf(it)
+  }
+  const gone = new Set(moved)
+  return { keep: list.filter((it) => !gone.has(it)), moved }
+}
 
 /** The three open groups, each sorted as the spec says; empty groups are omitted. */
 export const openGroups = (items, now) => {
@@ -260,17 +285,19 @@ export const matchesQuery = (item, q) => {
 // Short labels of a row
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** "12 ott" (closed rows show the day of the outcome). */
+/** "12 ott" (closed rows show the day of the outcome); '' for a missing or unreadable value, never the epoch. */
 export const shortDate = (value) => {
-  const d = new Date(value)
-  if (!Number.isFinite(d.getTime())) return ''
+  const t = ms(value)
+  if (t == null) return ''
+  const d = new Date(t)
   return `${d.getDate()} ${MONTHS_IT[d.getMonth()].slice(0, 3)}`
 }
 
 /** "oggi" | "ieri" | "3 giorni fa" | "domani" | "tra 5 giorni": both directions, by calendar day. */
 export const relativeDayLabel = (value, now) => {
-  const d = new Date(value)
-  if (!Number.isFinite(d.getTime())) return ''
+  const t = ms(value)
+  if (t == null) return ''
+  const d = new Date(t)
   const days = calendarDaysBetween(now, d)
   if (days === 0) return 'oggi'
   if (days === 1) return 'domani'
@@ -292,8 +319,9 @@ export const sinceLabel = (value, now) => {
 
 /** "oggi alle 20:45" | "ieri alle 20:45" | "3 giorni fa": when something happened. */
 export const whenLabel = (value, now) => {
-  const d = new Date(value)
-  if (!Number.isFinite(d.getTime())) return ''
+  const t = ms(value)
+  if (t == null) return ''
+  const d = new Date(t)
   const days = calendarDaysBetween(d, now)
   if (days <= 0) return `oggi alle ${formatTime(d)}`
   if (days === 1) return `ieri alle ${formatTime(d)}`
@@ -302,8 +330,9 @@ export const whenLabel = (value, now) => {
 
 /** "oggi alle 21:30" | "domani alle 21:30" | "domenica 2 novembre alle 21:30": a moment to act at. */
 export const momentLabel = (value, now) => {
-  const d = new Date(value)
-  if (!Number.isFinite(d.getTime())) return ''
+  const t = ms(value)
+  if (t == null) return ''
+  const d = new Date(t)
   const days = calendarDaysBetween(now, d)
   const day = days === 0 ? 'oggi' : days === 1 ? 'domani' : formatLongDate(d, now)
   return `${day} alle ${formatTime(d)}`

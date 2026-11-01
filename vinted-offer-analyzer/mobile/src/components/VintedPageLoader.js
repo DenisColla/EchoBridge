@@ -194,6 +194,18 @@ true;`
 const ALLOWED_SCHEMES = /^(https?:|about:|data:|blob:)/i
 
 /**
+ * The verdict of the silent attempt from the probe's last `state` message `s` (null before the first one), the job's
+ * start and the current time: 'challenge' (hand the check to the user), 'wait' (a page still loading, or the listing
+ * found while the probe waits for the hydrated details: its 'html' message follows within ATTR_WAIT_MS, so this is not
+ * an empty page), 'timeout' (still nothing after LOADING_MS) or 'empty' (a parsed page without the listing). Pure.
+ */
+export const decideState = (s, startedAt, now = Date.now()) => {
+  if (s && s.challenge) return 'challenge'
+  if (!s || !s.ready || s.item) return now - startedAt < LOADING_MS ? 'wait' : 'timeout'
+  return 'empty'
+}
+
+/**
  * The in-app browser used when Vinted's anti-bot check refuses the quick download. It loads the listing in a WebView
  * (a real Chrome engine, so Cloudflare's automatic check passes and its cookie is kept for the next time), hidden
  * behind the app. If the check wants a tap, the WebView is shown full screen with a short explanation and «Annulla».
@@ -237,23 +249,16 @@ export function VintedPageLoader({ ref }) {
   }, [finish])
 
   /**
-   * End of the silent attempt: a challenge goes to the user, a page still loading gets a little longer (returns
-   * 'wait'), a parsed page without the listing is reported.
+   * End of the silent attempt (decideState): a challenge goes to the user, a page still loading or waiting for its
+   * hydrated details gets a little longer (returns 'wait'), a parsed page without the listing is reported.
    */
   const decide = useCallback((id) => {
     const current = jobRef.current
     if (!current || current.id !== id || current.visible) return 'done'
-    const s = stateRef.current
-    if (s && s.challenge) {
-      showToUser(id)
-      return 'done'
-    }
-    if (!s || !s.ready) {
-      if (Date.now() - current.startedAt < LOADING_MS) return 'wait'
-      finish({ ok: false, reason: 'timeout' }, id)
-      return 'done'
-    }
-    finish({ ok: false, reason: 'empty' }, id)
+    const verdict = decideState(stateRef.current, current.startedAt, Date.now())
+    if (verdict === 'wait') return 'wait'
+    if (verdict === 'challenge') showToUser(id)
+    else finish({ ok: false, reason: verdict }, id)
     return 'done'
   }, [finish, showToUser])
 

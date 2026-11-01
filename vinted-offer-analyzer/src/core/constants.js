@@ -38,13 +38,17 @@ export const CATEGORIES = [
   { id: 'other', label: 'Altro', hint: 'Casa, libri, sport, accessori', icon: 'Package', weight: 0, dailySellRate: 0.015, ageMultiplier: 1.0, premium: false, disposable: false },
 ]
 
+/**
+ * `days` is the count the engine scores the bucket at; `maxDays` the bucket's exclusive upper bound (null = unknown),
+ * the thresholds extract.js listingAgeGuess maps a day count read from the page with.
+ */
 export const LISTING_AGES = [
-  { id: 'unknown', label: 'Non lo so', days: 7 },
-  { id: 'today', label: 'Caricato oggi', days: 0 },
-  { id: 'days_2_6', label: '2–6 giorni fa', days: 4 },
-  { id: 'weeks_1_2', label: '1–2 settimane fa', days: 10 },
-  { id: 'weeks_2_4', label: '2–4 settimane fa', days: 21 },
-  { id: 'over_month', label: 'Più di un mese fa', days: 35 },
+  { id: 'unknown', label: 'Non lo so', days: 7, maxDays: null },
+  { id: 'today', label: 'Caricato oggi', days: 0, maxDays: 1 },
+  { id: 'days_2_6', label: '2–6 giorni fa', days: 4, maxDays: 7 },
+  { id: 'weeks_1_2', label: '1–2 settimane fa', days: 10, maxDays: 14 },
+  { id: 'weeks_2_4', label: '2–4 settimane fa', days: 21, maxDays: 30 },
+  { id: 'over_month', label: 'Più di un mese fa', days: 35, maxDays: Infinity },
 ]
 
 export const SELLER_PROFILES = [

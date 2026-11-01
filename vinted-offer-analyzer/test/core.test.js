@@ -8,7 +8,7 @@ import {
   sellerProfileGuess, listingAgeGuess, findPriceInText, detectVintedChallenge,
   MONTH_END_WEIGHT, POSITIVE_CAP, QUIET_READ_PROBABILITY, SUGGESTED_PRICE_FLOOR, SUGGESTED_PRICE_SHARE_OF_MAX, goalChoicesFor, maxReachable,
   normalizeProfile, predictiveInterval, priceBandWeight, readProbability, scoreAt,
-  DOM_SIGNAL_SCALE, SIGNAL_WEIGHTS, demandWeight, reducedWeight, viewsWeight,
+  DOM_SIGNAL_SCALE, SIGNAL_WEIGHTS, demandWeight, reducedWeight, viewsWeight, policyDiscountFor,
 } from '../src/core/index.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -52,6 +52,35 @@ test('comma decimals are accepted', () => {
   assert.equal(ok, true)
   assert.equal(input.listPrice, 12.5)
   assert.equal(input.discountPct, 20)
+})
+
+test('a policy on the form rides on the input only while it still describes the listing (band and age tier, the age read as the gate reads it)', () => {
+  const stale = policyDiscountFor({ listPrice: 15, ageDays: 2 }) // 12–20 € × fresh: «non offrire»
+  assert.equal(stale.kind, 'no_offer')
+  const form = { ...base, listPrice: '15', targetPrice: '12', listingAge: 'days_2_6', policy: stale }
+  assert.equal(normalizeInput(form).input.policy, stale)
+  assert.equal(analyzeOffer({ ...form, targetPrice: '15' }, SUNDAY_AFTERNOON).gate.rule, 3, 'the gate speaks with the policy while it applies')
+  // The user then says the listing is over a month old, or types a price in another band: the policy no longer applies.
+  const aged = { ...form, listingAge: 'over_month' }
+  assert.equal(normalizeInput(aged).input.policy, undefined)
+  const r = analyzeOffer(aged, SUNDAY_AFTERNOON)
+  assert.equal(r.kind, 'analysis')
+  assert.notEqual(r.gate.rule, 3)
+  assert.equal(normalizeInput({ ...form, listPrice: '45', targetPrice: '38' }).input.policy, undefined)
+  // The policy's own day count wins while the form still shows its bucket: 30 days online is «più di un mese» on the
+  // form (listingAgeGuess) and the table's middle tier (policyAgeTierOf), the same listing seen twice.
+  const edge = policyDiscountFor({ listPrice: 30, ageDays: 30 })
+  assert.equal(edge.ageTier, 'mid')
+  assert.equal(listingAgeGuess(30), 'over_month')
+  assert.equal(normalizeInput({ ...base, listPrice: '30', targetPrice: '26', listingAge: 'over_month', policy: edge }).input.policy, edge)
+  const mid = policyDiscountFor({ listPrice: 30, ageDays: 21 })
+  assert.equal(normalizeInput({ ...base, listPrice: '30', targetPrice: '26', listingAge: 'over_month', policy: mid }).input.policy, undefined, 'from 2–4 weeks to over a month: another tier')
+  assert.ok(normalizeInput({ ...base, listPrice: '30', targetPrice: '26', listingAge: 'over_month', signals: { uploadedDays: 30 }, policy: mid }).input.policy, 'the DOM\'s day count is what the gate reads: it decides here too')
+  // Hand-built policies without stamps ride along as before.
+  assert.ok(normalizeInput({ ...base, policy: { kind: 'no_offer', alternative: 'buy' } }).input.policy)
+  // The buckets' bounds are the thresholds listingAgeGuess maps a day count with.
+  assert.deepEqual(LISTING_AGES.map((a) => a.maxDays), [null, 1, 7, 14, 30, Infinity])
+  for (const d of [0, 0.5, 1, 4, 6.9, 7, 13, 14, 29, 30, 35, 400]) assert.equal(LISTING_AGES.find((a) => a.maxDays !== null && d < a.maxDays).id, listingAgeGuess(d), `${d} days`)
 })
 
 test('target at or above list price needs no offer', () => {

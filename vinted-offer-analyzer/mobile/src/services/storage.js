@@ -4,6 +4,12 @@ const KEY = 'offerta-vinted.watchlist.v1'
 const ARCHIVE_KEY = 'offerta-vinted.archive.v1'
 const LEARNING_KEY = 'offerta-vinted.learning.v1'
 const ARCHIVE_MAX = 1000
+/**
+ * Android reads one AsyncStorage row through a 2 MB CursorWindow: a longer value saves but can never be read back, and
+ * the next save would then overwrite it with an empty list. The list and the archive each stay under this many
+ * characters (the same cap as labStore.js); useWatchlist moves closed negotiations to the archive to keep the list under it.
+ */
+export const MAX_CHARS = 1_200_000
 
 /**
  * Schema 3 (monthly learning loop) adds an append-only event log, the decision snapshot (what the engine recommended
@@ -95,9 +101,12 @@ export async function loadItems() {
   }
 }
 
+/** False when nothing was written: a storage error, or a list over MAX_CHARS (an unreadable row must never replace a readable one). */
 export async function saveItems(items) {
   try {
-    await AsyncStorage.setItem(KEY, JSON.stringify(items))
+    const json = JSON.stringify(items)
+    if (json.length > MAX_CHARS) return false
+    await AsyncStorage.setItem(KEY, json)
     return true
   } catch {
     return false
@@ -117,9 +126,20 @@ export async function loadArchive() {
   }
 }
 
+/** The archive is newest-first: the JSON of its first items within ARCHIVE_MAX and MAX_CHARS, the oldest dropped a tenth at a time. */
+function fitArchive(items) {
+  let out = items.slice(0, ARCHIVE_MAX)
+  let json = JSON.stringify(out)
+  while (out.length > 1 && json.length > MAX_CHARS) {
+    out = out.slice(0, out.length - Math.max(1, Math.ceil(out.length / 10)))
+    json = JSON.stringify(out)
+  }
+  return json
+}
+
 export async function saveArchive(items) {
   try {
-    await AsyncStorage.setItem(ARCHIVE_KEY, JSON.stringify(items.slice(0, ARCHIVE_MAX)))
+    await AsyncStorage.setItem(ARCHIVE_KEY, fitArchive(items))
     return true
   } catch {
     return false

@@ -10,7 +10,7 @@
  * Pure functions: constants.js, math.js and messages.js only. Private helpers are prefixed `gt` because the artifact
  * bundler puts every module in one scope.
  */
-import { GATE, MESSAGE_POLICY, TIERS } from './constants.js'
+import { GATE, LEARNING, MESSAGE_POLICY, TIERS } from './constants.js'
 import { hashString } from './math.js'
 import { formatEuro, recommendedToneFor } from './messages.js'
 
@@ -65,17 +65,20 @@ const gtSentence = (text, fallback) => {
 
 /**
  * Whether a new offer on `link` is blocked by a recent refusal of ours on the same listing (gate rule 7): among
- * `records` (watchlist items { link, status, outcomeAt, firstOutcome, sentAt, negotiation }) a `declined` or `no_reply`
- * outcome within REOFFER_BLOCK_DAYS before `now`. An offer still unanswered after 7 days counts as no reply from that
- * day. Exempt: negotiations the seller countered (he engaged: the counter screen is the place to continue) and plans
- * never sent. Price drops by the seller are the caller's exemption (the gate skips the rule when the price just fell).
+ * `records` (watchlist items { link, listPrice, status, outcomeAt, firstOutcome, sentAt, negotiation }) a `declined`
+ * or `no_reply` outcome within REOFFER_BLOCK_DAYS before `now`. An offer still unanswered after NO_REPLY_AFTER_DAYS
+ * counts as no reply from that day, and that day also caps the refusal moment: an outcome tapped weeks later records
+ * an old no, it does not renew the block. Exempt: negotiations the seller countered (he engaged: the counter screen is
+ * the place to continue), plans never sent, and records the seller moved on since — `listPrice` (the listing's price
+ * today) under the price we asked on, or a price drop (`dropHoursAgo`, hours before `now`) after the refusal; the
+ * gate and the save-time check pass the same options, so they reach the same decision.
  * Returns null, or { until: Date, outcome: 'declined' | 'no_reply', at: Date, recordId }.
  */
-export function reofferBlock(records, link, now = new Date()) {
+export function reofferBlock(records, link, now = new Date(), { listPrice = null, dropHoursAgo = null } = {}) {
   const id = listingIdOf(link)
   if (!id || !Array.isArray(records)) return null
   const ref = gtDate(now) || new Date()
-  const silentAfter = 7 * DAY_MS
+  const silentAfter = LEARNING.NO_REPLY_AFTER_DAYS * DAY_MS
   let block = null
   for (const r of records) {
     if (!r || listingIdOf(r.link) !== id) continue
@@ -84,20 +87,27 @@ export function reofferBlock(records, link, now = new Date()) {
     if (r.firstOutcome === 'countered' || r.status === 'countered') continue
     const sentAt = gtDate(r.sentAt)
     if (!sentAt) continue
+    // The refusal moment: the tap, capped at the offer's own horizon (silence is a no from that day anyway).
+    const latest = sentAt.getTime() + silentAfter
+    const tapped = gtDate(r.outcomeAt) || gtDate(r.firstOutcomeAt)
     let outcome = null
     let at = null
     const first = r.firstOutcome || r.status
     if (first === 'declined') {
       outcome = 'declined'
-      at = gtDate(r.outcomeAt) || gtDate(r.firstOutcomeAt) || sentAt
+      at = new Date(Math.min((tapped || sentAt).getTime(), latest))
     } else if (first === 'no_reply') {
       outcome = 'no_reply'
-      at = gtDate(r.outcomeAt) || gtDate(r.firstOutcomeAt) || new Date(sentAt.getTime() + silentAfter)
+      at = new Date(Math.min(tapped ? tapped.getTime() : latest, latest))
     } else if (r.status === 'sent' && ref.getTime() - sentAt.getTime() >= silentAfter) {
       outcome = 'no_reply'
-      at = new Date(sentAt.getTime() + silentAfter)
+      at = new Date(latest)
     }
     if (!outcome || at.getTime() > ref.getTime()) continue
+    // The seller moved since: a lower list price than the one we asked on, or a price cut after the refusal.
+    const askedOn = Number(r.listPrice)
+    if (gtFinite(listPrice) && Number.isFinite(askedOn) && askedOn > 0 && listPrice < askedOn - 0.004) continue
+    if (gtFinite(dropHoursAgo) && ref.getTime() - dropHoursAgo * 3_600_000 > at.getTime()) continue
     const until = new Date(at.getTime() + GATE.REOFFER_BLOCK_DAYS * DAY_MS)
     if (until.getTime() <= ref.getTime()) continue
     if (!block || until.getTime() > block.until.getTime()) block = { until, outcome, at, recordId: r.id || null }
@@ -175,9 +185,10 @@ export function decisionGate(input, moments, { records = null, now = new Date(),
     })
   }
 
-  // 7. A refusal of ours on this very listing within 14 days (a seller price drop lifts it: he changed his mind).
+  // 7. A refusal of ours on this very listing within 14 days, unless the seller moved since: a list price under the one
+  //    we asked on, or a price cut dated after the refusal (a crossed-out price alone says nothing about when).
   const blockLink = link || input.link || null
-  const block = blockLink && !gtDropped(sig) ? reofferBlock(records, blockLink, now) : null
+  const block = blockLink ? reofferBlock(records, blockLink, now, { listPrice: L, dropHoursAgo: gtDropped(sig) ? dropHours : null }) : null
   if (block) {
     const hours = Math.max(1, Math.ceil((block.until.getTime() - (gtDate(now) || new Date()).getTime()) / 3_600_000))
     const what = block.outcome === 'declined' ? 'ha rifiutato la tua offerta' : 'non ha risposto alla tua offerta'
