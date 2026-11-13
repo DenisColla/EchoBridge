@@ -1,9 +1,9 @@
 import {
-  Baby, Briefcase, Clock, Coffee, Crown, Footprints, Gem, Moon, Package, Shirt, Smartphone, Sun, Sparkles, Utensils, Zap,
+  Baby, BookOpen, Briefcase, Clock, Coffee, Crown, Footprints, Gem, Moon, Package, Shirt, Smartphone, Sun, Sparkles, Utensils, Zap,
 } from 'lucide-react'
 
 /** Lucide icon by the name stored in core constants (UI concern, kept out of core). */
-export const ICONS = { Baby, Briefcase, Clock, Coffee, Crown, Footprints, Gem, Moon, Package, Shirt, Smartphone, Sun, Sparkles, Zap }
+export const ICONS = { Baby, BookOpen, Briefcase, Clock, Coffee, Crown, Footprints, Gem, Moon, Package, Shirt, Smartphone, Sun, Sparkles, Zap }
 
 export const iconByName = (name) => ICONS[name] || Sparkles
 

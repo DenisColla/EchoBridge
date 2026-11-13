@@ -161,9 +161,66 @@ export const PAGE_PROBE = `(function () {
     }
     return out;
   };
+  // 1.8: the seller's wardrobe. On the listing page only the link to it is read; on the wardrobe page itself the
+  // counts, a sample of prices and the bundle text. Read-only like everything else here.
+  var isMember = /\\/member\\//.test(location.pathname);
+  var readSellerUrl = function () {
+    var links = document.querySelectorAll('a[href*="/member/"]');
+    for (var i = 0; i < links.length; i++) {
+      var m = String(links[i].getAttribute('href') || '').match(/\\/member\\/(\\d+)[^?#"]*/);
+      if (m) return location.origin + m[0];
+    }
+    return null;
+  };
+  var MEMBER_RES = {
+    item_count: /\\\\?"item_count\\\\?":\\s*(\\d+)/,
+    given_item_count: /\\\\?"given_item_count\\\\?":\\s*(\\d+)/,
+    taken_item_count: /\\\\?"taken_item_count\\\\?":\\s*(\\d+)/,
+    followers_count: /\\\\?"followers_count\\\\?":\\s*(\\d+)/,
+    feedback_count: /\\\\?"feedback_count\\\\?":\\s*(\\d+)/,
+    positive_feedback_count: /\\\\?"positive_feedback_count\\\\?":\\s*(\\d+)/,
+    negative_feedback_count: /\\\\?"negative_feedback_count\\\\?":\\s*(\\d+)/
+  };
+  var readMember = function () {
+    try {
+      var body = text(document.body).slice(0, 30000);
+      var links = document.querySelectorAll('a[href*="/items/"]');
+      var seen = {};
+      var prices = [];
+      var cards = 0;
+      for (var i = 0; i < links.length && cards < 120; i++) {
+        var a = links[i];
+        var m = String(a.getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+        if (!m || seen[m[1]]) continue;
+        seen[m[1]] = 1;
+        cards++;
+        var box = (a.closest && a.closest('[data-testid*="item" i]')) || a.parentElement || a;
+        var t = (String(a.getAttribute('title') || '') + ' ' + text(box)).slice(0, 400);
+        var p = t.match(/(\\d{1,5}(?:[.,]\\d{2})?)\\s?\\u20ac/);
+        if (p) prices.push(p[1]);
+      }
+      var num = function (re) { var x = body.match(re); return x ? x[1] : null; };
+      var flight = {};
+      var chunks = self.__next_f;
+      if (Array.isArray(chunks)) {
+        for (var k in MEMBER_RES) {
+          for (var j = 0; j < chunks.length && flight[k] === undefined; j++) {
+            var c = Array.isArray(chunks[j]) ? chunks[j][1] : chunks[j];
+            if (typeof c !== 'string') continue;
+            var hit = c.match(MEMBER_RES[k]);
+            if (hit) flight[k] = Number(hit[1]);
+          }
+        }
+      }
+      var bundle = body.match(/[^.]{0,80}(sconto sui lotti|sconti sui lotti|lotti)[^.]{0,80}/i);
+      return { kind: 'member', cards: cards, prices: prices, itemCountText: num(/(\\d[\\d.]*)\\s+articol[oi]/i), followersText: num(/(\\d[\\d.]*)\\s+follower/i), feedbackText: num(/(\\d[\\d.]*)\\s+recension/i), bundleText: bundle ? bundle[0].slice(0, 200) : null, flight: flight, sample: body.slice(0, 600) };
+    } catch (e) {
+      return null;
+    }
+  };
   var readDetails = function () {
     try {
-      return { attributes: readAttributes(), strikethrough: readStrikethrough(), badges: readBadges(), bundleText: readBundleText(), sellerItemCards: readSellerItemCards(), flight: readFlight() };
+      return { attributes: readAttributes(), strikethrough: readStrikethrough(), badges: readBadges(), bundleText: readBundleText(), sellerItemCards: readSellerItemCards(), flight: readFlight(), sellerUrl: readSellerUrl() };
     } catch (e) {
       return null;
     }
@@ -172,6 +229,22 @@ export const PAGE_PROBE = `(function () {
   var itemSince = null;
   var tick = function () {
     var ready = document.readyState !== 'loading';
+    if (isMember) {
+      var blocked = isChallenge();
+      if (ready && !blocked && !isCfError()) {
+        if (itemSince === null) itemSince = Date.now();
+        if (document.querySelectorAll('a[href*="/items/"]').length < 1 && Date.now() - itemSince < 4000) {
+          post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
+          setTimeout(tick, 300);
+          return;
+        }
+        post({ type: 'html', url: location.href, html: '', details: readMember() });
+        return;
+      }
+      post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: blocked, cfError: !blocked && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
+      setTimeout(tick, 700);
+      return;
+    }
     if (ready && hasItem()) {
       if (itemSince === null) itemSince = Date.now();
       if (!hasAttributes() && Date.now() - itemSince < ${ATTR_WAIT_MS}) {

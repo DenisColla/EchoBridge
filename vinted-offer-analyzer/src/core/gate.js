@@ -130,7 +130,7 @@ const gtFavouriteAlternative = (L) => ({
  * Returns { kind: 'offer' | 'buy_now' | 'favourite_wait' | 'message_first' | 'wait', rule: 1..10, reason (Italian,
  * one sentence), alternative: { title, valueEur, probability } | null, waitHours: number | null, block }.
  */
-export function decisionGate(input, moments, { records = null, now = new Date(), link = null, policy = null } = {}) {
+function gtRules(input, moments, { records = null, now = new Date(), link = null, policy = null } = {}) {
   const sig = input.signals || {}
   const L = input.listPrice
   const d = input.discountPct
@@ -211,6 +211,17 @@ export function decisionGate(input, moments, { records = null, now = new Date(),
   return out('offer', 10, 'Nessun segnale contrario: invia l\'offerta nel momento consigliato.')
 }
 
+/**
+ * The gate. With `advisory` (the best-price strategy of 1.8) only rule 1 still stops the offer (reserved, holiday):
+ * every other rule becomes `advice` on an «offer» verdict, because a refused offer costs nothing while «compra e basta»
+ * gives up the saving for certain.
+ */
+export function decisionGate(input, moments, options = {}) {
+  const g = gtRules(input, moments, options)
+  if (!options.advisory || g.rule === 1 || g.rule === 10) return g
+  return { kind: 'offer', rule: 10, reason: 'Offri: la strategia segue il tipo di venditore.', alternative: g.alternative, waitHours: null, block: g.block || null, advice: { kind: g.kind, rule: g.rule, reason: g.reason, waitHours: g.waitHours } }
+}
+
 /* ───────── tier ───────── */
 
 /** UI tier from the corrected overall probability (engine-spec §3.4): { id, label, min }. */
@@ -232,7 +243,7 @@ export const tierAtLeastOffer = (tier) => Boolean(tier && TIER_RANK[tier.id] >= 
  * (hashUnit, §5.3) when `key` and `month` are given, logged with propensity 0,5; without them it is offer-direct.
  * Returns { mode: 'message_first' | 'offer_direct' | 'optional', rule, tone, randomised, propensity, assigned }.
  */
-export function messagePolicyFor(input, gate = null, signals = null, { tier = null, key = null, month = null, otherItem = null } = {}) {
+export function messagePolicyFor(input, gate = null, signals = null, { tier = null, key = null, month = null, otherItem = null, sellerType = null } = {}) {
   const sig = signals || input.signals || {}
   const L = input.listPrice
   const d = input.discountPct
@@ -241,6 +252,9 @@ export function messagePolicyFor(input, gate = null, signals = null, { tier = nu
   const lastSeen = gtLastSeenDays({ ...input, signals: sig })
   const base = recommendedToneFor(input)
   const decide = (mode, rule, tone) => ({ mode, rule, tone, randomised: false, propensity: null, assigned: mode === 'message_first' ? 'message_first' : 'offer_direct' })
+
+  // 1.8: the seller type decides the moves (strategy.js planFor); the message accompanies the offer, never replaces it.
+  if (sellerType) return decide('offer_direct', `seller_${sellerType}`, sellerType === 'difficile' ? (L >= 50 ? 'motivato' : 'cordiale') : base)
 
   if (gate && gate.kind === 'message_first') return decide('message_first', `gate_${gate.rule}`, lastSeen !== null && lastSeen >= M.QUIET_DAYS ? 'domanda' : base)
   if (lastSeen !== null && lastSeen > M.QUIET_DAYS) return decide('message_first', 'seller_quiet', 'domanda')

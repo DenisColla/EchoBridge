@@ -31,6 +31,7 @@ const ORDER = [
   'src/core/optimize.js',
   'src/core/counter.js',
   'src/core/extract.js',
+  'src/core/strategy.js',
   'src/theme.js',
   'src/platform/clipboard.js',
   'src/hooks/useOfferAnalysis.js',

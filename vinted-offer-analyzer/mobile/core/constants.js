@@ -35,7 +35,9 @@ export const CATEGORIES = [
   { id: 'electronics', label: 'Elettronica', hint: 'Smartphone, console, cuffie', icon: 'Smartphone', weight: -0.2, dailySellRate: 0.025, ageMultiplier: 1.1, premium: false, disposable: false },
   { id: 'kids', label: 'Bambini', hint: 'Vestiti e accessori per bambini', icon: 'Baby', weight: 0.4, dailySellRate: 0.01, ageMultiplier: 1.2, premium: false, disposable: true },
   { id: 'luxury', label: 'Lusso', hint: 'Borse e capi high-end', icon: 'Crown', weight: -0.6, dailySellRate: 0.008, ageMultiplier: 0.7, premium: true, disposable: false },
-  { id: 'other', label: 'Altro', hint: 'Casa, libri, sport, accessori', icon: 'Package', weight: 0, dailySellRate: 0.015, ageMultiplier: 1.0, premium: false, disposable: false },
+  // 1.8: books and comics are media, not collectibles; the user's own sellers accept moderate offers readily.
+  { id: 'books', label: 'Libri e fumetti', hint: 'Fumetti, manga, romanzi, riviste', icon: 'BookOpen', weight: 0.15, dailySellRate: 0.015, ageMultiplier: 1.0, premium: false, disposable: false },
+  { id: 'other', label: 'Altro', hint: 'Casa, sport, accessori', icon: 'Package', weight: 0, dailySellRate: 0.015, ageMultiplier: 1.0, premium: false, disposable: false },
 ]
 
 /**

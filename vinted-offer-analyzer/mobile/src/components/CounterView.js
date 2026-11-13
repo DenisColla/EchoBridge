@@ -38,7 +38,7 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
   const recalculating = Boolean(last && last.by === 'seller')
   const [fields, setFields] = useState({
     previousOffer: lastBuyer ? priceText(lastBuyer.price) : (context.form.targetPrice || ''),
-    sellerCounter: recalculating ? priceText(last.price) : '',
+    sellerCounter: recalculating ? priceText(last.price) : Number.isFinite(context.prefillCounter) ? priceText(context.prefillCounter) : '',
     counterMode: 'eur',
     receivedAgo: 'just_now',
     maxPrice: '',

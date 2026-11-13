@@ -310,6 +310,7 @@ export function categoryGuess({ categoryText = '', brand = '', title = '', descr
   if (/\b(scarpe|sneakers|calzature)\b/i.test(cat) && (SNEAKER_HINTS.test(cat) || SNEAKER_HINTS.test(text) || /\b(nike|adidas|puma|new balance|reebok|asics|vans|converse|jordan)\b/i.test(brandText))) return { id: 'sneakers', reason: 'scarpe sportive' }
   if (SNEAKER_HINTS.test(title) && /\b(nike|adidas|puma|new balance|reebok|asics|vans|converse|jordan|hoka|salomon)\b/i.test(`${brandText} ${title}`)) return { id: 'sneakers', reason: 'titolo e marca' }
   if (ELECTRONICS_HINTS.test(cat) || (ELECTRONICS_HINTS.test(title) && /\b(apple|samsung|sony|nintendo|microsoft|xiaomi|huawei|google|dyson|bose|jbl|garmin)\b/i.test(`${brandText} ${title}`))) return { id: 'electronics', reason: 'elettronica' }
+  if (/\b(libri|fumetti|manga|graphic novel|riviste|romanzi)\b/i.test(cat)) return { id: 'books', reason: 'libri e fumetti' }
   if (COLLECTIBLE_HINTS.test(cat) || /\b(collezionismo|carte|fumetti|vinili|lego|funko|pok[ée]mon)\b/i.test(title)) return { id: 'collectible', reason: 'collezionismo' }
   if (FAST_FASHION_BRANDS.test(brandText)) return { id: 'fast_fashion', reason: `marca ${brandText}` }
   if (/^(donna|uomo|women|men)\b/i.test(cat) || /\b(abbigliamento|vestiti|maglie|felpe|pantaloni|jeans|giacche|abiti|gonne|camicie|t-shirt|scarpe)\b/i.test(cat)) {

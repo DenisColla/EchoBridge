@@ -3,7 +3,7 @@ import { View } from 'react-native'
 import { COUNTER, LEARNING, MONTHS_IT, formatEuro, formatLongDate, monthLabel, prepArticleFor, profileIsActive } from '../../core/index.js'
 import { openReport, shareReport } from '../services/reports.js'
 import { space } from '../theme.js'
-import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title, Toggle } from './ui.js'
+import { Body, Button, ButtonRow, Card, Note, SectionLabel, Title } from './ui.js'
 
 /** Probability points of a logit change on an offer at 50% (the engine's squash: 0,94 × ¼ per logit unit). */
 const POINTS_PER_LOGIT = 23.5
@@ -64,7 +64,7 @@ const SAVED_TO = {
 export function LearningCard({ learning, onToast }) {
   const [busy, setBusy] = useState(false)
   if (!learning || !learning.ready) return null
-  const { profile, folder, reports, exploration, canUndo, canUndoLive, liveStatus, nextReportAt } = learning
+  const { profile, folder, reports, canUndo, canUndoLive, liveStatus, nextReportAt } = learning
   const last = reports[0] || null
   const now = new Date()
   const liveOn = Boolean(liveStatus && liveStatus.applied)
@@ -151,8 +151,6 @@ export function LearningCard({ learning, onToast }) {
         </View>
       )}
 
-      <Toggle label={`Prova del motore: lo sconto esce ${LEARNING.THOMPSON_ARM_PTS} punti sotto, uguale o ${LEARNING.THOMPSON_ARM_PTS} punti sopra la tabella, scelto a sorte dal motore e sempre segnalato`} value={exploration} onChange={(v) => { if (!learning.busy) learning.setExploration(v) }} />
-      <Body muted small>La quota di ogni variante segue quel che il motore ha imparato dai tuoi esiti (la propensione finisce nel report). Puoi sempre scegliere «Usa il piano migliore».</Body>
       <Button label={busy || learning.busy ? 'Preparo l\'Excel…' : 'Esporta adesso il mese in corso'} variant="secondary" small onPress={exportNow} disabled={busy || learning.busy} />
       <Body muted small>Per imparare servono gli esiti: segna «Inviata» quando mandi l'offerta e poi com'è andata, anche «Venduto ad altri» o «Lasciato perdere».</Body>
     </Card>

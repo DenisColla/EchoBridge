@@ -61,7 +61,7 @@ export function DataForm({ form, errors = {}, onChange, onSubmit, onReset, hasRe
           <Field label="Prezzo in annuncio" value={form.listPrice} onChangeText={(v) => onChange('listPrice', v)} placeholder="60" keyboardType="decimal-pad" suffix="€" error={errors.listPrice} />
         </View>
         <View style={styles.half}>
-          <Field label="La tua offerta" value={form.targetPrice} onChangeText={(v) => onChange('targetPrice', v)} placeholder="45" keyboardType="decimal-pad" suffix="€" error={errors.targetPrice} />
+          <Field label="La tua offerta" hint="(facoltativa)" value={form.targetPrice} onChangeText={(v) => onChange('targetPrice', v)} placeholder="45" keyboardType="decimal-pad" suffix="€" error={errors.targetPrice} />
         </View>
       </Row>
 

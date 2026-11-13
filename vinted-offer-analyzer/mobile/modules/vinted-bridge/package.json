@@ -1,0 +1,7 @@
+{
+  "name": "vinted-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Android module: reads Vinted's notifications (read-only) and receives links shared from Vinted",
+  "main": "index.js"
+}

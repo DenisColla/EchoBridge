@@ -4,8 +4,8 @@ import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as core from './core/index.js'
 import {
-  MONTHS_IT, analyzeOffer, buildFormFromExtraction, explorationKey, explorationPlan, failureRiskFor, formatEuro, leversFor, monthKeyOf,
-  nextGoalFor, optimizeOffer, parsePrice, parseVintedItemHtml, policyDiscountFor, quickDiscountsFor,
+  MONTHS_IT, buildFormFromExtraction, explorationKey, failureRiskFor, formatEuro, leversFor, monthKeyOf,
+  nextGoalFor, optimizeOffer, parsePrice, parseVintedItemHtml, policyDiscountFor, quickDiscountsFor, strategyFor, strategySnapshot, wardrobeFromProbe,
 } from './core/index.js'
 import { EMPTY_FORM } from './src/components/formDefaults.js'
 import { LinkEntry } from './src/components/LinkEntry.js'
@@ -22,6 +22,8 @@ import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
 import { useSearch } from './src/hooks/useSearch.js'
 import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
+import { useVintedBridge } from './src/hooks/useVintedBridge.js'
+import { VintedNotices } from './src/components/VintedNotices.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { recordRead } from './src/services/readStats.js'
@@ -117,6 +119,11 @@ function Main() {
   const [form, setForm] = useState(EMPTY_FORM)
   const [errors, setErrors] = useState({})
   const [result, setResult] = useState(null)
+  // 1.8: the seller profile, the three proposals and the moves; `result` is the analysis of the chosen proposal.
+  const [strategy, setStrategy] = useState(null)
+  // What the link read knows beyond the form (raw extraction, the seller's wardrobe), and how the price was picked.
+  const contextRef = useRef(null)
+  const choiceRef = useRef({ kind: 'auto' })
   const [saveState, setSaveState] = useState(null)
   const [goal, setGoal] = useState(0.7)
   const [plan, setPlan] = useState(null)
@@ -152,7 +159,6 @@ function Main() {
   const learning = useLearning({ items: watchlist.allItems, ready: watchlist.ready })
   const lab = useLab({ folderUri: learning.folder ? learning.folder.uri : null })
   const search = useSearch()
-  const skipExploreRef = useRef(new Set())
   const now = useMemo(() => new Date(), [tab, result]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toastTimer = useRef(null)
@@ -265,36 +271,49 @@ function Main() {
    * The engine's test (Thompson arms on the discount, or the older flagged variation) is the same one every time the
    * offer is re-analysed this month: key and month seed it.
    */
-  const runAnalysis = (nextForm, preferredSendAt, { explore = false } = {}) => {
+  /** The price the form asks for, as a choice: one of the proposals on screen, the user's own figure, or the engine's. */
+  const choiceFromForm = (f) => {
+    const typed = parsePrice(f.targetPrice)
+    if (!Number.isFinite(typed) || typed <= 0) return { kind: 'auto' }
+    const same = strategy && strategy.options ? strategy.options.find((o) => Math.abs(o.price - typed) < 0.005 && o.id !== 'tua') : null
+    return same ? { kind: 'option', id: same.id } : { kind: 'custom', price: typed }
+  }
+
+  /**
+   * The best-price strategy for the form: seller profile, three proposals, moment and moves (core strategyFor); the
+   * analysis shown is the one of the chosen proposal. `choice` says how the price is picked (default: as last time).
+   */
+  const runAnalysis = (nextForm, preferredSendAt, { choice = null } = {}) => {
     const at = new Date()
     const mk = marketInfoFor(nextForm)
     const key = explorationKey(nextForm)
     const month = monthKeyOf(at)
-    // The saved offers feed gate rule 7 (no re-offer on a listing refused within 14 days); key and month seed the
-    // message-first draw and the exploration arm, so the same listing gets the same assignment all month.
-    const options = engineOptions({ ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}), records: watchlist.allItems, key, month })
-    // Demand signals of the page and of the search results ride on the form, like the profile: the exploration arms
-    // are scored on the same input, so their cost is measured against the same base.
+    const linkOf = (f) => normalizeVintedLink(f && f.link) || (f && f.link) || ''
+    const ctx = contextRef.current && contextRef.current.link && contextRef.current.link === linkOf(nextForm) ? contextRef.current : null
+    const pick = choice || choiceRef.current || { kind: 'auto' }
     const scored = withSignals(nextForm, mk)
-    let outcome = analyzeOffer(scored, at, options)
-    if (outcome.ok && explore && learning.exploration && !skipExploreRef.current.has(key)) {
-      const thompson = coreFn('thompsonArm')
-      const budgetOf = coreFn('explorationBudget')
-      const varied = thompson
-        ? thompson(scored, outcome, at, { key, month, options, enabled: true, profile: learning.engineProfile, records: learning.records })
-        : explorationPlan(scored, outcome, at, { key, month, options, ...(budgetOf ? { budget: budgetOf(watchlist.allItems, month) } : {}) })
-      if (varied && varied.result) outcome = varied.result
-    }
-    if (!outcome.ok) {
-      setErrors(outcome.errors)
+    const strat = strategyFor(scored, at, engineOptions({
+      ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}), records: watchlist.allItems, key, month,
+      extraction: ctx ? ctx.extraction : null, wardrobe: ctx ? ctx.wardrobe : null,
+      ...(pick.kind === 'option' ? { chosen: pick.id } : pick.kind === 'custom' ? { customPrice: pick.price } : {}),
+    }))
+    if (!strat.ok) {
+      setErrors(strat.errors || {})
       setResult(null)
+      setStrategy(null)
       // The fields to fix are inside the fold: open it and go there.
       openDataForm()
       return null
     }
+    const outcome = strat.result
+    choiceRef.current = pick
     setErrors({})
+    setStrategy(strat)
     setResult(outcome)
     setSaveState(null)
+    // The form follows the proposal on screen, so «Dati dell'offerta» and the saved item carry the analysed price.
+    const chosen = strat.options.find((o) => o.id === strat.chosenId)
+    if (chosen && parsePrice(nextForm.targetPrice) !== chosen.price) setForm((f) => (linkOf(f) === linkOf(nextForm) ? { ...f, targetPrice: String(chosen.price).replace('.', ',') } : f))
     if (outcome.kind !== 'no_offer_needed') setGoal(nextGoalFor(outcome.probability, outcome.maxProbability))
     setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: 0, animated: true }), 50)
     return outcome
@@ -303,19 +322,18 @@ function Main() {
   const analyze = () => {
     setPlan(null)
     setPinnedSendAt(null)
-    runAnalysis(form, null, { explore: true })
+    runAnalysis(form, null, { choice: choiceFromForm(form) })
   }
 
-  /** «Usa il piano migliore»: this offer skips its test variation (until the app restarts). */
+  /** Kept for older result views: re-runs the plain strategy. */
   const skipExploration = () => {
-    skipExploreRef.current.add(explorationKey(form))
     setPlan(null)
     setPinnedSendAt(null)
     runAnalysis(form, null)
   }
 
   /** Re-runs the analysis keeping the moment chosen through the optimizer or «Scegli» (used after edits). */
-  const recalcKeepingPin = () => runAnalysis(form, pinnedSendAt)
+  const recalcKeepingPin = () => runAnalysis(form, pinnedSendAt, { choice: choiceFromForm(form) })
 
   /** «Scegli» on another moment: the analysis re-runs pinned to it (the hero then says «Orario scelto da te»). */
   const pickMoment = (date) => {
@@ -351,8 +369,17 @@ function Main() {
     setForm(nextForm)
     setPlan(null)
     setPinnedSendAt(null)
-    const outcome = runAnalysis(nextForm, null)
+    const outcome = runAnalysis(nextForm, null, { choice: choiceFromForm(nextForm) })
     if (outcome) showToast(`Offerta impostata a ${formatEuro(price)}.`)
+  }
+
+  /** A tap on one of the three proposals (or on «La tua cifra»): the analysis follows it, the moment stays. */
+  const pickProposal = (option) => {
+    if (!option) return
+    const nextForm = { ...form, targetPrice: String(option.price).replace('.', ',') }
+    setForm(nextForm)
+    setPlan(null)
+    runAnalysis(nextForm, pinnedSendAt, { choice: option.id === 'tua' ? { kind: 'custom', price: option.price } : { kind: 'option', id: option.id } })
   }
 
   /** A lever with a reminder («metti nei preferiti e aspetta», «aspetta 7 giorni»): one notification, no item in the list. */
@@ -384,6 +411,9 @@ function Main() {
     setForm(EMPTY_FORM)
     setErrors({})
     setResult(null)
+    setStrategy(null)
+    contextRef.current = null
+    choiceRef.current = { kind: 'auto' }
     setSaveState(null)
     setPlan(null)
     setPinnedSendAt(null)
@@ -438,20 +468,47 @@ function Main() {
         setExtraction({ ok: false, message: EXTRACT_ERRORS.empty })
         return
       }
-      // The ask comes from the price-band policy (band × age, modifiers, learned shift) with this listing's market and
-      // demand signals when «Cerca altrove» has them; the learned default discount stays as the policy's fallback.
+      // 1.8: the seller's wardrobe, for the profile (facile / medio / difficile). Its link is only in the live page, so
+      // a listing that came from the quick download is opened once in the in-app browser to find it. Read-only; when
+      // anything fails the profile is built from the listing alone.
+      let wardrobe = null
+      let memberRaw = null
+      if (pageLoaderRef.current) {
+        let details = page.via === 'browser' ? page.details || null : null
+        if (!(details && details.sellerUrl) && page.via !== 'browser') {
+          setExtractPhase('browser')
+          const live = await pageLoaderRef.current.load(link, { onVisible: () => setExtractPhase('verify') })
+          if (live.ok && live.details) {
+            details = live.details
+            const fuller = parseVintedItemHtml(live.html || page.html, live.details)
+            if (fuller && (fuller.title || fuller.listPrice)) ex = fuller
+          }
+        }
+        if (details && typeof details.sellerUrl === 'string' && /\/member\/\d+/.test(details.sellerUrl)) {
+          setExtractPhase('seller')
+          const member = await pageLoaderRef.current.load(details.sellerUrl, { onVisible: () => setExtractPhase('verify') })
+          if (member.ok && member.details && member.details.kind === 'member') {
+            memberRaw = member.details
+            wardrobe = wardrobeFromProbe(member.details)
+          }
+        }
+        setExtractPhase(null)
+      }
+      contextRef.current = { link, extraction: ex, wardrobe, memberRaw }
+      choiceRef.current = { kind: 'auto' }
+      // The form starts from the listing; the price is then the strategy's recommended proposal (runAnalysis sets it).
       const mk = marketInfoFor({ link })
       const built = buildFormFromExtraction(ex, {
-        link, policy: true, profile: learning.engineProfile, market: mk ? mk.market : null, signals: mk ? mk.signals : null,
+        link, policy: false, profile: learning.engineProfile, market: mk ? mk.market : null, signals: mk ? mk.signals : null,
         targetDiscountPct: legacyDefaultDiscount(learning.profile), previousForm: { ...EMPTY_FORM, link },
       })
       setForm(built.form)
       setPlan(null)
       setPinnedSendAt(null)
-      const outcome = runAnalysis(built.form, null, { explore: true })
+      const outcome = runAnalysis(built.form, null, { choice: { kind: 'auto' } })
       // `raw` is the parser's output as read (kept with the saved item, engine-spec §6); `via` tells the two paths apart.
       const via = page.via === 'browser' ? 'browser' : 'fetch'
-      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via })
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw })
       recordRead(ex, { via }) // per-field read counters for Info; never blocks the analysis
       const idMatch = String(link).match(/\/items\/(\d+)/)
       setLastListing({
@@ -469,6 +526,29 @@ function Main() {
   }
 
   useEffect(() => { extractRef.current = extractFromLink })
+
+  // Vinted ↔ app (1.8): Vinted's notifications update the saved offers, and a listing shared from Vinted is read at once.
+  const listRef = useRef([])
+  useEffect(() => { listRef.current = watchlist.items }, [watchlist.items])
+  const vinted = useVintedBridge({
+    ready: watchlist.ready,
+    itemsRef: listRef,
+    setStatus: watchlist.setStatus,
+    onToast: (m) => showToast(m, 4000),
+    onSharedLink: (text) => {
+      const url = (String(text || '').match(/https?:\/\/\S+/) || [])[0]
+      const link = url ? normalizeVintedLink(url) : null
+      if (!link) {
+        showToast('Il contenuto condiviso non è un annuncio Vinted.', 4000)
+        return
+      }
+      setCounterContext(null)
+      setLabOpen(false)
+      setSearchOpen(false)
+      setTab('calcola')
+      if (extractRef.current) extractRef.current(link)
+    },
+  })
 
   const pasteLink = async () => {
     const link = await readVintedLinkFromClipboard()
@@ -517,16 +597,12 @@ function Main() {
   const savePayload = () => {
     const mk = marketInfoFor(form)
     const raw = extraction && extraction.ok && extraction.raw && extraction.link === normalizeVintedLink(form.link) ? extraction.raw : null
-    // userOverride (engine-spec §4): the ask the user typed when it is not the policy's suggestion (its target, or the
-    // list price when it said not to offer). The typed price, not the analysed one: an arm the engine varied is its
-    // own test, not the user's choice.
-    const typed = parsePrice(form.targetPrice)
-    const asked = Number.isFinite(typed) ? typed : result.input.targetPrice
-    const suggested = form.policy ? (form.policy.kind === 'no_offer' ? result.input.listPrice : form.policy.targetPrice) : null
-    const userOverride = Number.isFinite(suggested) && Math.abs(asked - suggested) > 0.004 ? asked : null
+    // userOverride: the figure the user typed in place of the three proposals («La tua cifra»).
+    const userOverride = strategy && strategy.chosenId === 'tua' ? result.input.targetPrice : null
     return {
       result, link: form.link, form: withSignals(form, mk), profile: learning.engineProfile, userOverride,
       market: mk ? mk.market : null, extraction: raw, policy: form.policy || null, gate: result.gate || null, messagePolicy: result.messagePolicy || null,
+      strategy: strategySnapshot(strategy), sellerName: raw && raw.sellerUsername ? raw.sellerUsername : null,
     }
   }
 
@@ -686,12 +762,12 @@ function Main() {
     return () => sub.remove()
   }, [searchOpen, labOpen])
 
-  const openCounterFromItem = (item) => {
+  const openCounterFromItem = (item, prefillCounter = null) => {
     const fallbackForm = {
       itemTitle: item.title || '', category: item.category || '', listPrice: String(item.listPrice ?? '').replace('.', ','),
       targetPrice: String(item.targetPrice ?? '').replace('.', ','), listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', link: item.link || '',
     }
-    setCounterContext({ key: `${item.id}-${Date.now()}`, source: 'item', itemId: item.id, form: item.form || fallbackForm, history: item.negotiation || [], offerSentAt: item.sentAt || null, link: item.link || '' })
+    setCounterContext({ key: `${item.id}-${Date.now()}`, source: 'item', itemId: item.id, form: item.form || fallbackForm, history: item.negotiation || [], offerSentAt: item.sentAt || null, link: item.link || '', prefillCounter: Number.isFinite(prefillCounter) ? prefillCounter : null })
     scrollTop()
   }
 
@@ -837,6 +913,8 @@ function Main() {
                   onCounter={openCounterFromAnalysis}
                   onSkipExploration={result.exploration ? skipExploration : null}
                   onApplyPrice={applyPrice}
+                  strategy={strategy}
+                  onPickProposal={pickProposal}
                   onLever={scheduleLever}
                   onCopyMessage={noteMessageCopied}
                   link={form.link}
@@ -872,6 +950,7 @@ function Main() {
               )}
             </View>
           )}
+          {!counterContext && !labOpen && !searchOpen && tab === 'lista' && <VintedNotices bridge={vinted} items={watchlist.items} onCounter={openCounterFromItem} onReanalyze={reanalyzeItem} onGoCalcola={() => setTab('calcola')} />}
           {!counterContext && !labOpen && !searchOpen && tab === 'lista' && (
             <WatchlistView
               items={watchlist.items}
@@ -892,7 +971,7 @@ function Main() {
               scrollRef={scrollRef}
             />
           )}
-          {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} onRestore={watchlist.restoreItems} />}
+          {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} onRestore={watchlist.restoreItems} vinted={vinted} />}
           {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} onCollectingChange={onCollectingChange} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
       </KeyboardAvoidingView>

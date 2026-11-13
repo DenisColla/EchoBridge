@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { Text, View } from 'react-native'
 import { articleFor } from '../../core/index.js'
 import { space } from '../theme.js'
-import { Button, Note } from './ui.js'
+import { Button, Note, Collapsible } from './ui.js'
+import { StrategyHero } from './result/StrategyHero.js'
 import { DecisionHero } from './result/DecisionHero.js'
 import { MessageSection } from './result/MessageSection.js'
 import { WhySection } from './result/WhySection.js'
@@ -18,7 +19,7 @@ import { SourceSection } from './result/SourceSection.js'
 export function ResultView({
   result, risk = null, levers = [], curve = null, extraction = null, marketInfo = null, policy = null, saveState = null, calendarBusy = false, now = null,
   goal, onGoal, plan = null, optimizing = false, onOptimize, onApply,
-  onSave, onSaveAndMarkSent, onCalendar, onCounter, onSkipExploration = null, onApplyPrice = null, onLever = null, onPickMoment = null, link = null, onCopyMessage = null,
+  onSave, onSaveAndMarkSent, onCalendar, onCounter, onSkipExploration = null, onApplyPrice = null, onLever = null, onPickMoment = null, link = null, onCopyMessage = null, strategy = null, onPickProposal = null,
   onOpenSearch = null, searchJob = null, onRecalc = null, onEditData, onReset, dataFold = null,
 }) {
   // Controlled so the hero's «Vedi mercato» can open the price fold.
@@ -44,54 +45,60 @@ export function ResultView({
           {result.message}{'\n'}{result.capAdvice.map((a) => `• ${a}`).join('\n')}
         </Note>
       )}
-      <DecisionHero
-        result={result}
-        levers={levers}
-        curve={curve}
-        risk={risk}
-        policy={policy}
-        saveState={saveState}
-        calendarBusy={calendarBusy}
-        now={now}
-        onEdit={onEditData}
-        onSave={onSave}
-        onSaveAndMarkSent={onSaveAndMarkSent}
-        onCalendar={onCalendar}
-        onCounter={onCounter}
-        onApplyPrice={onApplyPrice}
-        onSkipExploration={onSkipExploration}
-        link={link}
-        onCopyMessage={onCopyMessage}
-        onOpenPrice={() => setPriceOpen(true)}
-      />
+      {strategy ? (
+        <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPickProposal} onEdit={onEditData} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} />
+      ) : (
+        <DecisionHero
+          result={result}
+          levers={levers}
+          curve={curve}
+          risk={risk}
+          policy={policy}
+          saveState={saveState}
+          calendarBusy={calendarBusy}
+          now={now}
+          onEdit={onEditData}
+          onSave={onSave}
+          onSaveAndMarkSent={onSaveAndMarkSent}
+          onCalendar={onCalendar}
+          onCounter={onCounter}
+          onApplyPrice={onApplyPrice}
+          onSkipExploration={onSkipExploration}
+          link={link}
+          onCopyMessage={onCopyMessage}
+          onOpenPrice={() => setPriceOpen(true)}
+        />
+      )}
       {marketLater && (
         <View style={{ gap: space.sm }}>
           <Note tone="warn">Mercato trovato dopo il calcolo: i numeri non lo usano.</Note>
           {onRecalc ? <Button label="Ricalcola con il mercato" small variant="secondary" onPress={onRecalc} /> : null}
         </View>
       )}
-      <MessageSection key={result.now.getTime()} result={result} />
-      <WhySection result={result} risk={risk} policy={policy} />
-      <MomentsSection result={result} onPickMoment={onPickMoment} />
-      <PriceSection
-        result={result}
-        curve={curve}
-        marketInfo={marketInfo}
-        levers={levers}
-        goal={goal}
-        onGoal={onGoal}
-        plan={plan}
-        onOptimize={onOptimize}
-        onApply={onApply}
-        optimizing={optimizing}
-        onLever={onLever}
-        onOpenSearch={onOpenSearch}
-        searchJob={searchJob}
-        onRecalc={onRecalc}
-        open={priceOpen}
-        onToggle={setPriceOpen}
-      />
-      {extraction && extraction.ok ? <SourceSection extraction={extraction} onEdit={onEditData} /> : null}
+      <Collapsible title="Dettagli" summary="Messaggio, perché questo numero, altri momenti, mercato">
+        <MessageSection key={result.now.getTime()} result={result} />
+        <WhySection result={result} risk={risk} policy={policy} />
+        <MomentsSection result={result} onPickMoment={onPickMoment} />
+        <PriceSection
+          result={result}
+          curve={curve}
+          marketInfo={marketInfo}
+          levers={levers}
+          goal={goal}
+          onGoal={onGoal}
+          plan={plan}
+          onOptimize={onOptimize}
+          onApply={onApply}
+          optimizing={optimizing}
+          onLever={onLever}
+          onOpenSearch={onOpenSearch}
+          searchJob={searchJob}
+          onRecalc={onRecalc}
+          open={priceOpen}
+          onToggle={setPriceOpen}
+        />
+        {extraction && extraction.ok ? <SourceSection extraction={extraction} onEdit={onEditData} /> : null}
+      </Collapsible>
       {dataFold}
       <Button label="Nuova analisi" variant="ghost" onPress={onReset} />
     </View>

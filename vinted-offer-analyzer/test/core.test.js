@@ -22,7 +22,7 @@ const WEDNESDAY_LUNCH = new Date(2026, 9, 7, 13, 0)
 const base = { category: 'sneakers', listPrice: '100', targetPrice: '80', listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none' }
 
 test('enum ids match the spec', () => {
-  assert.deepEqual(CATEGORIES.map((c) => c.id), ['sneakers', 'fast_fashion', 'collectible', 'electronics', 'kids', 'luxury', 'other'])
+  assert.deepEqual(CATEGORIES.map((c) => c.id), ['sneakers', 'fast_fashion', 'collectible', 'electronics', 'kids', 'luxury', 'books', 'other'])
   assert.deepEqual(LISTING_AGES.map((a) => a.id), ['unknown', 'today', 'days_2_6', 'weeks_1_2', 'weeks_2_4', 'over_month'])
   assert.deepEqual(SELLER_PROFILES.map((s) => s.id), ['unknown', 'new_seller', 'expert', 'quiet', 'inactive'])
   assert.equal(SELLER_PROFILES.find((s) => s.id === 'quiet').label, 'Poco attivo')

@@ -239,9 +239,9 @@ function buildAnalysis(input, now, options = {}) {
   const uncertainty = uncertaintyFor(input)
   // The gate (ten ordered rules), the tier (on the corrected probability) and the message policy come before the
   // verdict: the headline leads with the gate whenever it says anything but «offer».
-  const gate = decisionGate(input, moments, { records: options.records || null, now, link: input.link || null })
+  const gate = decisionGate(input, moments, { records: options.records || null, now, link: input.link || null, advisory: Boolean(options.bestPrice) })
   const tier = offerTierFor(chosen.pOverall)
-  const messagePolicy = messagePolicyFor(input, gate, input.signals || null, { tier, key: options.key || null, month: options.month || null, otherItem: options.otherItem || null })
+  const messagePolicy = messagePolicyFor(input, gate, input.signals || null, { tier, key: options.key || null, month: options.month || null, otherItem: options.otherItem || null, sellerType: options.sellerType || null })
   const messageBeforeOffer = messagePolicy.assigned === 'message_first'
   const verdict = buildVerdict(chosen, sendNow, now, moments.best, { gate })
   const twoStep = twoStepFor(input, chosen)
@@ -336,13 +336,15 @@ export function analyzeOffer(raw, now = new Date(), options = {}) {
   if (input.discountPct <= 0) {
     return noOfferNeeded(input, now, 'Il prezzo che vorresti pagare è pari o superiore al prezzo di listino: compra direttamente, non serve nessuna offerta.', options)
   }
-  if (input.discountPct < MIN_MEANINGFUL_DISCOUNT_PCT || input.listPrice - input.targetPrice < MIN_MEANINGFUL_GAP_EUR) {
+  // Best-price strategy: any saving of half a euro is worth an offer (a refusal costs nothing).
+  const minGap = options.bestPrice ? 0.5 : MIN_MEANINGFUL_GAP_EUR
+  if (input.discountPct < MIN_MEANINGFUL_DISCOUNT_PCT || input.listPrice - input.targetPrice < minGap) {
     return noOfferNeeded(input, now, `Risparmieresti solo ${formatEuro(input.listPrice - input.targetPrice)}: compra a prezzo pieno, oppure chiedi la spedizione inclusa o un lotto con un altro articolo. Un'offerta così piccola non vale lo scambio.`, options)
   }
 
   if (input.discountPct > VINTED.MAX_DISCOUNT_PCT) {
     const cappedPrice = Math.ceil(input.listPrice * (1 - VINTED.MAX_DISCOUNT_PCT / 100) * 100) / 100
-    if (input.listPrice - cappedPrice < MIN_MEANINGFUL_GAP_EUR) {
+    if (input.listPrice - cappedPrice < minGap) {
       return noOfferNeeded(input, now, 'Su un prezzo così basso non esiste un\'offerta inviabile: compra direttamente.', options)
     }
     const capped = withPrices(input, input.listPrice, cappedPrice)

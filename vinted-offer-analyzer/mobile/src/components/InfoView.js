@@ -129,7 +129,7 @@ function CalendarSection() {
 }
 
 /** Info tab, outcomes first: how well the estimates match reality, then the engine's learning, reminders, calendar, tools and the explanations. */
-export function InfoView({ stats, items, learning = null, onToast = () => {}, onOpenLab = null, onOpenSearch = null, onRestore = null }) {
+export function InfoView({ stats, items, learning = null, onToast = () => {}, onOpenLab = null, onOpenSearch = null, onRestore = null, vinted = null }) {
   const [status, setStatus] = useState('undetermined')
   const [reads, setReads] = useState(null)
   useEffect(() => {
@@ -197,6 +197,28 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
           <Title>Scegli il modello AI con un test reale</Title>
           <Body muted small>Confronta i modelli disponibili su annunci veri: riconoscere lo stesso prodotto dalle foto e spiegare come trattare. Ti servono le chiavi dei fornitori; testi e foto degli annunci vanno a loro.</Body>
           <Button label="Apri il laboratorio" onPress={onOpenLab} />
+        </Card>
+      ) : null}
+
+      {vinted && vinted.available ? (
+        <Card>
+          <SectionLabel>Collegamento con Vinted</SectionLabel>
+          <Title>{vinted.enabled ? 'Le notifiche di Vinted aggiornano la Lista' : 'Fai aggiornare la Lista dalle notifiche di Vinted'}</Title>
+          <Body muted small>
+            {vinted.enabled
+              ? 'Quando Vinted ti avvisa di un\'offerta accettata, rifiutata o di una controproposta, l\'app collega la notifica all\'offerta in Lista. Legge solo le notifiche di Vinted, sul telefono, e non fa nulla dentro Vinted.'
+              : 'Serve l\'«accesso alle notifiche». Su un\'app installata a mano Android chiede prima un passo: Impostazioni › App › Offerta Vinted Timing › menu ⋮ › «Consenti impostazioni con restrizioni». Poi attiva l\'accesso qui sotto.'}
+          </Body>
+          <Row>
+            {vinted.enabled ? null : <Button label="Attiva l'accesso alle notifiche" small onPress={() => vinted.openSettings()} />}
+            {vinted.enabled ? null : <Button label="Apri le impostazioni dell'app" variant="secondary" small onPress={() => vinted.openAppSettings()} />}
+            <Button label="Aggiorna adesso" variant="ghost" small onPress={() => vinted.refresh()} />
+          </Row>
+          <Body muted small>
+            {vinted.log.length ? `Ultime notifiche lette: ${vinted.log.length}. La più recente: «${(vinted.log[vinted.log.length - 1].text || vinted.log[vinted.log.length - 1].title || '').slice(0, 90)}».` : 'Nessuna notifica di Vinted letta finora.'}
+          </Body>
+          {vinted.log.length ? <Button label="Condividi il registro delle notifiche" variant="ghost" small onPress={() => Share.share({ title: 'Notifiche Vinted lette', message: vinted.logText() }).catch(() => {})} /> : null}
+          <Body muted small>Dal menu «Condividi» di un annuncio Vinted puoi anche scegliere questa app: l'analisi parte da sola.</Body>
         </Card>
       ) : null}
 

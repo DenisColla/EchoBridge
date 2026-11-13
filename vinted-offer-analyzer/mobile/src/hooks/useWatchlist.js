@@ -259,7 +259,7 @@ export function useWatchlist() {
    * the discount policy that proposed the ask, the gate and the message policy. Every one of them may be absent.
    * `userOverride`: the price the user typed in place of the suggested one (null when the suggestion was kept).
    */
-  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null, market = null, extraction = null, policy = null, gate = null, messagePolicy = null }) => {
+  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null, market = null, extraction = null, policy = null, gate = null, messagePolicy = null, strategy = null, sellerName = null }) => {
     const { input, optimal, probability, messages, recommendedTone } = result
     const message = (messages.find((m) => m.tone === recommendedTone) || messages[0]).text
     const now = new Date()
@@ -330,6 +330,10 @@ export function useWatchlist() {
       events: [{ at: now.toISOString(), type: 'saved', price: input.targetPrice, recommendedAt: optimal.date.toISOString(), probability, exploration: result.exploration ? result.exploration.arm : null, gate: gateLog ? gateLog.kind : null }],
       ...LOG_FIELDS,
       userOverride: userOverride ?? null,
+      // 1.8: seller type, traits and the proposal taken, for the per-type learning.
+      strategy: strategy && typeof strategy === 'object' ? strategy : null,
+      // The seller's name as the listing shows it: kept on the phone only, to match Vinted's notifications to this offer.
+      sellerName: typeof sellerName === 'string' && sellerName.trim() ? sellerName.trim().slice(0, 60) : null,
     }
     // The same listing saved again before sending replaces the old plan: one negotiation, one item in the data.
     const sameLink = item.link ? itemsRef.current.filter((it) => it.link === item.link && it.status === 'planned' && !it.sentAt) : []
@@ -688,5 +692,16 @@ export function useWatchlist() {
     }
   }, [items, archive])
 
-  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, markReplied, restoreItems, update, setStatus, remove, stats }
+  /** One case per listing: a purchase closes every other open plan on the same listing («Lasciato perdere»). */
+  const setStatusMerged = useCallback(async (id, status) => {
+    await setStatus(id, status)
+    if (status !== 'accepted' && status !== 'bought') return
+    const me = itemsRef.current.find((it) => it.id === id)
+    const listing = me ? linkIdOf(me.link) : null
+    if (!listing) return
+    const others = itemsRef.current.filter((it) => it.id !== id && linkIdOf(it.link) === listing && ['planned', 'sent', 'countered'].includes(it.status))
+    for (const other of others) await setStatus(other.id, 'abandoned')
+  }, [setStatus])
+
+  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, markReplied, restoreItems, update, setStatus: setStatusMerged, remove, stats }
 }
