@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyVintedNotification, matchVintedEvent, planVintedEvent, vintedEventKey } from '../mobile/src/services/vintedEvents.js'
+import { classifyVintedNotification, matchVintedEvent, planVintedEvent, vintedEventKey, vintedPriceOf, vintedSellerOf } from '../mobile/src/services/vintedEvents.js'
 
 const NOW = new Date('2026-11-10T10:00:00Z')
 const item = (over = {}) => ({ id: 'a', title: 'Will Eisner - Verso la tempesta', listPrice: 15, targetPrice: 12.5, status: 'sent', sentAt: '2026-11-09T20:00:00Z', negotiation: [{ by: 'buyer', price: 12.5 }], sellerName: 'mario_rossi', ...over })
@@ -43,4 +43,27 @@ test('vinted notifications: matched to the right saved offer, automatic only whe
   assert.equal(planVintedEvent({ title: 'Vinted', text: '3 nuove notifiche', summary: true }, items, NOW).action, 'ignore')
   assert.equal(planVintedEvent({ title: 'anna', text: 'ha accettato la tua offerta per Pyongyang' }, items, NOW).action, 'unmatched')
   assert.notEqual(vintedEventKey({ key: 'a', at: 1, text: 'x' }), vintedEventKey({ key: 'a', at: 2, text: 'x' }))
+})
+
+test('vinted notifications: the real format (title = seller, «€12.60» with the symbol first)', () => {
+  const real = { key: 'r1', at: 10, title: 'misterbeppe', text: 'misterbeppe ha accettato la tua offerta di €12.60' }
+  const cls = classifyVintedNotification(real)
+  assert.deepEqual([cls.kind, cls.price], ['accepted', 12.6])
+  assert.equal(vintedSellerOf(real), 'misterbeppe')
+  assert.equal(vintedSellerOf({ title: 'Vinted', text: 'Vinted ti dà il benvenuto' }), null)
+  assert.equal(vintedPriceOf('offerta di €12.60'), 12.6)
+  assert.equal(vintedPriceOf('12,60 €'), 12.6)
+  assert.equal(vintedPriceOf('€1.250,00'), 1250)
+  assert.equal(vintedPriceOf('€ 335'), 335)
+  assert.equal(vintedPriceOf('nessuna cifra'), null)
+  // Saved before the app knew the seller's name: the exact figure of the only offer at that price is enough.
+  const offers = [item({ id: 'x', title: 'Fumetto qualsiasi', listPrice: 14, targetPrice: 12.6, negotiation: [{ by: 'buyer', price: 12.6 }], sellerName: null }), item({ id: 'y', title: 'Altro', negotiation: [{ by: 'buyer', price: 12.5 }], sellerName: null })]
+  const plan = planVintedEvent(real, offers, NOW)
+  assert.deepEqual([plan.action, plan.status, plan.itemId, plan.seller], ['auto', 'accepted', 'x', 'misterbeppe'])
+  // Two open offers at the same figure and no name: a question, never a guess.
+  const twins = [offers[0], item({ id: 'z', title: 'Gemello', targetPrice: 12.6, negotiation: [{ by: 'buyer', price: 12.6 }], sellerName: null })]
+  assert.equal(planVintedEvent(real, twins, NOW).action, 'ask')
+  // Once the name is known it decides, even among twins.
+  const named = [{ ...twins[0], sellerName: 'misterbeppe' }, twins[1]]
+  assert.deepEqual([planVintedEvent(real, named, NOW).action, planVintedEvent(real, named, NOW).itemId], ['auto', 'x'])
 })

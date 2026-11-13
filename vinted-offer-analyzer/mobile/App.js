@@ -534,6 +534,7 @@ function Main() {
     ready: watchlist.ready,
     itemsRef: listRef,
     setStatus: watchlist.setStatus,
+    setSellerName: (id, name) => watchlist.update(id, { sellerName: name }),
     onToast: (m) => showToast(m, 4000),
     onSharedLink: (text) => {
       const url = (String(text || '').match(/https?:\/\/\S+/) || [])[0]

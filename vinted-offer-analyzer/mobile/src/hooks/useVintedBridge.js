@@ -15,7 +15,7 @@ const EMPTY = { seen: [], log: [], notices: [] }
  * every doubtful one a question. Also hands over the links shared from Vinted. `setStatus(id, status)` is the
  * watchlist's; `itemsRef` its live list.
  */
-export function useVintedBridge({ ready, itemsRef, setStatus, onSharedLink, onToast }) {
+export function useVintedBridge({ ready, itemsRef, setStatus, setSellerName = null, onSharedLink, onToast }) {
   const [enabled, setEnabled] = useState(false)
   const [state, setState] = useState(EMPTY)
   const stateRef = useRef(EMPTY)
@@ -61,13 +61,15 @@ export function useVintedBridge({ ready, itemsRef, setStatus, onSharedLink, onTo
         const entry = { key, at: ev.at, title: ev.title || '', text: ev.bigText || ev.text || '', kind: plan.kind, action: plan.action, itemId: plan.itemId, price: plan.price }
         log.push(entry)
         if (plan.action === 'ignore') continue
-        const notice = { id: key, at: ev.at, kind: plan.kind, action: plan.action, itemId: plan.itemId, itemTitle: plan.title, status: plan.status, price: plan.price, text: entry.text.slice(0, 160), previous: null }
+        const notice = { id: key, at: ev.at, kind: plan.kind, action: plan.action, itemId: plan.itemId, itemTitle: plan.title, status: plan.status, price: plan.price, text: entry.text.slice(0, 160), previous: null, seller: plan.seller || null }
         if (plan.action === 'auto') {
           const item = (itemsRef.current || []).find((it) => it.id === plan.itemId)
           notice.previous = item ? item.status : null
           try {
             await setStatus(plan.itemId, plan.status)
             applied += 1
+            // The name in the notification's title now identifies this negotiation for the next ones.
+            if (plan.seller && setSellerName && item && !item.sellerName) await setSellerName(plan.itemId, plan.seller)
           } catch {
             notice.action = 'ask'
           }
@@ -82,7 +84,7 @@ export function useVintedBridge({ ready, itemsRef, setStatus, onSharedLink, onTo
     } finally {
       busyRef.current = false
     }
-  }, [ready, itemsRef, setStatus, persist, onToast])
+  }, [ready, itemsRef, setStatus, setSellerName, persist, onToast])
 
   // Shared links: the one that opened the app, then every later «Condividi».
   const sharedRef = useRef(onSharedLink)
@@ -117,8 +119,9 @@ export function useVintedBridge({ ready, itemsRef, setStatus, onSharedLink, onTo
   /** «Sì» on a doubtful match: apply it now. */
   const confirm = useCallback(async (notice) => {
     if (notice && notice.itemId && notice.status) await setStatus(notice.itemId, notice.status)
+    if (notice && notice.itemId && notice.seller && setSellerName) await setSellerName(notice.itemId, notice.seller)
     await dropNotice(notice.id)
-  }, [setStatus, dropNotice])
+  }, [setStatus, setSellerName, dropNotice])
 
   const logText = useCallback(() => JSON.stringify(stateRef.current.log.map((e) => ({ quando: new Date(e.at).toISOString(), titolo: e.title, testo: e.text, letto_come: VINTED_KIND_LABEL[e.kind] || e.kind, azione: e.action })), null, 2), [])
 
