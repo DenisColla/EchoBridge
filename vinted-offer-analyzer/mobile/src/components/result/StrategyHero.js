@@ -141,7 +141,7 @@ const styles = StyleSheet.create({
   proposals: { flexDirection: 'row', gap: space.sm },
   proposal: { flex: 1, minWidth: 0, borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 8, paddingVertical: 10, gap: 2, minHeight: 84, justifyContent: 'center' },
   proposalLabel: { fontSize: 11, fontWeight: '700' },
-  star: { position: 'absolute', top: 6, right: 8, fontSize: 12, fontWeight: '800' },
+  star: { position: 'absolute', top: 4, right: 6, fontSize: 10, fontWeight: '800' },
   proposalPrice: { fontSize: 20, fontWeight: '800', lineHeight: 26, fontVariant: ['tabular-nums'] },
   proposalSub: { fontSize: 12, lineHeight: 16 },
   own: { borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: 8 },
