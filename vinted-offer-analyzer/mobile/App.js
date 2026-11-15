@@ -821,13 +821,22 @@ function Main() {
   const OUTCOME_WORD = { accepted: 'accettata', declined: 'rifiutata', no_reply: 'scaduta senza risposta', abandoned: 'annullata' }
   const shortTitle = (title) => (String(title || '').trim().slice(0, 40) || 'Offerta')
 
-  /** An outcome read on Vinted closes the offer once, whichever page showed it first. */
+  /**
+   * An outcome read on Vinted closes the offer, whichever page showed it first. Judged on the list as it is now (an
+   * offer reopened by a counter-offer and answered again can be refused a second time), with a guard only for the two
+   * pages reporting at the same instant.
+   */
   const closeFromVinted = async (itemId, status, title) => {
-    const once = `outcome|${itemId}`
-    if (convDoneRef.current.has(once)) return
-    convDoneRef.current.add(once)
-    await watchlist.setStatus(itemId, status)
-    showToast(`«${shortTitle(title)}»: offerta ${OUTCOME_WORD[status] || 'chiusa'}. Lista aggiornata.`, 5000)
+    const busy = `outcome|${itemId}`
+    const live = watchlist.peek().find((it) => it.id === itemId)
+    if (!live || live.status !== 'sent' || convDoneRef.current.has(busy)) return
+    convDoneRef.current.add(busy)
+    try {
+      await watchlist.setStatus(itemId, status)
+      showToast(`«${shortTitle(title)}»: offerta ${OUTCOME_WORD[status] || 'chiusa'}. Lista aggiornata.`, 5000)
+    } finally {
+      convDoneRef.current.delete(busy)
+    }
   }
 
   /**
@@ -837,36 +846,43 @@ function Main() {
    * was saved.
    */
   const registerCounter = async (itemId, price, { previousOffer = null, conversationId = null, seller = null } = {}) => {
-    const once = `counter|${itemId}|${price}`
-    if (convDoneRef.current.has(once)) return null
-    convDoneRef.current.add(once)
-    const item = watchlist.peek().find((it) => it.id === itemId)
-    if (!item) return null
-    const raw = counterRawFor(item, price, { previousOffer })
-    const mk = marketInfoFor(formOfItem(item))
-    const market = mk ? mk.market : null
-    const policyTarget = policyTargetFor(formOfItem(item), { market, profile: learning.engineProfile })
-    const outcome = analyzeCounter(raw, new Date(), {
-      ...(learning.engineProfile ? { profile: learning.engineProfile } : {}), ...(market ? { market } : {}),
-      ...(policyTarget != null ? { policyTarget } : {}), counterStats: counterStatsOf(watchlist.allItems),
-    })
-    if (!outcome.ok) {
-      convDoneRef.current.delete(once)
-      return null
+    // Whether it is already in the list is the planner's judgement (on the list as it is now): here only the guard
+    // for two pages reporting the same counter-offer at the same instant. Returns 'saved' | 'busy' | 'failed'.
+    const busy = `counter|${itemId}`
+    if (convDoneRef.current.has(busy)) return 'busy'
+    convDoneRef.current.add(busy)
+    try {
+      const item = watchlist.peek().find((it) => it.id === itemId)
+      if (!item) return 'failed'
+      const history = Array.isArray(item.negotiation) ? item.negotiation : []
+      const lastEntry = history[history.length - 1]
+      if (item.status === 'countered' && lastEntry && lastEntry.by === 'seller' && Math.abs(lastEntry.price - price) < 0.005) return 'busy'
+      const raw = counterRawFor(item, price, { previousOffer })
+      const mk = marketInfoFor(formOfItem(item))
+      const market = mk ? mk.market : null
+      const policyTarget = policyTargetFor(formOfItem(item), { market, profile: learning.engineProfile })
+      const outcome = analyzeCounter(raw, new Date(), {
+        ...(learning.engineProfile ? { profile: learning.engineProfile } : {}), ...(market ? { market } : {}),
+        ...(policyTarget != null ? { policyTarget } : {}), counterStats: counterStatsOf(watchlist.allItems),
+      })
+      if (!outcome.ok) return 'failed'
+      // The refusal recorded for this offer was the counter-offer itself: its first answer is the counter.
+      if (!history.some((e) => e.by === 'seller') && ['declined', 'no_reply'].includes(item.status)) await watchlist.update(item.id, { firstOutcome: null, firstOutcomeAt: null }, { type: 'reopened', data: { from: item.status, reason: 'vinted_counter' } })
+      await watchlist.addCounter({ itemId: item.id, result: outcome, link: item.link, form: formOfItem(item), raw })
+      const saved = watchlist.peek().find((it) => it.id === itemId)
+      const patch = {}
+      if (conversationId && saved && !saved.conversationId) patch.conversationId = conversationId
+      if (seller && saved && !saved.sellerName) patch.sellerName = seller
+      if (Object.keys(patch).length) await watchlist.update(itemId, patch)
+      const rec = outcome.recommended
+      const move = rec && rec.id === 'accept' ? `conviene accettare a ${formatEuro(price)}` : rec && Number.isFinite(rec.price) ? `rilancia a ${formatEuro(rec.price)}` : 'apri la Lista'
+      showToast(`«${shortTitle(item.title)}»: controproposta di ${formatEuro(price)} registrata. Piano: ${move}.`, 7000)
+      return 'saved'
+    } catch {
+      return 'failed'
+    } finally {
+      convDoneRef.current.delete(busy)
     }
-    // The refusal recorded for this offer was the counter-offer itself: its first answer is the counter.
-    const hadSeller = (item.negotiation || []).some((e) => e.by === 'seller')
-    if (!hadSeller && ['declined', 'no_reply'].includes(item.status)) await watchlist.update(item.id, { firstOutcome: null, firstOutcomeAt: null }, { type: 'reopened', data: { from: item.status, reason: 'vinted_counter' } })
-    await watchlist.addCounter({ itemId: item.id, result: outcome, link: item.link, form: formOfItem(item), raw })
-    const saved = watchlist.peek().find((it) => it.id === itemId)
-    const patch = {}
-    if (conversationId && saved && !saved.conversationId) patch.conversationId = conversationId
-    if (seller && saved && !saved.sellerName) patch.sellerName = seller
-    if (Object.keys(patch).length) await watchlist.update(itemId, patch)
-    const rec = outcome.recommended
-    const move = rec && rec.id === 'accept' ? `conviene accettare a ${formatEuro(price)}` : rec && Number.isFinite(rec.price) ? `rilancia a ${formatEuro(rec.price)}` : 'apri la Lista'
-    showToast(`«${shortTitle(item.title)}»: controproposta di ${formatEuro(price)} registrata. Piano: ${move}.`, 7000)
-    return outcome
   }
 
   /**
@@ -889,10 +905,11 @@ function Main() {
       return
     }
     if (plan.action === 'counter') {
-      // Not behind `fresh`: registerCounter saves once per figure, and a first try that failed may succeed later.
+      // Not behind `fresh`: the same figure may come back later in the same negotiation (his offer stands again
+      // after the user's reply was refused), and the planner already skips what the list holds.
       convDoneRef.current.add(key)
       const saved = await registerCounter(plan.itemId, plan.price, { previousOffer: plan.previousOffer, conversationId: conv.convId, seller: conv.seller })
-      if (!saved && fresh && !convDoneRef.current.has(`counter|${plan.itemId}|${plan.price}`)) showToast(`Controproposta di ${formatEuro(plan.price)} dal venditore: apri la Lista e tocca «Controproposta».`, 6000)
+      if (saved === 'failed' && fresh) showToast(`Controproposta di ${formatEuro(plan.price)} dal venditore: apri la Lista e tocca «Controproposta».`, 6000)
       show('counter')
       return
     }
