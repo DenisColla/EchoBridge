@@ -6,6 +6,7 @@ import * as core from './core/index.js'
 import {
   MONTHS_IT, buildFormFromExtraction, explorationKey, failureRiskFor, formatEuro, leversFor, monthKeyOf,
   nextGoalFor, optimizeOffer, parsePrice, parseVintedItemHtml, policyDiscountFor, quickDiscountsFor, strategyFor, strategySnapshot, wardrobeFromProbe,
+  analyzeCounter,
 } from './core/index.js'
 import { EMPTY_FORM } from './src/components/formDefaults.js'
 import { LinkEntry } from './src/components/LinkEntry.js'
@@ -26,6 +27,7 @@ import { useVintedBridge } from './src/hooks/useVintedBridge.js'
 import { VintedNotices } from './src/components/VintedNotices.js'
 import { VintedTab } from './src/components/vinted/VintedTab.js'
 import { copyText } from './src/services/clipboard.js'
+import { counterRawFor, policyTargetFor } from './src/services/counterInput.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { recordRead } from './src/services/readStats.js'
@@ -829,6 +831,45 @@ function Main() {
   }
 
   /**
+   * The seller's counter-offer, read on Vinted: the offer becomes «controproposta» with the reply plan the planner
+   * computes by default (no budget, received now). An offer already closed as refused reopens: on Vinted a seller who
+   * proposes another figure refuses the request and makes his offer at once. Returns the plan, or null when nothing
+   * was saved.
+   */
+  const registerCounter = async (itemId, price, { previousOffer = null, conversationId = null, seller = null } = {}) => {
+    const once = `counter|${itemId}|${price}`
+    if (convDoneRef.current.has(once)) return null
+    convDoneRef.current.add(once)
+    const item = watchlist.peek().find((it) => it.id === itemId)
+    if (!item) return null
+    const raw = counterRawFor(item, price, { previousOffer })
+    const mk = marketInfoFor(formOfItem(item))
+    const market = mk ? mk.market : null
+    const policyTarget = policyTargetFor(formOfItem(item), { market, profile: learning.engineProfile })
+    const outcome = analyzeCounter(raw, new Date(), {
+      ...(learning.engineProfile ? { profile: learning.engineProfile } : {}), ...(market ? { market } : {}),
+      ...(policyTarget != null ? { policyTarget } : {}), counterStats: counterStatsOf(watchlist.allItems),
+    })
+    if (!outcome.ok) {
+      convDoneRef.current.delete(once)
+      return null
+    }
+    // The refusal recorded for this offer was the counter-offer itself: its first answer is the counter.
+    const hadSeller = (item.negotiation || []).some((e) => e.by === 'seller')
+    if (!hadSeller && ['declined', 'no_reply'].includes(item.status)) await watchlist.update(item.id, { firstOutcome: null, firstOutcomeAt: null }, { type: 'reopened', data: { from: item.status, reason: 'vinted_counter' } })
+    await watchlist.addCounter({ itemId: item.id, result: outcome, link: item.link, form: formOfItem(item), raw })
+    const saved = watchlist.peek().find((it) => it.id === itemId)
+    const patch = {}
+    if (conversationId && saved && !saved.conversationId) patch.conversationId = conversationId
+    if (seller && saved && !saved.sellerName) patch.sellerName = seller
+    if (Object.keys(patch).length) await watchlist.update(itemId, patch)
+    const rec = outcome.recommended
+    const move = rec && rec.id === 'accept' ? `conviene accettare a ${formatEuro(price)}` : rec && Number.isFinite(rec.price) ? `rilancia a ${formatEuro(rec.price)}` : 'apri la Lista'
+    showToast(`«${shortTitle(item.title)}»: controproposta di ${formatEuro(price)} registrata. Piano: ${move}.`, 7000)
+    return outcome
+  }
+
+  /**
    * A conversation page of Vinted, as the browser read it. The user's own pending offer on the listing analysed on
    * screen is saved as sent at the figure Vinted shows, with no tap; a saved plan becomes sent; an offer that Vinted
    * now shows accepted or refused closes in the list. Nothing is ever done on Vinted: this only reads.
@@ -839,21 +880,20 @@ function Main() {
     const plan = planOfferCapture(conv, { items: watchlist.peek(), analysed: analysedListing() })
     const key = `${conv.convId}|${plan.action}|${plan.price}|${plan.status || ''}`
     const fresh = !convDoneRef.current.has(key)
-    const show = (state, extra = {}) => setCapture({ convId: conv.convId, state, price: plan.price, link: conv.itemLink, ...extra })
-    // One line per change in the navigation log: Vinted's own words for the status and its buttons, never a name or a message.
-    if (fresh && conv.last) logVisit(url, `offerta «${conv.last.statusText || '?'}»${conv.last.buttons.length ? ` [${conv.last.buttons.join(', ')}]` : ''} → ${plan.action}`)
-    if (plan.action === 'none' || plan.action === 'needs_analysis') {
+    const show = (state, extra = {}) => setCapture({ convId: conv.convId, state, price: plan.price, link: conv.itemLink, itemId: plan.itemId, ...extra })
+    // One line per change in the navigation log: Vinted's own words for the status, never a name or a message.
+    if (fresh) logVisit(url, `offerta «${(conv.mine && conv.mine.statusText) || '-'}»${conv.standing ? ' + proposta del venditore' : ''} → ${plan.action}`)
+    if (plan.action === 'none' || plan.action === 'needs_analysis' || plan.action === 'incoming') {
       convDoneRef.current.add(key)
-      show(plan.action === 'needs_analysis' ? 'needs_analysis' : plan.recorded ? 'recorded' : 'idle')
+      show(plan.action !== 'none' ? plan.action : plan.counter ? 'counter' : plan.recorded ? 'recorded' : 'idle')
       return
     }
-    if (plan.action === 'incoming' || plan.action === 'unclear') {
-      show(plan.action)
-      if (fresh) {
-        convDoneRef.current.add(key)
-        if (plan.action === 'unclear') showToast(`Offerta di ${formatEuro(plan.price)} in sospeso in questa conversazione: se è tua segnala dal pannello, se è del venditore registra la controproposta dalla Lista.`, 7000)
-        else if (plan.itemId) showToast(`Controproposta di ${formatEuro(plan.price)} dal venditore: apri la Lista per preparare la risposta.`, 6000)
-      }
+    if (plan.action === 'counter') {
+      // Not behind `fresh`: registerCounter saves once per figure, and a first try that failed may succeed later.
+      convDoneRef.current.add(key)
+      const saved = await registerCounter(plan.itemId, plan.price, { previousOffer: plan.previousOffer, conversationId: conv.convId, seller: conv.seller })
+      if (!saved && fresh && !convDoneRef.current.has(`counter|${plan.itemId}|${plan.price}`)) showToast(`Controproposta di ${formatEuro(plan.price)} dal venditore: apri la Lista e tocca «Controproposta».`, 6000)
+      show('counter')
       return
     }
     if (!fresh) return
@@ -883,10 +923,19 @@ function Main() {
         show('recorded')
       } else if (plan.action === 'counter_sent') {
         await watchlist.markCounterSent(plan.itemId)
-        await watchlist.markSentFromVinted(plan.itemId, { conversationId: conv.convId, sellerName: conv.seller })
+        // The figure really sent, when it is not the planned one.
+        await watchlist.markSentFromVinted(plan.itemId, seen)
         showToast(`Risposta di ${formatEuro(plan.price)} inviata: segnata in Lista.`, 4500)
         show('recorded')
       } else if (plan.action === 'outcome') {
+        // «Rifiutata» may be followed by the seller's own offer a moment later (the page fills in steps): wait for it.
+        if (plan.status === 'declined') {
+          await new Promise((resolve) => setTimeout(resolve, 2500))
+          if (convQueueRef.current) {
+            convDoneRef.current.delete(key)
+            return
+          }
+        }
         await closeFromVinted(plan.itemId, plan.status, plan.title)
         show('closed', { status: plan.status })
       }
@@ -908,7 +957,9 @@ function Main() {
       if (convDoneRef.current.has(p.key)) continue
       convDoneRef.current.add(p.key)
       if (p.action === 'outcome') await closeFromVinted(p.itemId, p.status, p.title)
-      else showToast(`«${shortTitle(p.title)}»: controproposta${p.price ? ` di ${formatEuro(p.price)}` : ''} dal venditore. Apri la Lista per preparare la risposta.`, 6000)
+      // A counter-offer with its figure is registered (also on an offer closed as refused); without one it is announced.
+      else if (Number.isFinite(p.price) && p.price > 0) await registerCounter(p.itemId, p.price, { previousOffer: p.previousOffer, conversationId: null, seller: p.seller })
+      else showToast(`«${shortTitle(p.title)}»: controproposta dal venditore. Apri la Lista e tocca «Controproposta».`, 6000)
     }
   }
   useEffect(() => {
@@ -937,6 +988,22 @@ function Main() {
   const onInbox = useCallback((rows) => {
     if (inboxApplyRef.current) inboxApplyRef.current(rows).catch(() => {})
   }, [])
+
+  /** From the list: the conversation of an offer, opened in the Vinted tab, where it is read again. */
+  const openConversation = (item) => {
+    if (!item || !item.conversationId) return
+    const origin = (String(item.link || '').match(/^https:\/\/[^/?#]+/) || ['https://www.vinted.it'])[0]
+    setCounterContext(null)
+    setLabOpen(false)
+    setSearchOpen(false)
+    setTab('vinted')
+    if (vintedRef.current) vintedRef.current.open(`${origin}/inbox/${item.conversationId}`)
+  }
+  /** «Piano di risposta» in the browser strip: the reply planner of the counter-offer just read. */
+  const openCapturedCounter = () => {
+    const item = capture && capture.itemId ? watchlist.peek().find((it) => it.id === capture.itemId) : null
+    if (item) openCounterFromItem(item)
+  }
 
   /** «Analizza e registra»: the offer seen on Vinted is on a listing never analysed; analyse it, then record the offer. */
   const analyseAndRecord = () => {
@@ -1108,6 +1175,7 @@ function Main() {
           onConversation={onConversation}
           onInbox={onInbox}
           onRecordOffer={analyseAndRecord}
+          onOpenCounter={openCapturedCounter}
           analysisReport={analysisReport}
         />
       </View>
@@ -1221,6 +1289,7 @@ function Main() {
               onCalendar={(item) => addCalendar(item, item.id)}
               onCounter={openCounterFromItem}
               onCounterSent={counterSent}
+              onOpenConversation={Platform.OS === 'web' ? null : openConversation}
               onGoCalcola={() => setTab('calcola')}
               onGoInfo={() => setTab('info')}
               onReanalyze={reanalyzeItem}

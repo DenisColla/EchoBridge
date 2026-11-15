@@ -20,7 +20,7 @@ const call = (actions, name, ...args) => (actions && typeof actions[name] === 'f
  * marked sent (it shows the undo line); `scrollRef` (optional) is the page ScrollView, used to bring a highlighted row
  * into view; `openOutcome` opens the outcome panel, at mount or when it turns true (a «com'è andata?» notification tap).
  */
-export function OfferRow({ item, now, highlighted, openOutcome = false, actions, onStatus, onRemove, onCalendar, onCounter, onCounterSent, onReanalyze, onToast, onSent, scrollRef }) {
+export function OfferRow({ item, now, highlighted, openOutcome = false, actions, onStatus, onRemove, onCalendar, onCounter, onCounterSent, onOpenConversation = null, onReanalyze, onToast, onSent, scrollRef }) {
   const t = useTheme()
   const [expanded, setExpanded] = useState(false)
   const [outcomeOpen, setOutcomeOpen] = useState(openOutcome)
@@ -221,6 +221,7 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
           <View style={[styles.footer, { borderTopColor: t.line }]}>
             <View style={styles.ghosts}>
               {item.link ? <Button label="Apri annuncio" variant="ghost" small onPress={() => openLink(item.link)} /> : null}
+              {item.conversationId && onOpenConversation ? <Button label="Apri la conversazione" variant="ghost" small onPress={() => onOpenConversation(item)} /> : null}
               {canCopy ? <Button label={copyLabel} variant="ghost" small onPress={copyMessage} /> : null}
               {calendarable ? <Button label={item.calendarOpenedAt ? 'Calendario aperto' : 'Calendario'} variant="ghost" small onPress={() => onCalendar(item)} /> : null}
               {open ? <Button label="Controproposta" variant="ghost" small onPress={() => onCounter(item)} /> : null}

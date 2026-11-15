@@ -28,7 +28,7 @@ function Tool({ glyph, label, onPress }) {
 export const VintedTab = forwardRef(function VintedTab({
   normalizeLink, analysedLink, strategy, result, saveState, calendarBusy, extracting, extractPhase, extractError = null,
   onAnalyze, onPick, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onDetails, onToast,
-  capture = null, onConversation = null, onInbox = null, onRecordOffer = null, analysisReport = null,
+  capture = null, onConversation = null, onInbox = null, onRecordOffer = null, onOpenCounter = null, analysisReport = null,
 }, ref) {
   const t = useTheme()
   const { height } = useWindowDimensions()
@@ -106,8 +106,11 @@ export const VintedTab = forwardRef(function VintedTab({
       ? <Button label={`Analizza e registra ${formatEuro(cap.price)}`} small onPress={onRecordOffer} />
       : <Body small muted numberOfLines={2}>Offerta di {formatEuro(cap.price)} vista: analizza l'annuncio per registrarla</Body>
   } else if (cap && cap.state === 'recorded') action = <Body small numberOfLines={1}>✓ Offerta di {formatEuro(cap.price)} in Lista</Body>
-  else if (cap && cap.state === 'incoming') action = <Body small numberOfLines={2}>Controproposta di {formatEuro(cap.price)} dal venditore</Body>
-  else if (cap && cap.state === 'unclear') action = <Body small muted numberOfLines={2}>Offerta di {formatEuro(cap.price)} in sospeso: non registrata</Body>
+  else if (cap && cap.state === 'counter') {
+    action = onOpenCounter
+      ? <Button label={`Controproposta ${formatEuro(cap.price)} · piano`} small onPress={onOpenCounter} />
+      : <Body small numberOfLines={2}>Controproposta di {formatEuro(cap.price)} in Lista</Body>
+  } else if (cap && cap.state === 'incoming') action = <Body small muted numberOfLines={2}>Proposta di {formatEuro(cap.price)} dal venditore: annuncio non in Lista</Body>
   else if (cap && cap.state === 'closed') action = <Body small numberOfLines={1}>✓ Esito registrato in Lista</Body>
   else action = <Body small muted numberOfLines={1}>{page.type === 'signin' ? 'Accesso con Google' : page.type === 'external' ? 'Pagina esterna' : 'Apri un annuncio per analizzarlo'}</Body>
 

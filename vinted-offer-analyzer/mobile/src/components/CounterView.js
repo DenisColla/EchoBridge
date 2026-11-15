@@ -2,25 +2,14 @@ import { useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import {
   COUNTER_RECEIVED_AGO, TONES, analyzeCounter, capitalize, counterFromPercent, counterPreview, formatEuro, formatLongDate,
-  formatSignedPoints, formatTime, parsePercent, parsePrice, policyDiscountFor, reservationPosterior, toPercent,
+  formatSignedPoints, formatTime, parsePercent, parsePrice, reservationPosterior, toPercent,
 } from '../../core/index.js'
 import { copyText } from '../services/clipboard.js'
+import { policyTargetFor, priceText } from '../services/counterInput.js'
 import { radius, space, toneForProbability, useTheme } from '../theme.js'
 import { Badge, Body, Button, ButtonRow, Card, Chip, Collapsible, Field, Note, Row, SectionLabel, Title, Toggle } from './ui.js'
 
 const pctText = (v) => String(Math.round(v * 10) / 10).replace('.', ',')
-const priceText = (v) => (Math.abs(v - Math.round(v)) > 0.004 ? v.toFixed(2) : String(Math.round(v))).replace('.', ',')
-
-/** The price the policy (price band × age, modifiers) would have asked for this listing: the form's own policy when it has one. */
-const policyTargetFor = (form, { market, profile }) => {
-  if (form && form.policy && Number.isFinite(form.policy.targetPrice)) return form.policy.targetPrice
-  const pol = form ? policyDiscountFor({
-    listPrice: form.listPrice, listingAge: form.listingAge, category: form.category, sellerProfile: form.sellerProfile,
-    listingSignal: form.listingSignal, signals: form.signals, market, profile,
-  }) : null
-  return pol && pol.kind === 'offer' ? pol.targetPrice : null
-}
-
 /**
  * "Il venditore ha fatto una controproposta": the user types the seller's number (in € or as % over the offer),
  * the engine returns the best reply price, the moment to send it, the plan for the next round and the message.

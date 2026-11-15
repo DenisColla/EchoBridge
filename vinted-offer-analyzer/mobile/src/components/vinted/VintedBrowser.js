@@ -9,7 +9,8 @@ import { Body, Card } from '../ui.js'
  * Runs in every page: reports the address when it changes (Vinted moves between pages without reloading) and, on
  * request, an outline of the page for tuning: the elements Vinted itself labels, with a few characters of their text,
  * and the fields and buttons with their attributes (never what is typed in them). On a conversation page of Vinted
- * it also reports the offers shown (price, crossed price, status) with the listing they are about, and the rows of
+ * it also reports the offers shown (the user's requests and the seller's own offers: price, crossed price, status,
+ * whether it can still be bought) with the listing they are about, and the rows of
  * the conversation list (who, last message): this is how an offer made on Vinted reaches the list by itself.
  * It only reads: nothing is clicked, typed or sent, and no function of the page is replaced.
  */
@@ -21,7 +22,8 @@ const WATCH = `(function () {
   var onVinted = /(^|\\.)vinted\\.[a-z]{2,3}(\\.[a-z]{2})?$/.test(location.hostname);
   var q = function (id, root) { return (root || document).querySelector('[data-testid="' + id + '"]'); };
   var txt = function (n, max) { return n ? String(n.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, max || 80) : ''; };
-  var PRICE = '[data-testid="offer-request-current-price-label"]';
+  // A buyer's request (offer-request-*) and a seller's own offer (offer-*), in the order of the page.
+  var PRICE = '[data-testid="offer-request-current-price-label"], [data-testid="offer-current-price-label"]';
   var readConv = function () {
     var m = location.pathname.match(/\\/inbox\\/([0-9a-zA-Z][0-9a-zA-Z-]+)/);
     if (!m) return null;
@@ -34,17 +36,22 @@ const WATCH = `(function () {
     var offers = [];
     var labels = document.querySelectorAll(PRICE);
     for (var i = 0; i < labels.length && offers.length < 12; i++) {
-      // The offer's own box: the nearest ancestor that holds its status and no other offer.
+      var request = labels[i].getAttribute('data-testid') === 'offer-request-current-price-label';
+      // The offer's own box: the nearest ancestor that holds its status or its button, and no other offer.
       var box = labels[i];
       for (var up = 0; up < 8 && box.parentElement; up++) {
         if (box.parentElement.querySelectorAll(PRICE).length > 1) break;
         box = box.parentElement;
-        if (q('offer-status-title', box)) break;
+        if (q('offer-status-title', box) || q('offer-message-buy-button', box)) break;
       }
       var buttons = [];
       var bs = box.querySelectorAll('button');
       for (var b = 0; b < bs.length && buttons.length < 4; b++) { var bt = txt(bs[b], 30); if (bt) buttons.push(bt); }
-      offers.push({ price: txt(labels[i], 20), original: txt(q('offer-request-original-price-label', box), 20), status: txt(q('offer-status-title', box), 40), buttons: buttons });
+      offers.push({
+        kind: request ? 'request' : 'offer', price: txt(labels[i], 20),
+        original: txt(q(request ? 'offer-request-original-price-label' : 'offer-original-price-label', box), 20),
+        status: txt(q('offer-status-title', box), 40), buy: !!q('offer-message-buy-button', box), buttons: buttons
+      });
     }
     return { id: m[1], link: link, title: txt(q('hero-message--title'), 80), price: txt(q('hero-message-price'), 20), seller: txt(q('inbox-list-item-' + m[1] + '--title'), 60), canOffer: !!q('make-offer-request-button'), offers: offers };
   };
@@ -168,7 +175,8 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
     if (msg.type === 'nav' && typeof msg.url === 'string') seen(msg.url)
     else if (msg.type === 'outline' && onOutline) onOutline({ url: msg.url, lines: Array.isArray(msg.lines) ? msg.lines : [], controls: Array.isArray(msg.controls) ? msg.controls : [] })
     // What a page says about offers counts only when the page shown is Vinted's (the address comes from the WebView, not from the page).
-    else if (msg.type === 'conv' && onConversation && msg.conv && typeof msg.conv === 'object' && isVintedUrl(at)) onConversation({ url: at, conv: msg.conv })
+    // (the WebView's address lags on Vinted, which moves between pages without loading: the page's own is the one kept)
+    else if (msg.type === 'conv' && onConversation && msg.conv && typeof msg.conv === 'object' && isVintedUrl(at) && isVintedUrl(msg.url)) onConversation({ url: msg.url, conv: msg.conv })
     else if (msg.type === 'inbox' && onInbox && Array.isArray(msg.rows) && isVintedUrl(at)) onInbox(msg.rows)
   }, [seen, onOutline, onConversation, onInbox])
 

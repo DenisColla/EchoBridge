@@ -20,7 +20,7 @@ const UNDO_MS = 8000
  * `segment` and `query` live here and reset on every mount. `actions` is the whole useWatchlist object.
  * `onGoInfo` and `scrollRef` are optional extras (Info tab for «Perché →», page ScrollView for scrolling to a row).
  */
-export function WatchlistView({ items, ready, highlightId, now, stats, actions, onStatus, onRemove, onCalendar, onCounter, onCounterSent, onGoCalcola, onGoInfo, onReanalyze, onToast, scrollRef }) {
+export function WatchlistView({ items, ready, highlightId, now, stats, actions, onStatus, onRemove, onCalendar, onCounter, onCounterSent, onOpenConversation = null, onGoCalcola, onGoInfo, onReanalyze, onToast, scrollRef }) {
   const t = useTheme()
   const [segment, setSegment] = useState('open')
   const [query, setQuery] = useState('')
@@ -129,6 +129,7 @@ export function WatchlistView({ items, ready, highlightId, now, stats, actions, 
               onCalendar={onCalendar}
               onCounter={onCounter}
               onCounterSent={onCounterSent}
+              onOpenConversation={onOpenConversation}
               onReanalyze={onReanalyze}
               onToast={onToast}
               onSent={noteSent}
