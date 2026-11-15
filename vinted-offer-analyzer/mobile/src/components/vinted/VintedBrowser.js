@@ -1,13 +1,14 @@
 import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { Linking, Platform, StyleSheet, View } from 'react-native'
 import { WebView } from 'react-native-webview'
-import { PAY_WINDOW_MINUTES, VINTED_HOME, decideNavigation, isCheckoutUrl, isVintedUrl } from '../../services/vintedNav.js'
+import { PAY_WINDOW_MINUTES, SIGNIN_WINDOW_MINUTES, VINTED_HOME, decideNavigation, isCheckoutUrl, isGoogleSignInUrl, isVintedUrl } from '../../services/vintedNav.js'
 import { useTheme } from '../../theme.js'
 import { Body, Card } from '../ui.js'
 
 /**
  * Runs in every page: reports the address when it changes (Vinted moves between pages without reloading) and, on
- * request, an outline of the page for tuning (the elements Vinted itself labels, with a few characters of their text).
+ * request, an outline of the page for tuning: the elements Vinted itself labels, with a few characters of their text,
+ * and the fields and buttons with their attributes (never what is typed in them).
  * It only reads: nothing is clicked, typed or sent, and no function of the page is replaced.
  */
 const WATCH = `(function () {
@@ -30,7 +31,24 @@ const WATCH = `(function () {
       var text = kids ? '' : String(n.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
       out.push(n.tagName.toLowerCase() + ' ' + id + (text ? ' = ' + text : ''));
     }
-    post({ type: 'outline', url: location.href, lines: out });
+    var ctl = [];
+    var cs = document.querySelectorAll('input, textarea, select, button, form, [role="dialog"], [contenteditable="true"]');
+    var attrs = ['type', 'name', 'inputmode', 'placeholder', 'aria-label', 'role', 'data-testid', 'autocomplete'];
+    for (var j = 0; j < cs.length && ctl.length < 120; j++) {
+      var c = cs[j];
+      if (c.tagName === 'INPUT' && c.type === 'hidden') continue;
+      var bits = [c.tagName.toLowerCase()];
+      for (var k = 0; k < attrs.length; k++) {
+        var v = c.getAttribute(attrs[k]);
+        if (v) bits.push(attrs[k] + '=' + String(v).replace(/\\d{4,}/g, '{id}').slice(0, 50));
+      }
+      if (c.tagName === 'BUTTON') {
+        var bt = String(c.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 30);
+        if (bt) bits.push('testo=' + bt);
+      }
+      ctl.push(bits.join(' '));
+    }
+    post({ type: 'outline', url: location.href, lines: out, controls: ctl });
   };
 })();
 true;`
@@ -45,6 +63,7 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
   const webRef = useRef(null)
   const backRef = useRef(false)
   const payUntilRef = useRef(0)
+  const signInUntilRef = useRef(0)
   const lastGoodRef = useRef(VINTED_HOME)
   const [progress, setProgress] = useState(0)
 
@@ -60,6 +79,7 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
   const seen = useCallback((url) => {
     if (!url) return
     if (isCheckoutUrl(url)) payUntilRef.current = Date.now() + PAY_WINDOW_MINUTES * 60_000
+    if (isGoogleSignInUrl(url)) signInUntilRef.current = Date.now() + SIGNIN_WINDOW_MINUTES * 60_000
     if (isVintedUrl(url)) lastGoodRef.current = url
     if (onPage) onPage(url)
   }, [onPage])
@@ -68,7 +88,9 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
     // Frames inside a page (payment fields, consent, sign-in widgets) are the page's own business: only the page itself is ruled.
     if (req && req.isTopFrame === false) return true
     const url = (req && req.url) || ''
-    const verdict = decideNavigation(url, { payUntil: payUntilRef.current })
+    // Asked before the page loads: the window must be open for the hop that follows a sign-in page at once.
+    if (isGoogleSignInUrl(url)) signInUntilRef.current = Date.now() + SIGNIN_WINDOW_MINUTES * 60_000
+    const verdict = decideNavigation(url, { payUntil: payUntilRef.current, signInUntil: signInUntilRef.current })
     if (verdict === 'allow') return true
     if (verdict === 'external') {
       Linking.openURL(url).catch(() => {})
@@ -87,7 +109,7 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
     }
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'nav' && typeof msg.url === 'string') seen(msg.url)
-    else if (msg.type === 'outline' && onOutline) onOutline({ url: msg.url, lines: Array.isArray(msg.lines) ? msg.lines : [] })
+    else if (msg.type === 'outline' && onOutline) onOutline({ url: msg.url, lines: Array.isArray(msg.lines) ? msg.lines : [], controls: Array.isArray(msg.controls) ? msg.controls : [] })
   }, [seen, onOutline])
 
   if (Platform.OS === 'web') {

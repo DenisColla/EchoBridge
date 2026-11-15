@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { Pressable, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { formatEuro } from '../../../core/index.js'
 import { logVisit, visitLogText } from '../../services/vintedDiag.js'
-import { pageOf } from '../../services/vintedNav.js'
+import { pageOf, siteOf } from '../../services/vintedNav.js'
 import { space, useTheme } from '../../theme.js'
 import { StrategyHero } from '../result/StrategyHero.js'
 import { Body, Button, InlineAction } from '../ui.js'
@@ -89,17 +89,22 @@ export const VintedTab = forwardRef(function VintedTab({
   if (extracting) action = <Body small muted>{PHASE[extractPhase] || 'Leggo l\'annuncio…'}</Body>
   else if (ready) action = <Button label={panel ? 'Chiudi' : `★ ${formatEuro(chosen.price)} · proposte`} small variant={panel ? 'secondary' : 'primary'} onPress={() => setPanel((v) => !v)} />
   else if (link) action = <Button label="Analizza" small onPress={() => onAnalyze(link)} />
-  else action = <Body small muted numberOfLines={1}>{page.type === 'external' ? 'Pagina esterna' : 'Apri un annuncio per analizzarlo'}</Body>
+  else action = <Body small muted numberOfLines={1}>{page.type === 'signin' ? 'Accesso con Google' : page.type === 'external' ? 'Pagina esterna' : 'Apri un annuncio per analizzarlo'}</Body>
 
   return (
     <View style={styles.fill}>
       <VintedBrowser
         ref={browserRef}
         onPage={onPage}
-        onBlocked={() => onToast('Sito esterno bloccato: qui si naviga solo su Vinted.')}
-        onOutline={({ url: at, lines }) => {
+        onBlocked={(blocked) => {
+          // In the log too: a blocked page is the first thing to look at when a sign-in or a payment stops.
+          logVisit(blocked, 'bloccata')
+          const site = siteOf(blocked)
+          onToast(`${site ? `Bloccato ${site}` : 'Sito esterno bloccato'}: qui si naviga solo su Vinted.`)
+        }}
+        onOutline={({ url: at, lines, controls }) => {
           logVisit(at, 'struttura condivisa')
-          shareText('Struttura pagina Vinted', JSON.stringify({ pagina: pageOf(at).type, elementi: lines }, null, 1))
+          shareText('Struttura pagina Vinted', JSON.stringify({ pagina: pageOf(at).type, elementi: lines, controlli: controls }, null, 1))
         }}
       />
       {panel && ready ? (
@@ -114,7 +119,7 @@ export const VintedTab = forwardRef(function VintedTab({
         <View style={[styles.menu, { backgroundColor: t.card, borderTopColor: t.line }]}>
           <InlineAction label="Condividi la struttura di questa pagina" onPress={() => { setMenu(false); if (browserRef.current) browserRef.current.outline() }} />
           <InlineAction label="Condividi il registro di navigazione" onPress={async () => { setMenu(false); shareText('Registro browser Vinted', await visitLogText()) }} />
-          <Body small muted>Servono a me per adattare l'app alle pagine di Vinted: contengono solo indirizzi senza numeri e nomi degli elementi.</Body>
+          <Body small muted>Servono per adattare l'app alle pagine di Vinted. Il registro contiene solo indirizzi senza numeri; la struttura i nomi degli elementi, le prime parole del loro testo e i campi della pagina, mai quello che ci scrivi.</Body>
         </View>
       ) : null}
       <View style={[styles.strip, { backgroundColor: t.card, borderTopColor: t.line }]}>
