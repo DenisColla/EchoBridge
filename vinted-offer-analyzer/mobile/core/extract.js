@@ -39,21 +39,26 @@ const NUMBER_WORDS = { un: 1, una: 1, "un'": 1, uno: 1, due: 2, tre: 3, quattro:
 export function parseRelativeItalian(text) {
   const t = String(text || '').toLowerCase().replace(/[’]/g, "'").trim()
   if (!t) return null
-  if (/\b(adesso|ora|poco fa|un attimo fa)\b/.test(t) && !/\bun'?ora\b/.test(t)) return 0
+  // A counted time first: «1 ora fa» is an hour, not the word «ora» (= now).
+  const m = t.match(/(\d+|un'|un|una|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\s*(secondi?|sec|minut[oi]|min|or[ae]|giorn[oi]|gg|settiman[ae]|sett|mes[ei]|ann[oi])\b/)
+  if (m) {
+    const raw = m[1].replace(/\s/g, '')
+    const n = /^\d+$/.test(raw) ? Number(raw) : NUMBER_WORDS[raw] || 1
+    const unit = m[2]
+    if (/^sec/.test(unit)) return n / 86_400
+    if (/^min/.test(unit)) return n / 1_440
+    if (/^or/.test(unit)) return n / 24
+    if (/^(giorn|gg)/.test(unit)) return n
+    if (/^sett/.test(unit)) return n * 7
+    if (/^mes/.test(unit)) return n * 30
+    if (/^ann/.test(unit)) return n * 365
+    return null
+  }
+  if (/\b(alcuni|pochi|qualche)\s+(secondi?|istanti?)\b/.test(t)) return 0
+  if (/\b(alcuni|pochi|qualche)\s+minut[oi]\b/.test(t)) return 3 / 1_440
+  if (/\b(adesso|ora|poco fa|un attimo fa)\b/.test(t)) return 0
   if (/\bieri\b/.test(t)) return 1
   if (/\boggi\b/.test(t)) return 0
-  const m = t.match(/(\d+|un'|un|una|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\s*(secondi?|sec|minut[oi]|min|or[ae]|giorn[oi]|gg|settiman[ae]|sett|mes[ei]|ann[oi])\b/)
-  if (!m) return null
-  const raw = m[1].replace(/\s/g, '')
-  const n = /^\d+$/.test(raw) ? Number(raw) : NUMBER_WORDS[raw] || 1
-  const unit = m[2]
-  if (/^sec/.test(unit)) return n / 86_400
-  if (/^min/.test(unit)) return n / 1_440
-  if (/^or/.test(unit)) return n / 24
-  if (/^(giorn|gg)/.test(unit)) return n
-  if (/^sett/.test(unit)) return n * 7
-  if (/^mes/.test(unit)) return n * 30
-  if (/^ann/.test(unit)) return n * 365
   return null
 }
 

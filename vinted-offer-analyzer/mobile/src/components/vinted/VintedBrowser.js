@@ -8,7 +8,9 @@ import { Body, Card } from '../ui.js'
 /**
  * Runs in every page: reports the address when it changes (Vinted moves between pages without reloading) and, on
  * request, an outline of the page for tuning: the elements Vinted itself labels, with a few characters of their text,
- * and the fields and buttons with their attributes (never what is typed in them).
+ * and the fields and buttons with their attributes (never what is typed in them). On a conversation page of Vinted
+ * it also reports the offers shown (price, crossed price, status) with the listing they are about, and the rows of
+ * the conversation list (who, last message): this is how an offer made on Vinted reaches the list by itself.
  * It only reads: nothing is clicked, typed or sent, and no function of the page is replaced.
  */
 const WATCH = `(function () {
@@ -16,8 +18,60 @@ const WATCH = `(function () {
   window.__ovtWatch = true;
   var post = function (m) { try { window.ReactNativeWebView.postMessage(JSON.stringify(m)); } catch (e) {} };
   var last = '';
+  var onVinted = /(^|\\.)vinted\\.[a-z]{2,3}(\\.[a-z]{2})?$/.test(location.hostname);
+  var q = function (id, root) { return (root || document).querySelector('[data-testid="' + id + '"]'); };
+  var txt = function (n, max) { return n ? String(n.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, max || 80) : ''; };
+  var PRICE = '[data-testid="offer-request-current-price-label"]';
+  var readConv = function () {
+    var m = location.pathname.match(/\\/inbox\\/([0-9a-zA-Z][0-9a-zA-Z-]+)/);
+    if (!m) return null;
+    var hero = q('hero-message');
+    var link = '';
+    if (hero) {
+      var a = hero.getAttribute('href') ? hero : (hero.closest && hero.closest('a[href]')) || hero.querySelector('a[href*="/items/"]');
+      link = a ? a.getAttribute('href') || '' : '';
+    }
+    var offers = [];
+    var labels = document.querySelectorAll(PRICE);
+    for (var i = 0; i < labels.length && offers.length < 12; i++) {
+      // The offer's own box: the nearest ancestor that holds its status and no other offer.
+      var box = labels[i];
+      for (var up = 0; up < 8 && box.parentElement; up++) {
+        if (box.parentElement.querySelectorAll(PRICE).length > 1) break;
+        box = box.parentElement;
+        if (q('offer-status-title', box)) break;
+      }
+      var buttons = [];
+      var bs = box.querySelectorAll('button');
+      for (var b = 0; b < bs.length && buttons.length < 4; b++) { var bt = txt(bs[b], 30); if (bt) buttons.push(bt); }
+      offers.push({ price: txt(labels[i], 20), original: txt(q('offer-request-original-price-label', box), 20), status: txt(q('offer-status-title', box), 40), buttons: buttons });
+    }
+    return { id: m[1], link: link, title: txt(q('hero-message--title'), 80), price: txt(q('hero-message-price'), 20), seller: txt(q('inbox-list-item-' + m[1] + '--title'), 60), canOffer: !!q('make-offer-request-button'), offers: offers };
+  };
+  var readRows = function () {
+    var nodes = document.querySelectorAll('[data-testid^="inbox-list-item-"][data-testid$="--title"]');
+    var rows = [];
+    for (var i = 0; i < nodes.length && rows.length < 40; i++) {
+      var id = String(nodes[i].getAttribute('data-testid')).slice(16, -7);
+      var root = q('inbox-list-item-' + id + '-container') || q('inbox-list-item-' + id);
+      rows.push({ id: id, seller: txt(nodes[i], 60), text: txt(root ? q('inbox-list-item-description', root) : null, 160) });
+    }
+    return rows;
+  };
+  var lastConv = '';
+  var lastRows = '';
+  var beat = 0;
   var tick = function () {
     if (location.href !== last) { last = location.href; post({ type: 'nav', url: last, title: (document.title || '').slice(0, 80) }); }
+    if (!onVinted || (++beat % 2)) return;
+    try {
+      var c = readConv();
+      var cs = c ? JSON.stringify(c) : '';
+      if (cs !== lastConv) { lastConv = cs; if (c) post({ type: 'conv', url: location.href, conv: c }); }
+      var rows = readRows();
+      var rs = rows.length ? JSON.stringify(rows) : '';
+      if (rs !== lastRows) { lastRows = rs; if (rows.length) post({ type: 'inbox', rows: rows }); }
+    } catch (e) {}
   };
   tick();
   setInterval(tick, 600);
@@ -37,6 +91,7 @@ const WATCH = `(function () {
     for (var j = 0; j < cs.length && ctl.length < 120; j++) {
       var c = cs[j];
       if (c.tagName === 'INPUT' && c.type === 'hidden') continue;
+      if (c.closest && c.closest('[id^="onetrust"], [id^="ot-sdk"]')) continue;
       var bits = [c.tagName.toLowerCase()];
       for (var k = 0; k < attrs.length; k++) {
         var v = c.getAttribute(attrs[k]);
@@ -55,10 +110,11 @@ true;`
 
 /**
  * The Vinted browser: one WebView that stays on Vinted (services/vintedNav.js decides), keeps the session between
- * launches like any browser, and reports where the user is. Imperative API: goBack(), canGoBack(), reload(), home(),
- * outline() (asks the page for its outline, answered through `onOutline`).
+ * launches like any browser, and reports where the user is. `onConversation({ url, conv })` and `onInbox(rows)` carry
+ * what a conversation page shows (services/vintedConversation.js reads them). Imperative API: goBack(), canGoBack(),
+ * reload(), home(), outline() (asks the page for its outline, answered through `onOutline`).
  */
-export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlocked, onOutline, onLoading }, ref) {
+export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlocked, onOutline, onLoading, onConversation, onInbox }, ref) {
   const t = useTheme()
   const webRef = useRef(null)
   const backRef = useRef(false)
@@ -108,9 +164,13 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
       return
     }
     if (!msg || typeof msg !== 'object') return
+    const at = String((event.nativeEvent && event.nativeEvent.url) || '')
     if (msg.type === 'nav' && typeof msg.url === 'string') seen(msg.url)
     else if (msg.type === 'outline' && onOutline) onOutline({ url: msg.url, lines: Array.isArray(msg.lines) ? msg.lines : [], controls: Array.isArray(msg.controls) ? msg.controls : [] })
-  }, [seen, onOutline])
+    // What a page says about offers counts only when the page shown is Vinted's (the address comes from the WebView, not from the page).
+    else if (msg.type === 'conv' && onConversation && msg.conv && typeof msg.conv === 'object' && isVintedUrl(at)) onConversation({ url: at, conv: msg.conv })
+    else if (msg.type === 'inbox' && onInbox && Array.isArray(msg.rows) && isVintedUrl(at)) onInbox(msg.rows)
+  }, [seen, onOutline, onConversation, onInbox])
 
   if (Platform.OS === 'web') {
     return <View style={styles.fill}><Card><Body>Il browser di Vinted funziona solo nell'app Android.</Body></Card></View>

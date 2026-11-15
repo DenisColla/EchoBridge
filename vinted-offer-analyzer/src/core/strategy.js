@@ -53,7 +53,11 @@ export const STRATEGY = Object.freeze({
   MAX_COUNT: 12,
   /** A seller's counter-offer gives back this share of the distance on average (the user's own history: 0,42). */
   COUNTER_GIVE_SHARE: 0.42,
-  /** Online within this many days (72 minutes) = «adesso»; a listing younger than FRESH_DAYS is answered today. */
+  /**
+   * Seen within ONLINE_NOW_DAYS (10 minutes) = «online adesso»; within ONLINE_DAYS (72 minutes) = «online poco fa»,
+   * still worth sending at once but said for what it is. A listing younger than FRESH_DAYS is answered today.
+   */
+  ONLINE_NOW_DAYS: 10 / 1440,
   ONLINE_DAYS: 0.05,
   FRESH_DAYS: 3,
   LOW_BUDGET_EUR: 15,
@@ -127,7 +131,7 @@ const TYPE_LABEL = { facile: 'Venditore facile', medio: 'Venditore medio', diffi
  * { type, label, score, archetype: { id, label }, traits: [{ id, label, pts }], confidence: 'alta'|'media'|'bassa' }.
  * Positive points make the seller easier; the weights are priors, the outcome log will tune them.
  */
-export function sellerProfileFor({ extraction = null, signals = null, wardrobe = null, form = null } = {}) {
+export function sellerProfileFor({ extraction = null, signals = null, wardrobe = null, form = null, seenElapsedDays = 0 } = {}) {
   const ex = extraction || {}
   const sig = signals || {}
   const w = wardrobe && typeof wardrobe === 'object' ? wardrobe : null
@@ -167,8 +171,10 @@ export function sellerProfileFor({ extraction = null, signals = null, wardrobe =
   if (w && stFinite(w.soldCount) && items !== null && w.soldCount >= 30 && w.soldCount / (w.soldCount + items) >= 0.6) add('sells_fast', -0.5, `${w.soldCount} vendite: i suoi articoli vanno via, non serve scendere`)
   if ((w && w.bundleOffered) || sig.bundleOffered === true || stFinite(sig.bundleDiscountPct)) add('bundle', 1, 'ha attivato lo sconto sui lotti: è abituato a scendere')
 
-  const lastSeen = stFinite(sig.lastSeenDays) ? sig.lastSeenDays : stFinite(ex.sellerLastSeenDays) ? ex.sellerLastSeenDays : f.sellerProfile === 'inactive' ? 20 : f.sellerProfile === 'quiet' ? 7 : null
-  if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_DAYS) add('online', 0.5, 'è online adesso')
+  const read = stLastSeen(sig, ex, seenElapsedDays)
+  const lastSeen = read !== null ? read : f.sellerProfile === 'inactive' ? 20 : f.sellerProfile === 'quiet' ? 7 : null
+  if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_NOW_DAYS) add('online', 0.5, 'è online adesso')
+  else if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_DAYS) add('online', 0.5, `era online ${stAgo(lastSeen)}`)
   else if (lastSeen !== null && lastSeen >= 7) add('absent', -1, `non entra da ${Math.round(lastSeen)} giorni`)
 
   const age = stFinite(ex.uploadedDays) ? ex.uploadedDays : stFinite(sig.uploadedDays) ? sig.uploadedDays : null
@@ -224,14 +230,38 @@ export function experienceOf(records) {
 
 /* ───────── moment ───────── */
 
-/** «Adesso» when the seller is online or the listing is fresh (and it is not the middle of the night), else the slot. */
-export function momentFor({ extraction = null, signals = null, form = null, now = new Date() } = {}) {
+/** «3 minuti fa», «circa un'ora fa»: the last visit as the page would say it. */
+const stAgo = (days) => {
+  const min = Math.round(days * 1440)
+  if (min < 2) return 'un attimo fa'
+  if (min < 60) return `${min} minuti fa`
+  return min < 90 ? "circa un'ora fa" : `circa ${Math.round(min / 60)} ore fa`
+}
+
+/**
+ * The seller's last visit in days, moved forward by the time passed since the page was read: «online 5 minuti fa»
+ * read an hour ago is no longer «adesso». A reading older than a day says nothing about now, unless it already was
+ * an absence (7 days or more), which is kept as read.
+ */
+function stLastSeen(sig, ex, elapsedDays = 0) {
+  const base = stFinite(sig.lastSeenDays) ? sig.lastSeenDays : stFinite(ex.sellerLastSeenDays) ? ex.sellerLastSeenDays : null
+  if (base === null) return null
+  if (!stFinite(elapsedDays) || elapsedDays <= 0 || base >= 7) return base
+  return elapsedDays > 1 ? null : base + elapsedDays
+}
+
+/**
+ * «Adesso» when the seller is online or was a moment ago, or the listing is fresh (and it is not the middle of the
+ * night), else the slot. `seenElapsedDays`: the time passed since the last visit was read on the page.
+ */
+export function momentFor({ extraction = null, signals = null, form = null, now = new Date(), seenElapsedDays = 0 } = {}) {
   const ex = extraction || {}
   const sig = signals || {}
-  const lastSeen = stFinite(sig.lastSeenDays) ? sig.lastSeenDays : stFinite(ex.sellerLastSeenDays) ? ex.sellerLastSeenDays : null
+  const lastSeen = stLastSeen(sig, ex, seenElapsedDays)
   const age = stFinite(ex.uploadedDays) ? ex.uploadedDays : stFinite(sig.uploadedDays) ? sig.uploadedDays : form && form.listingAge === 'today' ? 0.5 : form && form.listingAge === 'days_2_6' ? 2.5 : null
   const hour = now.getHours()
-  if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_DAYS) return { kind: 'now', reason: 'Il venditore è online adesso: invia subito, risponde a caldo.' }
+  if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_NOW_DAYS) return { kind: 'now', reason: 'Il venditore è online adesso: invia subito, risponde a caldo.' }
+  if (lastSeen !== null && lastSeen <= STRATEGY.ONLINE_DAYS) return { kind: 'now', reason: `Il venditore era online ${stAgo(lastSeen)}: invia subito, è facile che abbia ancora il telefono in mano.` }
   if (age !== null && age < STRATEGY.FRESH_DAYS) {
     if (hour >= 7 && hour < 23) return { kind: 'now', reason: 'Annuncio appena caricato: chi arriva prima chiude, non aspettare la sera giusta.' }
     return { kind: 'morning', reason: 'Annuncio fresco ma è notte: invia appena sveglio, prima degli altri.' }
@@ -263,7 +293,8 @@ export function planFor({ type, price, title }) {
 /**
  * The whole strategy for a form. Options: everything analyzeOffer takes (profile, market, records, key, month) plus
  * `extraction`, `signals`, `wardrobe` (for the seller profile), `chosen` ('prudente' | 'consigliata' | 'audace' or a
- * price) and `seller` (a profile already computed). Returns
+ * price), `seller` (a profile already computed) and `readAt` (ms: when the listing page was read, so the seller's
+ * last visit ages with the time passed since; 0 = not read now). Returns
  * { ok, seller, options: [{ id, label, price, discountPct, probability, engineProbability, counterChance,
  *   counterPrice, expectedPrice, saving, history: { n, accepted }, recommended }], recommendedId, chosenId, moment,
  *   plan, experience, result } where `result` is analyzeOffer on the chosen option; { ok: false, errors } when the
@@ -276,9 +307,10 @@ export function strategyFor(form, now = new Date(), options = {}) {
     return { ok: false, errors: bad.errors || { listPrice: 'Inserisci il prezzo dell\'annuncio.' } }
   }
   const signals = options.signals || (form && form.signals) || null
-  const seller = options.seller || sellerProfileFor({ extraction: options.extraction || null, signals, wardrobe: options.wardrobe || null, form })
+  const seenElapsedDays = stFinite(options.readAt) ? Math.max(0, (now.getTime() - options.readAt) / 86_400_000) : 0
+  const seller = options.seller || sellerProfileFor({ extraction: options.extraction || null, signals, wardrobe: options.wardrobe || null, form, seenElapsedDays })
   const experience = experienceOf(options.records)
-  const moment = momentFor({ extraction: options.extraction || null, signals, form, now })
+  const moment = momentFor({ extraction: options.extraction || null, signals, form, now, seenElapsedDays })
 
   const band = policyBandOf(L)
   const ex = options.extraction || {}

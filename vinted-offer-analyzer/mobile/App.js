@@ -29,7 +29,9 @@ import { copyText } from './src/services/clipboard.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { recordRead } from './src/services/readStats.js'
-import { badgeCountOf, counterStatsOf } from './src/services/segments.js'
+import { badgeCountOf, counterStatsOf, linkIdOf } from './src/services/segments.js'
+import { planInboxRows, planOfferCapture, readConversation } from './src/services/vintedConversation.js'
+import { logVisit } from './src/services/vintedDiag.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 import { Collapsible } from './src/components/ui.js'
@@ -129,6 +131,8 @@ function Main() {
   // What the link read knows beyond the form (raw extraction, the seller's wardrobe), and how the price was picked.
   const contextRef = useRef(null)
   const choiceRef = useRef({ kind: 'auto' })
+  /** The last strategy computed and the form it was computed for: what a save right after runAnalysis stores. */
+  const lastRunRef = useRef(null)
   const [saveState, setSaveState] = useState(null)
   const [goal, setGoal] = useState(0.7)
   const [plan, setPlan] = useState(null)
@@ -300,6 +304,9 @@ function Main() {
     const strat = strategyFor(scored, at, engineOptions({
       ...(preferredSendAt ? { preferredSendAt } : {}), ...(mk ? { market: mk.market } : {}), records: watchlist.allItems, key, month,
       extraction: ctx ? ctx.extraction : null, wardrobe: ctx ? ctx.wardrobe : null,
+      // The seller's last visit ages with the time passed since the page was read; a form that carries a link but no
+      // reading of this session (a saved offer opened again) says nothing about «online adesso».
+      ...(ctx ? { readAt: ctx.at } : linkOf(nextForm) ? { readAt: 0 } : {}),
       ...(pick.kind === 'option' ? { chosen: pick.id } : pick.kind === 'custom' ? { customPrice: pick.price } : {}),
     }))
     if (!strat.ok) {
@@ -312,6 +319,7 @@ function Main() {
     }
     const outcome = strat.result
     choiceRef.current = pick
+    lastRunRef.current = { strat, form: nextForm }
     setErrors({})
     setStrategy(strat)
     setResult(outcome)
@@ -499,7 +507,7 @@ function Main() {
         }
         setExtractPhase(null)
       }
-      contextRef.current = { link, extraction: ex, wardrobe, memberRaw }
+      contextRef.current = { link, extraction: ex, wardrobe, memberRaw, at: Date.now() }
       choiceRef.current = { kind: 'auto' }
       // The form starts from the listing; the price is then the strategy's recommended proposal (runAnalysis sets it).
       const mk = marketInfoFor({ link })
@@ -600,15 +608,19 @@ function Main() {
    * the market of this listing, the raw extraction when it belongs to this very link, the discount policy, the gate and
    * the message policy. Fields the running engine does not produce are simply absent.
    */
-  const savePayload = () => {
-    const mk = marketInfoFor(form)
-    const raw = extraction && extraction.ok && extraction.raw && extraction.link === normalizeVintedLink(form.link) ? extraction.raw : null
+  const savePayload = (run = null) => {
+    // `run`: an analysis just computed (runAnalysis's state is not on screen yet), else the one on screen.
+    const f = run ? run.form : form
+    const r = run ? run.result : result
+    const st = run ? run.strategy : strategy
+    const mk = marketInfoFor(f)
+    const raw = extraction && extraction.ok && extraction.raw && extraction.link === normalizeVintedLink(f.link) ? extraction.raw : null
     // userOverride: the figure the user typed in place of the three proposals («La tua cifra»).
-    const userOverride = strategy && strategy.chosenId === 'tua' ? result.input.targetPrice : null
+    const userOverride = st && st.chosenId === 'tua' ? r.input.targetPrice : null
     return {
-      result, link: form.link, form: withSignals(form, mk), profile: learning.engineProfile, userOverride,
-      market: mk ? mk.market : null, extraction: raw, policy: form.policy || null, gate: result.gate || null, messagePolicy: result.messagePolicy || null,
-      strategy: strategySnapshot(strategy), sellerName: raw && raw.sellerUsername ? raw.sellerUsername : null,
+      result: r, link: f.link, form: withSignals(f, mk), profile: learning.engineProfile, userOverride,
+      market: mk ? mk.market : null, extraction: raw, policy: f.policy || null, gate: r.gate || null, messagePolicy: r.messagePolicy || null,
+      strategy: strategySnapshot(st), sellerName: raw && raw.sellerUsername ? raw.sellerUsername : null,
     }
   }
 
@@ -784,6 +796,197 @@ function Main() {
     if (option && (await copyText(String(option.price).replace('.', ',')))) showToast(`${formatEuro(option.price)} copiato: incollalo nell'offerta su Vinted.`, 3500)
   }
 
+  /* ───────── Offers made on Vinted, seen by the browser (services/vintedConversation.js) ───────── */
+
+  /** What the strip shows on the conversation open in the browser: { convId, state, price, link }. */
+  const [capture, setCapture] = useState(null)
+  const convQueueRef = useRef(null)
+  const convLastRef = useRef(null)
+  const convBusyRef = useRef(false)
+  const convDoneRef = useRef(new Set())
+  const convApplyRef = useRef(null)
+  const inboxApplyRef = useRef(null)
+  /** The listing the user asked to analyse so that the offer seen on Vinted can be recorded: { convId, itemId }. */
+  const wantRecordRef = useRef(null)
+
+  /** The listing analysed on screen, to recognise its conversation. */
+  const analysedListing = () => {
+    if (!(extraction && extraction.ok && strategy && result && result.ok && result.kind !== 'no_offer_needed')) return null
+    if (normalizeVintedLink(form.link) !== extraction.link) return null
+    return { itemId: linkIdOf(extraction.link), link: extraction.link, title: form.itemTitle || '', listPrice: parsePrice(form.listPrice) }
+  }
+
+  const OUTCOME_WORD = { accepted: 'accettata', declined: 'rifiutata', no_reply: 'scaduta senza risposta', abandoned: 'annullata' }
+  const shortTitle = (title) => (String(title || '').trim().slice(0, 40) || 'Offerta')
+
+  /** An outcome read on Vinted closes the offer once, whichever page showed it first. */
+  const closeFromVinted = async (itemId, status, title) => {
+    const once = `outcome|${itemId}`
+    if (convDoneRef.current.has(once)) return
+    convDoneRef.current.add(once)
+    await watchlist.setStatus(itemId, status)
+    showToast(`«${shortTitle(title)}»: offerta ${OUTCOME_WORD[status] || 'chiusa'}. Lista aggiornata.`, 5000)
+  }
+
+  /**
+   * A conversation page of Vinted, as the browser read it. The user's own pending offer on the listing analysed on
+   * screen is saved as sent at the figure Vinted shows, with no tap; a saved plan becomes sent; an offer that Vinted
+   * now shows accepted or refused closes in the list. Nothing is ever done on Vinted: this only reads.
+   */
+  const applyConversation = async ({ url, conv: raw }) => {
+    const conv = readConversation(raw, url)
+    if (!conv.convId) return
+    const plan = planOfferCapture(conv, { items: watchlist.peek(), analysed: analysedListing() })
+    const key = `${conv.convId}|${plan.action}|${plan.price}|${plan.status || ''}`
+    const fresh = !convDoneRef.current.has(key)
+    const show = (state, extra = {}) => setCapture({ convId: conv.convId, state, price: plan.price, link: conv.itemLink, ...extra })
+    // One line per change in the navigation log: Vinted's own words for the status and its buttons, never a name or a message.
+    if (fresh && conv.last) logVisit(url, `offerta «${conv.last.statusText || '?'}»${conv.last.buttons.length ? ` [${conv.last.buttons.join(', ')}]` : ''} → ${plan.action}`)
+    if (plan.action === 'none' || plan.action === 'needs_analysis') {
+      convDoneRef.current.add(key)
+      show(plan.action === 'needs_analysis' ? 'needs_analysis' : plan.recorded ? 'recorded' : 'idle')
+      return
+    }
+    if (plan.action === 'incoming' || plan.action === 'unclear') {
+      show(plan.action)
+      if (fresh) {
+        convDoneRef.current.add(key)
+        if (plan.action === 'unclear') showToast(`Offerta di ${formatEuro(plan.price)} in sospeso in questa conversazione: se è tua segnala dal pannello, se è del venditore registra la controproposta dalla Lista.`, 7000)
+        else if (plan.itemId) showToast(`Controproposta di ${formatEuro(plan.price)} dal venditore: apri la Lista per preparare la risposta.`, 6000)
+      }
+      return
+    }
+    if (!fresh) return
+    convDoneRef.current.add(key)
+    const seen = { price: plan.price, conversationId: conv.convId, sellerName: conv.seller }
+    try {
+      if (plan.action === 'record') {
+        if (!(plan.price > 0 && plan.price < parsePrice(form.listPrice))) throw new Error('price')
+        // The analysis follows the figure actually offered, so the list stores its probability and not the proposal's.
+        const nextForm = { ...form, targetPrice: String(plan.price).replace('.', ',') }
+        setForm(nextForm)
+        setPlan(null)
+        const outcome = runAnalysis(nextForm, pinnedSendAt, { choice: choiceFromForm(nextForm) })
+        const run = lastRunRef.current
+        if (!outcome || outcome.kind === 'no_offer_needed' || !run || run.form !== nextForm) throw new Error('analysis')
+        const saved = await watchlist.addFromAnalysis({ ...savePayload({ form: nextForm, result: outcome, strategy: run.strat }), allowReoffer: true })
+        if (!saved.item) throw new Error('save')
+        await watchlist.markSentFromVinted(saved.item.id, seen)
+        const message = `Offerta di ${formatEuro(plan.price)} registrata in Lista: in attesa di risposta.`
+        setSaveState({ saved: true, itemId: saved.item.id, tone: 'good', message })
+        showToast(message, 4500)
+        show('recorded')
+      } else if (plan.action === 'send' || plan.action === 'attach' || plan.action === 'reprice') {
+        await watchlist.markSentFromVinted(plan.itemId, seen)
+        if (plan.action === 'send') showToast(`Offerta di ${formatEuro(plan.price)} registrata in Lista: in attesa di risposta.`, 4500)
+        else if (plan.action === 'reprice') showToast(`Lista aggiornata: su Vinted la tua offerta è di ${formatEuro(plan.price)}.`, 4500)
+        show('recorded')
+      } else if (plan.action === 'counter_sent') {
+        await watchlist.markCounterSent(plan.itemId)
+        await watchlist.markSentFromVinted(plan.itemId, { conversationId: conv.convId, sellerName: conv.seller })
+        showToast(`Risposta di ${formatEuro(plan.price)} inviata: segnata in Lista.`, 4500)
+        show('recorded')
+      } else if (plan.action === 'outcome') {
+        await closeFromVinted(plan.itemId, plan.status, plan.title)
+        show('closed', { status: plan.status })
+      }
+    } catch {
+      convDoneRef.current.delete(key)
+      show('failed')
+      showToast('Ho visto l\'offerta su Vinted ma non sono riuscito a registrarla: segnala a mano dal pannello.', 6000)
+    }
+  }
+
+  /** The conversation list: an answer to an offer whose conversation is known closes it; a counter-offer is announced. */
+  const applyInbox = async (rows) => {
+    const items = watchlist.peek()
+    for (const row of rows) {
+      const named = items.find((it) => it.conversationId === row.id && !it.sellerName)
+      if (named && /^[\w.-]{2,40}$/.test(String(row.seller || ''))) await watchlist.update(named.id, { sellerName: row.seller })
+    }
+    for (const p of planInboxRows(rows, items)) {
+      if (convDoneRef.current.has(p.key)) continue
+      convDoneRef.current.add(p.key)
+      if (p.action === 'outcome') await closeFromVinted(p.itemId, p.status, p.title)
+      else showToast(`«${shortTitle(p.title)}»: controproposta${p.price ? ` di ${formatEuro(p.price)}` : ''} dal venditore. Apri la Lista per preparare la risposta.`, 6000)
+    }
+  }
+  useEffect(() => {
+    convApplyRef.current = applyConversation
+    inboxApplyRef.current = applyInbox
+  })
+
+  /** One reading at a time, always the latest: the page reports again while it renders. */
+  const onConversation = useCallback((msg) => {
+    convLastRef.current = msg
+    convQueueRef.current = msg
+    if (convBusyRef.current) return
+    convBusyRef.current = true
+    ;(async () => {
+      try {
+        for (let guard = 0; convQueueRef.current && guard < 6; guard++) {
+          const next = convQueueRef.current
+          convQueueRef.current = null
+          if (convApplyRef.current) await convApplyRef.current(next)
+        }
+      } catch { /* a reading that fails changes nothing */ } finally {
+        convBusyRef.current = false
+      }
+    })()
+  }, [])
+  const onInbox = useCallback((rows) => {
+    if (inboxApplyRef.current) inboxApplyRef.current(rows).catch(() => {})
+  }, [])
+
+  /** «Analizza e registra»: the offer seen on Vinted is on a listing never analysed; analyse it, then record the offer. */
+  const analyseAndRecord = () => {
+    const link = capture && capture.state === 'needs_analysis' && capture.link ? normalizeVintedLink(capture.link) : null
+    if (!link) return
+    wantRecordRef.current = { convId: capture.convId, itemId: linkIdOf(link) }
+    if (extractRef.current) extractRef.current(link)
+  }
+  useEffect(() => {
+    const want = wantRecordRef.current
+    if (!want || extracting || !extraction) return
+    if (!extraction.ok) {
+      wantRecordRef.current = null
+      return
+    }
+    if (!strategy || !result || linkIdOf(extraction.link) !== want.itemId) return
+    wantRecordRef.current = null
+    const last = convLastRef.current
+    if (last && last.conv && last.conv.id === want.convId) onConversation(last)
+  }, [extraction, strategy, result, extracting, onConversation])
+
+  // The web build has no Vinted browser: its checks reach the same handlers through this hook (never set in the app).
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return
+    window.__ovtBrowser = { conversation: onConversation, inbox: onInbox, record: analyseAndRecord }
+  })
+
+  /** What the analysis on screen read and concluded, as text to share: numbers and the page's own words, no names. */
+  const analysisReport = () => {
+    if (!(extraction && extraction.ok && strategy && strategy.seller)) return null
+    const ex = extraction.raw || {}
+    const num = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null)
+    return JSON.stringify({
+      letto: new Date(extraction.at).toISOString(), via: extraction.via,
+      annuncio: { prezzo: ex.listPrice ?? null, caricato: ex.uploadedText ?? null, giorni_online: num(ex.uploadedDays), condizione: ex.condition ?? null, categoria: form.category || null },
+      venditore: {
+        ultima_visita: ex.sellerLastSeenText ?? null, ultima_visita_minuti: Number.isFinite(ex.sellerLastSeenDays) ? Math.round(ex.sellerLastSeenDays * 1440) : null,
+        recensioni: ex.sellerFeedbackCount ?? null, valutazione: ex.sellerRating ?? null, professionale: ex.sellerBusiness ?? null,
+      },
+      segnali: ex.signals || null,
+      armadio: extraction.wardrobe || null,
+      profilo: {
+        tipo: strategy.seller.type, punteggio: strategy.seller.score, archetipo: strategy.seller.archetype ? strategy.seller.archetype.label : null, fiducia: strategy.seller.confidence,
+        tratti: (strategy.seller.traits || []).map((x) => `${x.pts > 0 ? '+' : ''}${x.pts} ${x.label}`),
+      },
+      momento: strategy.moment,
+      proposte: (strategy.options || []).map((o) => ({ tipo: o.id, prezzo: o.price, sconto_pct: o.discountPct, probabilita_pct: Number.isFinite(o.probability) ? Math.round(o.probability * 100) : null, consigliata: Boolean(o.recommended) })),
+    }, null, 1)
+  }
+
   const openCounterFromItem = (item, prefillCounter = null) => {
     const fallbackForm = {
       itemTitle: item.title || '', category: item.category || '', listPrice: String(item.listPrice ?? '').replace('.', ','),
@@ -901,6 +1104,11 @@ function Main() {
           onCopyMessage={noteMessageCopied}
           onDetails={() => setTab('calcola')}
           onToast={browserToast}
+          capture={capture}
+          onConversation={onConversation}
+          onInbox={onInbox}
+          onRecordOffer={analyseAndRecord}
+          analysisReport={analysisReport}
         />
       </View>
 

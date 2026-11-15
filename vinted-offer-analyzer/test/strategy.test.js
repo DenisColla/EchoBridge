@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { analyzeOffer, categoryGuess, experienceOf, momentFor, planFor, sellerProfileFor, strategyFor, strategySnapshot, wardrobeStats } from '../src/core/index.js'
+import { analyzeOffer, categoryGuess, experienceOf, momentFor, parseRelativeItalian, planFor, sellerProfileFor, strategyFor, strategySnapshot, wardrobeStats } from '../src/core/index.js'
 
 const HISTORY = JSON.parse(readFileSync(new URL('./fixtures/backup-2026-10.json', import.meta.url), 'utf8'))
 const NOW = new Date(2026, 10, 4, 9, 45)
@@ -97,4 +97,40 @@ test('strategy: moment, chosen option and snapshot', () => {
 test('category: comics and books are «Libri e fumetti», not collectibles', () => {
   assert.equal(categoryGuess({ categoryText: 'Libri e media Fumetti, manga e graphic novel', title: 'Pyongyang' }).id, 'books')
   assert.equal(categoryGuess({ categoryText: 'Intrattenimento Carte collezionabili', title: 'Charizard' }).id, 'collectible')
+})
+
+test('strategy: «online adesso» only when it is true, and a reading ages', () => {
+  // Vinted writes «1 ora fa»: an hour, not the word «ora». It used to read as «adesso».
+  assert.equal(parseRelativeItalian('Ultima visita 1 ora fa'), 1 / 24)
+  assert.equal(parseRelativeItalian("Ultima visita un'ora fa"), 1 / 24)
+  assert.equal(parseRelativeItalian('Ultima visita circa 3 ore fa'), 3 / 24)
+  assert.equal(parseRelativeItalian('Ultima visita 40 minuti fa'), 40 / 1440)
+  assert.equal(parseRelativeItalian('Ultima visita: ora'), 0)
+  assert.equal(parseRelativeItalian('alcuni secondi fa'), 0)
+  assert.equal(parseRelativeItalian('3 secondi fa'), 3 / 86_400)
+  assert.equal(parseRelativeItalian('ieri'), 1)
+  const now = new Date(2026, 10, 15, 20, 0)
+  const at = (minutes, extra = {}) => momentFor({ extraction: { sellerLastSeenDays: minutes / 1440, uploadedDays: 30 }, now, ...extra })
+  assert.match(at(3).reason, /è online adesso/)
+  // Forty minutes ago is still worth sending at once, but it is said for what it is.
+  assert.equal(at(40).kind, 'now')
+  assert.match(at(40).reason, /era online 40 minuti fa/)
+  assert.match(at(60).reason, /era online circa un'ora fa/)
+  assert.equal(at(180).kind, 'slot')
+  // The same reading twenty minutes later; and a reading of days ago says nothing about now.
+  assert.match(at(3, { seenElapsedDays: 20 / 1440 }).reason, /era online 23 minuti fa/)
+  assert.equal(at(3, { seenElapsedDays: 2 }).kind, 'slot')
+  const traits = (minutes, elapsed = 0) => sellerProfileFor({ extraction: { sellerLastSeenDays: minutes / 1440 }, seenElapsedDays: elapsed }).traits.filter((t) => t.id === 'online').map((t) => t.label)
+  assert.deepEqual(traits(3), ['è online adesso'])
+  assert.deepEqual(traits(40), ['era online 40 minuti fa'])
+  assert.deepEqual(traits(180), [])
+  assert.deepEqual(traits(3, 2), [])
+  // An absence stays an absence however old the reading.
+  assert.ok(sellerProfileFor({ extraction: { sellerLastSeenDays: 12 }, seenElapsedDays: 3 }).traits.some((t) => t.id === 'absent'))
+  // strategyFor carries the time of the reading: read 30 minutes ago, «3 minuti fa» is 33.
+  const form = { itemTitle: 'Libro', category: 'books', listPrice: '20', targetPrice: '', listingAge: 'over_month', sellerProfile: 'unknown', listingSignal: 'none' }
+  const ex = { sellerLastSeenDays: 3 / 1440, uploadedDays: 40 }
+  assert.match(strategyFor(form, now, { extraction: ex }).moment.reason, /è online adesso/)
+  assert.match(strategyFor(form, now, { extraction: ex, readAt: now.getTime() - 30 * 60_000 }).moment.reason, /era online 33 minuti fa/)
+  assert.equal(strategyFor(form, now, { extraction: ex, readAt: 0 }).moment.kind, 'slot')
 })

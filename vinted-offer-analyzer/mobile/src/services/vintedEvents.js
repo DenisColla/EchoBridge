@@ -52,8 +52,9 @@ export function classifyVintedNotification(event) {
   const pc = text.match(/(\d{1,2})\s?%/)
   const offer = /offert/.test(text)
   let kind = 'other'
-  if (offer && /accettat/.test(text)) kind = 'accepted'
-  else if (offer && /(rifiutat|declinat|respint)/.test(text)) kind = 'declined'
+  // The refusal first: Vinted writes it «Ci spiace, X non ha accettato la tua offerta» (seen in a real inbox).
+  if (offer && /(non\s+(?:ha|hanno|e stata|viene)?\s*accettat|rifiutat|declinat|respint)/.test(text)) kind = 'declined'
+  else if (offer && /accettat/.test(text)) kind = 'accepted'
   else if (offer && /scadut/.test(text)) kind = 'expired'
   else if (/(controffert|controproposta|contro-offerta|ha proposto|ti propone)/.test(text) || (offer && /(ti ha fatto|ha fatto|ti ha inviato|ha inviato|nuova|hai ricevuto)/.test(text))) kind = 'counter'
   else if (/(offerta speciale|sconto (solo |esclusivo )?per te|prezzo speciale|ti offre uno sconto|il prezzo per te)/.test(text)) kind = 'seller_offer'

@@ -57,7 +57,8 @@ export function pageOf(url) {
   if (m) return { type: 'item', id: m[1] }
   m = path.match(/\/member\/(\d+)/)
   if (m) return { type: 'member', id: m[1] }
-  m = path.match(/\/inbox\/(\d+)/)
+  // A conversation is a number on the old pages and a code with dashes on the new ones (01a1e0ab-56c7-…).
+  m = path.match(/\/inbox\/([0-9a-z][0-9a-z-]+)/i)
   if (m) return { type: 'conversation', id: m[1] }
   if (/\/inbox(\/|$)/.test(path)) return { type: 'inbox', id: null }
   if (isCheckoutUrl(url)) return { type: 'checkout', id: null }
@@ -91,7 +92,7 @@ export const siteOf = (url) => hostOf(url) || ''
 /** The address without what identifies anything: digits become {id}, the query keeps only its names. For the log. */
 export function templateOf(url) {
   const host = hostOf(url) || ''
-  const path = pathOf(url).replace(/\d{3,}[^/]*/g, '{id}')
+  const path = pathOf(url).replace(/\/inbox\/[^/]+/i, '/inbox/{id}').replace(/\d{3,}[^/]*/g, '{id}')
   const q = String(url || '').split('?')[1]
   const names = q ? [...new Set(q.split('#')[0].split('&').map((p) => p.split('=')[0]).filter(Boolean))].slice(0, 8) : []
   return `${host}${path}${names.length ? `?${names.join('&')}` : ''}`

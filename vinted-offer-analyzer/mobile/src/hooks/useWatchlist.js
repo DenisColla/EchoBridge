@@ -215,6 +215,7 @@ export function useWatchlist() {
   const itemsRef = useRef([])
   const archiveRef = useRef([])
   const markCounterSentRef = useRef(null)
+  const setStatusRef = useRef(null)
 
   useEffect(() => {
     Promise.all([loadItems(), loadArchive()]).then(([loaded, archived]) => {
@@ -259,7 +260,7 @@ export function useWatchlist() {
    * the discount policy that proposed the ask, the gate and the message policy. Every one of them may be absent.
    * `userOverride`: the price the user typed in place of the suggested one (null when the suggestion was kept).
    */
-  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null, market = null, extraction = null, policy = null, gate = null, messagePolicy = null, strategy = null, sellerName = null }) => {
+  const addFromAnalysis = useCallback(async ({ result, link, form, profile = null, userOverride = null, market = null, extraction = null, policy = null, gate = null, messagePolicy = null, strategy = null, sellerName = null, allowReoffer = false }) => {
     const { input, optimal, probability, messages, recommendedTone } = result
     const message = (messages.find((m) => m.tone === recommendedTone) || messages[0]).text
     const now = new Date()
@@ -270,7 +271,8 @@ export function useWatchlist() {
     // exemptions the gate applies (the seller moved: a lower price, or a drop after our refusal).
     const verdict = gate || result.gate || null
     const pastRule7 = Boolean(verdict && Number.isFinite(Number(verdict.rule)) && Number(verdict.rule) > 7)
-    const blocked = pastRule7 ? null : reofferBlockFor([...itemsRef.current, ...archiveRef.current], cleanLink, now, { listPrice: input.listPrice, dropHoursAgo: dropHoursOf(signals) })
+    // `allowReoffer`: the offer is already on Vinted (the browser saw it), so it is recorded whatever the rule says.
+    const blocked = pastRule7 || allowReoffer ? null : reofferBlockFor([...itemsRef.current, ...archiveRef.current], cleanLink, now, { listPrice: input.listPrice, dropHoursAgo: dropHoursOf(signals) })
     if (blocked) return { item: null, reminder: 'skipped', replaced: 0, blocked }
     const marketUsed = market || result.market || null
     const extractionLog = extractionOf(extraction)
@@ -361,6 +363,42 @@ export function useWatchlist() {
       reminder = 'skipped' // the item is saved anyway
     }
     return { item, reminder, replaced: replaced.size }
+  }, [persist])
+
+  /**
+   * An offer the Vinted browser saw in a conversation: the item is sent, at the figure Vinted shows (the list follows
+   * Vinted when the two differ), and remembers the conversation, so the answer can be read there later. The name of
+   * the other person stays on the phone only. Returns the item, or null when it is not in the list.
+   */
+  const markSentFromVinted = useCallback(async (id, { price = null, conversationId = null, sellerName = null } = {}) => {
+    const target = itemsRef.current.find((it) => it.id === id)
+    if (!target) return null
+    if (target.status === 'planned') await setStatusRef.current(id, 'sent')
+    const name = typeof sellerName === 'string' && sellerName.trim() ? sellerName.trim().slice(0, 60) : null
+    const p = Number(price)
+    await persist((prev) => prev.map((it) => {
+      if (it.id !== id) return it
+      let next = { ...it, conversationId: conversationId || it.conversationId || null, sellerName: it.sellerName || name }
+      const neg = Array.isArray(it.negotiation) ? [...it.negotiation] : []
+      const buyer = neg.map((e, i) => (e && e.by === 'buyer' ? i : -1)).filter((i) => i >= 0)
+      const lastIdx = buyer.length ? buyer[buyer.length - 1] : -1
+      const shown = lastIdx >= 0 && Number.isFinite(neg[lastIdx].price) ? neg[lastIdx].price : Number(it.targetPrice)
+      if (Number.isFinite(p) && p > 0 && Math.abs(p - shown) >= 0.005) {
+        if (lastIdx >= 0) neg[lastIdx] = { ...neg[lastIdx], price: p }
+        next = { ...next, negotiation: neg }
+        // The first offer is the item's own price; a later one (the reply to a counter-offer) lives in the history only.
+        if (buyer.length <= 1) {
+          const L = Number(it.listPrice)
+          next = {
+            ...next, targetPrice: p, userOverride: p,
+            discountPct: Number.isFinite(L) && L > 0 ? Math.round(((L - p) / L) * 1000) / 10 : it.discountPct,
+            form: it.form ? { ...it.form, targetPrice: String(p).replace('.', ',') } : it.form,
+          }
+        }
+      }
+      return withEvent(next, 'vinted_offer', { price: Number.isFinite(p) ? p : null, conversationId: conversationId || null })
+    }))
+    return itemsRef.current.find((it) => it.id === id) || null
   }, [persist])
 
   const update = useCallback(async (id, patch, event = null) => {
@@ -703,5 +741,10 @@ export function useWatchlist() {
     for (const other of others) await setStatus(other.id, 'abandoned')
   }, [setStatus])
 
-  return { items, archive, allItems, ready, addFromAnalysis, addCounter, markCounterSent, markMessageCopied, markMessageSent, markReplied, restoreItems, update, setStatus: setStatusMerged, remove, stats }
+  useEffect(() => { setStatusRef.current = setStatusMerged }, [setStatusMerged])
+
+  /** The list as it is this instant (the state lags one render behind a save). */
+  const peek = useCallback(() => itemsRef.current, [])
+
+  return { items, archive, allItems, ready, peek, addFromAnalysis, markSentFromVinted, addCounter, markCounterSent, markMessageCopied, markMessageSent, markReplied, restoreItems, update, setStatus: setStatusMerged, remove, stats }
 }

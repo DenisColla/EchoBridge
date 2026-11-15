@@ -22,11 +22,13 @@ function Tool({ glyph, label, onPress }) {
 /**
  * The Vinted tab: the browser over the whole screen and, under it, one strip that follows the page. On a listing it
  * offers «Analizza»; once analysed it shows the best proposal and opens a panel with the seller, the three
- * proposals and the moves, without leaving the page. Imperative API: handleBack() → true when it used the gesture.
+ * proposals and the moves, without leaving the page. On a conversation it says what became of the offer seen there
+ * (`capture`, decided by the app from what the browser read). Imperative API: handleBack() → true when it used the gesture.
  */
 export const VintedTab = forwardRef(function VintedTab({
   normalizeLink, analysedLink, strategy, result, saveState, calendarBusy, extracting, extractPhase, extractError = null,
   onAnalyze, onPick, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onDetails, onToast,
+  capture = null, onConversation = null, onInbox = null, onRecordOffer = null, analysisReport = null,
 }, ref) {
   const t = useTheme()
   const { height } = useWindowDimensions()
@@ -59,6 +61,16 @@ export const VintedTab = forwardRef(function VintedTab({
     setUrl((prev) => (prev === next ? prev : next))
     logVisit(next)
   }, [])
+  // The browser keeps one set of callbacks: the latest handlers are reached through refs.
+  const convRef = useRef(onConversation)
+  const inboxRef = useRef(onInbox)
+  useEffect(() => {
+    convRef.current = onConversation
+    inboxRef.current = onInbox
+  })
+  const handleConversation = useCallback((msg) => { if (convRef.current) convRef.current(msg) }, [])
+  const handleInbox = useCallback((rows) => { if (inboxRef.current) inboxRef.current(rows) }, [])
+  const cap = page.type === 'conversation' && capture && capture.convId === page.id ? capture : null
   // A new page closes the panel of the previous listing; a finished analysis of this listing opens it.
   const lastLinkRef = useRef(null)
   useEffect(() => {
@@ -89,6 +101,14 @@ export const VintedTab = forwardRef(function VintedTab({
   if (extracting) action = <Body small muted>{PHASE[extractPhase] || 'Leggo l\'annuncio…'}</Body>
   else if (ready) action = <Button label={panel ? 'Chiudi' : `★ ${formatEuro(chosen.price)} · proposte`} small variant={panel ? 'secondary' : 'primary'} onPress={() => setPanel((v) => !v)} />
   else if (link) action = <Button label="Analizza" small onPress={() => onAnalyze(link)} />
+  else if (cap && cap.state === 'needs_analysis') {
+    action = cap.link && onRecordOffer
+      ? <Button label={`Analizza e registra ${formatEuro(cap.price)}`} small onPress={onRecordOffer} />
+      : <Body small muted numberOfLines={2}>Offerta di {formatEuro(cap.price)} vista: analizza l'annuncio per registrarla</Body>
+  } else if (cap && cap.state === 'recorded') action = <Body small numberOfLines={1}>✓ Offerta di {formatEuro(cap.price)} in Lista</Body>
+  else if (cap && cap.state === 'incoming') action = <Body small numberOfLines={2}>Controproposta di {formatEuro(cap.price)} dal venditore</Body>
+  else if (cap && cap.state === 'unclear') action = <Body small muted numberOfLines={2}>Offerta di {formatEuro(cap.price)} in sospeso: non registrata</Body>
+  else if (cap && cap.state === 'closed') action = <Body small numberOfLines={1}>✓ Esito registrato in Lista</Body>
   else action = <Body small muted numberOfLines={1}>{page.type === 'signin' ? 'Accesso con Google' : page.type === 'external' ? 'Pagina esterna' : 'Apri un annuncio per analizzarlo'}</Body>
 
   return (
@@ -102,6 +122,8 @@ export const VintedTab = forwardRef(function VintedTab({
           const site = siteOf(blocked)
           onToast(`${site ? `Bloccato ${site}` : 'Sito esterno bloccato'}: qui si naviga solo su Vinted.`)
         }}
+        onConversation={handleConversation}
+        onInbox={handleInbox}
         onOutline={({ url: at, lines, controls }) => {
           logVisit(at, 'struttura condivisa')
           shareText('Struttura pagina Vinted', JSON.stringify({ pagina: pageOf(at).type, elementi: lines, controlli: controls }, null, 1))
@@ -119,7 +141,17 @@ export const VintedTab = forwardRef(function VintedTab({
         <View style={[styles.menu, { backgroundColor: t.card, borderTopColor: t.line }]}>
           <InlineAction label="Condividi la struttura di questa pagina" onPress={() => { setMenu(false); if (browserRef.current) browserRef.current.outline() }} />
           <InlineAction label="Condividi il registro di navigazione" onPress={async () => { setMenu(false); shareText('Registro browser Vinted', await visitLogText()) }} />
-          <Body small muted>Servono per adattare l'app alle pagine di Vinted. Il registro contiene solo indirizzi senza numeri; la struttura i nomi degli elementi, le prime parole del loro testo e i campi della pagina, mai quello che ci scrivi.</Body>
+          {ready && analysisReport ? (
+            <InlineAction
+              label="Condividi cosa ha letto l'analisi"
+              onPress={() => {
+                setMenu(false)
+                const text = analysisReport()
+                if (text) shareText('Analisi del venditore', text)
+              }}
+            />
+          ) : null}
+          <Body small muted>Servono per adattare l'app alle pagine di Vinted. Il registro contiene indirizzi senza numeri e lo stato delle offerte; la struttura i nomi degli elementi, le prime parole del loro testo e i campi della pagina, mai quello che ci scrivi; l'analisi i dati letti dall'annuncio aperto, senza nomi.</Body>
         </View>
       ) : null}
       <View style={[styles.strip, { backgroundColor: t.card, borderTopColor: t.line }]}>
