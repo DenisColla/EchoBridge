@@ -10,8 +10,10 @@
  *  - the seller's own offer (`offer-*`, no «request»): its price, the crossed listing price and an «Acquista» button
  *    while it stands. A seller who answers with another figure refuses the request and makes this offer at once, so
  *    «Rifiutata» followed by an offer that still stands is a counter-offer, not a refusal.
- * The statuses not seen yet («Accettata», «Scaduta») are read by their stem; one that is not understood changes
- * nothing. The list of conversations is in the same page: a row is `inbox-list-item-<conversation>` with the other
+ *  - an accepted request reads «Accettata», and after the payment the conversation says «Acquisto andato a buon fine»;
+ *  - a request reads «Annullata» when the article is gone («Articolo non disponibile · L'articolo è stato venduto o
+ *    cancellato»): somebody else bought it, unless the purchase line is there.
+ * «Scaduta» has not been seen yet and is read by its stem; a status that is not understood changes nothing. The list of conversations is in the same page: a row is `inbox-list-item-<conversation>` with the other
  * person's name and the last message, which for a seller's offer is the bare figure («€20.00»).
  */
 import { linkIdOf } from './segments.js'
@@ -44,8 +46,11 @@ export function offerStatusOf(text) {
   return 'unknown'
 }
 
-/** The status of the list an offer's status on Vinted sets by itself. */
-export const OFFER_STATUS_TO_LIST = { accepted: 'accepted', declined: 'declined', expired: 'no_reply', cancelled: 'abandoned' }
+/**
+ * The status of the list an offer's status on Vinted sets by itself. «Annullata» is not here: by itself it does not
+ * say why (see planOfferCapture: with the article gone it is «venduto ad altri»).
+ */
+export const OFFER_STATUS_TO_LIST = { accepted: 'accepted', declined: 'declined', expired: 'no_reply' }
 
 /**
  * The browser's raw reading of a conversation page →
@@ -90,6 +95,7 @@ export function readConversation(raw, pageUrl = '') {
     title: String(r.title || '').trim().slice(0, 80), listPrice: crossed ? crossed.original : Number.isFinite(hero) ? hero : null,
     seller: /^[\w.-]{2,40}$/.test(String(r.seller || '').trim()) ? String(r.seller).trim() : null,
     canOffer: r.canOffer === true, offers, last, mine, standing,
+    purchased: r.purchased === true, unavailable: r.unavailable === true,
   }
 }
 
@@ -131,16 +137,30 @@ const counterKnown = (item, price) => {
  *  - 'outcome'        the request of the list now reads accepted / declined / expired on Vinted: `status`
  *  - 'counter'        the seller's offer stands (he refused and proposed `price`): the offer of the list, open or
  *                     closed as refused, becomes a counter-offer to answer; `previousOffer` is the user's figure
+ *  - 'purchase'       the conversation says the user bought the article: `status` 'accepted' (at the figure agreed:
+ *                     the accepted request, or the seller's offer) or 'bought' (after a refusal, or with no offer)
  *  - 'incoming'       an offer of the seller on a listing that is not in the list, or a request made to the user
  *  - 'none'           (`recorded`: the list already says what the page says)
  */
 export function planOfferCapture(conv, { items = [], analysed = null } = {}) {
   const none = { action: 'none', itemId: null, price: null, statusText: conv && conv.last ? conv.last.statusText : '' }
-  if (!conv || !conv.last) return none
+  if (!conv || (!conv.last && !conv.purchased)) return none
   const { mine, standing } = conv
   const order = { countered: 0, sent: 1, planned: 2, declined: 3, no_reply: 4 }
   const pick = (statuses) => items.filter((it) => it && statuses.includes(it.status) && sameListing(it, conv))
     .sort((a, b) => Number(b.conversationId === conv.convId) - Number(a.conversationId === conv.convId) || order[a.status] - order[b.status])[0] || null
+
+  // Bought: the deal is done, at the figure on the table (his offer when he made one, the accepted request), or at
+  // the listing price when the last word was a refusal, silence, or there never was an offer.
+  if (conv.purchased) {
+    const item = pick([...OPEN, ...REFUSED])
+    const base = { ...none, itemId: item ? item.id : null, price: mine ? mine.price : null, title: item ? item.title : conv.title }
+    if (!item) return base
+    const agreed = item.status === 'countered' || (item.status === 'sent' && Boolean(mine) && mine.status === 'accepted')
+    // Bought while the request was still unanswered (or with none to be seen): paid at the listing price.
+    return { ...base, action: 'purchase', status: agreed ? 'accepted' : 'bought', atList: !agreed && item.status === 'sent' }
+  }
+  if (!conv.last) return none
 
   // The seller's offer stands: a counter-offer, whatever the list said until now (open, or closed as refused).
   if (standing) {
@@ -169,7 +189,8 @@ export function planOfferCapture(conv, { items = [], analysed = null } = {}) {
     if (item) return { ...base, action: 'send', reprice: !same(offeredPrice(item), mine.price) }
     return { ...base, action: 'needs_analysis', link: conv.itemLink }
   }
-  const status = OFFER_STATUS_TO_LIST[mine.status] || null
+  // «Annullata» with the article gone: sold to somebody else (a purchase of the user's was handled above).
+  const status = OFFER_STATUS_TO_LIST[mine.status] || (mine.status === 'cancelled' && conv.unavailable ? 'sold_other' : null)
   if (status && item && item.status === 'sent' && (item.conversationId === conv.convId || same(offeredPrice(item), mine.price))) return { ...base, action: 'outcome', status }
   return base
 }

@@ -53,7 +53,16 @@ const WATCH = `(function () {
         status: txt(q('offer-status-title', box), 40), buy: !!q('offer-message-buy-button', box), buttons: buttons
       });
     }
-    return { id: m[1], link: link, title: txt(q('hero-message--title'), 80), price: txt(q('hero-message-price'), 20), seller: txt(q('inbox-list-item-' + m[1] + '--title'), 60), canOffer: !!q('make-offer-request-button'), offers: offers };
+    // What Vinted says of the deal in the conversation itself (the list of the other conversations is left out).
+    var area = q('inbox-page-container') || document.body;
+    var said = String(area.textContent || '');
+    var list = q('conversation-list');
+    if (list && area.contains(list)) said = said.replace(String(list.textContent || ''), ' ');
+    return {
+      id: m[1], link: link, title: txt(q('hero-message--title'), 80), price: txt(q('hero-message-price'), 20), seller: txt(q('inbox-list-item-' + m[1] + '--title'), 60),
+      canOffer: !!q('make-offer-request-button'), offers: offers,
+      purchased: /acquisto andato a buon fine/i.test(said), unavailable: /articolo non disponibile|venduto o cancellato/i.test(said)
+    };
   };
   var readRows = function () {
     var nodes = document.querySelectorAll('[data-testid^="inbox-list-item-"][data-testid$="--title"]');

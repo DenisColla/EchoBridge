@@ -112,11 +112,14 @@ const OLD_PRICE_RES = [
   /\\"original_price\\"[^}]{0,80}?\\"amount\\":\\"([\d.]+)\\"/,
 ]
 /** Listing text that hints at a bundle discount («sconto sui lotti», «più pezzi»); the percentage is read only when written. */
-export const BUNDLE_HINT = /sconto (?:sui|per i|sul|per il) (?:lotti|lotto|bundle)|sconto bundle|bundle discount|più pezzi|più articoli/i
+export const BUNDLE_HINT = /sconto (?:sui|per i|sul|per il) (?:lotti|lotto|bundle|set)|sconto bundle|bundle discount|più pezzi|più articoli|acquista set|crea set/i
 const BUNDLE_PCT_RES = [
   /(?:sconto|risparmi\w*)[^.]{0,80}?(?:lott[io]|bundle)[^.]{0,80}?(\d{1,2})\s*%/i,
   /(?:lott[io]|bundle)[^.]{0,60}?(?:fino al|fino a|del|di|al)\s*-?\s*(\d{1,2})\s*%/i,
   /-?\s*(\d{1,2})\s*%[^.]{0,60}?(?:lott[io]|bundle|più pezzi)/i,
+  // Vinted now calls a bundle a «set»: «Acquista set · Ottieni fino al 25% di sconto · Crea set» (seen on a profile, Nov 2026).
+  /acquista set[\s\S]{0,60}?fino al?\s*(\d{1,2})\s*%/i,
+  /fino al?\s*(\d{1,2})\s*% di sconto[\s\S]{0,40}?crea set/i,
 ]
 const EX_TIME_PHRASE = "((?:oggi|ieri|adesso|poco fa)\\b|(?:\\d+|un'?|una|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\\s*(?:min(?:ut[oi])?|or[ae]|giorn[oi]|gg|settiman[ae]|mes[ei]|ann[oi])\\b(?:\\s*fa)?)"
 /** «visto 5 giorni fa», «attivo oggi», «ultimo accesso 2 settimane fa» in the visible text (the data-testid span wins when present). */
@@ -133,7 +136,7 @@ export function parseVintedItemHtml(html, details = null) {
   const out = {
     title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null, photo: null,
     uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
-    sellerBusiness: null, sellerBadges: [],
+    sellerBusiness: null, sellerBadges: [], sellerPath: null,
     signals: { views: null, interested: null, oldPrice: null, priceDropped: null, priceDrop: null, bundleOffered: null, bundleDiscountPct: null, lastSeenDays: null, sellerItems: null, reserved: null },
     found: [], missing: [], unread: [],
   }
@@ -192,19 +195,36 @@ export function parseVintedItemHtml(html, details = null) {
   }
   const username = firstMatch(src, /<[a-z0-9]+[^>]*data-testid="profile-username"[^>]*>\s*([^<]{1,80}?)\s*<\//i)
   if (username) out.sellerUsername = stripTags(username)
-  const rating = firstMatch(src, /valutazione di ([\d.,]+) su 5 stelle/i)
+  // The seller's wardrobe is /member/<number>-<name>: found by the name, never by position (a logged-in page also
+  // links the visitor's own profile).
+  if (out.sellerUsername) {
+    const name = out.sellerUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const path = firstMatch(src, new RegExp(`(/member/\\d+-${name})(?=["'\\\\?#/&\\s]|$)`, 'i'))
+    if (path) out.sellerPath = path
+  }
+  // The seller's box, as shown next to the name, is read first. A logged-in page embeds the visitor's own account too
+  // (its feedback_count comes first: a seller with 285 reviews read as 16), so the embedded data counts only where
+  // it is the seller's own block, or when the whole page holds one figure.
+  const boxAt = src.search(/data-testid="profile-username"/i)
+  const box = boxAt >= 0 ? src.slice(boxAt, boxAt + 2500) : ''
+  const sellerData = src.match(/\\"business\\":(true|false),\\"feedback_count\\":(\d+),\\"feedback_reputation\\":([\d.]+),\\"follow_action_visible\\"/)
+  const rating = firstMatch(box, /valutazione di ([\d.,]+) su 5 stelle/i) || firstMatch(src, /valutazione di ([\d.,]+) su 5 stelle/i)
   if (rating) out.sellerRating = Number(rating.replace(',', '.'))
-  // The seller block is also embedded as escaped JSON (feedback_count, feedback_reputation 0..1, business flag, badges).
-  const feedback = firstMatch(src, /\\"feedback_count\\":(\d+)/)
+  const allCounts = [...src.matchAll(/\\"feedback_count\\":(\d+)/g)].map((m) => m[1])
+  const feedback = firstMatch(box, /su 5 stelle"[\s\S]{0,300}?>\s*\(?(\d{1,6})\)?\s*<\//i)
+    || (sellerData ? sellerData[2] : null)
     || firstMatch(src, /web_ui__Rating__label[^>]*>(?:\s*<span[^>]*>)?\s*(\d+)\s*</i)
     || firstMatch(src, /su 5 stelle"[\s\S]{0,400}?>\s*\(?(\d+)\)?\s*<\/span>/i)
+    || (new Set(allCounts).size === 1 ? allCounts[0] : null)
   if (feedback) out.sellerFeedbackCount = Number(feedback)
   else if (/Nessuna recensione|Nessuna valutazione/i.test(src)) out.sellerFeedbackCount = 0
-  const reputation = firstMatch(src, /\\"feedback_reputation\\":([\d.]+)/)
+  const reputation = sellerData ? sellerData[3] : new Set(allCounts).size <= 1 ? firstMatch(src, /\\"feedback_reputation\\":([\d.]+)/) : null
   if (out.sellerRating === null && reputation) out.sellerRating = Math.round(Number(reputation) * 5 * 10) / 10
-  const business = firstMatch(src, /\\"business\\":(true|false)[^}]{0,200}\\"feedback_count\\"/)
+  const business = sellerData ? sellerData[1] : new Set(allCounts).size <= 1 ? firstMatch(src, /\\"business\\":(true|false)[^}]{0,200}\\"feedback_count\\"/) : null
   if (business) out.sellerBusiness = business === 'true'
-  const badgeBlock = firstMatch(src, /\\"badges\\":\[([^\]]*)\][^}]{0,80}\\"username\\"/)
+  // The badges block names its owner: the seller's when the name is known.
+  const badgeOwner = out.sellerUsername ? `:\\\\"${out.sellerUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\\\"` : ''
+  const badgeBlock = firstMatch(src, new RegExp(`\\\\"badges\\\\":\\[([^\\]]*)\\][^}]{0,80}\\\\"username\\\\"${badgeOwner}`, 'i'))
   if (badgeBlock) out.sellerBadges = [...badgeBlock.matchAll(/\\"type\\":\\"([A-Z_]+)\\"/g)].map((m) => m[1])
 
   // Visible-text fallbacks for the two dates when the structured markers are missing (phrases, never guesses).

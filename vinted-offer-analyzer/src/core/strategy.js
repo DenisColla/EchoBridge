@@ -83,7 +83,9 @@ export function wardrobeStats(raw) {
   const ages = (Array.isArray(raw.ageDays) ? raw.ageDays : []).map(stNum).filter((v) => stFinite(v) && v >= 0)
   const itemCount = stNum(raw.itemCount)
   const bundleText = typeof raw.bundleText === 'string' ? raw.bundleText : ''
-  const bundleFromText = /lott|bundle|pi[uù] articoli/i.test(bundleText) ? stNum((bundleText.match(/(\d{1,2})\s?%/) || [])[1]) : null
+  // Vinted now calls a bundle a «set» («Acquista set · Ottieni fino al 25% di sconto · Crea set»).
+  const bundleWords = /lott|bundle|pi[uù] articoli|acquista set|crea set/i
+  const bundleFromText = bundleWords.test(bundleText) ? stNum((bundleText.match(/(\d{1,2})\s?%/) || [])[1]) : null
   const bundle = stNum(raw.bundleDiscountPct) ?? bundleFromText
   const out = {
     itemCount: stFinite(itemCount) ? itemCount : prices.length || null,
@@ -92,7 +94,9 @@ export function wardrobeStats(raw) {
     feedbackCount: stNum(raw.feedbackCount),
     newWithTags: stNum(raw.newWithTags),
     bundleDiscountPct: stFinite(bundle) && bundle > 0 && bundle <= 60 ? bundle : null,
-    bundleOffered: bundle !== null || /lott|bundle/i.test(bundleText) || raw.bundleOffered === true,
+    bundleOffered: bundle !== null || bundleWords.test(bundleText) || raw.bundleOffered === true,
+    // «Annunci frequenti»: Vinted's own badge for a seller who lists regularly.
+    frequentLister: raw.frequentLister === true,
     sampleCount: prices.length,
     medianPrice: stMedian(prices),
     lowBudgetShare: prices.length ? prices.filter((p) => p <= STRATEGY.LOW_BUDGET_EUR).length / prices.length : null,
@@ -108,7 +112,8 @@ export function wardrobeStats(raw) {
 export function wardrobeFromProbe(details) {
   if (!details || typeof details !== 'object' || details.kind !== 'member') return null
   const fl = details.flight && typeof details.flight === 'object' ? details.flight : {}
-  const pick = (a, b) => (stFinite(a) ? a : stNum(b))
+  // What the page shows in words («5 articoli», «19 follower», «285 recensioni») comes before the embedded data.
+  const pick = (data, shown) => stNum(shown) ?? (stFinite(data) ? data : null)
   return wardrobeStats({
     itemCount: pick(fl.item_count, details.itemCountText) ?? (stFinite(details.cards) && details.cards > 0 ? details.cards : null),
     soldCount: stFinite(fl.given_item_count) ? fl.given_item_count : null,
@@ -116,6 +121,7 @@ export function wardrobeFromProbe(details) {
     feedbackCount: pick(fl.feedback_count, details.feedbackText),
     prices: details.prices,
     bundleText: details.bundleText,
+    frequentLister: details.frequentLister === true,
   })
 }
 
@@ -167,6 +173,10 @@ export function sellerProfileFor({ extraction = null, signals = null, wardrobe =
   } else if (items !== null && items >= 15 && lowBudget === true) add('low_budget', 0.5, `${items} articoli a poco prezzo: abituato a piccoli sconti`)
   else if (items !== null && items <= 3) add('occasional', 0.25, 'vende di rado: prezzo poco ragionato')
 
+  // Vinted's «Annunci frequenti» badge (on the listing as ACTIVE_LISTER, on the profile in words): he lists regularly
+  // and wants the stock to move. A light push: one of the weights the user's own outcomes should confirm.
+  const lister = (Array.isArray(ex.sellerBadges) && ex.sellerBadges.includes('ACTIVE_LISTER')) || Boolean(w && w.frequentLister)
+  if (lister) add('active_lister', 0.25, 'pubblica spesso: gli interessa far girare gli articoli')
   if (w && stFinite(w.staleShare) && w.staleShare >= 0.5 && w.sampleCount >= 6) add('stale_stock', 1, 'molti articoli fermi da mesi: accumula, ha bisogno di vendere')
   if (w && stFinite(w.soldCount) && items !== null && w.soldCount >= 30 && w.soldCount / (w.soldCount + items) >= 0.6) add('sells_fast', -0.5, `${w.soldCount} vendite: i suoi articoli vanno via, non serve scendere`)
   if ((w && w.bundleOffered) || sig.bundleOffered === true || stFinite(sig.bundleDiscountPct)) add('bundle', 1, 'ha attivato lo sconto sui lotti: è abituato a scendere')

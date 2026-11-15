@@ -488,24 +488,37 @@ function Main() {
       // anything fails the profile is built from the listing alone.
       let wardrobe = null
       let memberRaw = null
+      // What each step of the seller's reading gave: shown in «Condividi cosa ha letto l'analisi», to tell a seller
+      // with nothing to read from a page that was not read.
+      const profileRead = { livePage: 'skipped', sellerLink: null, memberPage: 'skipped' }
       if (pageLoaderRef.current) {
         let details = page.via === 'browser' ? page.details || null : null
+        if (page.via === 'browser') profileRead.livePage = details ? 'ok' : 'no_details'
         if (!(details && details.sellerUrl) && page.via !== 'browser') {
           setExtractPhase('browser')
           const live = await pageLoaderRef.current.load(link, { onVisible: () => setExtractPhase('verify') })
+          profileRead.livePage = live.ok ? (live.details ? 'ok' : 'no_details') : live.reason || 'failed'
           if (live.ok && live.details) {
             details = live.details
             const fuller = parseVintedItemHtml(live.html || page.html, live.details)
             if (fuller && (fuller.title || fuller.listPrice)) ex = fuller
           }
         }
-        if (details && typeof details.sellerUrl === 'string' && /\/member\/\d+/.test(details.sellerUrl)) {
+        // The seller's link by his name in the page that was read (parseVintedItemHtml): a logged-in page also links
+        // the visitor's own profile, so the name decides, then the link of the seller's box in the live page.
+        const origin = (String(link).match(/^https:\/\/[^/?#]+/) || ['https://www.vinted.it'])[0]
+        const byName = ex.sellerPath ? `${origin}${ex.sellerPath}` : null
+        const byPage = details && typeof details.sellerUrl === 'string' && /\/member\/\d+/.test(details.sellerUrl) ? details.sellerUrl : null
+        const sellerUrl = byName || byPage
+        profileRead.sellerLink = byName ? 'name' : byPage ? 'page' : null
+        if (sellerUrl) {
           setExtractPhase('seller')
-          const member = await pageLoaderRef.current.load(details.sellerUrl, { onVisible: () => setExtractPhase('verify') })
+          const member = await pageLoaderRef.current.load(sellerUrl, { onVisible: () => setExtractPhase('verify') })
           if (member.ok && member.details && member.details.kind === 'member') {
             memberRaw = member.details
             wardrobe = wardrobeFromProbe(member.details)
-          }
+            profileRead.memberPage = wardrobe ? 'ok' : 'nothing_read'
+          } else profileRead.memberPage = member.ok ? 'not_a_profile' : member.reason || 'failed'
         }
         setExtractPhase(null)
       }
@@ -523,7 +536,7 @@ function Main() {
       const outcome = runAnalysis(built.form, null, { choice: { kind: 'auto' } })
       // `raw` is the parser's output as read (kept with the saved item, engine-spec §6); `via` tells the two paths apart.
       const via = page.via === 'browser' ? 'browser' : 'fetch'
-      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw })
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw, profileRead })
       recordRead(ex, { via }) // per-field read counters for Info; never blocks the analysis
       const idMatch = String(link).match(/\/items\/(\d+)/)
       setLastListing({
@@ -818,7 +831,7 @@ function Main() {
     return { itemId: linkIdOf(extraction.link), link: extraction.link, title: form.itemTitle || '', listPrice: parsePrice(form.listPrice) }
   }
 
-  const OUTCOME_WORD = { accepted: 'accettata', declined: 'rifiutata', no_reply: 'scaduta senza risposta', abandoned: 'annullata' }
+  const OUTCOME_WORD = { accepted: 'accettata', declined: 'rifiutata', no_reply: 'scaduta senza risposta', abandoned: 'annullata', sold_other: 'chiusa, articolo venduto ad altri' }
   const shortTitle = (title) => (String(title || '').trim().slice(0, 40) || 'Offerta')
 
   /**
@@ -834,6 +847,27 @@ function Main() {
     try {
       await watchlist.setStatus(itemId, status)
       showToast(`«${shortTitle(title)}»: offerta ${OUTCOME_WORD[status] || 'chiusa'}. Lista aggiornata.`, 5000)
+    } finally {
+      convDoneRef.current.delete(busy)
+    }
+  }
+
+  /**
+   * «Acquisto andato a buon fine» in the conversation: the offer of the list is a deal ('accepted', at the figure on
+   * the table: the accepted request or the seller's own offer) or a purchase at the listing price ('bought').
+   */
+  const purchaseFromVinted = async (itemId, status, title, atList = false) => {
+    const busy = `purchase|${itemId}`
+    const live = watchlist.peek().find((it) => it.id === itemId)
+    if (!live || ['accepted', 'bought', 'sold_other'].includes(live.status) || convDoneRef.current.has(busy)) return
+    convDoneRef.current.add(busy)
+    try {
+      await watchlist.setStatus(itemId, status)
+      // Bought without waiting for the answer: the price paid is the listing's, not the figure offered.
+      if (atList && Number.isFinite(Number(live.listPrice))) await watchlist.update(itemId, { finalPrice: Number(live.listPrice) })
+      const after = watchlist.peek().find((it) => it.id === itemId)
+      const paid = after && Number.isFinite(after.finalPrice) ? ` a ${formatEuro(after.finalPrice)}` : ''
+      showToast(`«${shortTitle(title)}»: acquistato${paid}. Lista aggiornata.`, 5000)
     } finally {
       convDoneRef.current.delete(busy)
     }
@@ -898,10 +932,16 @@ function Main() {
     const fresh = !convDoneRef.current.has(key)
     const show = (state, extra = {}) => setCapture({ convId: conv.convId, state, price: plan.price, link: conv.itemLink, itemId: plan.itemId, ...extra })
     // One line per change in the navigation log: Vinted's own words for the status, never a name or a message.
-    if (fresh) logVisit(url, `offerta «${(conv.mine && conv.mine.statusText) || '-'}»${conv.standing ? ' + proposta del venditore' : ''} → ${plan.action}`)
+    if (fresh) logVisit(url, `offerta «${(conv.mine && conv.mine.statusText) || '-'}»${conv.standing ? ' + proposta del venditore' : ''}${conv.purchased ? ' + acquisto' : ''}${conv.unavailable ? ' + non disponibile' : ''} → ${plan.action}`)
     if (plan.action === 'none' || plan.action === 'needs_analysis' || plan.action === 'incoming') {
       convDoneRef.current.add(key)
       show(plan.action !== 'none' ? plan.action : plan.counter ? 'counter' : plan.recorded ? 'recorded' : 'idle')
+      return
+    }
+    if (plan.action === 'purchase') {
+      convDoneRef.current.add(key)
+      await purchaseFromVinted(plan.itemId, plan.status, plan.title, plan.atList === true)
+      show('closed', { status: plan.status })
       return
     }
     if (plan.action === 'counter') {
@@ -1061,7 +1101,10 @@ function Main() {
         recensioni: ex.sellerFeedbackCount ?? null, valutazione: ex.sellerRating ?? null, professionale: ex.sellerBusiness ?? null,
       },
       segnali: ex.signals || null,
+      distintivi: ex.sellerBadges || [],
       armadio: extraction.wardrobe || null,
+      // Which step of the seller's reading worked: the live page, the link to his profile (by name or from the page), his profile.
+      lettura_profilo: extraction.profileRead || null,
       profilo: {
         tipo: strategy.seller.type, punteggio: strategy.seller.score, archetipo: strategy.seller.archetype ? strategy.seller.archetype.label : null, fiducia: strategy.seller.confidence,
         tratti: (strategy.seller.traits || []).map((x) => `${x.pts > 0 ? '+' : ''}${x.pts} ${x.label}`),

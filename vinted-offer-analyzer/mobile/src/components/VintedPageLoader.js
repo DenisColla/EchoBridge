@@ -165,10 +165,36 @@ export const PAGE_PROBE = `(function () {
   // counts, a sample of prices and the bundle text. Read-only like everything else here.
   var isMember = /\\/member\\//.test(location.pathname);
   var readSellerUrl = function () {
+    var pick = function (a) {
+      var m = String((a && a.getAttribute && a.getAttribute('href')) || '').match(/\\/member\\/(\\d+)[^?#"]*/);
+      return m ? location.origin + m[0] : null;
+    };
+    // The link around the seller's name, or the nearest one in his box: a logged-in page also links the visitor's
+    // own profile (menu, header), which the first link of the page may well be.
+    var name = document.querySelector('[data-testid="profile-username"]');
+    if (name) {
+      var own = pick(name.closest ? name.closest('a[href*="/member/"]') : null);
+      if (own) return own;
+      var box = name;
+      for (var up = 0; up < 6 && box.parentElement; up++) {
+        box = box.parentElement;
+        var inner = pick(box.querySelector('a[href*="/member/"]'));
+        if (inner) return inner;
+      }
+      var who = text(name).toLowerCase();
+      if (who) {
+        var named = document.querySelectorAll('a[href*="/member/"]');
+        for (var n = 0; n < named.length; n++) {
+          var href = String(named[n].getAttribute('href') || '').toLowerCase();
+          if (href.indexOf('-' + who) > 0 && pick(named[n])) return pick(named[n]);
+        }
+      }
+    }
     var links = document.querySelectorAll('a[href*="/member/"]');
     for (var i = 0; i < links.length; i++) {
-      var m = String(links[i].getAttribute('href') || '').match(/\\/member\\/(\\d+)[^?#"]*/);
-      if (m) return location.origin + m[0];
+      if (links[i].closest && links[i].closest('header, nav, [data-testid*="header" i], [data-testid*="menu" i]')) continue;
+      var url = pick(links[i]);
+      if (url) return url;
     }
     return null;
   };
@@ -200,20 +226,38 @@ export const PAGE_PROBE = `(function () {
         if (p) prices.push(p[1]);
       }
       var num = function (re) { var x = body.match(re); return x ? x[1] : null; };
+      // «5 articoli» is the wardrobe's size; «almeno 5 articoli» is the text of the «Annunci frequenti» badge.
+      var itemCount = null;
+      var counts = /(\\d[\\d.]*)\\s+articol[oi]/gi;
+      for (var hitC = counts.exec(body); hitC && itemCount === null; hitC = counts.exec(body)) {
+        if (!/almeno\\s*$/i.test(body.slice(Math.max(0, hitC.index - 10), hitC.index))) itemCount = hitC[1];
+      }
+      // The embedded data of the page, only around this member's own name: a logged-in page embeds the visitor's
+      // account too, and its figures would come first.
       var flight = {};
+      var who = String((location.pathname.match(/\\/member\\/\\d+-([^/?#]+)/) || [])[1] || '').toLowerCase();
       var chunks = self.__next_f;
-      if (Array.isArray(chunks)) {
-        for (var k in MEMBER_RES) {
-          for (var j = 0; j < chunks.length && flight[k] === undefined; j++) {
-            var c = Array.isArray(chunks[j]) ? chunks[j][1] : chunks[j];
-            if (typeof c !== 'string') continue;
-            var hit = c.match(MEMBER_RES[k]);
+      if (who && Array.isArray(chunks)) {
+        var plain = '"login":"' + who + '"';
+        var escaped = '\\\\"login\\\\":\\\\"' + who + '\\\\"';
+        for (var j = 0; j < chunks.length; j++) {
+          var c = Array.isArray(chunks[j]) ? chunks[j][1] : chunks[j];
+          if (typeof c !== 'string') continue;
+          var low = c.toLowerCase();
+          var at = low.indexOf(escaped);
+          if (at < 0) at = low.indexOf(plain);
+          if (at < 0) continue;
+          var near = c.slice(Math.max(0, at - 3000), at + 3000);
+          for (var k in MEMBER_RES) {
+            if (flight[k] !== undefined) continue;
+            var hit = near.match(MEMBER_RES[k]);
             if (hit) flight[k] = Number(hit[1]);
           }
         }
       }
-      var bundle = body.match(/[^.]{0,80}(sconto sui lotti|sconti sui lotti|lotti)[^.]{0,80}/i);
-      return { kind: 'member', cards: cards, prices: prices, itemCountText: num(/(\\d[\\d.]*)\\s+articol[oi]/i), followersText: num(/(\\d[\\d.]*)\\s+follower/i), feedbackText: num(/(\\d[\\d.]*)\\s+recension/i), bundleText: bundle ? bundle[0].slice(0, 200) : null, flight: flight, sample: body.slice(0, 600) };
+      // «Acquista set · Ottieni fino al 25% di sconto · Crea set» (the bundle was called «lotti» before).
+      var bundle = body.match(/[^.]{0,80}(acquista set|crea set|sconto sui lotti|sconti sui lotti|lotti)[^.]{0,80}/i);
+      return { kind: 'member', frequentLister: /annunci frequenti/i.test(body), cards: cards, prices: prices, itemCountText: itemCount, followersText: num(/(\\d[\\d.]*)\\s+follower/i), feedbackText: num(/(\\d[\\d.]*)\\s+recension/i), bundleText: bundle ? bundle[0].slice(0, 200) : null, flight: flight, sample: body.slice(0, 600) };
     } catch (e) {
       return null;
     }

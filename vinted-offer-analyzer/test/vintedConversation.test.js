@@ -94,6 +94,34 @@ test('conversation: the answer read on Vinted closes the offer', () => {
   assert.equal(planOfferCapture(readConversation(raw([request('4,00 €', 'Rifiutata')]), URL), { items: [item({ status: 'sent' })] }).action, 'none')
 })
 
+test('conversation: a purchase and an article that is gone, as the pages of 15 Nov say them', () => {
+  // «31,00 € · 40,00 € · Accettata», then «Acquisto andato a buon fine».
+  const bought = (offers, extra = {}) => readConversation(raw(offers, { purchased: true, ...extra }), URL)
+  const accepted = bought([request('6,00 €', 'Accettata')])
+  const sent = item({ status: 'sent', conversationId: CONV })
+  assert.deepEqual([planOfferCapture(accepted, { items: [sent] }).action, planOfferCapture(accepted, { items: [sent] }).status], ['purchase', 'accepted'])
+  // Bought at the seller's own offer: a deal at his figure. After a refusal, or with a plan never sent: a purchase at the listing price.
+  const noOffers = bought([])
+  assert.deepEqual([planOfferCapture(noOffers, { items: [item({ status: 'countered', negotiation: [{ by: 'buyer', price: 6 }, { by: 'seller', price: 8 }] })] }).status], ['accepted'])
+  assert.equal(planOfferCapture(bought([request('6,00 €', 'Rifiutata')]), { items: [item({ status: 'declined' })] }).status, 'bought')
+  assert.equal(planOfferCapture(bought([request('6,00 €', 'Rifiutata')]), { items: [sent] }).status, 'bought')
+  // Bought without waiting for the answer: a purchase at the listing price, not a deal at the figure offered.
+  const impatient = planOfferCapture(bought([request('6,00 €', 'In sospeso')]), { items: [sent] })
+  assert.deepEqual([impatient.status, impatient.atList], ['bought', true])
+  assert.equal(planOfferCapture(accepted, { items: [sent] }).atList, false)
+  assert.equal(planOfferCapture(noOffers, { items: [item()] }).status, 'bought')
+  // Already closed as a deal, or not in the list: nothing.
+  assert.equal(planOfferCapture(accepted, { items: [item({ status: 'accepted', conversationId: CONV })] }).action, 'none')
+  assert.equal(planOfferCapture(accepted, { items: [] }).action, 'none')
+  // «12,60 € · 21,00 € · Annullata» with «Articolo non disponibile»: somebody else bought it.
+  const gone = readConversation(raw([request('6,00 €', 'Annullata')], { unavailable: true }), URL)
+  assert.deepEqual([planOfferCapture(gone, { items: [sent] }).action, planOfferCapture(gone, { items: [sent] }).status], ['outcome', 'sold_other'])
+  // «Annullata» alone does not say why: nothing changes by itself.
+  assert.equal(planOfferCapture(readConversation(raw([request('6,00 €', 'Annullata')]), URL), { items: [sent] }).action, 'none')
+  // The article is gone but the user's purchase line is there: his purchase.
+  assert.equal(planOfferCapture(bought([request('6,00 €', 'Annullata')], { unavailable: true }), { items: [item({ status: 'countered', negotiation: [{ by: 'buyer', price: 6 }, { by: 'seller', price: 8 }] })] }).action, 'purchase')
+})
+
 // The real page of 15 Nov, 23:08: the request of 15 € «Rifiutata», then the seller's own offer of 20 € with «Acquista».
 const SB = '01a1e0ee-626b-7000-ab49-c00000bfc9'
 const counterPage = (extra = {}, sellerOffer = {}) => readConversation({
