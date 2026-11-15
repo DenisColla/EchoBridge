@@ -24,6 +24,8 @@ import { useSearch } from './src/hooks/useSearch.js'
 import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
 import { useVintedBridge } from './src/hooks/useVintedBridge.js'
 import { VintedNotices } from './src/components/VintedNotices.js'
+import { VintedTab } from './src/components/vinted/VintedTab.js'
+import { copyText } from './src/services/clipboard.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { recordRead } from './src/services/readStats.js'
@@ -33,6 +35,7 @@ import { space, useTheme } from './src/theme.js'
 import { Collapsible } from './src/components/ui.js'
 
 const TABS = [
+  { id: 'vinted', label: 'Vinted' },
   { id: 'calcola', label: 'Calcola' },
   { id: 'lista', label: 'Lista' },
   { id: 'info', label: 'Info' },
@@ -115,7 +118,9 @@ export default function App() {
 function Main() {
   const t = useTheme()
   const insets = useSafeAreaInsets()
-  const [tab, setTab] = useState('calcola')
+  // 1.9: the Vinted browser is the home of the app (the web build has no browser, it starts from Calcola).
+  const [tab, setTab] = useState(Platform.OS === 'web' ? 'calcola' : 'vinted')
+  const vintedRef = useRef(null)
   const [form, setForm] = useState(EMPTY_FORM)
   const [errors, setErrors] = useState({})
   const [result, setResult] = useState(null)
@@ -763,6 +768,22 @@ function Main() {
     return () => sub.remove()
   }, [searchOpen, labOpen])
 
+  // In the Vinted tab the back gesture belongs to the browser (its panel first, then its history).
+  const vintedActive = tab === 'vinted' && !counterContext && !labOpen && !searchOpen
+  useEffect(() => {
+    if (!vintedActive) return undefined
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => Boolean(vintedRef.current && vintedRef.current.handleBack()))
+    return () => sub.remove()
+  }, [vintedActive])
+
+  const browserToast = useCallback((m) => showToast(m, 4000), [showToast])
+
+  /** A proposal chosen in the browser panel: the analysis follows it and the figure is ready to paste in Vinted's offer. */
+  const pickInBrowser = async (option) => {
+    pickProposal(option)
+    if (option && (await copyText(String(option.price).replace('.', ',')))) showToast(`${formatEuro(option.price)} copiato: incollalo nell'offerta su Vinted.`, 3500)
+  }
+
   const openCounterFromItem = (item, prefillCounter = null) => {
     const fallbackForm = {
       itemTitle: item.title || '', category: item.category || '', listPrice: String(item.listPrice ?? '').replace('.', ','),
@@ -851,12 +872,39 @@ function Main() {
   return (
     <View style={[styles.root, { backgroundColor: t.bg, paddingTop: topInset }]}>
       <StatusBar style="auto" />
-      <View style={[styles.header, { borderBottomColor: t.line }]}>
-        <View style={[styles.logo, { backgroundColor: t.accent }]}><Text style={[styles.logoText, { color: t.onAccent }]}>€</Text></View>
-        <Text style={[styles.appName, { color: t.ink, flex: 1 }]} numberOfLines={1}>Offerta Vinted Timing</Text>
+      {vintedActive ? null : (
+        <View style={[styles.header, { borderBottomColor: t.line }]}>
+          <View style={[styles.logo, { backgroundColor: t.accent }]}><Text style={[styles.logoText, { color: t.onAccent }]}>€</Text></View>
+          <Text style={[styles.appName, { color: t.ink, flex: 1 }]} numberOfLines={1}>Offerta Vinted Timing</Text>
+        </View>
+      )}
+
+      {/* The browser stays mounted while the other tabs are shown, so the page and the session are where they were. */}
+      <View style={{ flex: 1, display: vintedActive ? 'flex' : 'none' }}>
+        <VintedTab
+          ref={vintedRef}
+          normalizeLink={normalizeVintedLink}
+          analysedLink={extraction && extraction.ok ? extraction.link : null}
+          strategy={strategy}
+          result={result && result.ok && result.kind !== 'no_offer_needed' ? result : null}
+          saveState={saveState}
+          calendarBusy={calendarBusy}
+          extracting={extracting}
+          extractPhase={extractPhase}
+          extractError={vintedActive && extraction && !extraction.ok ? extraction.message : null}
+          onAnalyze={(link) => { if (extractRef.current) extractRef.current(link) }}
+          onPick={pickInBrowser}
+          onSave={saveCurrent}
+          onSaveAndMarkSent={saveAndMarkSent}
+          onCalendar={() => addCalendar(result, saveState && saveState.itemId)}
+          onCounter={openCounterFromAnalysis}
+          onCopyMessage={noteMessageCopied}
+          onDetails={() => setTab('calcola')}
+          onToast={browserToast}
+        />
       </View>
 
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView style={{ flex: 1, display: vintedActive ? 'none' : 'flex' }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView ref={scrollRef} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           {counterContext && (
             <CounterView
