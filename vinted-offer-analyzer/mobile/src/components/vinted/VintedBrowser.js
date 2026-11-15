@@ -164,7 +164,7 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
       return
     }
     if (!msg || typeof msg !== 'object') return
-    const at = String((event.nativeEvent && event.nativeEvent.url) || '')
+    const at = String((event.nativeEvent && event.nativeEvent.url) || msg.url || '')
     if (msg.type === 'nav' && typeof msg.url === 'string') seen(msg.url)
     else if (msg.type === 'outline' && onOutline) onOutline({ url: msg.url, lines: Array.isArray(msg.lines) ? msg.lines : [], controls: Array.isArray(msg.controls) ? msg.controls : [] })
     // What a page says about offers counts only when the page shown is Vinted's (the address comes from the WebView, not from the page).
