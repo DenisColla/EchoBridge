@@ -483,6 +483,14 @@ export function strategyFor(form, now = new Date(), options = {}) {
       // What the lowest offer Vinted allows costs in all: below this resale value no offer can gain.
       floorTotal: purchaseCost(stR2(Math.ceil(floor * 100 - 1e-7) / 100), shipping.amount).total,
       set,
+      // The market the figures rest on, when one is known (1.12: for a book, the listings with the same ISBN or title):
+      // how many listings, their median and middle half, and what they were matched by ('isbn' | 'title' | null).
+      market: market ? {
+        n: market.n, medianPrice: market.medianPrice, p25Price: market.p25Price, p75Price: market.p75Price,
+        minPrice: stFinite(market.minPrice) ? market.minPrice : null, maxPrice: stFinite(market.maxPrice) ? market.maxPrice : null,
+        gapPct: stFinite(market.medianPrice) && market.medianPrice > 0 ? Math.round((L / market.medianPrice - 1) * 100) : null,
+        basis: market.basis || null, confidence: market.confidence || null,
+      } : null,
     },
   }
 }

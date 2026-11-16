@@ -9,6 +9,7 @@ const extractLabel = (extracting, phase) => {
   if (phase === 'verify') return 'Completa la verifica qui sopra'
   if (phase === 'browser') return 'Supero il controllo di Vinted…'
   if (phase === 'seller') return 'Studio il venditore…'
+  if (phase === 'market') return 'Cerco lo stesso libro…'
   return 'Leggo l\'annuncio…'
 }
 

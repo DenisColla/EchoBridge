@@ -211,6 +211,54 @@ export const PAGE_PROBE = `(function () {
     }
     return null;
   };
+  // The article cards of a page (a profile, a search): { id, price, text } for each distinct article. The card is the
+  // widest box around the link that holds no other article. On Vinted the link is an empty overlay with its own
+  // data-testid («product-item-id-…--overlay-link»): price and title are its siblings, so they are looked for going
+  // up from the link (1.11.1 stopped at the link itself and read no price at all).
+  var PRICE = /(\\d{1,5}(?:[.,]\\d{2})?)\\s?\\u20ac/;
+  var readCards = function (limit) {
+    var links = document.querySelectorAll('a[href*="/items/"]');
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < links.length && out.length < limit; i++) {
+      var a = links[i];
+      var m = String(a.getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+      if (!m || seen[m[1]]) continue;
+      seen[m[1]] = 1;
+      var title = String(a.getAttribute('title') || '');
+      var p = title.match(PRICE);
+      var box = null;
+      var node = a;
+      for (var up = 0; up < 7; up++) {
+        node = node.parentElement;
+        if (!node || node === document.body) break;
+        var inside = node.querySelectorAll('a[href*="/items/"]');
+        var foreign = false;
+        for (var q = 0; q < inside.length && !foreign; q++) {
+          var other = String(inside[q].getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+          if (other && other[1] !== m[1]) foreign = true;
+        }
+        if (foreign) break;
+        box = node;
+        // Laid out, one element per line: glued, a title ending in a digit would change the price after it.
+        if (!p) p = String(node.innerText || text(node)).slice(0, 600).match(PRICE);
+      }
+      var img = box ? box.querySelector('img[alt]') : null;
+      var words = (title + ' ' + (img ? String(img.getAttribute('alt') || '') : '') + ' ' + (box ? String(box.innerText || text(box)) : '')).replace(/\\s+/g, ' ').trim().slice(0, 300);
+      out.push({ id: m[1], price: p ? p[1] : null, text: words, mark: String(a.getAttribute('data-testid') || a.className || '').replace(/\\d{3,}/g, '{id}').slice(0, 60) });
+    }
+    return out;
+  };
+  var countItemLinks = function () {
+    var linked = document.querySelectorAll('a[href*="/items/"]');
+    var ids = {};
+    var n = 0;
+    for (var li = 0; li < linked.length; li++) {
+      var hit = String(linked[li].getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+      if (hit && !ids[hit[1]]) { ids[hit[1]] = 1; n++; }
+    }
+    return n;
+  };
   var MEMBER_RES = {
     item_count: /\\\\?"item_count\\\\?":\\s*(\\d+)/,
     given_item_count: /\\\\?"given_item_count\\\\?":\\s*(\\d+)/,
@@ -226,39 +274,11 @@ export const PAGE_PROBE = `(function () {
       // digits would change the figure that follows it.
       var laidOut = String(document.body.innerText || '').replace(/[ \\t]+/g, ' ');
       var body = (laidOut.length > 40 ? laidOut : text(document.body)).slice(0, 30000);
-      var links = document.querySelectorAll('a[href*="/items/"]');
-      var seen = {};
+      var got = readCards(120);
       var prices = [];
-      var cards = 0;
-      var firstCard = null;
-      var PRICE = /(\\d{1,5}(?:[.,]\\d{2})?)\\s?\\u20ac/;
-      for (var i = 0; i < links.length && cards < 120; i++) {
-        var a = links[i];
-        var m = String(a.getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
-        if (!m || seen[m[1]]) continue;
-        seen[m[1]] = 1;
-        cards++;
-        if (cards === 1) firstCard = String(a.getAttribute('data-testid') || a.className || '').replace(/\\d{3,}/g, '{id}').slice(0, 60);
-        // The card is the widest box around the link that holds no other article. On Vinted the link is an empty
-        // overlay with its own data-testid («product-item-id-…--overlay-link»): the price is a sibling, so it is
-        // looked for going up from the link (1.11.1 stopped at the link itself and read no price at all).
-        var p = String(a.getAttribute('title') || '').match(PRICE);
-        var node = a;
-        for (var up = 0; up < 7 && !p; up++) {
-          node = node.parentElement;
-          if (!node || node === document.body) break;
-          var inside = node.querySelectorAll('a[href*="/items/"]');
-          var foreign = false;
-          for (var q = 0; q < inside.length && !foreign; q++) {
-            var other = String(inside[q].getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
-            if (other && other[1] !== m[1]) foreign = true;
-          }
-          if (foreign) break;
-          // Laid out, one element per line: glued, a title ending in a digit would change the price after it.
-          p = String(node.innerText || text(node)).slice(0, 600).match(PRICE);
-        }
-        if (p) prices.push(p[1]);
-      }
+      for (var i = 0; i < got.length; i++) { if (got[i].price) prices.push(got[i].price); }
+      var cards = got.length;
+      var firstCard = got.length ? got[0].mark : null;
       var num = function (re) { var x = body.match(re); return x ? x[1] : null; };
       // «5 articoli» is the wardrobe's size; «almeno 5 articoli» is the text of the «Annunci frequenti» badge.
       var itemCount = null;
@@ -304,9 +324,38 @@ export const PAGE_PROBE = `(function () {
     }
   };
 
+  // 1.12: a search page (the same book in the other listings). Read when its cards stop growing, or when it says
+  // there is none; the cards are the same as a profile's.
+  var isCatalog = /^\\/catalog/.test(location.pathname);
+  var lastCount = -1;
+  var stableSince = 0;
   var itemSince = null;
   var tick = function () {
     var ready = document.readyState !== 'loading';
+    if (isCatalog) {
+      var stopped = isChallenge();
+      if (ready && !stopped && !isCfError()) {
+        if (itemSince === null) itemSince = Date.now();
+        var waitedC = Date.now() - itemSince;
+        var count = countItemLinks();
+        if (count !== lastCount) { lastCount = count; stableSince = Date.now(); }
+        var none = /nessun risultato|nessun articolo|non abbiamo trovato|niente da mostrare/i.test(String(document.body ? document.body.innerText || '' : '').slice(0, 6000));
+        var settledC = (count > 0 && Date.now() - stableSince > 900) || (none && waitedC > 1500) || waitedC > 6000;
+        if (!settledC) {
+          post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
+          setTimeout(tick, 400);
+          return;
+        }
+        var found = readCards(80);
+        var pricedC = 0;
+        for (var fc = 0; fc < found.length; fc++) { if (found[fc].price) pricedC++; }
+        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 90) : null } } });
+        return;
+      }
+      post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: stopped, cfError: !stopped && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
+      setTimeout(tick, 700);
+      return;
+    }
     if (isMember) {
       var blocked = isChallenge();
       if (ready && !blocked && !isCfError()) {

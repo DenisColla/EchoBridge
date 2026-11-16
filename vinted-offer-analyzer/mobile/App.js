@@ -240,8 +240,47 @@ function Main() {
   /** Engine options with the learned profile (none until the monthly report has something to correct). */
   const engineOptions = (extra = {}) => ({ ...extra, ...(learning.engineProfile ? { profile: learning.engineProfile } : {}) })
   /** The market picture of the listing on screen (from «Cerca altrove», when it searched this very listing). */
-  const marketInfoFor = (f) => search.marketFor(normalizeVintedLink(f && f.link) || (f && f.link))
-  const marketInfo = useMemo(() => marketInfoFor(form), [form.link, search.run, search.store]) // eslint-disable-line react-hooks/exhaustive-deps
+  // 1.12: for a book the analysis itself reads the market (the other listings with the same ISBN, else with its title
+  // and author); kept by link for the session, behind the one «Cerca altrove» found for the same listing.
+  const bookMarketRef = useRef(new Map())
+  const [bookMarkets, setBookMarkets] = useState({})
+  const bookInfoOf = (book) => (book && book.market ? { market: book.market, at: book.at, signals: null } : null)
+  const linkKeyOf = (f) => normalizeVintedLink(f && f.link) || (f && f.link)
+  /** In a handler: the freshest reading (the ref is written before the analysis that follows it runs). */
+  const marketInfoFor = (f) => {
+    const url = linkKeyOf(f)
+    return search.marketFor(url) || bookInfoOf(url ? bookMarketRef.current.get(url) : null)
+  }
+  /** While rendering: the same picture, from state. */
+  const marketShownFor = (f) => {
+    const url = linkKeyOf(f)
+    return search.marketFor(url) || bookInfoOf(url ? bookMarkets[url] : null)
+  }
+  const marketInfo = useMemo(() => marketShownFor(form), [form.link, search.run, search.store, bookMarkets]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * The market of a book: one search page read in the in-app browser (by ISBN; by title and author when the page has
+   * no ISBN, or when the ISBN finds fewer than three comparable listings). Read-only, at most two pages.
+   * → { market (null when too few), info (what was found), tried (one line per search, for the report) }.
+   */
+  const readBookMarket = async (identity, { origin, selfId, listingTitle, listPrice }) => {
+    const tried = []
+    let best = null
+    for (const mode of identity.isbn ? ['isbn', 'title'] : ['title']) {
+      const q = core.bookSearchFor(identity, { origin, mode, listingTitle })
+      if (!q || !pageLoaderRef.current) continue
+      // The web build has no in-app browser: the cards a test hands over stand in for the search page.
+      const handed = Platform.OS === 'web' && typeof window !== 'undefined' && window.__ovtBookCards && Array.isArray(window.__ovtBookCards[mode]) ? window.__ovtBookCards[mode] : null
+      const res = handed ? { ok: true, details: { kind: 'catalog', cards: handed, diag: null } } : await pageLoaderRef.current.load(q.url, { onVisible: () => setExtractPhase('verify') })
+      const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
+      const found = cards ? core.bookMarketFrom(cards, { identity, mode, selfId, listingTitle, listPrice }) : null
+      tried.push({ via: mode, esito: res.ok ? (cards ? 'ok' : 'not_a_search') : res.reason || 'failed', visti: found ? found.seen : null, confrontabili: found ? found.kept : null, pagina: res.ok && res.details ? res.details.diag || null : null })
+      setExtractPhase('market')
+      if (found && (!best || found.kept > best.kept)) best = found
+      if (found && found.ok) break
+    }
+    return { market: best && best.ok ? best.market : null, info: best, tried, identity }
+  }
 
   /**
    * A field edit. The policy the link read put on the form describes the listing AS READ: when the price, the age or a
@@ -523,6 +562,8 @@ function Main() {
       // anything fails the profile is built from the listing alone.
       let wardrobe = null
       let memberRaw = null
+      let bookRead = null
+      let itemHtml = page.html || ''
       // What each step of the seller's reading gave: shown in «Condividi cosa ha letto l'analisi», to tell a seller
       // with nothing to read from a page that was not read.
       const profileRead = { livePage: 'skipped', sellerLink: null, memberPage: 'skipped' }
@@ -533,6 +574,7 @@ function Main() {
           setExtractPhase('browser')
           const live = await pageLoaderRef.current.load(link, { onVisible: () => setExtractPhase('verify') })
           profileRead.livePage = live.ok ? (live.details ? 'ok' : 'no_details') : live.reason || 'failed'
+          if (live.ok && live.html) itemHtml = live.html
           if (live.ok && live.details) {
             details = live.details
             const fuller = parseVintedItemHtml(live.html || page.html, live.details)
@@ -557,7 +599,26 @@ function Main() {
             profileRead.memberSeen = member.details.diag || null
           } else profileRead.memberPage = member.ok ? 'not_a_profile' : member.reason || 'failed'
         }
+        // 1.12: the market of a book — what the other listings ask for the same ISBN, else for its title and author.
+        const identity = core.bookIdentityOf(itemHtml) || (core.categoryGuess(ex).id === 'books' && ex.title ? { isbn: null, isbnHref: null, title: null, author: null } : null)
+        if (identity) {
+          setExtractPhase('market')
+          bookRead = await readBookMarket(identity, { origin, selfId: (String(link).match(/\/items\/(\d+)/) || [])[1] || null, listingTitle: ex.title || '', listPrice: ex.listPrice })
+        }
         setExtractPhase(null)
+      }
+      const marketKey = normalizeVintedLink(link) || link
+      const bookEntry = bookRead && bookRead.market ? { market: bookRead.market, at: new Date().toISOString() } : null
+      if (bookEntry) {
+        bookMarketRef.current.set(marketKey, bookEntry)
+        if (bookMarketRef.current.size > 30) bookMarketRef.current.delete(bookMarketRef.current.keys().next().value)
+      } else bookMarketRef.current.delete(marketKey)
+      setBookMarkets(Object.fromEntries(bookMarketRef.current))
+      if (bookRead && bookRead.info) {
+        const what = bookRead.info.basis === 'isbn' ? 'dello stesso libro' : 'con lo stesso titolo'
+        showToast(bookRead.market
+          ? `Mercato: ${bookRead.market.n} annunci ${what}, mediana ${formatEuro(bookRead.market.medianPrice)}.`
+          : `Mercato: ${bookRead.info.kept} ${bookRead.info.kept === 1 ? 'annuncio' : 'annunci'} ${what}, troppo pochi per una mediana.`, 5000)
       }
       contextRef.current = { link, extraction: ex, wardrobe, memberRaw, at: Date.now() }
       choiceRef.current = { kind: 'auto' }
@@ -573,7 +634,7 @@ function Main() {
       const outcome = runAnalysis(built.form, null, { choice: { kind: 'auto' } })
       // `raw` is the parser's output as read (kept with the saved item, engine-spec §6); `via` tells the two paths apart.
       const via = page.via === 'browser' ? 'browser' : 'fetch'
-      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw, profileRead })
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw, profileRead, bookRead })
       recordRead(ex, { via }) // per-field read counters for Info; never blocks the analysis
       const idMatch = String(link).match(/\/items\/(\d+)/)
       setLastListing({
@@ -1154,6 +1215,17 @@ function Main() {
       armadio: extraction.wardrobe || null,
       // Which step of the seller's reading worked: the live page, the link to his profile (by name or from the page), his profile.
       lettura_profilo: extraction.profileRead || null,
+      // 1.12: the market of a book — what it was searched by, how many listings were seen and how many compare.
+      mercato: extraction.bookRead ? {
+        isbn: extraction.bookRead.identity.isbn, titolo: extraction.bookRead.identity.title, autore: extraction.bookRead.identity.author,
+        via: extraction.bookRead.info ? extraction.bookRead.info.basis : null, annunci_visti: extraction.bookRead.info ? extraction.bookRead.info.seen : null,
+        confrontabili: extraction.bookRead.info ? extraction.bookRead.info.kept : null, usato: Boolean(extraction.bookRead.market),
+        ...(extraction.bookRead.info && extraction.bookRead.info.market ? {
+          mediana: extraction.bookRead.info.market.medianPrice, quartile_basso: extraction.bookRead.info.market.p25Price, quartile_alto: extraction.bookRead.info.market.p75Price,
+          minimo: extraction.bookRead.info.market.minPrice, massimo: extraction.bookRead.info.market.maxPrice, affidabilita: extraction.bookRead.info.market.confidence,
+        } : {}),
+        ricerche: extraction.bookRead.tried,
+      } : null,
       profilo: {
         tipo: strategy.seller.type, punteggio: strategy.seller.score, archetipo: strategy.seller.archetype ? strategy.seller.archetype.label : null, fiducia: strategy.seller.confidence,
         tratti: (strategy.seller.traits || []).map((x) => `${x.pts > 0 ? '+' : ''}${x.pts} ${x.label}`),
@@ -1313,7 +1385,7 @@ function Main() {
               onCalendar={counterCalendar}
               calendarBusy={calendarBusy}
               profile={learning.engineProfile}
-              market={marketInfoFor(counterContext.form) ? marketInfoFor(counterContext.form).market : null}
+              market={marketShownFor(counterContext.form) ? marketShownFor(counterContext.form).market : null}
               counterStats={counterStatsOf(watchlist.allItems)}
               onScrollTo={(y) => setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ y: Math.max(0, y - 8), animated: true }), 30)}
             />

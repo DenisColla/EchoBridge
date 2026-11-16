@@ -44,7 +44,12 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
   const shipWord = costs.shipping.source === 'estimate' ? 'spedizione (stima)' : 'spedizione'
   const gain = chosen.margin
   const tone = toneColors(t, gain >= 0 ? 'good' : 'bad')
-  const from = costs.resale.source === 'market' ? ' (la mediana degli annunci simili)' : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
+  // 1.12: the market the figures rest on — for a book, the other listings with the same ISBN (or title).
+  const mk = costs.market
+  const alike = mk && mk.basis === 'isbn' ? 'dello stesso libro (ISBN)' : mk && mk.basis === 'title' ? 'con lo stesso titolo' : 'simili'
+  const from = costs.resale.source === 'market' ? (mk && mk.basis === 'isbn' ? ' (la mediana dello stesso libro)' : mk && mk.basis === 'title' ? ' (la mediana degli annunci con lo stesso titolo)' : ' (la mediana degli annunci simili)') : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
+  const gapWord = mk && Number.isFinite(mk.gapPct) && mk.gapPct !== 0 ? ` Questo annuncio è il ${Math.abs(mk.gapPct)}% ${mk.gapPct > 0 ? 'sopra' : 'sotto'}.` : ''
+  const marketLine = mk ? `Mercato: ${mk.n} annunci ${alike}, mediana ${formatEuro(mk.medianPrice)}; la metà chiede tra ${formatEuro(mk.p25Price)} e ${formatEuro(mk.p75Price)}.${gapWord}` : null
   let counter = `Se controbatte arriverà verso ${formatEuro(chosen.landing)}, in tutto ${formatEuro(chosen.landingTotal)}`
   if (!resell) counter += '.'
   else if (chosen.landingMargin >= 0) counter += ': resti in guadagno, puoi chiudere.'
@@ -68,6 +73,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
       <Body small>
         Con {formatEuro(chosen.price)} paghi in tutto <Text style={{ fontWeight: '700' }}>{formatEuro(chosen.total)}</Text>: {formatEuro(chosen.fee)} di commissione Vinted e {formatEuro(costs.shipping.amount)} di {shipWord}.
       </Body>
+      {marketLine ? <Body small muted>{marketLine}</Body> : null}
       {resell ? (
         <Body small style={{ color: tone.fg, fontWeight: '600' }}>
           {gain >= 0 ? `Rivendendolo a ${formatEuro(resale)}${from} ti restano ${formatEuro(gain)}.` : `Rivendendolo a ${formatEuro(resale)}${from} ci perdi ${formatEuro(-gain)}.`}
