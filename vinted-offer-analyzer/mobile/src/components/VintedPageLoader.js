@@ -96,6 +96,19 @@ export const PAGE_PROBE = `(function () {
   };
   var readStrikethrough = function () { return readTexts('s, del, [class*="strikethrough" i], [class*="line-through" i], [style*="line-through"]', true, 10); };
   var readBadges = function () { return readTexts('[data-testid*="badge" i]', false, 10); };
+  // The listing's own heart: aria-label «Aggiungi ai preferiti. Aggiunto ai preferiti da 4», text «4». The hearts of
+  // the other listings on the page have other test ids, so this count is surely this listing's.
+  var readFavourites = function () {
+    try {
+      var b = document.querySelector('[data-testid="favourite-button"]');
+      if (!b) return null;
+      var label = String(b.getAttribute('aria-label') || '');
+      var n = label.match(/preferiti da\\s*(\\d[\\d.]*)/i) || text(b).match(/(\\d[\\d.]*)/);
+      if (!n) return label ? 0 : null;
+      var v = Number(String(n[1]).replace(/\\./g, ''));
+      return isFinite(v) ? v : null;
+    } catch (e) { return null; }
+  };
   var readBundleText = function () {
     var parts = readTexts('[data-testid*="bundle" i]', false, 6);
     var joined = parts.join(' \\u00b7 ').slice(0, 300);
@@ -285,7 +298,7 @@ export const PAGE_PROBE = `(function () {
   };
   var readDetails = function () {
     try {
-      return { attributes: readAttributes(), strikethrough: readStrikethrough(), badges: readBadges(), bundleText: readBundleText(), sellerItemCards: readSellerItemCards(), flight: readFlight(), sellerUrl: readSellerUrl() };
+      return { attributes: readAttributes(), strikethrough: readStrikethrough(), badges: readBadges(), bundleText: readBundleText(), favourites: readFavourites(), sellerItemCards: readSellerItemCards(), flight: readFlight(), sellerUrl: readSellerUrl() };
     } catch (e) {
       return null;
     }

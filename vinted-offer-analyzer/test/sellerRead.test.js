@@ -132,3 +132,31 @@ test('extract: the set button on a listing page is not a bundle discount, a perc
   const pct = parseVintedItemHtml(html('Acquista set Ottieni fino al 25% di sconto Crea set'))
   assert.deepEqual([pct.signals.bundleOffered, pct.signals.bundleDiscountPct], [true, 25])
 })
+
+test('extract: the listing page of a logged-in visitor, as its structure was shared on 16 Nov', () => {
+  // «Neun Box» 20,00 € → 21,70 €, «Spedizione da 3,09 €», heart «Aggiunto ai preferiti da 4», set «fino al 20%»,
+  // «Caricato 23 min fa», «Ultima visita 30 min fa». The embedded data carries the favourites of other listings too.
+  const html = `<html><head><meta property="og:title" content="Neun Box Volumi 1-6 +6,5"><link rel="canonical" href="https://www.vinted.it/items/8800000001-neun-box">
+  <script type="application/ld+json">{"@type":"Product","name":"Neun Box Volumi 1-6 +6,5","offers":{"price":"20.00","priceCurrency":"EUR"}}</script>
+  <script>self.__next_f.push([1,"{\\"id\\":7700000009,\\"favourite_count\\":262},{\\"id\\":8800000001,\\"title\\":\\"Neun\\",\\"favourite_count\\":4}"])</script></head><body>
+  <button type="button" aria-label="Aggiungi ai preferiti. Aggiunto ai preferiti da 4 " data-testid="favourite-button"><span data-testid="favourite-icon"></span><span>4</span></button>
+  <div data-testid="item-price"><p>20,00 €</p></div><span data-testid="total-combined-price">21,70 €</span><span data-testid="service-fee-included-title">incl. la commissione Vinted</span>
+  <div data-testid="item-attributes-upload_date"><div>Caricato</div><div>23 min fa</div></div>
+  <div data-testid="item-shipping-banner"><h2 data-testid="item-shipping-banner-title">Spedizione</h2><span data-testid="item-shipping-banner-price">da 3,09 €</span></div>
+  <span data-testid="profile-username">biancamaravela</span><span data-testid="seller-last-logged-in">Ultima visita 30 min fa</span>
+  <div data-testid="buy-bundle-banner"><div data-testid="buy-bundle-banner--title">Acquista set</div><div data-testid="buy-bundle-banner--content">Ottieni fino al 20% di sconto</div><button data-testid="buy-bundle-banner-shop-button">Crea set</button></div>
+  </body></html>`
+  const ex = parseVintedItemHtml(html)
+  assert.equal(ex.listPrice, 20)
+  assert.equal(ex.shippingFrom, 3.09)
+  assert.equal(ex.signals.interested, 4)
+  assert.deepEqual([ex.signals.bundleOffered, ex.signals.bundleDiscountPct], [true, 20])
+  assert.equal(ex.sellerLastSeenText, 'Ultima visita 30 min fa')
+  assert.match(ex.uploadedText, /23 min fa/)
+  // Without the heart the figure next to this listing's id is taken, not the first one on the page (262).
+  assert.equal(parseVintedItemHtml(html.replace(/<button type="button" aria-label[\s\S]*?<\/button>/, '')).signals.interested, 4)
+  // A heart nobody pressed says no number: zero, not the other listings' figure.
+  assert.equal(parseVintedItemHtml(html.replace('Aggiungi ai preferiti. Aggiunto ai preferiti da 4 ', 'Aggiungi ai preferiti').replace('<span>4</span>', '')).signals.interested, 0)
+  // What the live page read wins over the embedded data.
+  assert.equal(parseVintedItemHtml('<html><head><meta property="og:title" content="x"></head><body></body></html>', { favourites: 7, flight: { favourite_count: 262 } }).signals.interested, 7)
+})

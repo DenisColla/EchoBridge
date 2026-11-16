@@ -95,6 +95,35 @@ const exMoney = (raw) => {
 }
 const exIntOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : null)
 
+/**
+ * The listing's own heart, as the page carries it (structure of a logged-in listing page, Nov 2026):
+ *   <button aria-label="Aggiungi ai preferiti. Aggiunto ai preferiti da 4" data-testid="favourite-button">4</button>
+ * The other listings shown on the page have hearts of their own (product-item-id-…--favourite), and the embedded data
+ * carries a favourite_count for each of them: this button is the only figure that is surely this listing's.
+ * → the count, 0 when the button carries no number, null when the page has no such button.
+ */
+const exFavouriteButton = (src) => {
+  const hit = src.match(/<button\b[^>]*\bdata-testid="favourite-button"[^>]*>([\s\S]{0,400}?)<\/button>/i)
+  if (!hit) return null
+  const label = (hit[0].match(/aria-label="([^"]*)"/i) || [])[1] || ''
+  const said = label.match(/preferiti da\s*(\d[\d.]*)/i) || hit[1].replace(/<[^>]+>/g, ' ').match(/(\d[\d.]*)/)
+  if (!said) return label ? 0 : null
+  const n = Number(said[1].replace(/\./g, ''))
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
+/** A count of the embedded data read next to this listing's own id (the page embeds other listings too), else null. */
+const exNearItem = (src, key) => {
+  const id = (src.match(/(?:rel="canonical"|property="og:url")[^>]*\/items\/(\d{5,})/i) || src.match(/\/items\/(\d{5,})[^"]*"[^>]*(?:rel="canonical"|property="og:url")/i) || [])[1]
+  if (!id) return null
+  for (const mark of [`"id":${id}`, `\\"id\\":${id}`]) {
+    const at = src.indexOf(mark)
+    if (at < 0) continue
+    const hit = src.slice(at, at + 6000).match(new RegExp(`\\\\?"${key}\\\\?":\\s*(\\d+)`))
+    if (hit) return Number(hit[1])
+  }
+  return null
+}
+
 const VIEW_RES = [
   /\\"view_count\\":\s*(\d+)/, /"view_count":\s*(\d+)/,
   /data-testid="[^"]*view[_-]?count[^"]*"[^>]*>\s*(?:<[^>]+>\s*)*([\d.]+)/i,
@@ -190,6 +219,8 @@ export function parseVintedItemHtml(html, details = null) {
   }
 
   const upload = firstMatch(src, /itemProp="upload_date"[^>]*>\s*<span[^>]*>([^<]+)</i) || firstMatch(src, /\\"value\\":\\"Caricato ([^"\\]+)\\"/)
+    // Its own element on the page (data-testid="item-attributes-upload_date" → «Caricato» + «23 min fa»).
+    || ((stripTags(firstMatch(src, /data-testid="item-attributes-upload_date"[^>]*>([\s\S]{0,400})/i) || '').match(/caricato\W{0,6}([^.]{2,30}?\bfa\b|oggi|ieri)/i) || [])[1] || null)
   if (upload) {
     out.uploadedText = stripTags(upload).replace(/^caricato\s*/i, '')
     out.uploadedDays = parseRelativeItalian(out.uploadedText)
@@ -252,7 +283,9 @@ export function parseVintedItemHtml(html, details = null) {
   if (shownCondition) out.condition = /senza/i.test(shownCondition) ? 'nuovo senza etichetta' : 'nuovo con etichetta'
 
   // «Spedizione · da 2,29 €»: what the buyer pays on top of the price and of Vinted's protection.
-  const shipFrom = firstMatch(visible, /spedizione[^€\d]{0,40}?da\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
+  // Its own element first (data-testid="item-shipping-banner-price" → «da 3,09 €»), then the sentence as shown.
+  const shipFrom = firstMatch(src, /data-testid="item-shipping-banner-price"[^>]*>(?:\s*<[^>]+>)*\s*(?:da\s*)?(\d{1,3}(?:[.,]\d{1,2})?)/i)
+    || firstMatch(visible, /spedizione[^€\d]{0,40}?da\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
   if (shipFrom) {
     const amount = Number(shipFrom.replace(',', '.'))
     if (Number.isFinite(amount) && amount >= 0 && amount < 100) out.shippingFrom = amount
@@ -263,7 +296,8 @@ export function parseVintedItemHtml(html, details = null) {
   const d = details && typeof details === 'object' ? details : {}
   const flight = d.flight && typeof d.flight === 'object' ? d.flight : {}
   sig.views = exIntOrNull(flight.view_count)
-  sig.interested = exIntOrNull(flight.favourite_count)
+  // The heart of the listing first (the page's HTML, then the live page), then the embedded data.
+  sig.interested = exFavouriteButton(src) ?? exIntOrNull(d.favourites) ?? exIntOrNull(flight.favourite_count)
   sig.sellerItems = exIntOrNull(flight.item_count) ?? exIntOrNull(d.sellerItemCards)
   sig.reserved = typeof flight.is_reserved === 'boolean' ? flight.is_reserved : null
   for (const pair of Array.isArray(d.attributes) ? d.attributes : []) {
@@ -277,7 +311,7 @@ export function parseVintedItemHtml(html, details = null) {
     }
   }
   if (sig.views === null) sig.views = exCount(firstOf(src, VIEW_RES))
-  if (sig.interested === null) sig.interested = exCount(firstOf(src, INTEREST_RES))
+  if (sig.interested === null) sig.interested = exNearItem(src, 'favourite_count') ?? exCount(firstOf(src, INTEREST_RES))
   const struck = (Array.isArray(d.strikethrough) ? d.strikethrough : []).map((t) => exMoney(String(t).match(/\d[\d.]*(?:,\d{1,2})?/) ? String(t).match(/\d[\d.]*(?:,\d{1,2})?/)[0] : '')).find((v) => v !== null)
   sig.oldPrice = struck ?? exMoney(firstOf(src, OLD_PRICE_RES))
   if (sig.oldPrice !== null && out.listPrice !== null && sig.oldPrice > out.listPrice + 0.004) {
