@@ -112,7 +112,13 @@ const OLD_PRICE_RES = [
   /\\"original_price\\"[^}]{0,80}?\\"amount\\":\\"([\d.]+)\\"/,
 ]
 /** Listing text that hints at a bundle discount («sconto sui lotti», «più pezzi»); the percentage is read only when written. */
-export const BUNDLE_HINT = /sconto (?:sui|per i|sul|per il) (?:lotti|lotto|bundle|set)|sconto bundle|bundle discount|più pezzi|più articoli|acquista set|crea set/i
+export const BUNDLE_HINT = /sconto (?:sui|per i|sul|per il) (?:lotti|lotto|bundle|set)|sconto bundle|bundle discount|più pezzi|più articoli/i
+/**
+ * Vinted's own «Acquista set / Crea set» button. Every seller with two articles has it (one parcel, one shipping): it
+ * says nothing of a discount, it only tells where a percentage is written when the seller has set one (1.11.3: read
+ * as a discount, it gave +1 to a seller who had activated nothing).
+ */
+const BUNDLE_BUTTON = /acquista set|crea set/i
 const BUNDLE_PCT_RES = [
   /(?:sconto|risparmi\w*)[^.]{0,80}?(?:lott[io]|bundle)[^.]{0,80}?(\d{1,2})\s*%/i,
   /(?:lott[io]|bundle)[^.]{0,60}?(?:fino al|fino a|del|di|al)\s*-?\s*(\d{1,2})\s*%/i,
@@ -283,9 +289,10 @@ export function parseVintedItemHtml(html, details = null) {
   }
   // The listing text (title, description) sits in the JSON-LD script, which the visible text excludes: scan it too.
   const bundleText = [typeof d.bundleText === 'string' ? d.bundleText : '', out.title || '', out.description || '', visible].join('. ')
-  if (BUNDLE_HINT.test(bundleText)) sig.bundleOffered = true
+  const bundleHinted = BUNDLE_HINT.test(bundleText)
   const pct = firstOf(bundleText, BUNDLE_PCT_RES)
-  if (pct !== null && BUNDLE_HINT.test(bundleText)) sig.bundleDiscountPct = Number(pct)
+  if (pct !== null && (bundleHinted || BUNDLE_BUTTON.test(bundleText))) sig.bundleDiscountPct = Number(pct)
+  if (bundleHinted || sig.bundleDiscountPct !== null) sig.bundleOffered = true
   sig.lastSeenDays = out.sellerLastSeenDays
 
   const labels = [

@@ -95,7 +95,9 @@ export function wardrobeStats(raw) {
     feedbackCount: stNum(raw.feedbackCount),
     newWithTags: stNum(raw.newWithTags),
     bundleDiscountPct: stFinite(bundle) && bundle > 0 && bundle <= 60 ? bundle : null,
-    bundleOffered: bundle !== null || bundleWords.test(bundleText) || raw.bundleOffered === true,
+    // «Acquista set» alone is Vinted's button, there for every seller with two articles: a discount is offered only
+    // when a percentage is written or the text says so.
+    bundleOffered: (stFinite(bundle) && bundle > 0) || /scont[oi][^.\n]{0,40}(?:lott|bundle|set\b|pi[uù] articoli)|(?:lott|bundle)[^.\n]{0,40}scont[oi]/i.test(bundleText) || raw.bundleOffered === true,
     // «Annunci frequenti»: Vinted's own badge for a seller who lists regularly.
     frequentLister: raw.frequentLister === true,
     sampleCount: prices.length,
@@ -180,7 +182,8 @@ export function sellerProfileFor({ extraction = null, signals = null, wardrobe =
   if (lister) add('active_lister', 0.25, 'pubblica spesso: gli interessa far girare gli articoli')
   if (w && stFinite(w.staleShare) && w.staleShare >= 0.5 && w.sampleCount >= 6) add('stale_stock', 1, 'molti articoli fermi da mesi: accumula, ha bisogno di vendere')
   if (w && stFinite(w.soldCount) && items !== null && w.soldCount >= 30 && w.soldCount / (w.soldCount + items) >= 0.6) add('sells_fast', -0.5, `${w.soldCount} vendite: i suoi articoli vanno via, non serve scendere`)
-  if ((w && w.bundleOffered) || sig.bundleOffered === true || stFinite(sig.bundleDiscountPct)) add('bundle', 1, 'ha attivato lo sconto sui lotti: è abituato a scendere')
+  const setPct = w && stFinite(w.bundleDiscountPct) ? w.bundleDiscountPct : stFinite(sig.bundleDiscountPct) ? sig.bundleDiscountPct : null
+  if ((w && w.bundleOffered) || sig.bundleOffered === true || setPct !== null) add('bundle', 1, `ha attivato lo sconto sui set${setPct ? ` (fino al ${setPct}%)` : ''}: è abituato a scendere`)
 
   const read = stLastSeen(sig, ex, seenElapsedDays)
   const lastSeen = read !== null ? read : f.sellerProfile === 'inactive' ? 20 : f.sellerProfile === 'quiet' ? 7 : null

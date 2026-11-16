@@ -103,3 +103,32 @@ test('seller: the profile of the recording (16 Nov) gives a complete profile onc
   assert.equal(blind.archetype.id, 'firm')
   assert.notEqual(read.archetype.id, 'firm')
 })
+
+test('seller: «Acquista set» alone is Vinted\'s button, not a discount the seller activated', () => {
+  // The report of 16 Nov, 13:19 (a 230 € listing): «bundleOffered: true, bundleDiscountPct: null» and the trait
+  // «+1 ha attivato lo sconto sui lotti». The button is there for every seller with two articles.
+  const probe = { kind: 'member', frequentLister: true, cards: 15, prices: [], itemCountText: '15', followersText: '3', feedbackText: null, bundleText: '\nAcquista set\nRisparmia sulle spese di spedizione\nCrea set\n15 articoli', flight: {} }
+  const w = wardrobeFromProbe(probe)
+  assert.deepEqual([w.itemCount, w.bundleOffered, w.bundleDiscountPct], [15, false, null])
+  const form = { listPrice: '230', category: 'books', listingSignal: 'none' }
+  const ex = { sellerFeedbackCount: 39, sellerRating: 4.9, sellerLastSeenDays: 32 / 1440, uploadedDays: 14, condition: 'nuovo senza etichetta', sellerBadges: ['ACTIVE_LISTER', 'SPEEDY_SHIPPING'], signals: {} }
+  const read = sellerProfileFor({ extraction: ex, wardrobe: w, form })
+  assert.ok(!read.traits.some((t) => t.id === 'bundle'))
+  assert.equal(read.score, 0.25)
+  assert.equal(read.type, 'medio')
+  // With a percentage the seller did activate it, and the trait says how much.
+  const set = sellerProfileFor({ extraction: ex, wardrobe: wardrobeFromProbe({ ...probe, bundleText: '\nAcquista set\nOttieni fino al 15% di sconto\nCrea set' }), form })
+  assert.match(set.traits.find((t) => t.id === 'bundle').label, /15%/)
+  assert.equal(set.score, 1.25)
+  // The old wording still counts.
+  assert.equal(wardrobeFromProbe({ ...probe, bundleText: 'Sconto sui lotti attivo' }).bundleOffered, true)
+})
+
+test('extract: the set button on a listing page is not a bundle discount, a percentage next to it is', () => {
+  const html = (text) => `<html><head><meta property="og:title" content="Libro"><script type="application/ld+json">{"@type":"Product","name":"Libro","offers":{"price":"230","priceCurrency":"EUR"}}</script></head><body><p>${text}</p></body></html>`
+  const plain = parseVintedItemHtml(html('Acquista set Risparmia sulle spese di spedizione Crea set'))
+  assert.equal(plain.signals.bundleOffered, null)
+  assert.equal(plain.signals.bundleDiscountPct, null)
+  const pct = parseVintedItemHtml(html('Acquista set Ottieni fino al 25% di sconto Crea set'))
+  assert.deepEqual([pct.signals.bundleOffered, pct.signals.bundleDiscountPct], [true, 25])
+})
