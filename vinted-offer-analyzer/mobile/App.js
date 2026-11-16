@@ -40,6 +40,9 @@ import { space, useTheme } from './src/theme.js'
 import { Collapsible } from './src/components/ui.js'
 
 const AIM_KEY = 'offerta-vinted.aim.v1'
+/** 1.13.1: the share of the resale value to keep as margin (0 = not losing), chosen in the cost panel. */
+const MARGIN_KEY = 'offerta-vinted.margin.v1'
+const MARGIN_CHOICES = [0, 10, 20, 30]
 
 const TABS = [
   { id: 'vinted', label: 'Vinted' },
@@ -143,9 +146,13 @@ function Main() {
    * (the costs are only shown). Remembered between launches.
    */
   const aimRef = useRef('resell')
+  const marginRef = useRef(0)
   useEffect(() => {
     AsyncStorage.getItem(AIM_KEY).then((saved) => {
       if (saved === 'keep' || saved === 'resell') aimRef.current = saved
+    }).catch(() => {})
+    AsyncStorage.getItem(MARGIN_KEY).then((saved) => {
+      if (MARGIN_CHOICES.includes(Number(saved))) marginRef.current = Number(saved)
     }).catch(() => {})
   }, [])
   const [saveState, setSaveState] = useState(null)
@@ -289,25 +296,38 @@ function Main() {
    * same article; without a key the cards are only «same brand and kind», a range that is told and not used.
    * Read-only, one page; to the AI go titles, prices and conditions only (scrubbed), never a seller's name.
    */
-  const readProductMarket = async (identity, { origin, selfId, ex }) => {
-    const started = Date.now()
+  /**
+   * The AI's product card for a listing. It needs only the listing, so it is asked as soon as that is read and is
+   * ready when the seller's page has been (1.13.1: asked in line, the first real analysis took 47 seconds).
+   */
+  const askProductCard = async (identity, ex) => {
     const reference = {
       title: ex.title || '', brand: ex.brand || '', size: identity.size || '', categoryText: identity.category || ex.categoryText || '',
       description: ex.description || '', price: ex.listPrice, condition: identity.condition || ex.condition || '',
     }
-    const ai = { scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0 }
-    let product = null
-    if (identity.kind === 'brand') {
-      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: 900, timeoutMs: 20_000, maxAttempts: 1 })
+    const ai = { scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0, ms_scheda: null, ms_smistamento: null }
+    const t0 = Date.now()
+    try {
+      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: 900, timeoutMs: 20_000, maxAttempts: 1, think: false })
       ai.costo_usd += res.costUsd || 0
       if (res.costUsd) search.addSpend(res.modelKey, res.costUsd, null)
       ai.scheda = res.ok ? 'ok' : res.kind || 'failed'
+      ai.ms_scheda = Date.now() - t0
       if (res.ok && res.value) {
-        product = core.cleanProduct(res.value, reference)
+        const product = core.cleanProduct(res.value, reference)
         ai.modello = res.modelKey
         ai.parole = product.query
+        return { reference, product, ai }
       }
-    }
+    } catch { ai.scheda = 'failed' }
+    return { reference, product: null, ai }
+  }
+  const readProductMarket = async (identity, { origin, selfId, ex, card = null }) => {
+    const started = Date.now()
+    const asked = card ? await card : null
+    const reference = asked ? asked.reference : { title: ex.title || '', brand: ex.brand || '', size: identity.size || '', categoryText: identity.category || '', description: '', price: ex.listPrice, condition: identity.condition || '' }
+    const ai = asked ? asked.ai : { scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0, ms_scheda: null, ms_smistamento: null }
+    const product = asked ? asked.product : null
     const q = core.productSearchFor(identity, { origin, query: product ? product.query : null })
     if (!q || !pageLoaderRef.current) return { market: null, info: null, tried: [], identity, ai, ms: Date.now() - started }
     setExtractPhase('product')
@@ -321,7 +341,9 @@ function Main() {
         const said = core.cardFactsOf(c.text)
         return { source: 'vinted', id: String(c.id), title: said.title, price: core.cardPriceOf(c.price), condition: said.condition || '' }
       }).filter((c) => c.price !== null && c.title && c.id !== String(selfId)).slice(0, 80)
-      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: 4000, timeoutMs: 45_000, maxAttempts: 1 })))
+      const tTriage = Date.now()
+      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: 4000, timeoutMs: 30_000, maxAttempts: 1, think: false })))
+      ai.ms_smistamento = Date.now() - tTriage
       const said = new Map()
       let answered = 0
       for (const r of answers) {
@@ -423,7 +445,7 @@ function Main() {
       // reading of this session (a saved offer opened again) says nothing about «online adesso».
       ...(ctx ? { readAt: ctx.at } : linkOf(nextForm) ? { readAt: 0 } : {}),
       // 1.11: the purchase as a whole. The resale value is the one typed, else the engine's default.
-      goal: aimRef.current, ...(Number.isFinite(parsePrice(nextForm.resalePrice)) && parsePrice(nextForm.resalePrice) > 0 ? { resale: parsePrice(nextForm.resalePrice) } : {}),
+      goal: aimRef.current, marginPct: marginRef.current, ...(Number.isFinite(parsePrice(nextForm.resalePrice)) && parsePrice(nextForm.resalePrice) > 0 ? { resale: parsePrice(nextForm.resalePrice) } : {}),
       ...(pick.kind === 'option' ? { chosen: pick.id } : pick.kind === 'custom' ? { customPrice: pick.price } : {}),
     }))
     if (!strat.ok) {
@@ -517,6 +539,17 @@ function Main() {
     if (next !== 'keep' && next !== 'resell') return
     aimRef.current = next
     AsyncStorage.setItem(AIM_KEY, next).catch(() => {})
+    if (strategy) {
+      setPlan(null)
+      runAnalysis(form, pinnedSendAt, { choice: { kind: 'auto' } })
+    }
+  }
+
+  /** «Margine minimo»: the ceiling leaves that share of the resale value, and the proposals follow it. */
+  const changeMargin = (pct) => {
+    if (!MARGIN_CHOICES.includes(pct)) return
+    marginRef.current = pct
+    AsyncStorage.setItem(MARGIN_KEY, String(pct)).catch(() => {})
     if (strategy) {
       setPlan(null)
       runAnalysis(form, pinnedSendAt, { choice: { kind: 'auto' } })
@@ -650,6 +683,11 @@ function Main() {
         const sellerUrl = byName || byPage
         profileRead.sellerLink = byName ? 'name' : byPage ? 'page' : null
         profileRead.sellerNameRead = Boolean(ex.sellerUsername)
+        // What the market search will rest on is known as soon as the listing is read: for clothes the AI's product
+        // card is asked now, while the seller's page is being read.
+        const bookIdentity = core.bookIdentityOf(itemHtml) || (core.categoryGuess(ex).id === 'books' && ex.title ? { isbn: null, isbnHref: null, title: null, author: null } : null)
+        const productIdentity = bookIdentity ? null : core.productIdentityOf(core.pageFactsOf(itemHtml), { brand: ex.brand || null, description: ex.description || '' })
+        const cardAsked = productIdentity && productIdentity.kind === 'brand' ? askProductCard(productIdentity, ex) : null
         if (sellerUrl) {
           setExtractPhase('seller')
           const member = await pageLoaderRef.current.load(sellerUrl, { onVisible: () => setExtractPhase('verify') })
@@ -660,19 +698,15 @@ function Main() {
             profileRead.memberSeen = member.details.diag || null
           } else profileRead.memberPage = member.ok ? 'not_a_profile' : member.reason || 'failed'
         }
-        // 1.12: the market of a book — what the other listings ask for the same ISBN, else for its title and author.
-        const identity = core.bookIdentityOf(itemHtml) || (core.categoryGuess(ex).id === 'books' && ex.title ? { isbn: null, isbnHref: null, title: null, author: null } : null)
+        // 1.12: the market of a book — the same ISBN, else its title and author. 1.13: any other article — by the
+        // model the page links (electronics) or by brand × category and the AI.
         const selfId = (String(link).match(/\/items\/(\d+)/) || [])[1] || null
-        if (identity) {
+        if (bookIdentity) {
           setExtractPhase('market')
-          bookRead = await readBookMarket(identity, { origin, selfId, listingTitle: ex.title || '', listPrice: ex.listPrice })
-        } else {
-          // 1.13: any other article — by the model the page links (electronics) or by brand × category and the AI.
-          const product = core.productIdentityOf(core.pageFactsOf(itemHtml), { brand: ex.brand || null })
-          if (product) {
-            setExtractPhase('product')
-            bookRead = await readProductMarket(product, { origin, selfId, ex })
-          }
+          bookRead = await readBookMarket(bookIdentity, { origin, selfId, listingTitle: ex.title || '', listPrice: ex.listPrice })
+        } else if (productIdentity) {
+          setExtractPhase('product')
+          bookRead = await readProductMarket(productIdentity, { origin, selfId, ex, card: cardAsked })
         }
         setExtractPhase(null)
       }
@@ -1446,6 +1480,7 @@ function Main() {
           onToast={browserToast}
           onAim={changeAim}
           onResale={changeResale}
+          onMargin={changeMargin}
           capture={capture}
           onConversation={onConversation}
           onInbox={onInbox}
@@ -1517,6 +1552,7 @@ function Main() {
                   onPickProposal={pickProposal}
                   onAim={changeAim}
                   onResale={changeResale}
+          onMargin={changeMargin}
                   onLever={scheduleLever}
                   onCopyMessage={noteMessageCopied}
                   link={form.link}

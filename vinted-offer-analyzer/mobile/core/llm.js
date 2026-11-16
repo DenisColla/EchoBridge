@@ -174,7 +174,8 @@ export function buildLlmRequest(modelKey, prompt, images = [], opts = {}) {
       max_tokens: maxTokens,
       stream: false,
     }
-    if (effort === 'low' && images.length) body.thinking = { type: 'disabled' }
+    // `think: false` (1.13.1): a plain sorting job — the triage of the search cards took 45 s with thinking on.
+    if (opts.think === false || (effort === 'low' && images.length)) body.thinking = { type: 'disabled' }
     else body.reasoning_effort = 'low'
     return { url: 'https://api.deepseek.com/chat/completions', headers: json, body }
   }

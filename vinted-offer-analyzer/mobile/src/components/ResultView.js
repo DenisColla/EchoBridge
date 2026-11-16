@@ -19,7 +19,7 @@ import { SourceSection } from './result/SourceSection.js'
 export function ResultView({
   result, risk = null, levers = [], curve = null, extraction = null, marketInfo = null, policy = null, saveState = null, calendarBusy = false, now = null,
   goal, onGoal, plan = null, optimizing = false, onOptimize, onApply,
-  onSave, onSaveAndMarkSent, onCalendar, onCounter, onSkipExploration = null, onApplyPrice = null, onLever = null, onPickMoment = null, link = null, onCopyMessage = null, strategy = null, onPickProposal = null, onAim = null, onResale = null,
+  onSave, onSaveAndMarkSent, onCalendar, onCounter, onSkipExploration = null, onApplyPrice = null, onLever = null, onPickMoment = null, link = null, onCopyMessage = null, strategy = null, onPickProposal = null, onAim = null, onResale = null, onMargin = null,
   onOpenSearch = null, searchJob = null, onRecalc = null, onEditData, onReset, dataFold = null,
 }) {
   // Controlled so the hero's «Vedi mercato» can open the price fold.
@@ -46,7 +46,7 @@ export function ResultView({
         </Note>
       )}
       {strategy ? (
-        <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPickProposal} onEdit={onEditData} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} />
+        <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPickProposal} onEdit={onEditData} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} onMargin={onMargin} />
       ) : (
         <DecisionHero
           result={result}

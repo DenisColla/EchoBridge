@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { capacitiesOf, cardFactsOf, productIdentityOf, productMarketFrom, productSearchFor, strategyFor } from '../src/core/index.js'
+import { buildLlmRequest, capacitiesOf, cardFactsOf, productIdentityOf, productMarketFrom, productSearchFor, strategyFor } from '../src/core/index.js'
 
 // What the pages of the three reports of 16 Nov (20:05–20:07) gave as data.
 const PHONE = {
@@ -98,4 +98,44 @@ test('product: cards too far apart are not one market', () => {
   // Six cards of the same condition would be «alta»: the spread takes a step away.
   assert.ok(m.market.spread > 0.6)
   assert.equal(m.confidence, 'media')
+})
+
+test('product: what the first real reports of 1.13.0 taught (a phone by model, jeans with DeepSeek)', () => {
+  // «Nuovo senza cartellino» in the attributes, «usato pochissimo» in the description: it compares with the used ones.
+  const facts = { attributes: { model_nav: 'Modello Galaxy S25 Ultra', internal_memory_capacity: 'Capacità di archiviazione 256 MB', status: 'Condizioni Nuovo senza cartellino' }, links: { model_nav: '/catalog?brand_collection_ids%5B%5D=9142&catalog%5B%5D=3661&search_start_type=item_page_model' }, breadcrumbs: [] }
+  const said = productIdentityOf(facts, { description: 'Vendo Samsung Galaxy S25 ultra 256gb usato pochissimo pari al nuovo' })
+  assert.deepEqual([said.band, said.bandFromDescription], ['used', true])
+  assert.deepEqual([productIdentityOf(facts, { description: 'Mai usato, ancora sigillato' }).band, productIdentityOf(facts).band], ['new', 'new'])
+  // The same model does not vary threefold: 215 € and 1500 € among phones around 700 € are something else.
+  const prices = [215, 600, 630, 650, 700, 720, 780, 800, 1500]
+  const cards = prices.map((p, i) => ({ id: String(i), price: p, text: `Samsung s25ultra, Brand: Samsung, Modello: Galaxy S25 Ultra, Condizioni: Ottime, ${p}.00 €` }))
+  const m = productMarketFrom(cards, { identity: said, mode: 'model' })
+  assert.deepEqual([m.kept, m.dropped['prezzo anomalo'], m.market.minPrice, m.market.maxPrice], [7, 2, 600, 800])
+  // The card's own storage field decides, whatever the title says.
+  const other = productMarketFrom([...cards, { id: 'x', price: 900, text: 'S25 Ultra come nuovo, Brand: Samsung, Capacità di archiviazione: 512 GB, Condizioni: Ottime, 900.00 €' }], { identity: said, mode: 'model' })
+  assert.equal(other.dropped['altra capacità'], 1)
+  // Sorting cards is not a job to think about: 45 seconds with thinking on, on the first real run.
+  const prompt = { system: 's', text: 't', schema: { type: 'object' } }
+  const fast = buildLlmRequest('deepseek:deepseek-flash', prompt, [], { effort: 'low', maxTokens: 900, think: false }).body
+  assert.deepEqual([fast.thinking, fast.reasoning_effort], [{ type: 'disabled' }, undefined])
+  const slow = buildLlmRequest('deepseek:deepseek-flash', prompt, [], { effort: 'low', maxTokens: 900 }).body
+  assert.deepEqual([slow.thinking, slow.reasoning_effort], [undefined, 'low'])
+})
+
+test('strategy: three real choices under the ceiling, and a minimum margin moves the ceiling', () => {
+  // The S25 Ultra of 16 Nov: 630 €, sold again at 630 € (the market's lower quartile), free shipping. The ceiling left
+  // «prudente» at 595 € and «consigliata» at 592 €.
+  const market = { n: 17, medianPrice: 700, p25Price: 630, p75Price: 780, basis: 'model' }
+  const form = { listPrice: '630', category: 'electronics', listingSignal: 'none', itemTitle: 'Galaxy S25 Ultra' }
+  const at = new Date('2026-11-16T20:41:00Z')
+  const s = strategyFor(form, at, { goal: 'resell', market, extraction: { shippingFrom: 0, uploadedDays: 2 } })
+  const [top, mid, low] = s.options.map((o) => o.price)
+  assert.equal(s.costs.ceiling, 599.33)
+  assert.ok(top <= 599.33 && top > mid && mid > low)
+  assert.ok(top - mid >= 0.25 * (top - low), `the middle one stands apart: ${top} / ${mid} / ${low}`)
+  // Keeping 10% of the resale value: the ceiling is 630 × 0,9 less the costs, and every proposal is under it.
+  const kept = strategyFor(form, at, { goal: 'resell', marginPct: 10, market, extraction: { shippingFrom: 0, uploadedDays: 2 } })
+  assert.equal(kept.costs.marginPct, 10)
+  assert.equal(kept.costs.ceiling, 539.33)
+  assert.ok(kept.options.every((o) => o.price <= 539.33 && o.margin >= 63 - 0.01))
 })

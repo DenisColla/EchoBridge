@@ -409,6 +409,13 @@ export function strategyFor(form, now = new Date(), options = {}) {
       if (price < floor - 1e-9 || price <= 0) continue
       capped.push({ ...o, price: stR2(price) })
     }
+    // The ceiling can leave the first two a few euro apart (595 and 592 on a real listing): the middle one moves
+    // half-way to the bold one, so that the three are three choices.
+    if (capped.length === 3) {
+      const [top, mid, low] = capped.map((o) => o.price)
+      const half = stR2(Math.round((top + low) / 2 / step) * step)
+      if (top - mid < 0.25 * (top - low) && half < top - 1e-9 && half > low + 1e-9) capped[1] = { ...capped[1], price: half }
+    }
     if (capped.length) priced = capped
   }
   // A price the user typed that is none of the three rides along as «La tua cifra» and is the one analysed.

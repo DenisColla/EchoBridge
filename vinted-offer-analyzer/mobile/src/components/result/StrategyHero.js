@@ -34,7 +34,7 @@ function Proposal({ option, selected, onPress }) {
  * left when the article is sold again, where a counter-offer would land. «Per rivendere» caps the proposals at the
  * price that does not lose; «Per me» only shows the costs.
  */
-function CostBlock({ strategy, chosen, onGoal, onResale }) {
+function CostBlock({ strategy, chosen, onGoal, onResale, onMargin }) {
   const t = useTheme()
   const { costs } = strategy
   const resell = strategy.goal === 'resell'
@@ -82,7 +82,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
       ) : (
         <Body small muted>Se un giorno lo rivendi, per non perderci dovrai chiedere almeno {formatEuro(chosen.total)}.</Body>
       )}
-      {resell && costs.reachable ? <Body small muted>Tetto per non perderci: {formatEuro(costs.ceiling)}. Nessuna delle tre proposte lo supera.</Body> : null}
+      {resell && costs.reachable ? <Body small muted>{costs.marginPct ? `Tetto per tenerti almeno il ${costs.marginPct}%` : 'Tetto per non perderci'}: {formatEuro(costs.ceiling)}. Nessuna delle tre proposte lo supera.</Body> : null}
       {resell && !costs.reachable ? (
         <Body small muted>
           Per non perderci dovresti pagarlo al massimo {formatEuro(costs.ceiling)}, ma Vinted non lascia offrire meno di {formatEuro(costs.floor)}, e anche lì paghi in tutto {formatEuro(costs.floorTotal)}. Da solo conviene se lo rivendi sopra {formatEuro(costs.floorTotal)} (scrivilo sotto) o se lo tieni.
@@ -107,6 +107,12 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
           <Button label="Ricalcola" variant="secondary" small onPress={() => onResale && onResale(text)} />
         </View>
       ) : null}
+      {resell ? (
+        <View style={styles.inlineRow}>
+          <Text style={{ color: t.ink3, fontSize: 12, alignSelf: 'center' }}>Margine minimo</Text>
+          {[0, 10, 20, 30].map((m) => <Chip key={m} compact label={`${m}%`} active={(costs.marginPct || 0) === m} onPress={() => onMargin && onMargin(m)} />)}
+        </View>
+      ) : null}
     </View>
   )
 }
@@ -115,7 +121,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
  * The 1.8 hero: who the seller is, three proposals, when to send, the moves in order, one primary button.
  * `strategy` comes from strategyFor (core); `result` is the analysis of the chosen proposal.
  */
-export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null }) {
+export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null, onMargin = null }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const { seller, options, moment, plan } = strategy
@@ -177,7 +183,7 @@ export function StrategyHero({ strategy, result, saveState = null, calendarBusy 
           ★ = paga meno in media. Con {formatEuro(chosen.price)} paghi in media {formatEuro(chosen.expectedPrice)} tra sì, controproposte e no. {history}{strategy.costs ? '' : counter}
         </Body>
       )}
-      {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} /> : null}
+      {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} onMargin={onMargin} /> : null}
 
       <View style={{ gap: 2 }}>
         <Text style={[styles.h2, { color: t.ink }]}>{when}</Text>

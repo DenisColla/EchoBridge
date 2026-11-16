@@ -349,7 +349,7 @@ export const PAGE_PROBE = `(function () {
         var found = readCards(80);
         var pricedC = 0;
         for (var fc = 0; fc < found.length; fc++) { if (found[fc].price) pricedC++; }
-        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 90) : null } } });
+        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
         return;
       }
       post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: stopped, cfError: !stopped && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });

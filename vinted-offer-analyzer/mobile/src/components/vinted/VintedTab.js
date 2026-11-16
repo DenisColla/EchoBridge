@@ -28,7 +28,7 @@ function Tool({ glyph, label, onPress }) {
 export const VintedTab = forwardRef(function VintedTab({
   normalizeLink, analysedLink, strategy, result, saveState, calendarBusy, extracting, extractPhase, extractError = null,
   onAnalyze, onPick, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onDetails, onToast,
-  onAim = null, onResale = null,
+  onAim = null, onResale = null, onMargin = null,
   capture = null, onConversation = null, onInbox = null, onRecordOffer = null, onOpenCounter = null, analysisReport = null,
 }, ref) {
   const t = useTheme()
@@ -136,7 +136,7 @@ export const VintedTab = forwardRef(function VintedTab({
       {panel && ready ? (
         <View style={[styles.panel, { backgroundColor: t.bg, borderTopColor: t.line, maxHeight: Math.round(height * 0.62) }]}>
           <ScrollView contentContainerStyle={{ padding: space.md, gap: space.sm }} keyboardShouldPersistTaps="handled">
-            <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPick} onEdit={onDetails} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} />
+            <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPick} onEdit={onDetails} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} onMargin={onMargin} />
             <Button label="Tutti i dettagli in Calcola" variant="ghost" small onPress={onDetails} />
           </ScrollView>
         </View>

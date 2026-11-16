@@ -399,7 +399,9 @@ export function pageFactsOf(html) {
     const next = inner.search(new RegExp(`data-testid="(?!item-attributes-${hit[1]})`, 'i'))
     // The buttons inside a block («Menu del brand», the size guide) are not its value; nor is a tag cut by the window.
     const block = (next >= 0 ? inner.slice(0, inner.lastIndexOf('<', next)) : inner).replace(/<button[\s\S]*?(?:<\/button>|$)/gi, ' ').replace(/<[^>]*$/, '')
-    attributes[hit[1]] = stripTags(block).slice(0, 80)
+    const value = stripTags(block)
+    // The last block runs into the description («Caricato 2 giorni fa Vendo…»): only its own words.
+    attributes[hit[1]] = (hit[1] === 'upload_date' ? (value.match(/^caricato\s+(?:\S+\s+){0,3}?fa\b|^caricato\s+\S+/i) || [value])[0] : value).slice(0, 80)
     // «Modello», «ISBN»: the block links Vinted's own search for that model or that book.
     const href = (block.match(/<a\b[^>]*href="([^"]+)"/i) || [])[1]
     if (href) links[hit[1]] = decodeEntities(href).replace(/^https?:\/\/[^/]+/i, '').slice(0, 300)

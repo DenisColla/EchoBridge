@@ -25,6 +25,8 @@ export const PRODUCT_MARKET = Object.freeze({
   MIN: 3,
   TRIM_FROM: 4,
   TRIM_FACTOR: 3,
+  /** The same model, storage and condition does not vary threefold: beyond twice or half the median it is something else. */
+  TRIM_MODEL: 2,
   /** (p75 − p25) / median above which the cards are too different to be one market. */
   MAX_SPREAD: 0.6,
 })
@@ -93,7 +95,7 @@ const pmCatalogPath = (path) => {
  * How the same product can be searched for, from what the page gives as data (extract.js pageFactsOf):
  * `kind` 'model' when the page links its model, 'brand' when it links brand × category; null when it links neither.
  */
-export function productIdentityOf(facts, { brand = null } = {}) {
+export function productIdentityOf(facts, { brand = null, description = '' } = {}) {
   const f = facts && typeof facts === 'object' ? facts : {}
   const a = f.attributes || {}
   const links = f.links || {}
@@ -104,11 +106,16 @@ export function productIdentityOf(facts, { brand = null } = {}) {
   const kind = modelHref ? 'model' : brandCrumb ? 'brand' : null
   if (!kind) return null
   const capacity = capacitiesOf(a.internal_memory_capacity || '')
+  // «Nuovo senza cartellino» in the attributes and «usato pochissimo» in the description (a real listing): the
+  // description is what the seller really says, and a used article compares with the used ones.
+  const said = pmNorm(description)
+  const declared = conditionBandOf(a.status)
+  const band = declared === 'new' && /\busat[oaie]\b/.test(said) && !/\b(?:mai|non)\s+(?:stat[oaie]\s+)?usat/.test(said) ? 'used' : declared
   return {
     kind,
     model: pmValue(a.model_nav), modelHref,
     capacityGb: capacity.length ? capacity[0] : null,
-    size: pmValue(a.size), condition: pmValue(a.status), band: conditionBandOf(a.status), colour: pmValue(a.color),
+    size: pmValue(a.size), condition: pmValue(a.status), band, bandFromDescription: band !== declared, colour: pmValue(a.color),
     brand: brand || null, brandHref: brandCrumb ? pmCatalogPath(brandCrumb.path) : null,
     category: categoryCrumb ? categoryCrumb.text || null : null,
   }
@@ -159,7 +166,9 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
     const head = r.title.match(/[a-z]+/g) || []
     if (head.slice(0, 2).some((w) => PM_ACCESSORY.test(w))) return drop('accessorio')
     if (pmFinite(id.capacityGb)) {
-      const named = capacitiesOf(r.title).filter((gb) => gb >= 32)
+      // The card's own storage field when it has one («Capacità di archiviazione: 256 GB»), else what its title names.
+      const field = (r.said.match(/capacit[a-z ]*:\s*([^,]+)/) || [])[1]
+      const named = field ? capacitiesOf(field) : capacitiesOf(r.title).filter((gb) => gb >= 32)
       if (named.length && !named.includes(id.capacityGb)) return drop('altra capacità')
     }
     if (r.verdict === 'accessory') return drop('accessorio')
@@ -188,7 +197,8 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   if (prices.length >= PRODUCT_MARKET.TRIM_FROM) {
     const mid = pmPercentile(prices, 0.5)
     const before = prices.length
-    prices = prices.filter((p) => p >= mid / PRODUCT_MARKET.TRIM_FACTOR && p <= mid * PRODUCT_MARKET.TRIM_FACTOR)
+    const factor = mode === 'model' ? PRODUCT_MARKET.TRIM_MODEL : PRODUCT_MARKET.TRIM_FACTOR
+    prices = prices.filter((p) => p >= mid / factor && p <= mid * factor)
     if (before - prices.length) dropped['prezzo anomalo'] = before - prices.length
   }
   for (const k of Object.keys(dropped)) if (dropped[k] === undefined) delete dropped[k]

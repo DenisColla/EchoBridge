@@ -25,14 +25,14 @@ function retryDelay(response, attempt) {
   return Math.min(30_000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 400)
 }
 
-export async function callModel(modelKey, prompt, images = [], { effort = 'low', maxTokens = 1500, timeoutMs = 90_000, signal, maxAttempts = 3 } = {}) {
+export async function callModel(modelKey, prompt, images = [], { effort = 'low', maxTokens = 1500, timeoutMs = 90_000, signal, maxAttempts = 3, think } = {}) {
   const model = modelByKey(modelKey)
   if (!model) return { ok: false, error: `Modello sconosciuto: ${modelKey}`, kind: 'request', costUsd: 0, latencyMs: 0 }
   const key = await getApiKey(model.provider)
   if (!key) return { ok: false, error: 'Chiave mancante', kind: 'auth', costUsd: 0, latencyMs: 0 }
   let request
   try {
-    request = buildLlmRequest(modelKey, prompt, images, { effort, maxTokens })
+    request = buildLlmRequest(modelKey, prompt, images, { effort, maxTokens, think })
   } catch (e) {
     return { ok: false, error: String(e.message || e), kind: 'request', costUsd: 0, latencyMs: 0 }
   }
