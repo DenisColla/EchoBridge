@@ -33,6 +33,7 @@ const ORDER = [
   'src/core/extract.js',
   'src/core/costs.js',
   'src/core/bookMarket.js',
+  'src/core/productMarket.js',
   'src/core/strategy.js',
   'src/theme.js',
   'src/platform/clipboard.js',

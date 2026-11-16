@@ -306,7 +306,7 @@ export function planFor({ type, price, title }) {
 
 /**
  * The whole strategy for a form. Options: everything analyzeOffer takes (profile, market, records, key, month) plus
- * `goal` ('keep' | 'resell'), `resale` (the price the article would be sold again at; default the market's median,
+ * `goal` ('keep' | 'resell'), `resale` (the price the article would be sold again at; default the market's lower quartile,
  * else the listing price), `shipping` (default the listing's «Spedizione da…», else an estimate), `marginPct`,
  * `extraction`, `signals`, `wardrobe` (for the seller profile), `chosen` ('prudente' | 'consigliata' | 'audace' or a
  * price), `seller` (a profile already computed) and `readAt` (ms: when the listing page was read, so the seller's
@@ -372,7 +372,9 @@ export function strategyFor(form, now = new Date(), options = {}) {
     : stFinite(ex.shippingFrom) && ex.shippingFrom >= 0 ? { amount: stR2(ex.shippingFrom), source: 'page' }
       : shippingEstimateFor({ category: categoryId, listPrice: L })
   const resale = stFinite(options.resale) && options.resale > 0 ? { amount: stR2(options.resale), source: 'user' }
-    : market && stFinite(market.medianPrice) && market.medianPrice > 0 ? { amount: stR2(market.medianPrice), source: 'market' }
+    // The market's lower quartile, not its median: these are asking prices of listings not sold yet, and whoever
+    // buys from the user will make an offer too. A quarter of the sellers already ask this or less (the user's choice).
+    : market && stFinite(market.p25Price) && market.p25Price > 0 ? { amount: stR2(market.p25Price), source: 'market' }
       : { amount: L, source: 'listing' }
   const marginPct = stFinite(options.marginPct) ? stClamp(options.marginPct, 0, 60) : 0
   const ceiling = ceilingPriceFor(resale.amount, shipping.amount, marginPct)

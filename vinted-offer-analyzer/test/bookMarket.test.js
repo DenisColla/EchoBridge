@@ -57,6 +57,9 @@ test('book: the market by ISBN — every card is the same edition, but lots, the
   assert.equal(m.ok, true)
   assert.deepEqual([m.seen, m.kept, m.basis, m.confidence], [6, 4, 'isbn', 'media'])
   assert.deepEqual([m.market.n, m.market.medianPrice, m.market.minPrice, m.market.maxPrice], [4, 13, 10, 16])
+  // Why the others were left out, with the first of them: what the report shows.
+  assert.deepEqual(m.dropped, { lotto: 1, 'prezzo anomalo': 1 })
+  assert.deepEqual(m.examples, ['lotto: Lotto 5 libri Zerocalcare'])
   assert.equal(m.market.gapPct, 31) // 17 € against a median of 13 €
   // Two cards are told, not used.
   const few = bookMarketFrom(cards.slice(0, 2), { identity: { isbn: '9788865436189' }, mode: 'isbn' })
@@ -84,10 +87,11 @@ test('book: the market by title — only the cards that carry the title and the 
   assert.deepEqual([k.kept, k.market.medianPrice], [3, 11])
 })
 
-test('book: the market feeds the strategy — the resale value is the median of the same book', () => {
+test('book: the market feeds the strategy — the resale value is the lower quartile of the same book', () => {
   const m = bookMarketFrom([{ id: '1', price: 12, text: 'a' }, { id: '2', price: 14, text: 'a' }, { id: '3', price: 10, text: 'a' }, { id: '4', price: 16, text: 'a' }], { identity: { isbn: '9788865436189' }, mode: 'isbn', listPrice: 9 })
   const s = strategyFor({ listPrice: '9', category: 'books', listingSignal: 'none', itemTitle: 'Kobane Calling' }, new Date('2026-11-16T18:00:00Z'), { goal: 'resell', market: m.market, extraction: { shippingFrom: 2.29 } })
-  assert.deepEqual(s.costs.resale, { amount: 13, source: 'market' })
+  // The lower quartile of what is asked (10, 12, 14, 16 → 11,50 €), not the median: what sells, not what is hoped for.
+  assert.deepEqual(s.costs.resale, { amount: 11.5, source: 'market' })
   assert.deepEqual([s.costs.market.n, s.costs.market.medianPrice, s.costs.market.basis], [4, 13, 'isbn'])
   assert.equal(s.costs.reachable, true)
 })

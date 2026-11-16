@@ -8,7 +8,7 @@ import { StrategyHero } from '../result/StrategyHero.js'
 import { Body, Button, InlineAction } from '../ui.js'
 import { VintedBrowser } from './VintedBrowser.js'
 
-const PHASE = { browser: 'Apro la pagina…', verify: 'Completa la verifica', seller: 'Studio il venditore…', market: 'Cerco lo stesso libro…' }
+const PHASE = { browser: 'Apro la pagina…', verify: 'Completa la verifica', seller: 'Studio il venditore…', market: 'Cerco lo stesso libro…', product: 'Cerco lo stesso articolo…' }
 
 function Tool({ glyph, label, onPress }) {
   const t = useTheme()

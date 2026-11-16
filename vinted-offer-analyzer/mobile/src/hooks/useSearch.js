@@ -9,8 +9,14 @@ import { prepareImage } from '../services/images.js'
 import { emptySearchState, loadSearchState, saveSearchState } from '../services/searchStore.js'
 
 /** Models chosen in the AI lab (October 2026): Qwen recognises listings, Haiku steps in, GPT-6 Luna writes. */
-export const VERIFY_CHAIN = ['qwen:qwen3.8-flash', 'anthropic:claude-haiku-5-5']
-export const TEXT_CHAIN = ['openai:gpt-6-luna', 'anthropic:claude-haiku-5-5']
+export const VERIFY_CHAIN = ['qwen:qwen3.8-flash', 'anthropic:claude-haiku-5-5', 'deepseek:deepseek-flash']
+export const TEXT_CHAIN = ['openai:gpt-6-luna', 'anthropic:claude-haiku-5-5', 'deepseek:deepseek-flash']
+/**
+ * 1.13 — the market of the same article on Vinted (product card and triage of the search cards, text only): DeepSeek
+ * first, the user's choice (Nov 2026); the others step in when its key is missing. DeepSeek also closes the two
+ * chains above, so that «Cerca altrove» works with that key alone.
+ */
+export const MARKET_CHAIN = ['deepseek:deepseek-flash', 'qwen:qwen3.8-flash', 'anthropic:claude-haiku-5-5', 'openai:gpt-6-luna']
 const CONCURRENCY = 4
 const PER_CHANNEL = 20
 /** Below this many unverified candidates the text triage is not worth a call. */
@@ -23,7 +29,7 @@ const providerOf = (modelKey) => modelKey.split(':')[0]
 let runCounter = 0
 
 /** First answer that validates, trying the chain in order; models without a key are skipped. */
-async function callChain(chain, prompt, images, opts) {
+export async function callChain(chain, prompt, images, opts) {
   let cost = 0
   let last = { ok: false, error: 'Nessuna chiave per i modelli scelti', kind: 'auth' }
   for (const modelKey of chain) {
@@ -322,6 +328,6 @@ export function useSearch() {
 
   return {
     ready: Boolean(store), store, run, keys, checkKeys, city, setCity, start, setQuery, searchUrlFor, setChannelResults, resetChannel, addChannelResults, setPhase,
-    analyze, cancel, explain, reopenLast, close, marketFor,
+    analyze, cancel, explain, reopenLast, close, marketFor, addSpend,
   }
 }

@@ -167,21 +167,32 @@ export function bookMarketFrom(cards, { identity = null, mode = 'isbn', selfId =
     if (!bkFinite(price) || price <= 0) continue
     rows.push({ id: String(c.id), price, text: String(c.text || '') })
   }
+  // Why a card was left out, and the first few of them: the report shows whether the rules cut the right ones.
+  const dropped = {}
+  const examples = []
+  const drop = (why, r) => {
+    dropped[why] = (dropped[why] || 0) + 1
+    if (examples.length < 4) examples.push(`${why}: ${r.text.split(/,\s*(?:marca|condizioni|taglia)\s*:/i)[0].slice(0, 50)}`)
+    return false
+  }
   const kept = rows.filter((r) => {
     const said = bkNorm(r.text)
     // A card that says nothing can only be trusted when the search itself was by ISBN.
-    if (!said.replace(/[^a-z]/g, '')) return mode === 'isbn' && !refIsLot
-    if (bkIsLot(said) !== refIsLot) return false
-    return mode === 'isbn' ? true : bkSameTitle(r.text, refTitle, id.title ? BOOK_MARKET.TITLE_COVERAGE : BOOK_MARKET.LISTING_COVERAGE)
+    if (!said.replace(/[^a-z]/g, '')) return mode === 'isbn' && !refIsLot ? true : drop('senza testo', r)
+    if (bkIsLot(said) !== refIsLot) return drop(refIsLot ? 'non è un lotto' : 'lotto', r)
+    if (mode !== 'isbn' && !bkSameTitle(r.text, refTitle, id.title ? BOOK_MARKET.TITLE_COVERAGE : BOOK_MARKET.LISTING_COVERAGE)) return drop('altro titolo', r)
+    return true
   })
   let prices = kept.map((r) => r.price).sort((a, b) => a - b)
   if (prices.length >= BOOK_MARKET.TRIM_FROM) {
     const mid = bkPercentile(prices, 0.5)
+    const before = prices.length
     prices = prices.filter((p) => p >= mid / BOOK_MARKET.TRIM_FACTOR && p <= mid * BOOK_MARKET.TRIM_FACTOR)
+    if (before - prices.length) dropped['prezzo anomalo'] = before - prices.length
   }
   const n = prices.length
   const query = mode === 'isbn' ? id.isbn || null : [id.title || listingTitle, id.author].filter(Boolean).join(' ') || null
-  const base = { ok: n >= BOOK_MARKET.MIN, market: null, basis: mode === 'isbn' ? 'isbn' : 'title', query, seen: rows.length, kept: n, confidence: null }
+  const base = { ok: n >= BOOK_MARKET.MIN, market: null, basis: mode === 'isbn' ? 'isbn' : 'title', query, seen: rows.length, kept: n, dropped, examples, confidence: null }
   if (n < 2) return base
   const medianPrice = bkR2(bkPercentile(prices, 0.5))
   const L = Number(listPrice)

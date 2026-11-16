@@ -46,8 +46,9 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
   const tone = toneColors(t, gain >= 0 ? 'good' : 'bad')
   // 1.12: the market the figures rest on — for a book, the other listings with the same ISBN (or title).
   const mk = costs.market
-  const alike = mk && mk.basis === 'isbn' ? 'dello stesso libro (ISBN)' : mk && mk.basis === 'title' ? 'con lo stesso titolo' : 'simili'
-  const from = costs.resale.source === 'market' ? (mk && mk.basis === 'isbn' ? ' (la mediana dello stesso libro)' : mk && mk.basis === 'title' ? ' (la mediana degli annunci con lo stesso titolo)' : ' (la mediana degli annunci simili)') : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
+  const alike = { isbn: 'dello stesso libro (ISBN)', title: 'con lo stesso titolo', model: 'dello stesso modello', ai: 'dello stesso articolo (riconosciuti dall\'AI)' }[mk && mk.basis] || 'simili'
+  // The resale value is the market's lower quartile: asking prices of unsold listings, and the next buyer haggles too.
+  const from = costs.resale.source === 'market' ? ' (il quartile basso del mercato: il prezzo a cui si vende)' : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
   const gapWord = mk && Number.isFinite(mk.gapPct) && mk.gapPct !== 0 ? ` Questo annuncio è il ${Math.abs(mk.gapPct)}% ${mk.gapPct > 0 ? 'sopra' : 'sotto'}.` : ''
   const marketLine = mk ? `Mercato: ${mk.n} annunci ${alike}, mediana ${formatEuro(mk.medianPrice)}; la metà chiede tra ${formatEuro(mk.p25Price)} e ${formatEuro(mk.p75Price)}.${gapWord}` : null
   let counter = `Se controbatte arriverà verso ${formatEuro(chosen.landing)}, in tutto ${formatEuro(chosen.landingTotal)}`

@@ -390,13 +390,19 @@ const KIDS_HINTS = /^(bambin[ie]|neonat[io]|ragazz[ie]|kids|bimb[aoie])\b|\b(bam
 export function pageFactsOf(html) {
   const src = String(html || '')
   const attributes = {}
+  const links = {}
   for (const hit of src.matchAll(/data-testid="item-attributes-([a-z_]+)"/gi)) {
     if (attributes[hit[1]] !== undefined) continue
-    const tail = src.slice(hit.index, hit.index + 500)
+    // The real blocks carry long class names: a short window ends inside a tag (seen in the first reports).
+    const tail = src.slice(hit.index, hit.index + 6000)
     const inner = tail.slice(tail.indexOf('>') + 1)
     const next = inner.search(new RegExp(`data-testid="(?!item-attributes-${hit[1]})`, 'i'))
-    // The buttons inside a block («Menu del brand», the size guide) are not its value.
-    attributes[hit[1]] = stripTags((next >= 0 ? inner.slice(0, inner.lastIndexOf('<', next)) : inner).replace(/<button[\s\S]*?<\/button>/gi, ' ')).slice(0, 60)
+    // The buttons inside a block («Menu del brand», the size guide) are not its value; nor is a tag cut by the window.
+    const block = (next >= 0 ? inner.slice(0, inner.lastIndexOf('<', next)) : inner).replace(/<button[\s\S]*?(?:<\/button>|$)/gi, ' ').replace(/<[^>]*$/, '')
+    attributes[hit[1]] = stripTags(block).slice(0, 80)
+    // «Modello», «ISBN»: the block links Vinted's own search for that model or that book.
+    const href = (block.match(/<a\b[^>]*href="([^"]+)"/i) || [])[1]
+    if (href) links[hit[1]] = decodeEntities(href).replace(/^https?:\/\/[^/]+/i, '').slice(0, 300)
   }
   const breadcrumbs = []
   for (const tag of src.matchAll(/<a\b[^>]*data-testid="[^"]*breadcrumb[^"]*"[^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
@@ -404,8 +410,7 @@ export function pageFactsOf(html) {
     breadcrumbs.push({ text: stripTags(tag[1]).slice(0, 60), path: decodeEntities(href).replace(/^https?:\/\/[^/]+/i, '').slice(0, 160) })
     if (breadcrumbs.length >= 8) break
   }
-  const summary = firstMatch(src, /data-testid="item-page-summary-plugin"[^>]*>([\s\S]{0,600}?)<\/div>\s*<div[^>]*data-testid=/i)
-  return { attributes, breadcrumbs, summary: summary ? stripTags(summary).slice(0, 120) : null }
+  return { attributes, links, breadcrumbs }
 }
 
 export function categoryGuess({ categoryText = '', brand = '', title = '', description = '', listPrice = null }) {

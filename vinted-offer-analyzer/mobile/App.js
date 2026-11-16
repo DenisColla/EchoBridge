@@ -21,7 +21,7 @@ import { SearchView } from './src/components/search/SearchView.js'
 import { useWatchlist } from './src/hooks/useWatchlist.js'
 import { useLearning } from './src/hooks/useLearning.js'
 import { useLab } from './src/hooks/useLab.js'
-import { useSearch } from './src/hooks/useSearch.js'
+import { MARKET_CHAIN, callChain, useSearch } from './src/hooks/useSearch.js'
 import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
 import { useVintedBridge } from './src/hooks/useVintedBridge.js'
 import { VintedNotices } from './src/components/VintedNotices.js'
@@ -280,6 +280,67 @@ function Main() {
       if (found && found.ok) break
     }
     return { market: best && best.ok ? best.market : null, info: best, tried, identity }
+  }
+
+  /**
+   * 1.13 — the market of an article that is not a book. Electronics: the page links its model, that search is read
+   * and judged by rules. Clothes and shoes: the page links brand × category and the model is only in the seller's
+   * words, so the AI (DeepSeek first) reads the listing, gives the words to search for and says which cards are the
+   * same article; without a key the cards are only «same brand and kind», a range that is told and not used.
+   * Read-only, one page; to the AI go titles, prices and conditions only (scrubbed), never a seller's name.
+   */
+  const readProductMarket = async (identity, { origin, selfId, ex }) => {
+    const started = Date.now()
+    const reference = {
+      title: ex.title || '', brand: ex.brand || '', size: identity.size || '', categoryText: identity.category || ex.categoryText || '',
+      description: ex.description || '', price: ex.listPrice, condition: identity.condition || ex.condition || '',
+    }
+    const ai = { scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0 }
+    let product = null
+    if (identity.kind === 'brand') {
+      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: 900, timeoutMs: 20_000, maxAttempts: 1 })
+      ai.costo_usd += res.costUsd || 0
+      if (res.costUsd) search.addSpend(res.modelKey, res.costUsd, null)
+      ai.scheda = res.ok ? 'ok' : res.kind || 'failed'
+      if (res.ok && res.value) {
+        product = core.cleanProduct(res.value, reference)
+        ai.modello = res.modelKey
+        ai.parole = product.query
+      }
+    }
+    const q = core.productSearchFor(identity, { origin, query: product ? product.query : null })
+    if (!q || !pageLoaderRef.current) return { market: null, info: null, tried: [], identity, ai, ms: Date.now() - started }
+    setExtractPhase('product')
+    const handed = Platform.OS === 'web' && typeof window !== 'undefined' && window.__ovtBookCards && Array.isArray(window.__ovtBookCards[q.mode]) ? window.__ovtBookCards[q.mode] : null
+    const res = handed ? { ok: true, details: { kind: 'catalog', cards: handed, diag: null } } : await pageLoaderRef.current.load(q.url, { onVisible: () => setExtractPhase('verify') })
+    const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
+    let verdicts = null
+    if (product && cards && cards.length) {
+      setExtractPhase('product')
+      const candidates = cards.map((c) => {
+        const said = core.cardFactsOf(c.text)
+        return { source: 'vinted', id: String(c.id), title: said.title, price: core.cardPriceOf(c.price), condition: said.condition || '' }
+      }).filter((c) => c.price !== null && c.title && c.id !== String(selfId)).slice(0, 80)
+      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: 4000, timeoutMs: 45_000, maxAttempts: 1 })))
+      const said = new Map()
+      let answered = 0
+      for (const r of answers) {
+        ai.costo_usd += r.costUsd || 0
+        if (r.costUsd) search.addSpend(r.modelKey, r.costUsd, null)
+        if (!(r.ok && r.value && Array.isArray(r.value.items))) continue
+        answered++
+        for (const it of r.value.items) {
+          const id = String((it && it.id) || '').trim().replace(/^#/, '').replace(/^vinted:/, '')
+          if (id && core.TRIAGE_VERDICTS.includes(it.verdict)) said.set(id, it.verdict)
+        }
+      }
+      ai.smistamento = answers.length ? `${answered}/${answers.length}` : null
+      if (answered) verdicts = said
+    }
+    ai.costo_usd = Math.round(ai.costo_usd * 100000) / 100000
+    const found = cards ? core.productMarketFrom(cards, { identity, mode: q.mode, selfId, listPrice: ex.listPrice, verdicts }) : null
+    const tried = [{ via: q.mode, parole: q.query, esito: res.ok ? (cards ? 'ok' : 'not_a_search') : res.reason || 'failed', visti: found ? found.seen : null, confrontabili: found ? found.kept : null, pagina: res.ok && res.details ? res.details.diag || null : null }]
+    return { market: found && found.ok ? found.market : null, info: found, tried, identity, ai, ms: Date.now() - started }
   }
 
   /**
@@ -601,9 +662,17 @@ function Main() {
         }
         // 1.12: the market of a book — what the other listings ask for the same ISBN, else for its title and author.
         const identity = core.bookIdentityOf(itemHtml) || (core.categoryGuess(ex).id === 'books' && ex.title ? { isbn: null, isbnHref: null, title: null, author: null } : null)
+        const selfId = (String(link).match(/\/items\/(\d+)/) || [])[1] || null
         if (identity) {
           setExtractPhase('market')
-          bookRead = await readBookMarket(identity, { origin, selfId: (String(link).match(/\/items\/(\d+)/) || [])[1] || null, listingTitle: ex.title || '', listPrice: ex.listPrice })
+          bookRead = await readBookMarket(identity, { origin, selfId, listingTitle: ex.title || '', listPrice: ex.listPrice })
+        } else {
+          // 1.13: any other article — by the model the page links (electronics) or by brand × category and the AI.
+          const product = core.productIdentityOf(core.pageFactsOf(itemHtml), { brand: ex.brand || null })
+          if (product) {
+            setExtractPhase('product')
+            bookRead = await readProductMarket(product, { origin, selfId, ex })
+          }
         }
         setExtractPhase(null)
       }
@@ -615,10 +684,12 @@ function Main() {
       } else bookMarketRef.current.delete(marketKey)
       setBookMarkets(Object.fromEntries(bookMarketRef.current))
       if (bookRead && bookRead.info) {
-        const what = bookRead.info.basis === 'isbn' ? 'dello stesso libro' : 'con lo stesso titolo'
-        showToast(bookRead.market
-          ? `Mercato: ${bookRead.market.n} annunci ${what}, mediana ${formatEuro(bookRead.market.medianPrice)}.`
-          : `Mercato: ${bookRead.info.kept} ${bookRead.info.kept === 1 ? 'annuncio' : 'annunci'} ${what}, troppo pochi per una mediana.`, 5000)
+        const info = bookRead.info
+        const what = { isbn: 'dello stesso libro', title: 'con lo stesso titolo', model: 'dello stesso modello', ai: 'dello stesso articolo', brand: 'della stessa marca e categoria' }[info.basis] || 'simili'
+        const count = `${info.kept} ${info.kept === 1 ? 'annuncio' : 'annunci'} ${what}`
+        if (bookRead.market) showToast(`Mercato: ${count}. Si vende a ${formatEuro(bookRead.market.p25Price)} (quartile basso), mediana ${formatEuro(bookRead.market.medianPrice)}.`, 6000)
+        else if (info.basis === 'brand' && info.market) showToast(`${count}, tra ${formatEuro(info.market.minPrice)} e ${formatEuro(info.market.maxPrice)}: troppo diversi per farne un valore.${bookRead.ai && bookRead.ai.scheda === 'auth' ? ' Con la chiave DeepSeek (Info → Laboratorio AI) riconosco lo stesso articolo.' : ''}`, 7000)
+        else showToast(`Mercato: ${count}, ${info.kept < 3 ? 'troppo pochi' : 'troppo diversi'} per farne un valore.`, 5000)
       }
       contextRef.current = { link, extraction: ex, wardrobe, memberRaw, at: Date.now() }
       choiceRef.current = { kind: 'auto' }
@@ -1219,16 +1290,23 @@ function Main() {
       // a «same product» search can rest on, category by category.
       pagina: extraction.pageFacts || null,
       // 1.12: the market of a book — what it was searched by, how many listings were seen and how many compare.
-      mercato: extraction.bookRead ? {
-        isbn: extraction.bookRead.identity.isbn, titolo: extraction.bookRead.identity.title, autore: extraction.bookRead.identity.author,
-        via: extraction.bookRead.info ? extraction.bookRead.info.basis : null, annunci_visti: extraction.bookRead.info ? extraction.bookRead.info.seen : null,
-        confrontabili: extraction.bookRead.info ? extraction.bookRead.info.kept : null, usato: Boolean(extraction.bookRead.market),
-        ...(extraction.bookRead.info && extraction.bookRead.info.market ? {
-          mediana: extraction.bookRead.info.market.medianPrice, quartile_basso: extraction.bookRead.info.market.p25Price, quartile_alto: extraction.bookRead.info.market.p75Price,
-          minimo: extraction.bookRead.info.market.minPrice, massimo: extraction.bookRead.info.market.maxPrice, affidabilita: extraction.bookRead.info.market.confidence,
-        } : {}),
-        ricerche: extraction.bookRead.tried,
-      } : null,
+      mercato: extraction.bookRead ? (() => {
+        const read = extraction.bookRead
+        const info = read.info
+        const id = read.identity || {}
+        return {
+          ...(id.kind ? { tipo: id.kind === 'model' ? 'modello' : 'marca', modello: id.model || null, capacita_gb: id.capacityGb ?? null, taglia: id.size || null, condizioni: id.condition || null, categoria: id.category || null }
+            : { tipo: 'libro', isbn: id.isbn || null, titolo: id.title || null, autore: id.author || null }),
+          via: info ? info.basis : null, annunci_visti: info ? info.seen : null, confrontabili: info ? info.kept : null, usato: Boolean(read.market),
+          scartati: info ? info.dropped || null : null, ...(info && info.examples ? { esempi_scartati: info.examples } : {}),
+          ...(info && info.market ? {
+            mediana: info.market.medianPrice, quartile_basso: info.market.p25Price, quartile_alto: info.market.p75Price, minimo: info.market.minPrice, massimo: info.market.maxPrice,
+            affidabilita: info.market.confidence, ...(id.kind ? { stessa_condizione: info.conditionMatched, stessa_taglia: info.sizeMatched, dispersione: info.market.spread } : {}),
+          } : {}),
+          ...(read.ai ? { ai: read.ai, millisecondi: read.ms } : {}),
+          ricerche: read.tried,
+        }
+      })() : null,
       profilo: {
         tipo: strategy.seller.type, punteggio: strategy.seller.score, archetipo: strategy.seller.archetype ? strategy.seller.archetype.label : null, fiducia: strategy.seller.confidence,
         tratti: (strategy.seller.traits || []).map((x) => `${x.pts > 0 ? '+' : ''}${x.pts} ${x.label}`),

@@ -190,5 +190,10 @@ test('extract: a clothing page as shared on 16 Nov — fixed shipping, no set di
   assert.equal(facts.attributes.size, 'Taglia 42,5')
   assert.equal(facts.attributes.brand, 'Brand Nike')
   assert.deepEqual(facts.breadcrumbs[2], { text: 'Nike Infradito e ciabatte', path: '/catalog/2656-slides?brand_ids[]=53' })
-  assert.equal(facts.summary, 'Nikeminds 42,5 Ottime Nike')
+  // The real blocks carry long class names and a link: the value is clean text and the link is kept (first reports:
+  // «Taglia M<button data-testid=…», «Modello <a href="/catalog?brand_collection_ids%5B%5D=9979&ca»).
+  const long = 'web_ui__Cell__cell web_ui__Cell__default '.repeat(20)
+  const phone = pageFactsOf(`<div data-testid="item-attributes-model_nav" class="${long}"><div class="${long}"><span class="${long}">Modello</span></div><a class="${long}" href="/catalog?brand_collection_ids%5B%5D=9979&amp;catalog%5B%5D=3661">Galaxy Z Fold7</a></div><div data-testid="item-attributes-size" class="${long}"><span>Taglia</span><span>M</span><button class="${long}" data-testid="item-attributes-size-faq-link" aria-label="Informazioni sulla taglia"></button></div><div data-testid="item-attributes-status"><span>Condizioni</span><span>Ottime</span></div>`)
+  assert.deepEqual(phone.attributes, { model_nav: 'Modello Galaxy Z Fold7', size: 'Taglia M', status: 'Condizioni Ottime' })
+  assert.deepEqual(phone.links, { model_nav: '/catalog?brand_collection_ids%5B%5D=9979&catalog%5B%5D=3661' })
 })
