@@ -679,9 +679,13 @@ function Main() {
     watchBusyRef.current = false
     const now = Date.now()
     const base = autoRef.current
-    if (!base.job || base.job.startedAt !== job.startedAt || base.job.stopped) return
+    if (!base.job || base.job.stopped) return
+    // Another job was started while this page was loading: this reading is dropped and the new job gets its first one.
+    if (base.job.startedAt !== job.startedAt) { setTimeout(() => watchReadRef.current(), 300); return }
     const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
     const entry = { quando: new Date(now).toISOString(), ms: now - t0, esito: res.ok ? (cards ? 'ok' : 'non_una_lista') : res.reason || 'failed', schede: cards ? cards.length : null }
+    // A reading that found nothing says what the page looked like, to tell an empty search from a page not read.
+    if (res.ok && (!cards || !cards.length) && res.details && res.details.diag) entry.pagina = res.details.diag
     if (!res.ok && res.reason === 'challenge') {
       saveAuto({ ...base, log: [...base.log, entry] })
       endJob('verifica')
@@ -725,7 +729,13 @@ function Main() {
       const next = { mode: ['manual', 'semi', 'auto'].includes(saved.mode) ? saved.mode : 'manual', job: saved.job || null, finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: null }
       autoRef.current = next
       setAuto(next)
-      if (core.jobActive(next.job)) setTimeout(() => watchReadRef.current(), 4000)
+      // Reopening the app does not bring the readings closer than they would be: a job read less than 8 minutes ago
+      // waits its turn, drawn anew.
+      // A job whose hours ran out while the app was closed ends now, with its summary.
+      if (next.job && !next.job.stopped && !core.jobActive(next.job)) { setTimeout(() => endJob('fine'), 1500); return }
+      if (!core.jobActive(next.job)) return
+      if (Date.now() - (next.job.lastReadAt || 0) >= core.WATCH.REFRESH_MIN_S * 1000) setTimeout(() => watchReadRef.current(), 4000)
+      else scheduleWatch()
     }).catch(() => {})
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return
@@ -738,7 +748,8 @@ function Main() {
   const startJob = async (job) => {
     await ensureNotificationPermission().catch(() => false)
     const base = autoRef.current
-    saveAuto({ ...base, job: { ...job, startedAt: Date.now(), reads: 0, told: [] }, log: [], draft: null })
+    // A new job starts its own list and its own diary.
+    saveAuto({ ...base, job: { ...job, startedAt: Date.now(), reads: 0, told: [] }, finds: [], log: [], draft: null })
     showToast(job.kind === 'hunt' ? 'Caccia avviata: leggo la ricerca ogni 8–12 minuti.' : 'Vetrina avviata: leggo la tua home ogni 8–12 minuti.', 4000)
     setTimeout(() => watchReadRef.current(), 300)
   }
