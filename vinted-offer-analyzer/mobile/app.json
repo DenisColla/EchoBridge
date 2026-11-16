@@ -2,7 +2,7 @@
   "expo": {
     "name": "Offerta Vinted Timing",
     "slug": "offerta-vinted-timing",
-    "version": "1.13.1",
+    "version": "1.13.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "offertavinted",
@@ -13,7 +13,7 @@
     ],
     "android": {
       "package": "it.migelino.offertavinted",
-      "versionCode": 26,
+      "versionCode": 27,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f766e"

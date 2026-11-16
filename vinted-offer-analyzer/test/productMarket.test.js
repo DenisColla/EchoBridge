@@ -139,3 +139,34 @@ test('strategy: three real choices under the ceiling, and a minimum margin moves
   assert.equal(kept.costs.ceiling, 539.33)
   assert.ok(kept.options.every((o) => o.price <= 539.33 && o.margin >= 63 - 0.01))
 })
+
+test('strategy: in the first hours the seller is at the peak of his confidence — gentler proposals, lower odds', () => {
+  // The jeans of 16 Nov: 15 €, uploaded two hours before, a seller the profile calls «facile». Until 1.13.1 a fresh
+  // listing made the seller easier and the bold proposal was the one recommended.
+  const form = { listPrice: '15', category: 'other', listingSignal: 'none', itemTitle: 'Levi\'s 511' }
+  const at = new Date('2026-11-16T20:44:00Z')
+  const seller = { type: 'facile', score: 2.25, traits: [], archetype: { id: 'active', label: 'Privato attivo' }, confidence: 'alta' }
+  const run = (uploadedDays) => strategyFor(form, at, { goal: 'keep', seller, extraction: { shippingFrom: 2.59, uploadedDays } })
+  const fresh = run(2 / 24)
+  const settled = run(2)
+  assert.equal(fresh.firstHours, 1)
+  assert.equal(settled.firstHours, 0)
+  // Every proposal is at least as near the price, and each is less likely to pass than the same step two days later.
+  for (let i = 0; i < 3; i++) {
+    assert.ok(fresh.options[i].price >= settled.options[i].price, `${fresh.options[i].price} >= ${settled.options[i].price}`)
+    assert.ok(fresh.options[i].probability < settled.options[i].probability + 1e-9 || fresh.options[i].price > settled.options[i].price)
+  }
+  assert.ok(fresh.options[2].price > settled.options[2].price, 'the bold one is not as bold')
+  // To sell again, with the real market of that listing: the bold proposal gains a few cents more on average, and in
+  // the first hours that is a tie — the middle one is recommended. Two days later the bold one is.
+  const market = { n: 11, medianPrice: 20, p25Price: 19, p75Price: 25, basis: 'ai' }
+  const resell = (uploadedDays) => strategyFor(form, at, { goal: 'resell', seller, market, extraction: { shippingFrom: 2.59, uploadedDays } })
+  assert.equal(resell(2 / 24).recommendedId, 'consigliata')
+  assert.equal(resell(2).recommendedId, 'audace')
+  // Half a day later half of that caution is left; after a day none.
+  assert.ok(run(0.5).firstHours > 0.5 && run(0.5).firstHours < 0.6)
+  assert.equal(run(1.2).firstHours, 0)
+  // The same price is less likely to pass in the first hours.
+  const same = (uploadedDays) => strategyFor(form, at, { goal: 'keep', seller, customPrice: 12, extraction: { shippingFrom: 2.59, uploadedDays } }).options.find((o) => o.id === 'tua' || Math.abs(o.price - 12) < 0.005).probability
+  assert.ok(same(2 / 24) < same(2) - 0.03, `${same(2 / 24)} < ${same(2)}`)
+})

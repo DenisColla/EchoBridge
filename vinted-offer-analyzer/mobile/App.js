@@ -1311,6 +1311,7 @@ function Main() {
     return JSON.stringify({
       letto: new Date(extraction.at).toISOString(), via: extraction.via,
       annuncio: { prezzo: ex.listPrice ?? null, caricato: ex.uploadedText ?? null, giorni_online: num(ex.uploadedDays), condizione: ex.condition ?? null, categoria: form.category || null },
+        prime_ore: strategy && Number.isFinite(strategy.firstHours) ? strategy.firstHours : null,
       venditore: {
         ultima_visita: ex.sellerLastSeenText ?? null, ultima_visita_minuti: Number.isFinite(ex.sellerLastSeenDays) ? Math.round(ex.sellerLastSeenDays * 1440) : null,
         recensioni: ex.sellerFeedbackCount ?? null, valutazione: ex.sellerRating ?? null, professionale: ex.sellerBusiness ?? null,

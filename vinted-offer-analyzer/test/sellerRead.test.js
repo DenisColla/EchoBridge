@@ -54,11 +54,13 @@ test('seller: the profile page as it reads in November 2026', () => {
   const form = { listPrice: '6', category: 'books', listingSignal: 'none' }
   const read = sellerProfileFor({ extraction: { ...parseVintedItemHtml(page()), uploadedDays: 1, condition: 'nuovo con etichetta' }, wardrobe: w, form })
   const ids = read.traits.map((t) => t.id)
-  for (const id of ['serial', 'active_lister', 'bundle', 'fresh', 'cheap', 'new_with_tags']) assert.ok(ids.includes(id), `${id} in ${ids}`)
+  for (const id of ['serial', 'active_lister', 'bundle', 'cheap', 'new_with_tags']) assert.ok(ids.includes(id), `${id} in ${ids}`)
   assert.match(read.traits.find((t) => t.id === 'serial').label, /285 recensioni/)
   // The misreading of 1.10: 16 reviews, no wardrobe → the seller looked like a private seller with nothing known.
   const misread = sellerProfileFor({ extraction: { sellerFeedbackCount: 16, uploadedDays: 1, condition: 'nuovo con etichetta' }, wardrobe: null, form })
-  assert.deepEqual(misread.traits.map((t) => t.id).sort(), ['cheap', 'fresh', 'new_with_tags'])
+  assert.deepEqual(misread.traits.map((t) => t.id).sort(), ['cheap', 'new_with_tags'])
+  // A listing just uploaded says nothing of the seller: until 1.13.1 it made him «easier».
+  assert.ok(!ids.includes('fresh'))
   // The badge alone, read on the listing page.
   assert.ok(sellerProfileFor({ extraction: { sellerBadges: ['ACTIVE_LISTER'] }, form }).traits.some((t) => t.id === 'active_lister'))
   assert.ok(!sellerProfileFor({ extraction: { sellerBadges: ['SPEEDY_SHIPPING'] }, form }).traits.some((t) => t.id === 'active_lister'))

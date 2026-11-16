@@ -61,6 +61,15 @@ export const STRATEGY = Object.freeze({
   ONLINE_NOW_DAYS: 10 / 1440,
   ONLINE_DAYS: 0.05,
   FRESH_DAYS: 3,
+  /**
+   * The first hours of a listing (1.13.2, the user's rule: «nelle prime ore il venditore è al massimo della fiducia»).
+   * Within FIRST_HOURS_FULL_DAYS the three proposals stay FIRST_HOURS_PTS points nearer the price and their odds drop
+   * by FIRST_HOURS_LOGIT; the effect fades to nothing at FIRST_HOURS_END_DAYS.
+   */
+  FIRST_HOURS_FULL_DAYS: 3 / 24,
+  FIRST_HOURS_END_DAYS: 1,
+  FIRST_HOURS_PTS: 4,
+  FIRST_HOURS_LOGIT: 0.4,
   LOW_BUDGET_EUR: 15,
 })
 
@@ -194,7 +203,8 @@ export function sellerProfileFor({ extraction = null, signals = null, wardrobe =
   const age = stFinite(ex.uploadedDays) ? ex.uploadedDays : stFinite(sig.uploadedDays) ? sig.uploadedDays : null
   const dropped = sig.priceDropped === true || Boolean(sig.priceDrop)
   if (dropped) add('dropped', 1, 'ha già ribassato il prezzo')
-  if (age !== null && age < STRATEGY.FRESH_DAYS) add('fresh', 0.5, 'annuncio appena caricato: vuole vendere adesso')
+  // No trait for a listing just uploaded: until 1.13.1 it made the seller «easier» (+0.5), the opposite of what the
+  // first hours are. The moment of the listing is the strategy's business (firstHours), not the seller's nature.
   else if (age !== null && age > 45 && !dropped) add('anchored', -0.5, `fermo sullo stesso prezzo da ${Math.round(age)} giorni`)
 
   if (/nuovo con (etichetta|cartellino)/i.test(String(ex.condition || ''))) add('new_with_tags', -0.5, 'nuovo con etichetta: ragiona sul prezzo del negozio')
@@ -341,6 +351,17 @@ export function strategyFor(form, now = new Date(), options = {}) {
   else if (signalId === 'fixed_price') center -= 5
   if (market && L >= market.p75Price) center += 4
   if (market && L <= market.p25Price) center -= 6
+  // The first hours: 1 within FIRST_HOURS_FULL_DAYS, fading to 0 at FIRST_HOURS_END_DAYS («Caricato oggi» without an
+  // hour counts as half a day).
+  const hoursAge = ageDays ?? (form.listingAge === 'today' ? 0.5 : null)
+  const firstHours = hoursAge === null ? 0
+    : stClamp((STRATEGY.FIRST_HOURS_END_DAYS - hoursAge) / (STRATEGY.FIRST_HOURS_END_DAYS - STRATEGY.FIRST_HOURS_FULL_DAYS), 0, 1)
+  center -= STRATEGY.FIRST_HOURS_PTS * firstHours
+  // While the seller is that confident a tie goes to the gentler proposal, whatever his type.
+  const lean = firstHours >= 0.5 ? 'difficile' : seller.type
+  // …and «a tie» is wider: a refusal closes the door, so a little more on average is not worth a likelier no
+  // (1% of the price as always, up to 3% when the listing was just uploaded).
+  const tieShare = 0.01 + 0.02 * firstHours
   center = stClamp(center, STRATEGY.MIN_PTS + 2, STRATEGY.MAX_CENTER_PTS)
 
   const floor = L * (1 - VINTED.MAX_DISCOUNT_PCT / 100)
@@ -432,7 +453,7 @@ export function strategyFor(form, now = new Date(), options = {}) {
     const cell = experience[b.id]
     const scale = cell.n > STRATEGY.MAX_COUNT ? STRATEGY.MAX_COUNT / cell.n : 1
     const n = cell.n * scale
-    const shifted = engineP === null ? null : stSquash(stLogit(stClamp(engineP, 0.01, 0.99)) + STRATEGY.TYPE_LOGIT[seller.type])
+    const shifted = engineP === null ? null : stSquash(stLogit(stClamp(engineP, 0.01, 0.99)) + STRATEGY.TYPE_LOGIT[seller.type] - STRATEGY.FIRST_HOURS_LOGIT * firstHours)
     const probability = shifted === null ? null : (STRATEGY.PRIOR_WEIGHT * shifted + cell.accepted * scale) / (STRATEGY.PRIOR_WEIGHT + n)
     const counterRaw = (STRATEGY.PRIOR_WEIGHT * b.counter + cell.countered * scale) / (STRATEGY.PRIOR_WEIGHT + n)
     const counterChance = probability === null ? null : Math.min(counterRaw, Math.max(0, 0.95 - probability))
@@ -453,8 +474,8 @@ export function strategyFor(form, now = new Date(), options = {}) {
   // The cheapest on average wins; within 1% of the listing price the type decides (difficile → the gentler option).
   let best = scored.length ? scored.reduce((a, b) => (b.expectedPrice < a.expectedPrice ? b : a)) : analysed[0]
   if (scored.length > 1) {
-    const near = scored.filter((o) => o.expectedPrice - best.expectedPrice <= 0.01 * L)
-    if (near.length > 1) best = seller.type === 'difficile' ? near[0] : seller.type === 'facile' ? near[near.length - 1] : near.find((o) => o.id === 'consigliata') || best
+    const near = scored.filter((o) => o.expectedPrice - best.expectedPrice <= tieShare * L)
+    if (near.length > 1) best = lean === 'difficile' ? near[0] : lean === 'facile' ? near[near.length - 1] : near.find((o) => o.id === 'consigliata') || best
   }
   // To sell again: the proposal that gains the most on average among those that cannot lose (a refusal costs nothing:
   // the article is simply not bought). Within 1% of the listing price the type decides, as above. When no proposal can
@@ -464,8 +485,8 @@ export function strategyFor(form, now = new Date(), options = {}) {
     const gain = scored.filter((o) => o.safe && o.expectedMargin !== null && o.expectedMargin > 0.004)
     if (gain.length) {
       const top = gain.reduce((a, b) => (b.expectedMargin > a.expectedMargin ? b : a))
-      const close = gain.filter((o) => top.expectedMargin - o.expectedMargin <= 0.01 * L)
-      best = close.length > 1 ? (seller.type === 'difficile' ? close[0] : seller.type === 'facile' ? close[close.length - 1] : close.find((o) => o.id === 'consigliata') || top) : top
+      const close = gain.filter((o) => top.expectedMargin - o.expectedMargin <= tieShare * L)
+      best = close.length > 1 ? (lean === 'difficile' ? close[0] : lean === 'facile' ? close[close.length - 1] : close.find((o) => o.id === 'consigliata') || top) : top
     } else noMargin = true
   }
   const chosenOpt = (typeof options.chosen === 'string' ? analysed.find((o) => o.id === options.chosen) : null)
@@ -483,6 +504,8 @@ export function strategyFor(form, now = new Date(), options = {}) {
     experience,
     result,
     goal,
+    // How much of the «first hours» caution was applied (1 = just uploaded, 0 = a day old or more).
+    firstHours: stR2(firstHours),
     // What the figures above were computed with: the protection on the listing price, the shipping and where it comes
     // from ('page' | 'estimate' | 'user'), the resale value ('user' | 'market' | 'listing'), the highest price that
     // does not lose (`ceiling`), the lowest offer Vinted allows (`floor`), whether the two meet (`reachable`), and

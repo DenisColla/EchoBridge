@@ -183,6 +183,7 @@ export function StrategyHero({ strategy, result, saveState = null, calendarBusy 
           ★ = paga meno in media. Con {formatEuro(chosen.price)} paghi in media {formatEuro(chosen.expectedPrice)} tra sì, controproposte e no. {history}{strategy.costs ? '' : counter}
         </Body>
       )}
+      {strategy.firstHours >= 0.5 ? <Body small muted>Annuncio appena caricato: nelle prime ore il venditore è al massimo della fiducia. Proposte più caute; invia subito, prima degli altri.</Body> : null}
       {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} onMargin={onMargin} /> : null}
 
       <View style={{ gap: 2 }}>
