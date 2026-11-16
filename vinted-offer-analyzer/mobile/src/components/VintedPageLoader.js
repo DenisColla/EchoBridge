@@ -217,15 +217,33 @@ export const PAGE_PROBE = `(function () {
       var seen = {};
       var prices = [];
       var cards = 0;
+      var firstCard = null;
+      var PRICE = /(\\d{1,5}(?:[.,]\\d{2})?)\\s?\\u20ac/;
       for (var i = 0; i < links.length && cards < 120; i++) {
         var a = links[i];
         var m = String(a.getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
         if (!m || seen[m[1]]) continue;
         seen[m[1]] = 1;
         cards++;
-        var box = (a.closest && a.closest('[data-testid*="item" i]')) || a.parentElement || a;
-        var t = (String(a.getAttribute('title') || '') + ' ' + text(box)).slice(0, 400);
-        var p = t.match(/(\\d{1,5}(?:[.,]\\d{2})?)\\s?\\u20ac/);
+        if (cards === 1) firstCard = String(a.getAttribute('data-testid') || a.className || '').replace(/\\d{3,}/g, '{id}').slice(0, 60);
+        // The card is the widest box around the link that holds no other article. On Vinted the link is an empty
+        // overlay with its own data-testid («product-item-id-…--overlay-link»): the price is a sibling, so it is
+        // looked for going up from the link (1.11.1 stopped at the link itself and read no price at all).
+        var p = String(a.getAttribute('title') || '').match(PRICE);
+        var node = a;
+        for (var up = 0; up < 7 && !p; up++) {
+          node = node.parentElement;
+          if (!node || node === document.body) break;
+          var inside = node.querySelectorAll('a[href*="/items/"]');
+          var foreign = false;
+          for (var q = 0; q < inside.length && !foreign; q++) {
+            var other = String(inside[q].getAttribute('href') || '').match(/\\/items\\/(\\d+)/);
+            if (other && other[1] !== m[1]) foreign = true;
+          }
+          if (foreign) break;
+          // Laid out, one element per line: glued, a title ending in a digit would change the price after it.
+          p = String(node.innerText || text(node)).slice(0, 600).match(PRICE);
+        }
         if (p) prices.push(p[1]);
       }
       var num = function (re) { var x = body.match(re); return x ? x[1] : null; };
@@ -260,7 +278,7 @@ export const PAGE_PROBE = `(function () {
       }
       // «Acquista set · Ottieni fino al 25% di sconto · Crea set» (the bundle was called «lotti» before).
       var bundle = body.match(/[^.]{0,80}(acquista set|crea set|sconto sui lotti|sconti sui lotti|lotti)[^.]{0,80}/i);
-      return { kind: 'member', frequentLister: /annunci frequenti/i.test(body), cards: cards, prices: prices, itemCountText: itemCount, followersText: num(/(\\d[\\d.]*)\\s+follower/i), feedbackText: num(/(\\d[\\d.]*)\\s+recension/i), bundleText: bundle ? bundle[0].slice(0, 200) : null, flight: flight, sample: body.slice(0, 600) };
+      return { kind: 'member', frequentLister: /annunci frequenti/i.test(body), cards: cards, prices: prices, cardMark: firstCard, itemCountText: itemCount, followersText: num(/(\\d[\\d.]*)\\s+follower/i), feedbackText: num(/(\\d[\\d.]*)\\s+recension/i), bundleText: bundle ? bundle[0].slice(0, 200) : null, flight: flight, sample: body.slice(0, 600) };
     } catch (e) {
       return null;
     }
@@ -297,7 +315,7 @@ export const PAGE_PROBE = `(function () {
         }
         var read = readMember();
         // What the page looked like when it was read, without a name or a number: tells an empty wardrobe from a page not read.
-        if (read) read.diag = { waitedMs: waited, textLen: (document.body ? document.body.textContent || '' : '').length, itemLinks: itemLinks, hasInfo: hasInfo, path: location.pathname.replace(/\\d{3,}/g, '{id}').replace(/\\{id\\}-[^/]+/, '{id}-{nome}') };
+        if (read) read.diag = { waitedMs: waited, textLen: (document.body ? document.body.textContent || '' : '').length, itemLinks: itemLinks, priced: read.prices ? read.prices.length : 0, card: read.cardMark || null, hasInfo: hasInfo, path: location.pathname.replace(/\\d{3,}/g, '{id}').replace(/\\{id\\}-[^/]+/, '{id}-{nome}') };
         post({ type: 'html', url: location.href, html: '', details: read });
         return;
       }

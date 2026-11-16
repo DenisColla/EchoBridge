@@ -15,6 +15,7 @@
  * - shippingEstimateFor({ category, listPrice })
  * - ceilingPriceFor(resale, shipping, marginPct): the highest price that still leaves the margin when sold at `resale`
  * - resaleMarginOf(price, shipping, resale)
+ * - setCeilingFor(resale, shipping, items, marginPct): the same ceiling for each article of a «set» of `items`
  */
 
 // Half-up to the cent, as Vinted rounds its protection (1e-7 absorbs binary noise such as 14.745 → 14.7449999…).
@@ -76,6 +77,18 @@ export function ceilingPriceFor(resale, shipping = 0, marginPct = 0) {
     price = next
   }
   return price
+}
+
+/**
+ * The ceiling for EACH article when `items` similar ones (each sold again at `resale`) are bought from the same seller
+ * in one order: the fixed 0,70 € and the shipping are paid once, so on cheap articles the ceiling rises a lot
+ * (a 7 € book with 2,29 € of shipping: 3,82 € alone, 5,24 € each in two, 5,71 € each in three).
+ * An estimate: it takes the shipping as unchanged (a heavier parcel can cost more) and the articles as alike.
+ */
+export function setCeilingFor(resale, shipping = 0, items = 2, marginPct = 0) {
+  const n = cstFinite(items) ? Math.max(1, Math.floor(items)) : 1
+  if (!cstFinite(resale) || resale <= 0) return 0
+  return Math.floor((ceilingPriceFor(resale * n, shipping, marginPct) / n) * 100 + 1e-7) / 100
 }
 
 /** Bought at `price`, sold again at `resale`: { total, margin, marginPct (of the resale) }. Null without a price. */

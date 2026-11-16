@@ -50,6 +50,15 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
   else if (chosen.landingMargin >= 0) counter += ': resti in guadagno, puoi chiudere.'
   else if (costs.reachable) counter += `: rilancia e chiudi solo fino a ${formatEuro(costs.ceiling)}.`
   else counter += '.'
+  // The «set»: with other articles of the same seller the fixed costs are paid once. It is the way out when alone the
+  // article cannot gain, and a saving worth a line in every other case.
+  const set = costs.set
+  const setOff = set && set.discountPct ? `, e lui toglie già il ${String(set.discountPct).replace('.', ',')}% sui set` : ''
+  const setStrong = Boolean(resell && set && !costs.reachable && set.reachable)
+  let setLine = null
+  if (setStrong) setLine = `La via è il set: con ${set.items} articoli suoi (ne ha ${set.sellerItems}) spedizione e 0,70 € fissi si pagano una volta sola e il tetto sale a ${formatEuro(set.ceilingEach)} l'uno${setOff}. Stima a parità di spedizione e di valore.`
+  else if (set && resell && costs.reachable) setLine = `In set con un altro suo articolo il tetto sale a ${formatEuro(set.ceilingEach)} l'uno: i costi fissi si dividono (${formatEuro(set.savingEach)} in meno a pezzo)${setOff}.`
+  else if (set && !resell) setLine = `In set con un altro suo articolo risparmi circa ${formatEuro(set.savingEach)} a pezzo: spedizione e 0,70 € fissi si pagano una volta sola${setOff}.`
   return (
     <View style={[styles.costs, { borderColor: t.line }]}>
       <View style={styles.inlineRow}>
@@ -69,9 +78,10 @@ function CostBlock({ strategy, chosen, onGoal, onResale }) {
       {resell && costs.reachable ? <Body small muted>Tetto per non perderci: {formatEuro(costs.ceiling)}. Nessuna delle tre proposte lo supera.</Body> : null}
       {resell && !costs.reachable ? (
         <Body small muted>
-          Per non perderci dovresti pagarlo al massimo {formatEuro(costs.ceiling)}, ma Vinted non lascia offrire meno di {formatEuro(costs.floor)}: rivendendo a {formatEuro(resale)} il margine non c'è. Vale se lo tieni, o se vale di più: scrivi sotto a quanto lo rivendi.
+          Per non perderci dovresti pagarlo al massimo {formatEuro(costs.ceiling)}, ma Vinted non lascia offrire meno di {formatEuro(costs.floor)}, e anche lì paghi in tutto {formatEuro(costs.floorTotal)}. Da solo conviene se lo rivendi sopra {formatEuro(costs.floorTotal)} (scrivilo sotto) o se lo tieni.
         </Body>
       ) : null}
+      {setLine ? <Body small style={setStrong ? { fontWeight: '600' } : null} muted={!setStrong}>{setLine}</Body> : null}
       <Body small muted>{counter}</Body>
       {resell ? (
         <View style={styles.resale}>

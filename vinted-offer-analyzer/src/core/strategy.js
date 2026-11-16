@@ -16,7 +16,7 @@ import { CATEGORIES, VINTED } from './constants.js'
 import { analyzeOffer, parsePrice } from './analyze.js'
 import { formatEuro } from './messages.js'
 import { policyAgeTierOf, policyBandOf, precisePriceFor } from './policy.js'
-import { ceilingPriceFor, purchaseCost, shippingEstimateFor } from './costs.js'
+import { COSTS, ceilingPriceFor, purchaseCost, setCeilingFor, shippingEstimateFor } from './costs.js'
 
 const stFinite = (v) => typeof v === 'number' && Number.isFinite(v)
 const stClamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
@@ -374,6 +374,25 @@ export function strategyFor(form, now = new Date(), options = {}) {
   const marginPct = stFinite(options.marginPct) ? stClamp(options.marginPct, 0, 60) : 0
   const ceiling = ceilingPriceFor(resale.amount, shipping.amount, marginPct)
   const reachable = ceiling >= floor - 1e-9
+  // 1.11.2 — the «set»: bought with other articles of the same seller in one order, the fixed part of the protection
+  // and the shipping are paid once. `items` is how many alike articles it takes for the price that does not lose to be
+  // one Vinted lets offer (2 when it already is, at most 5 and never more than the seller has); `ceilingEach` that
+  // price for each, `savingEach` the fixed costs each article no longer carries. Only when the seller is known to have
+  // other articles: it is an estimate (same shipping, alike articles) and the panel says so.
+  const wardrobe = options.wardrobe && typeof options.wardrobe === 'object' ? options.wardrobe : null
+  const sellerItems = wardrobe && stFinite(wardrobe.itemCount) ? wardrobe.itemCount : signals && stFinite(signals.sellerItems) ? signals.sellerItems : null
+  let set = null
+  if (sellerItems !== null && sellerItems >= 2) {
+    const most = Math.min(Math.floor(sellerItems), 5)
+    let items = 2
+    if (!reachable) while (items < most && setCeilingFor(resale.amount, shipping.amount, items, marginPct) < floor - 1e-9) items++
+    const ceilingEach = setCeilingFor(resale.amount, shipping.amount, items, marginPct)
+    const discount = wardrobe && stFinite(wardrobe.bundleDiscountPct) ? wardrobe.bundleDiscountPct : signals && stFinite(signals.bundleDiscountPct) ? signals.bundleDiscountPct : null
+    set = {
+      items, ceilingEach, reachable: ceilingEach >= floor - 1e-9, savingEach: stR2((COSTS.FEE_FIXED + shipping.amount) * (1 - 1 / items)),
+      discountPct: discount !== null && discount > 0 ? discount : null, sellerItems: Math.floor(sellerItems),
+    }
+  }
   if (goal === 'resell' && reachable) {
     let cap = Math.floor(ceiling / step + 1e-9) * step
     if (cap >= L) cap = L - step
@@ -454,9 +473,13 @@ export function strategyFor(form, now = new Date(), options = {}) {
     goal,
     // What the figures above were computed with: the protection on the listing price, the shipping and where it comes
     // from ('page' | 'estimate' | 'user'), the resale value ('user' | 'market' | 'listing'), the highest price that
-    // does not lose (`ceiling`), the lowest offer Vinted allows (`floor`), whether the two meet (`reachable`).
+    // does not lose (`ceiling`), the lowest offer Vinted allows (`floor`), whether the two meet (`reachable`), and
+    // what buying a «set» from this seller changes (`set`, null when he is not known to have other articles).
     costs: {
       fee: purchaseCost(L, 0).fee, shipping, resale, marginPct, ceiling: stR2(ceiling), floor: stR2(Math.ceil(floor * 100 - 1e-7) / 100), reachable, noMargin,
+      // What the lowest offer Vinted allows costs in all: below this resale value no offer can gain.
+      floorTotal: purchaseCost(stR2(Math.ceil(floor * 100 - 1e-7) / 100), shipping.amount).total,
+      set,
     },
   }
 }

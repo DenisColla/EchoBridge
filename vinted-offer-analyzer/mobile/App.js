@@ -1060,6 +1060,8 @@ function Main() {
     for (const p of planInboxRows(rows, items)) {
       if (convDoneRef.current.has(p.key)) continue
       convDoneRef.current.add(p.key)
+      // In the visit log too: an outcome applied from the inbox is why the conversation then has nothing left to do.
+      logVisit('https://www.vinted.it/inbox', `messaggi: ${p.action}${p.status ? ' ' + p.status : ''}${Number.isFinite(p.price) ? ' ' + p.price + ' €' : ''}`)
       if (p.action === 'outcome') await closeFromVinted(p.itemId, p.status, p.title)
       // A counter-offer with its figure is registered (also on an offer closed as refused); without one it is announced.
       else if (Number.isFinite(p.price) && p.price > 0) await registerCounter(p.itemId, p.price, { previousOffer: p.previousOffer, conversationId: null, seller: p.seller })
@@ -1162,7 +1164,8 @@ function Main() {
       costi: strategy.costs ? {
         scopo: strategy.goal, spedizione: strategy.costs.shipping.amount, spedizione_da: strategy.costs.shipping.source,
         rivendita: strategy.costs.resale.amount, rivendita_da: strategy.costs.resale.source, tetto: strategy.costs.ceiling, minimo_vinted: strategy.costs.floor,
-        tetto_raggiungibile: strategy.costs.reachable, senza_margine: strategy.costs.noMargin,
+        tetto_raggiungibile: strategy.costs.reachable, senza_margine: strategy.costs.noMargin, totale_al_minimo: strategy.costs.floorTotal ?? null,
+        set: strategy.costs.set ? { articoli: strategy.costs.set.items, tetto_a_pezzo: strategy.costs.set.ceilingEach, raggiungibile: strategy.costs.set.reachable, risparmio_a_pezzo: strategy.costs.set.savingEach, sconto_set_pct: strategy.costs.set.discountPct } : null,
       } : null,
       proposte: (strategy.options || []).map((o) => ({
         tipo: o.id, prezzo: o.price, sconto_pct: o.discountPct, probabilita_pct: Number.isFinite(o.probability) ? Math.round(o.probability * 100) : null, consigliata: Boolean(o.recommended),

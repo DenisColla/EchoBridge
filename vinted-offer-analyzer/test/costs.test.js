@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { analyzeCounter, ceilingPriceFor, parseVintedItemHtml, purchaseCost, resaleMarginOf, shippingEstimateFor, strategyFor, strategySnapshot, vintedBuyerFee } from '../src/core/index.js'
+import { analyzeCounter, ceilingPriceFor, setCeilingFor, parseVintedItemHtml, purchaseCost, resaleMarginOf, shippingEstimateFor, strategyFor, strategySnapshot, vintedBuyerFee } from '../src/core/index.js'
 import { budgetOfItem, counterRawFor } from '../mobile/src/services/counterInput.js'
 
 const now = new Date(2026, 10, 16, 10, 0)
@@ -125,4 +125,34 @@ test('strategy: what is saved with the offer, and the budget it gives to the rep
   assert.ok(!Number.isFinite(plan.recommended.price) || plan.recommended.price <= 17.43, String(plan.recommended.price))
   // Without a ceiling the planner is free, as before.
   assert.equal(counterRawFor({ ...item, strategy: null }, 20).maxPrice, '')
+})
+
+test('costs: in a set the fixed costs are paid once, so the ceiling of each article rises', () => {
+  // The 7 € book of the report of 16 Nov (shipping 2,29 €, sold again at 7 €): alone the ceiling is below what Vinted lets offer.
+  assert.equal(ceilingPriceFor(7, 2.29), 3.82)
+  assert.equal(setCeilingFor(7, 2.29, 1), 3.82)
+  assert.equal(setCeilingFor(7, 2.29, 2), 5.24)
+  assert.equal(setCeilingFor(7, 2.29, 3), 5.71)
+  // Two at the ceiling really cost no more than they give back.
+  assert.ok(purchaseCost(5.24 * 2, 2.29).total <= 14)
+  assert.equal(setCeilingFor(0, 2.29, 2), 0)
+})
+
+test('strategy: when the article alone cannot gain, the set of the same seller is the way out', () => {
+  const form = { listPrice: '7', category: 'books', listingSignal: 'none', itemTitle: 'Libro' }
+  const wardrobe = { itemCount: 7, followers: 1, bundleOffered: true, bundleDiscountPct: 5, frequentLister: true, sampleCount: 0 }
+  const extraction = { shippingFrom: 2.29, sellerFeedbackCount: 15, sellerRating: 5, uploadedDays: 0, condition: 'usato', signals: {} }
+  const s = strategyFor(form, new Date('2026-11-16T09:28:00Z'), { goal: 'resell', resale: 7, extraction, wardrobe })
+  assert.equal(s.costs.reachable, false)
+  assert.equal(s.costs.noMargin, true)
+  assert.equal(s.costs.floor, 4.2)
+  assert.equal(s.costs.floorTotal, 7.4)
+  assert.deepEqual([s.costs.set.items, s.costs.set.ceilingEach, s.costs.set.reachable, s.costs.set.discountPct, s.costs.set.sellerItems], [2, 5.24, true, 5, 7])
+  assert.equal(s.costs.set.savingEach, 1.5)
+  // A seller with one article has no set; an unknown wardrobe says nothing.
+  assert.equal(strategyFor(form, new Date('2026-11-16T09:28:00Z'), { goal: 'resell', resale: 7, extraction, wardrobe: { itemCount: 1 } }).costs.set, null)
+  assert.equal(strategyFor(form, new Date('2026-11-16T09:28:00Z'), { goal: 'resell', resale: 7, extraction }).costs.set, null)
+  // Dearer shipping and a low resale: it takes more than two, never more than the seller has.
+  const hard = strategyFor(form, new Date('2026-11-16T09:28:00Z'), { goal: 'resell', resale: 6, shipping: 4, extraction, wardrobe: { itemCount: 3 } })
+  assert.equal(hard.costs.set.items, 3)
 })
