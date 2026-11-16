@@ -63,3 +63,43 @@ test('seller: the profile page as it reads in November 2026', () => {
   assert.ok(sellerProfileFor({ extraction: { sellerBadges: ['ACTIVE_LISTER'] }, form }).traits.some((t) => t.id === 'active_lister'))
   assert.ok(!sellerProfileFor({ extraction: { sellerBadges: ['SPEEDY_SHIPPING'] }, form }).traits.some((t) => t.id === 'active_lister'))
 })
+
+test('listing: «Nuovo senza cartellino» is not «nuovo con etichetta»', () => {
+  // schema.org says NewCondition for both; the page's own «Condizioni» label decides (seen on real listings, Nov 2026:
+  // a «Nuovo senza cartellino» book was profiled as «nuovo con etichetta: ragiona sul prezzo del negozio»).
+  const ld = (shown) => `<script type="application/ld+json">{"@type":"Product","name":"Kobane Calling","offers":{"@type":"Offer","price":"17.00","priceCurrency":"EUR","itemCondition":"https://schema.org/NewCondition"}}</script><div><span>Condizioni</span><span>${shown}</span></div>`
+  assert.equal(parseVintedItemHtml(ld('Nuovo senza cartellino')).condition, 'nuovo senza etichetta')
+  assert.equal(parseVintedItemHtml(ld('Nuovo con cartellino')).condition, 'nuovo con etichetta')
+  // No label on the page: the embedded data stays, as before.
+  assert.equal(parseVintedItemHtml(ld('')).condition, 'nuovo con etichetta')
+  // The label of another listing shown on the page (a card of «articoli simili») does not count.
+  assert.equal(parseVintedItemHtml(ld('Nuovo con cartellino') + '<div class="card"><p>Altro fumetto</p><p>Nuovo senza cartellino</p></div>').condition, 'nuovo con etichetta')
+  const form = { listPrice: '17', category: 'books', listingSignal: 'none' }
+  const without = sellerProfileFor({ extraction: { ...parseVintedItemHtml(ld('Nuovo senza cartellino')), uploadedDays: 60 }, form })
+  assert.ok(!without.traits.some((t) => t.id === 'new_with_tags'))
+  // …so a seller who simply has not touched the price for two months is no longer «Fermo sul prezzo».
+  assert.notEqual(without.archetype.id, 'firm')
+  assert.equal(sellerProfileFor({ extraction: { ...parseVintedItemHtml(ld('Nuovo con cartellino')), uploadedDays: 60 }, form }).archetype.id, 'firm')
+})
+
+test('seller: the profile of the recording (16 Nov) gives a complete profile once it is read', () => {
+  // What the probe reads on kokosc23's page when it waits for it to fill: 44 articoli, 7 follower, «Annunci frequenti»,
+  // «Acquista set · Ottieni fino al 15% di sconto». 1.10.2 and 1.11.0 read it empty, one second after opening it.
+  const probe = {
+    kind: 'member', frequentLister: true, cards: 20, prices: ['30,00', '17,00', '4,00', '6,00', '8,00', '5,00', '12,00', '3,00', '9,00', '10,00'],
+    itemCountText: '44', followersText: '7', feedbackText: null, bundleText: '\n\nAcquista set\n\nOttieni fino al 15% di sconto\n\nCrea set\n44 articoli\n30,00 €', flight: {},
+  }
+  const w = wardrobeFromProbe(probe)
+  assert.deepEqual([w.itemCount, w.followers, w.bundleOffered, w.bundleDiscountPct, w.frequentLister, w.sampleCount], [44, 7, true, 15, true, 10])
+  const form = { listPrice: '17', category: 'books', listingSignal: 'none' }
+  const ex = { sellerFeedbackCount: 30, sellerRating: 5, sellerLastSeenDays: 31 / 1440, uploadedDays: 60, condition: 'nuovo senza etichetta', sellerBadges: ['ACTIVE_LISTER'], signals: {} }
+  const read = sellerProfileFor({ extraction: ex, wardrobe: w, form })
+  const blind = sellerProfileFor({ extraction: { ...ex, condition: 'nuovo con etichetta' }, wardrobe: null, form })
+  assert.equal(read.confidence, 'alta')
+  assert.equal(blind.confidence, 'media')
+  for (const id of ['bundle', 'online', 'active_lister']) assert.ok(read.traits.some((t) => t.id === id), id)
+  // The wardrobe and the right condition move the score: the seller of the recording was shown as «medio · Fermo sul prezzo».
+  assert.ok(read.score > blind.score, `${read.score} > ${blind.score}`)
+  assert.equal(blind.archetype.id, 'firm')
+  assert.notEqual(read.archetype.id, 'firm')
+})

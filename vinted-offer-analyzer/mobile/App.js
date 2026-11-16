@@ -1012,7 +1012,13 @@ function Main() {
         await watchlist.markSentFromVinted(saved.item.id, seen)
         const message = `Offerta di ${formatEuro(plan.price)} registrata in Lista: in attesa di risposta.`
         setSaveState({ saved: true, itemId: saved.item.id, tone: 'good', message })
-        showToast(message, 4500)
+        // The next move is the message, and the field to write it in is right under the offer: it is copied now, with
+        // the figure really offered (a message copied before the offer says the proposal's figure, and takes the
+        // clipboard the figure needed for Vinted's offer window).
+        const step = (run.strat.plan || []).find((s) => s.text)
+        const copied = step ? await copyText(step.text) : false
+        if (copied) watchlist.markMessageCopied(saved.item.id)
+        showToast(copied ? `${message} Messaggio${step.optional ? ' (facoltativo)' : ''} copiato: incollalo qui sotto.` : message, copied ? 6500 : 4500)
         show('recorded')
       } else if (plan.action === 'send' || plan.action === 'attach' || plan.action === 'reprice') {
         await watchlist.markSentFromVinted(plan.itemId, seen)

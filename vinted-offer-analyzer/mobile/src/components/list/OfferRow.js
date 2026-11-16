@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native'
-import { buildAfterRefusalMessage, formatEuro, toPercent } from '../../../core/index.js'
+import { buildAfterRefusalMessage, formatEuro, purchaseCost, toPercent } from '../../../core/index.js'
 import { copyText } from '../../services/clipboard.js'
 import { estimateOf, hasSellerCounter, hostOf, nextStepOf, rowStateOf, segmentOf, timeLabelOf, whenLabel } from '../../services/segments.js'
 import { statusMeta } from '../../services/storage.js'
@@ -57,6 +57,9 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
   const plan = item.counterPlan
   const step = nextStepOf(item, now)
   const estimate = estimateOf(item)
+  // 1.11: what the offer costs in all (Vinted's protection on the figure offered, the shipping read with the analysis).
+  const shipped = item.strategy && Number.isFinite(item.strategy.shipping) ? purchaseCost(Number(item.targetPrice), item.strategy.shipping) : null
+  const inAll = shipped ? shipped.total : null
   const open = segmentOf(item) === 'open'
   const hasCounter = hasSellerCounter(item)
   const discount = item.listPrice > 0 && item.targetPrice != null ? Math.round(((item.listPrice - item.targetPrice) / item.listPrice) * 100) : Math.round(item.discountPct || 0)
@@ -206,7 +209,7 @@ export function OfferRow({ item, now, highlighted, openOutcome = false, actions,
           </View>
           <Text style={[styles.title, { color: t.ink }]} numberOfLines={2}>{item.title || 'Articolo senza titolo'}</Text>
           <Body muted small>
-            {formatEuro(item.targetPrice)} su {formatEuro(item.listPrice)} (−{discount}%){estimate != null ? ` · stima ${toPercent(estimate)}%` : ''}
+            {formatEuro(item.targetPrice)} su {formatEuro(item.listPrice)} (−{discount}%){estimate != null ? ` · stima ${toPercent(estimate)}%` : ''}{inAll != null ? ` · in tutto ${formatEuro(inAll)}` : ''}
           </Body>
           {step ? (
             <Body>

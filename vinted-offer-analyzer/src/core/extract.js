@@ -240,6 +240,11 @@ export function parseVintedItemHtml(html, details = null) {
     if (days !== null) { out.sellerLastSeenText = phrase.trim(); out.sellerLastSeenDays = days }
   }
 
+  // schema.org knows one «new»: the page's own label tells «Nuovo senza cartellino» (no shop tag, no shop price to
+  // reason on) from «Nuovo con cartellino». Read next to its «Condizioni» label, never from the other listings shown.
+  const shownCondition = firstMatch(visible, /condizion[ie]\W{0,8}(nuovo senza (?:cartellino|etichetta)|nuovo con (?:cartellino|etichetta))/i)
+  if (shownCondition) out.condition = /senza/i.test(shownCondition) ? 'nuovo senza etichetta' : 'nuovo con etichetta'
+
   // «Spedizione · da 2,29 €»: what the buyer pays on top of the price and of Vinted's protection.
   const shipFrom = firstMatch(visible, /spedizione[^€\d]{0,40}?da\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
   if (shipFrom) {

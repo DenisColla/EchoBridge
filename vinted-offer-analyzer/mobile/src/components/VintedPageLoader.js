@@ -209,7 +209,10 @@ export const PAGE_PROBE = `(function () {
   };
   var readMember = function () {
     try {
-      var body = text(document.body).slice(0, 30000);
+      // The text as laid out, one element per line: glued together («kokosc23» + «7 follower») a name ending in
+      // digits would change the figure that follows it.
+      var laidOut = String(document.body.innerText || '').replace(/[ \\t]+/g, ' ');
+      var body = (laidOut.length > 40 ? laidOut : text(document.body)).slice(0, 30000);
       var links = document.querySelectorAll('a[href*="/items/"]');
       var seen = {};
       var prices = [];
@@ -280,16 +283,21 @@ export const PAGE_PROBE = `(function () {
         // The profile fills in steps (the page is heavy and this view is hidden): wait for the articles, or for the
         // profile's own figures and then a little more, before reading. 4 s were not enough on a real phone.
         var waited = Date.now() - itemSince;
-        var hasItems = document.querySelectorAll('a[href*="/items/"]').length > 0;
+        // Real articles only: every page carries the header's «Vendi subito» (/items/new), which made the wait end at
+        // once and the profile be read while still empty (seen on a real phone: the step lasted one second).
+        var itemLinks = 0;
+        var linked = document.querySelectorAll('a[href*="/items/"]');
+        for (var li = 0; li < linked.length; li++) { if (/\\/items\\/\\d+/.test(String(linked[li].getAttribute('href') || ''))) itemLinks++; }
         var hasInfo = /\\d\\s+follower|\\d\\s+recension|\\d\\s+articol/i.test(document.body ? document.body.textContent || '' : '');
-        if (!(hasItems || (hasInfo && waited > 5000)) && waited < 12000) {
+        var settled = itemLinks > 0 ? (hasInfo || waited > 3000) : (hasInfo && waited > 5000);
+        if (!settled && waited < 12000) {
           post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
           setTimeout(tick, 400);
           return;
         }
         var read = readMember();
         // What the page looked like when it was read, without a name or a number: tells an empty wardrobe from a page not read.
-        if (read) read.diag = { waitedMs: waited, textLen: (document.body ? document.body.textContent || '' : '').length, itemLinks: document.querySelectorAll('a[href*="/items/"]').length, hasInfo: hasInfo, path: location.pathname.replace(/\\d{3,}/g, '{id}').replace(/\\{id\\}-[^/]+/, '{id}-{nome}') };
+        if (read) read.diag = { waitedMs: waited, textLen: (document.body ? document.body.textContent || '' : '').length, itemLinks: itemLinks, hasInfo: hasInfo, path: location.pathname.replace(/\\d{3,}/g, '{id}').replace(/\\{id\\}-[^/]+/, '{id}-{nome}') };
         post({ type: 'html', url: location.href, html: '', details: read });
         return;
       }
