@@ -34,6 +34,7 @@ export class Speaker {
   constructor() {
     this.queue = [];
     this.index = 0;
+    this.charIndex = 0; // position inside the current sentence, if the voice reports it
     this.state = 'idle'; // idle | playing | paused
     this.rate = 1;
     this.voiceName = '';
@@ -59,7 +60,7 @@ export class Speaker {
   }
 
   play() {
-    if (this.finished) return;
+    if (this.finished || this.state === 'playing') return;
     this.state = 'playing';
     this.speakCurrent();
   }
@@ -81,17 +82,36 @@ export class Speaker {
     this.cancelSpeech();
     this.state = 'idle';
     this.index = 0;
+    this.charIndex = 0;
     this.emit();
   }
 
   skip(delta) {
-    this.index = Math.min(Math.max(0, this.index + delta), this.queue.length - 1);
+    this.seek(Math.min(this.index, this.queue.length - 1) + delta);
+  }
+
+  // Jumps to a sentence. Playing keeps playing from there; paused or idle
+  // just moves the cursor, so the next play starts at that point.
+  seek(index) {
+    if (!this.queue.length) return;
+    this.index = Math.min(Math.max(0, index), this.queue.length - 1);
+    this.charIndex = 0;
     if (this.state === 'playing') {
       this.cancelSpeech();
       this.speakCurrent();
     } else {
       this.emit();
     }
+  }
+
+  // Skips whatever is left and fires onQueueEnd, as if it had been heard.
+  end() {
+    this.cancelSpeech();
+    this.index = this.queue.length;
+    this.charIndex = 0;
+    this.state = 'idle';
+    this.emit();
+    this.onQueueEnd();
   }
 
   setRate(rate) {
@@ -110,6 +130,7 @@ export class Speaker {
   async speakCurrent() {
     const gen = ++this.generation;
     const seg = this.queue[this.index];
+    this.charIndex = 0;
     this.emit();
     const voice = await pickVoice(seg.lang, this.voiceName);
     if (gen !== this.generation) return;
@@ -133,6 +154,13 @@ export class Speaker {
     u.onerror = (e) => {
       if (e.error !== 'interrupted' && e.error !== 'canceled') advance();
     };
+    // Local voices report word boundaries; network voices usually don't, and
+    // then the bar simply moves sentence by sentence.
+    u.onboundary = (e) => {
+      if (gen !== this.generation) return;
+      this.charIndex = e.charIndex;
+      this.emit();
+    };
     speechSynthesis.speak(u);
   }
 
@@ -140,6 +168,7 @@ export class Speaker {
     this.onChange({
       state: this.state,
       index: this.index,
+      charIndex: this.charIndex,
       total: this.queue.length,
       segment: this.queue[this.index] || null,
     });

@@ -4,6 +4,7 @@ import { Speaker, say } from './speech.js';
 import { dictate } from './dictation.js';
 import { createPlayer } from './ui.js';
 import { cleanEmailText, detectLanguage, hash, localSummary, needsSummary, splitForSpeech } from './text.js';
+import { buildTimeline, fractionAt, indexAt } from './timeline.js';
 
 const PHRASES = {
   it: {
@@ -25,7 +26,7 @@ const phrases = (lang) => PHRASES[lang] || PHRASES.it;
 const RATES = [0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
 let settings = null;
-let current = null; // { key, email, text, lang, summary: { needed, promise, appended } }
+let current = null; // { key, email, text, lang, bodyEnd, summary: { needed, promise, appended } }
 let recording = null;
 
 const speaker = new Speaker();
@@ -37,11 +38,23 @@ const player = createPlayer({
   speed: cycleRate,
   reply: toggleReply,
   settings: () => chrome.runtime.sendMessage({ type: 'openOptions' }).catch(() => {}),
+  summary: jumpToSummary,
+  seek: seekTo,
+  preview: previewAt,
 });
 
-speaker.onChange = ({ state, index, total, segment }) => {
+// The timeline is rebuilt whenever the queue changes (new email, summary appended).
+let tl = { queue: null, length: -1, value: buildTimeline([]) };
+function timeline() {
+  if (tl.queue !== speaker.queue || tl.length !== speaker.queue.length) {
+    tl = { queue: speaker.queue, length: speaker.queue.length, value: buildTimeline(speaker.queue) };
+  }
+  return tl.value;
+}
+
+speaker.onChange = ({ state, index, charIndex, total, segment }) => {
   player.setPlaying(state === 'playing');
-  player.setProgress(state === 'idle' && index === 0 ? 0 : index, total);
+  player.setProgress(fractionAt(timeline(), index, charIndex), total ? `Frase ${Math.min(index + 1, total)} di ${total}` : '');
   if (state === 'playing' && segment) player.setStatus(segment.text);
   if (state === 'paused') player.setStatus('In pausa');
 };
@@ -58,18 +71,21 @@ function loadEmail(email) {
   const text = cleanEmailText(email.rawText);
   const lang = detectLanguage(text, settings.summaryLang);
   const ui = settings.summaryLang;
+  const segments = [
+    { text: phrases(ui).intro(email), lang: ui },
+    ...splitForSpeech(text).map((t) => ({ text: t, lang })),
+  ];
   current = {
     key: email.id || hash(email.subject + text.slice(0, 300)),
     email,
     text,
     lang,
+    bodyEnd: segments.length, // where the summary starts once appended
     summary: { needed: needsSummary(text, settings.summaryMinLines), promise: null, appended: false },
   };
 
-  speaker.load([
-    { text: phrases(ui).intro(email), lang: ui },
-    ...splitForSpeech(text).map((t) => ({ text: t, lang })),
-  ]);
+  speaker.load(segments);
+  player.setSummaryJump(current.summary.needed);
   player.setStatus(current.summary.needed ? 'Pronto: lettura + riassunto in 3 punti' : 'Pronto a leggere');
   player.show(true);
   if (settings.autoPlay) toggle();
@@ -85,6 +101,28 @@ function toggle() {
   // listen to cost nothing. It runs while the body is being read.
   if (current.summary.needed && !current.summary.promise) current.summary.promise = fetchSummary(current);
   speaker.toggle();
+}
+
+// Timeline click/drag: jump to the sentence under the pointer.
+function seekTo(fraction) {
+  if (current) speaker.seek(indexAt(timeline(), fraction));
+}
+
+function previewAt(fraction) {
+  const { queue } = speaker;
+  if (!current || !queue.length) return '';
+  const i = indexAt(timeline(), fraction);
+  return `${i + 1}/${queue.length} · ${queue[i].text}`;
+}
+
+function jumpToSummary() {
+  if (!current?.summary.needed) return;
+  if (current.summary.appended) {
+    speaker.seek(current.bodyEnd);
+    speaker.play();
+  } else {
+    speaker.end(); // onQueueEnd fetches/appends the summary and reads it
+  }
 }
 
 async function fetchSummary(target) {
@@ -113,6 +151,7 @@ async function onQueueEnd() {
   }
 
   player.setStatus('Preparo il riassunto…', 'busy');
+  summary.promise ??= fetchSummary(target); // skipped straight here without pressing play
   const result = await summary.promise;
   if (current !== target || summary.appended) return; // user moved to another email
   summary.appended = true;

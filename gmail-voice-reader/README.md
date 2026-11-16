@@ -13,12 +13,14 @@ npm run build        # crea la cartella dist/
 1. Apri `chrome://extensions` (o `edge://extensions`) e attiva **Modalità sviluppatore**.
 2. Clicca **Carica estensione non pacchettizzata** e scegli `gmail-voice-reader/dist`.
 3. Si apre la pagina Impostazioni: incolla la chiave API Anthropic (facoltativa, vedi sotto).
-4. Ricarica Gmail e apri un'email: in basso compare la barra del lettore.
+4. Ricarica Gmail e apri un'email: in basso a sinistra compare il simbolo del lettore. Passaci sopra con il mouse e si apre la barra completa, con il tasto ▶ proprio sotto il puntatore. Quando sposti il mouse, la barra torna a essere solo il simbolo (🔊 fermo, barrette animate in lettura, microfono durante la dettatura).
 
 | Comando | Azione |
 |---|---|
 | ▶ / ⏸ oppure **Alt+Shift+L** | Leggi / pausa |
 | ⏮ ⏭ | Frase precedente / successiva |
+| Timeline | Clicca o trascina il cursore per saltare a qualsiasi punto. Al passaggio del mouse vedi l'anteprima della frase in quel punto. Da tastiera: ← → frase per frase, Home/Fine |
+| Riassunto | Salta il resto della mail e ascolta subito i 3 punti chiave (solo per le mail lunghe) |
 | 1.1× | Cambia velocità (da 0.9× a 2×) |
 | 🎤 oppure **Alt+Shift+R** | Rispondi a voce; clicca di nuovo, oppure resta in silenzio 3 s, per terminare |
 
@@ -59,7 +61,7 @@ La chiave API resta in `chrome.storage.local`: non viene sincronizzata e parte s
 ## Sviluppo
 
 ```bash
-npm test          # test unitari (pulizia testo, soglia, frasi, lingua, riassunto offline)
+npm test          # test unitari (pulizia testo, soglia, frasi, lingua, riassunto offline, timeline)
 npm run watch     # ricompila a ogni modifica, poi ricarica l'estensione
 ```
 
@@ -68,8 +70,9 @@ npm run watch     # ricompila a ogni modifica, poi ricarica l'estensione
 | `src/content/main.js` | Orchestrazione: rilevamento mail, coda di lettura, riassunto, risposta |
 | `src/content/gmail.js` | Estrazione dal DOM di Gmail e inserimento della bozza |
 | `src/content/text.js` | Funzioni pure: pulizia, soglia righe, frasi, lingua, riassunto offline |
-| `src/content/speech.js` | Motore TTS a coda (pausa, salto frase, velocità, scelta voce) |
+| `src/content/speech.js` | Motore TTS a coda (pausa, salto a una frase, velocità, scelta voce) |
+| `src/content/timeline.js` | Funzioni pure: posizione sulla timeline ↔ frase, pesata sulla lunghezza del testo |
 | `src/content/dictation.js` | Dettatura vocale (Web Speech API) |
-| `src/content/ui.js` | Barra flottante in Shadow DOM, con tema chiaro e scuro |
+| `src/content/ui.js` | Lettore flottante in Shadow DOM: simbolo compatto che si apre al passaggio del mouse, timeline trascinabile, tema chiaro e scuro |
 | `src/background.js` | Chiamate a Claude (SDK ufficiale), cache, scorciatoie |
 | `src/options/` | Pagina impostazioni |
