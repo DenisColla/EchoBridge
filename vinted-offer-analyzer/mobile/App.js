@@ -634,7 +634,7 @@ function Main() {
       const outcome = runAnalysis(built.form, null, { choice: { kind: 'auto' } })
       // `raw` is the parser's output as read (kept with the saved item, engine-spec §6); `via` tells the two paths apart.
       const via = page.via === 'browser' ? 'browser' : 'fetch'
-      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw, profileRead, bookRead })
+      setExtraction({ ok: true, summary: built.summary, link, at: Date.now(), raw: ex, via, wardrobe, memberRaw, profileRead, bookRead, pageFacts: core.pageFactsOf(itemHtml) })
       recordRead(ex, { via }) // per-field read counters for Info; never blocks the analysis
       const idMatch = String(link).match(/\/items\/(\d+)/)
       setLastListing({
@@ -1215,6 +1215,9 @@ function Main() {
       armadio: extraction.wardrobe || null,
       // Which step of the seller's reading worked: the live page, the link to his profile (by name or from the page), his profile.
       lettura_profilo: extraction.profileRead || null,
+      // What the page exposes as data (attribute blocks, breadcrumb) and what only as the seller's words: the ground
+      // a «same product» search can rest on, category by category.
+      pagina: extraction.pageFacts || null,
       // 1.12: the market of a book — what it was searched by, how many listings were seen and how many compare.
       mercato: extraction.bookRead ? {
         isbn: extraction.bookRead.identity.isbn, titolo: extraction.bookRead.identity.title, autore: extraction.bookRead.identity.author,

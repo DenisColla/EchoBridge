@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseVintedItemHtml, sellerProfileFor, wardrobeFromProbe } from '../src/core/index.js'
+import { pageFactsOf, parseVintedItemHtml, sellerProfileFor, wardrobeFromProbe } from '../src/core/index.js'
 
 // A listing page as a logged-in visitor gets it: his own account is embedded before the seller's. The real case of
 // 15 Nov: a seller with 285 reviews was read as 16 (the visitor's own), and his wardrobe was not read at all.
@@ -159,4 +159,36 @@ test('extract: the listing page of a logged-in visitor, as its structure was sha
   assert.equal(parseVintedItemHtml(html.replace('Aggiungi ai preferiti. Aggiunto ai preferiti da 4 ', 'Aggiungi ai preferiti').replace('<span>4</span>', '')).signals.interested, 0)
   // What the live page read wins over the embedded data.
   assert.equal(parseVintedItemHtml('<html><head><meta property="og:title" content="x"></head><body></body></html>', { favourites: 7, flight: { favourite_count: 262 } }).signals.interested, 7)
+})
+
+test('extract: a clothing page as shared on 16 Nov — fixed shipping, no set discount, what the page exposes', () => {
+  // «Nikeminds» 68,00 € → 72,10 €, «Spedizione 4,99 €» (no «da»), heart 15, set banner «Risparmia sulle spese di
+  // spedizione» (no discount), brand, size, condition and colour as attribute blocks; the model only in the title.
+  const html = `<html><head><meta property="og:title" content="Nikeminds"><link rel="canonical" href="https://www.vinted.it/items/8800000002-nikeminds">
+  <script type="application/ld+json">{"@type":"Product","name":"Nikeminds","brand":{"name":"Nike"},"offers":{"price":"68.00","priceCurrency":"EUR"}}</script></head><body>
+  <a data-testid="breadcrumb" href="/catalog/5-men">Uomo</a><a data-testid="breadcrumb" href="/catalog/1231-shoes">Scarpe</a><a data-testid="breadcrumb" href="https://www.vinted.it/catalog/2656-slides?brand_ids[]=53">Nike Infradito e ciabatte</a>
+  <button type="button" aria-label="Aggiungi ai preferiti. Aggiunto ai preferiti da 15" data-testid="favourite-button"><span>15</span></button>
+  <div data-testid="item-page-summary-plugin"><h1>Nikeminds</h1><span>42,5</span><span>Ottime</span><span>Nike</span></div><div data-testid="item-sidebar-price-container">
+  <div data-testid="item-price"><p>68,00 €</p></div><span data-testid="total-combined-price">72,10 €</span></div>
+  <div data-testid="item-attributes-brand"><span>Brand</span><a>Nike</a><button data-testid="item-attributes-brand-menu-button">Menu del brand</button></div>
+  <div data-testid="item-attributes-size"><div>Taglia</div><div>42,5</div><button data-testid="item-attributes-size-faq-link"></button></div>
+  <div data-testid="item-attributes-status"><div>Condizioni</div><div>Ottime</div></div><div data-testid="item-attributes-color"><div>Colore</div><div>Nero</div></div>
+  <div data-testid="item-attributes-upload_date"><div>Caricato</div><div>3 giorni fa</div></div>
+  <div data-testid="item-shipping-banner"><h2 data-testid="item-shipping-banner-title">Spedizione</h2><div data-testid="item-shipping-banner--suffix"><span data-testid="item-shipping-banner-price">4,99 €</span></div></div>
+  <span data-testid="profile-username">venditore</span><span data-testid="seller-last-logged-in">Ultima visita 31 min fa</span>
+  <div data-testid="buy-bundle-banner"><div data-testid="buy-bundle-banner--title">Acquista set</div><div data-testid="buy-bundle-banner--content">Risparmia sulle spese di spedizione</div><button data-testid="buy-bundle-banner-shop-button">Crea set</button></div>
+  </body></html>`
+  const ex = parseVintedItemHtml(html)
+  assert.equal(ex.shippingFrom, 4.99)
+  assert.equal(ex.signals.interested, 15)
+  assert.deepEqual([ex.signals.bundleOffered, ex.signals.bundleDiscountPct], [null, null])
+  // Without the element the sentence as shown still gives the fixed price, and «gratis sopra 20 €» is not one.
+  assert.equal(parseVintedItemHtml(html.replace('data-testid="item-shipping-banner-price"', 'class="x"')).shippingFrom, 4.99)
+  assert.equal(parseVintedItemHtml('<html><head><meta property="og:title" content="x"></head><body><p>Spedizione gratuita sopra 20 €</p></body></html>').shippingFrom, null)
+  const facts = pageFactsOf(html)
+  assert.deepEqual(Object.keys(facts.attributes), ['brand', 'size', 'status', 'color', 'upload_date'])
+  assert.equal(facts.attributes.size, 'Taglia 42,5')
+  assert.equal(facts.attributes.brand, 'Brand Nike')
+  assert.deepEqual(facts.breadcrumbs[2], { text: 'Nike Infradito e ciabatte', path: '/catalog/2656-slides?brand_ids[]=53' })
+  assert.equal(facts.summary, 'Nikeminds 42,5 Ottime Nike')
 })

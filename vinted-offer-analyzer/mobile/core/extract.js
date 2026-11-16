@@ -286,6 +286,8 @@ export function parseVintedItemHtml(html, details = null) {
   // Its own element first (data-testid="item-shipping-banner-price" → «da 3,09 €»), then the sentence as shown.
   const shipFrom = firstMatch(src, /data-testid="item-shipping-banner-price"[^>]*>(?:\s*<[^>]+>)*\s*(?:da\s*)?(\d{1,3}(?:[.,]\d{1,2})?)/i)
     || firstMatch(visible, /spedizione[^€\d]{0,40}?da\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
+    // A fixed price has no «da» («Spedizione · 4,99 €», seen on a real page): only when the figure follows at once.
+    || firstMatch(visible, /spedizione[\s.·:]{0,6}(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
   if (shipFrom) {
     const amount = Number(shipFrom.replace(',', '.'))
     if (Number.isFinite(amount) && amount >= 0 && amount < 100) out.shippingFrom = amount
@@ -378,6 +380,33 @@ const SNEAKER_HINTS = /\b(sneakers?|scarpe da ginnastica|scarpe sportive|air for
 const ELECTRONICS_HINTS = /\b(elettronica|smartphone|iphone|samsung galaxy|pixel|tablet|ipad|console|playstation|ps[45]|xbox|nintendo|switch|cuffie|airpods|auricolari|smartwatch|apple watch|laptop|notebook|macbook|monitor|fotocamera|gopro|drone|kindle|dyson|speaker|videogioc)\b/i
 const COLLECTIBLE_HINTS = /\b(collezionismo|collezione|carte|pok[ée]mon|yu-?gi-?oh|magic the gathering|funko|lego|vintage|fumett|manga|vinil|francobolli|monete|figure|statua|action figure|hot wheels|raro|rara|rare|limited|edizione limitata|prima edizione|autografat)\b/i
 const KIDS_HINTS = /^(bambin[ie]|neonat[io]|ragazz[ie]|kids|bimb[aoie])\b|\b(bambin[ioae]|neonat[io]|ragazz[ioae]|bimb[aoie]|baby)\b/i
+
+/**
+ * What the listing page itself says of the article, for the report: the names of its attribute blocks with their text
+ * («brand», «size», «status», «color», «isbn_nav»…) and its breadcrumb (text and Vinted path). It tells which
+ * details a category exposes as data and which only as the seller's free text — what a «same product» search can
+ * rest on. No seller name: the attributes are the article's.
+ */
+export function pageFactsOf(html) {
+  const src = String(html || '')
+  const attributes = {}
+  for (const hit of src.matchAll(/data-testid="item-attributes-([a-z_]+)"/gi)) {
+    if (attributes[hit[1]] !== undefined) continue
+    const tail = src.slice(hit.index, hit.index + 500)
+    const inner = tail.slice(tail.indexOf('>') + 1)
+    const next = inner.search(new RegExp(`data-testid="(?!item-attributes-${hit[1]})`, 'i'))
+    // The buttons inside a block («Menu del brand», the size guide) are not its value.
+    attributes[hit[1]] = stripTags((next >= 0 ? inner.slice(0, inner.lastIndexOf('<', next)) : inner).replace(/<button[\s\S]*?<\/button>/gi, ' ')).slice(0, 60)
+  }
+  const breadcrumbs = []
+  for (const tag of src.matchAll(/<a\b[^>]*data-testid="[^"]*breadcrumb[^"]*"[^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
+    const href = (tag[0].match(/href="([^"]+)"/i) || [])[1] || ''
+    breadcrumbs.push({ text: stripTags(tag[1]).slice(0, 60), path: decodeEntities(href).replace(/^https?:\/\/[^/]+/i, '').slice(0, 160) })
+    if (breadcrumbs.length >= 8) break
+  }
+  const summary = firstMatch(src, /data-testid="item-page-summary-plugin"[^>]*>([\s\S]{0,600}?)<\/div>\s*<div[^>]*data-testid=/i)
+  return { attributes, breadcrumbs, summary: summary ? stripTags(summary).slice(0, 120) : null }
+}
 
 export function categoryGuess({ categoryText = '', brand = '', title = '', description = '', listPrice = null }) {
   const cat = String(categoryText || '')
