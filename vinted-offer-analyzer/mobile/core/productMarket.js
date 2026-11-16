@@ -59,10 +59,10 @@ const pmPercentile = (sorted, p) => {
 }
 /** «Taglia M» → «M»: the value of an attribute block without its label. */
 const pmValue = (text) => String(text || '').replace(/^(taglia|condizioni|colore|modello|capacit[aà] di archiviazione|marca|brand)\s*:?\s*/i, '').trim() || null
-/** A price as a card shows it («9,00», «1.150,00», «15.00») → number, else null. */
+/** A price as a card shows it («9,00», «1.150,00», «15.00», «18,00 €») → number, else null. */
 export const cardPriceOf = (price) => {
   if (typeof price === 'number') return Number.isFinite(price) && price > 0 ? price : null
-  const shown = String(price ?? '').trim()
+  const shown = String(price ?? '').replace(/[^\d.,]/g, '')
   const v = Number(shown.includes(',') ? shown.replace(/\./g, '').replace(',', '.') : shown)
   return Number.isFinite(v) && v > 0 ? v : null
 }

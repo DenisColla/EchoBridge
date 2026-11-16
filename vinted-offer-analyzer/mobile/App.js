@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
+import { AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, Share, StatusBar as RNStatusBar, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as core from './core/index.js'
@@ -36,6 +36,8 @@ import { badgeCountOf, counterStatsOf, linkIdOf } from './src/services/segments.
 import { planInboxRows, planOfferCapture, readConversation } from './src/services/vintedConversation.js'
 import { logVisit } from './src/services/vintedDiag.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
+import { AutoPanel } from './src/components/AutoPanel.js'
 import { space, useTheme } from './src/theme.js'
 import { Collapsible } from './src/components/ui.js'
 
@@ -45,11 +47,15 @@ const MARGIN_KEY = 'offerta-vinted.margin.v1'
 const MARGIN_CHOICES = [0, 10, 20, 30]
 /** 1.13.3: how the AI sorts the market cards — 'fast' (a few seconds) or 'deep' (it reasons first: about 45 s). */
 const AI_DEPTH_KEY = 'offerta-vinted.aiDepth.v1'
+/** 1.14: the mode (manual, hunt, feed), the running job, what it found and the diary of its readings. */
+const AUTO_KEY = 'offerta-vinted.auto.v1'
+const VINTED_ORIGIN = 'https://www.vinted.it'
 
 const TABS = [
   { id: 'vinted', label: 'Vinted' },
   { id: 'calcola', label: 'Calcola' },
   { id: 'lista', label: 'Lista' },
+  { id: 'caccia', label: 'Caccia' },
   { id: 'info', label: 'Info' },
 ]
 
@@ -221,6 +227,12 @@ function Main() {
       if (data.link && extractRef.current) extractRef.current(data.link)
       return
     }
+    if (data && data.kind === 'auto') {
+      // A find of the hunt or the end of a job: the article opens in the Vinted tab, else the list of what was found.
+      setCounterContext(null)
+      if (data.link && vintedRef.current) { setTab('vinted'); vintedRef.current.open(data.link) } else setTab('caccia')
+      return
+    }
     if (data && data.kind === 'monthly') {
       setCounterContext(null)
       setTab('info')
@@ -299,7 +311,7 @@ function Main() {
       if (found && (!best || found.kept > best.kept)) best = found
       if (found && found.ok) break
     }
-    return { market: best && best.ok ? best.market : null, info: best, tried, identity }
+    return { market: best && best.ok ? best.market : null, info: best, tried, identity, searchUrl: (core.bookSearchFor(identity, { origin, listingTitle }) || {}).url || null }
   }
 
   /**
@@ -396,7 +408,7 @@ function Main() {
     ai.costo_usd = Math.round(ai.costo_usd * 100000) / 100000
     const found = cards ? core.productMarketFrom(cards, { identity, mode: q.mode, selfId, listPrice: ex.listPrice, verdicts, strict: !product || Boolean(String(product.model || '').trim()) }) : null
     const tried = [{ via: q.mode, parole: q.query, esito: res.ok ? (cards ? 'ok' : 'not_a_search') : res.reason || 'failed', visti: found ? found.seen : null, confrontabili: found ? found.kept : null, pagina: res.ok && res.details ? res.details.diag || null : null }]
-    return { market: found && found.ok ? found.market : null, info: found, tried, identity, ai, ms: Date.now() - started }
+    return { market: found && found.ok ? found.market : null, info: found, tried, identity, ai, ms: Date.now() - started, searchUrl: q.url }
   }
 
   /**
@@ -597,6 +609,203 @@ function Main() {
     setAiDepth(next)
     AsyncStorage.setItem(AI_DEPTH_KEY, next).catch(() => {})
     showToast(next === 'deep' ? 'AI profonda: ragiona prima di smistare, circa 45 secondi in più. Vale dalla prossima analisi.' : 'AI veloce: pochi secondi. Vale dalla prossima analisi.', 4500)
+  }
+
+  /* ───────── 1.14: «caccia» (semi-automatic) and «vetrina» (automatic) ─────────
+   * One job at a time: a page (a search, or the user's Vinted home) read again after a wait drawn between 8 and 12
+   * minutes, in a hidden browser of its own, while the app is open. What the cards say is kept and ranked (core
+   * watch.js). A verification asked by Vinted stops the job: nothing here imitates a person or works around a check.
+   * The app never sends an offer by itself: the hunt ends with a notification, and the user sends it.
+   */
+  const watchLoaderRef = useRef(null)
+  const [auto, setAuto] = useState({ mode: 'manual', job: null, finds: [], log: [], draft: null })
+  const autoRef = useRef(auto)
+  const [watchNextAt, setWatchNextAt] = useState(null)
+  const watchNextRef = useRef(null)
+  const watchTimerRef = useRef(null)
+  const watchBusyRef = useRef(false)
+  const watchReadRef = useRef(() => {})
+  const [autoBusy, setAutoBusy] = useState(false)
+  const saveAuto = (next) => {
+    autoRef.current = next
+    setAuto(next)
+    AsyncStorage.setItem(AUTO_KEY, JSON.stringify({ mode: next.mode, job: next.job, finds: next.finds, log: next.log.slice(-80) })).catch(() => {})
+  }
+  const notifyNow = (title, body, link = null) => scheduleReminderAt({ itemId: null, link, at: Date.now() + 6500, title, body, kind: 'auto' }).catch(() => null)
+  const shareText = async (title, message) => { try { await Share.share({ title, message }) } catch { /* cancelled */ } }
+  const setWatchNext = (at) => { watchNextRef.current = at; setWatchNextAt(at) }
+  const scheduleWatch = () => {
+    if (watchTimerRef.current) clearTimeout(watchTimerRef.current)
+    watchTimerRef.current = null
+    const job = autoRef.current.job
+    if (!core.jobActive(job)) { setWatchNext(null); return }
+    const delay = Math.min(core.nextRefreshDelayMs(), Math.max(1000, core.jobEndsAt(job) - Date.now()))
+    setWatchNext(Date.now() + delay)
+    watchTimerRef.current = setTimeout(() => watchReadRef.current(), delay)
+  }
+  const endJob = (reason) => {
+    const base = autoRef.current
+    if (!base.job || base.job.stopped) return
+    if (watchTimerRef.current) clearTimeout(watchTimerRef.current)
+    watchTimerRef.current = null
+    setWatchNext(null)
+    const job = { ...base.job, stopped: reason, stoppedAt: Date.now() }
+    saveAuto({ ...base, job })
+    if (reason === 'verifica') notifyNow('Ricerca fermata', 'Vinted chiede una verifica: aprila nella scheda Vinted, poi riavvia la ricerca.')
+    if (reason !== 'fine') return
+    const ranked = core.rankFinds(base.finds, job.kind === 'hunt' ? job : null)
+    if (job.kind === 'hunt') {
+      const best = ranked.find((f) => f.eligible)
+      if (best) notifyNow(`Caccia finita: ${best.title || 'il migliore'} a ${formatEuro(best.price)}`, 'Tocca per aprirlo: analizzalo e manda tu cuore, messaggio e offerta.', best.url)
+      else notifyNow('Caccia finita', `Niente entro ${formatEuro(job.maxPrice)} in ${job.reads || 0} letture.`)
+    } else notifyNow('Vetrina finita', `${ranked.length} articoli raccolti in ${job.reads || 0} letture: li trovi nella scheda Caccia.`)
+  }
+  const watchRead = async () => {
+    const job = autoRef.current.job
+    if (!job || job.stopped || watchBusyRef.current) return
+    if (!core.jobActive(job)) { endJob('fine'); return }
+    if (!watchLoaderRef.current) return
+    watchBusyRef.current = true
+    setWatchNext(null)
+    const t0 = Date.now()
+    let res
+    // The web build has no in-app browser: what a test hands over stands in for the page (cards, or a refusal).
+    const handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
+    try {
+      res = Array.isArray(handed) ? { ok: true, details: { kind: 'catalog', cards: handed, diag: null } }
+        : handed && handed.reason ? { ok: false, reason: handed.reason }
+          : await watchLoaderRef.current.load(job.url, { silent: true })
+    } catch { res = { ok: false, reason: 'failed' } }
+    watchBusyRef.current = false
+    const now = Date.now()
+    const base = autoRef.current
+    if (!base.job || base.job.startedAt !== job.startedAt || base.job.stopped) return
+    const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
+    const entry = { quando: new Date(now).toISOString(), ms: now - t0, esito: res.ok ? (cards ? 'ok' : 'non_una_lista') : res.reason || 'failed', schede: cards ? cards.length : null }
+    if (!res.ok && res.reason === 'challenge') {
+      saveAuto({ ...base, log: [...base.log, entry] })
+      endJob('verifica')
+      return
+    }
+    let { finds } = base
+    let fresh = []
+    if (cards) {
+      const merged = core.mergeFinds(base.finds, cards, { at: now, source: job.kind, origin: VINTED_ORIGIN })
+      finds = merged.finds
+      fresh = merged.fresh
+      entry.nuovi = fresh.length
+    }
+    const next = { ...job, reads: (job.reads || 0) + 1, lastReadAt: now, told: job.told || [] }
+    if (job.kind === 'hunt' && cards) {
+      // An exceptional one is told at once, each article once: on Vinted the best ones do not wait a day.
+      for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
+        next.told = [...next.told, f.id]
+        notifyNow(`Affare: ${f.title || 'articolo'} a ${formatEuro(f.price)}`, `Sotto il ${Math.round(core.WATCH.EXCEPTIONAL_SHARE * 100)}% del tuo massimo di ${formatEuro(job.maxPrice)}. Tocca per aprirlo.`, f.url)
+      }
+    }
+    saveAuto({ ...base, job: next, finds, log: [...base.log, entry].slice(-80) })
+    if (core.jobActive(next)) scheduleWatch()
+    else endJob('fine')
+  }
+  useEffect(() => { watchReadRef.current = watchRead })
+  // While a job runs the screen stays on (the app in front, the phone better on charge): with the screen off Android
+  // stops the timers, and the readings with them.
+  const watchOn = Boolean(auto.job && !auto.job.stopped)
+  useEffect(() => {
+    if (!watchOn || Platform.OS === 'web') return undefined
+    activateKeepAwakeAsync('ovt-watch').catch(() => {})
+    return () => { Promise.resolve(deactivateKeepAwake('ovt-watch')).catch(() => {}) }
+  }, [watchOn])
+  // What was saved comes back; a job still inside its hours goes on, and when the app comes to the front again a
+  // reading that is overdue happens at once (the timers do not run while the app is closed).
+  useEffect(() => {
+    AsyncStorage.getItem(AUTO_KEY).then((raw) => {
+      const saved = raw ? JSON.parse(raw) : null
+      if (!saved || typeof saved !== 'object') return
+      const next = { mode: ['manual', 'semi', 'auto'].includes(saved.mode) ? saved.mode : 'manual', job: saved.job || null, finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: null }
+      autoRef.current = next
+      setAuto(next)
+      if (core.jobActive(next.job)) setTimeout(() => watchReadRef.current(), 4000)
+    }).catch(() => {})
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return
+      const job = autoRef.current.job
+      if (job && !job.stopped && !core.jobActive(job)) endJob('fine')
+      else if (core.jobActive(job) && !watchBusyRef.current && (!watchNextRef.current || watchNextRef.current <= Date.now())) watchReadRef.current()
+    })
+    return () => { sub.remove(); if (watchTimerRef.current) clearTimeout(watchTimerRef.current) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const startJob = async (job) => {
+    await ensureNotificationPermission().catch(() => false)
+    const base = autoRef.current
+    saveAuto({ ...base, job: { ...job, startedAt: Date.now(), reads: 0, told: [] }, log: [], draft: null })
+    showToast(job.kind === 'hunt' ? 'Caccia avviata: leggo la ricerca ogni 8–12 minuti.' : 'Vetrina avviata: leggo la tua home ogni 8–12 minuti.', 4000)
+    setTimeout(() => watchReadRef.current(), 300)
+  }
+  const startHunt = ({ words, maxPrice, size = null }) => {
+    const draft = autoRef.current.draft
+    const url = draft ? draft.url : `${VINTED_ORIGIN}/catalog?search_text=${encodeURIComponent(words)}`
+    // The search is asked newest first, so that a reading shows what was uploaded since the last one.
+    const sorted = /[?&]order=/.test(url) ? url : `${url}${url.includes('?') ? '&' : '?'}order=newest_first`
+    startJob({ kind: 'hunt', url: sorted, label: draft ? draft.label : words, maxPrice, size, hours: core.WATCH.HUNT_HOURS })
+  }
+  const startFeed = () => startJob({ kind: 'feed', url: `${VINTED_ORIGIN}/`, label: 'la tua home', hours: core.WATCH.FEED_HOURS })
+  const changeAutoMode = (mode) => saveAuto({ ...autoRef.current, mode, draft: mode === 'semi' ? autoRef.current.draft : null })
+  /** «Caccia da questa pagina» in the Vinted tab: a search page as it is, or the search of the article just analysed. */
+  const huntFromPage = ({ url, type }) => {
+    let draft = null
+    if (type === 'catalog') draft = { url, label: 'la ricerca aperta nel browser' }
+    else if (type === 'item') {
+      const same = extraction && extraction.ok && linkIdOf(extraction.link) === linkIdOf(url)
+      const title = same && extraction.raw ? extraction.raw.title || '' : ''
+      const searchUrl = same && extraction.bookRead && extraction.bookRead.searchUrl ? extraction.bookRead.searchUrl : null
+      if (searchUrl) draft = { url: searchUrl, label: title || 'lo stesso articolo' }
+      else if (title) draft = { url: `${VINTED_ORIGIN}/catalog?search_text=${encodeURIComponent(title.split(/\s+/).slice(0, 6).join(' '))}`, label: title }
+    }
+    if (!draft) { showToast('Apri una ricerca di Vinted, oppure analizza prima l\'annuncio: poi «Caccia da questa pagina».', 4500); return }
+    saveAuto({ ...autoRef.current, mode: 'semi', draft })
+    setTab('caccia')
+  }
+  /** What the feasibility test measures: in which ways a search and the home can be read from this phone. */
+  const runFeasibility = async () => {
+    if (autoBusy) return
+    setAutoBusy(true)
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, prove: [] }
+    const timed = async (prova, fn) => {
+      const t = Date.now()
+      try { out.prove.push({ prova, ms: Date.now() - t, ...(await fn()) }) } catch (e) { out.prove.push({ prova, ms: Date.now() - t, errore: String((e && e.message) || e).slice(0, 140) }) }
+    }
+    const articles = (html) => new Set([...String(html).matchAll(/\/items\/(\d{6,})/g)].map((m) => m[1])).size
+    const page = (url) => async () => {
+      const r = await fetch(url, { headers: { Accept: 'text/html' } })
+      const html = await r.text()
+      return { stato: r.status, caratteri: html.length, articoli: articles(html), verifica: /captcha-delivery|challenge-platform\/h\//.test(html) }
+    }
+    const hidden = (url) => async () => {
+      if (!watchLoaderRef.current) return { esito: 'nessun browser' }
+      const r = await watchLoaderRef.current.load(url, { silent: true })
+      return { esito: r.ok ? 'ok' : r.reason || 'failed', schede: r.ok && r.details && Array.isArray(r.details.cards) ? r.details.cards.length : null, pagina: r.ok && r.details ? r.details.diag || null : null }
+    }
+    await timed('ricerca scaricata senza aprirla', page(`${VINTED_ORIGIN}/catalog?search_text=libro&order=newest_first`))
+    await timed('home scaricata senza aprirla', page(`${VINTED_ORIGIN}/`))
+    await timed('ricerca come dati', async () => {
+      const r = await fetch(`${VINTED_ORIGIN}/api/v2/catalog/items?search_text=libro&per_page=20&order=newest_first`, { headers: { Accept: 'application/json' } })
+      const text = await r.text()
+      let json = null
+      try { json = JSON.parse(text) } catch { /* not JSON */ }
+      const items = json && Array.isArray(json.items) ? json.items : null
+      return { stato: r.status, tipo: r.headers.get('content-type'), articoli: items ? items.length : null, campi: items && items[0] ? Object.keys(items[0]).slice(0, 30) : null }
+    })
+    if (!core.jobActive(autoRef.current.job)) {
+      await timed('ricerca letta nel browser nascosto', hidden(`${VINTED_ORIGIN}/catalog?search_text=libro&order=newest_first`))
+      await timed('home letta nel browser nascosto', hidden(`${VINTED_ORIGIN}/`))
+    } else out.nota = 'una ricerca è in corso: le due letture nel browser nascosto non sono state rifatte'
+    setAutoBusy(false)
+    shareText('Prova di fattibilità', JSON.stringify(out, null, 1))
+  }
+  const shareWatchLog = () => {
+    const { job, log, finds } = autoRef.current
+    shareText('Diario della ricerca', JSON.stringify({ lavoro: job ? { tipo: job.kind, avviato: new Date(job.startedAt).toISOString(), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, prezzo_massimo: job.maxPrice ?? null } : null, trovati: finds.length, letture: log }, null, 1))
   }
 
   /** «Lo rivendo a»: the price the article would be sold again at (blank = the engine's default). */
@@ -1537,6 +1746,7 @@ function Main() {
           onMargin={changeMargin}
           aiDepth={aiDepth}
           onAiDepth={changeAiDepth}
+          onHunt={huntFromPage}
           capture={capture}
           onConversation={onConversation}
           onInbox={onInbox}
@@ -1668,6 +1878,21 @@ function Main() {
               scrollRef={scrollRef}
             />
           )}
+          {!counterContext && !labOpen && !searchOpen && tab === 'caccia' && (
+            <AutoPanel
+              auto={auto}
+              nextAt={watchNextAt}
+              busy={autoBusy}
+              onMode={changeAutoMode}
+              onStartHunt={startHunt}
+              onStartFeed={startFeed}
+              onStop={() => endJob('utente')}
+              onOpen={(url) => { setTab('vinted'); if (vintedRef.current) vintedRef.current.open(url) }}
+              onClearFinds={() => saveAuto({ ...autoRef.current, finds: [] })}
+              onFeasibility={runFeasibility}
+              onShareLog={shareWatchLog}
+            />
+          )}
           {!counterContext && !labOpen && !searchOpen && tab === 'info' && <InfoView stats={watchlist.stats} items={watchlist.allItems} learning={learning} onToast={(m) => showToast(m, 4000)} onOpenLab={openLab} onOpenSearch={() => openSearch(false)} onRestore={watchlist.restoreItems} vinted={vinted} />}
           {!counterContext && labOpen && <LabView labState={lab} onClose={closeLab} onCollectingChange={onCollectingChange} reference={lastListing} onToast={(m) => showToast(m, 4000)} />}
         </ScrollView>
@@ -1692,6 +1917,7 @@ function Main() {
       </View>
 
       <VintedPageLoader ref={pageLoaderRef} />
+      <VintedPageLoader ref={watchLoaderRef} />
     </View>
   )
 }

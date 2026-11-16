@@ -326,7 +326,10 @@ export const PAGE_PROBE = `(function () {
 
   // 1.12: a search page (the same book in the other listings). Read when its cards stop growing, or when it says
   // there is none; the cards are the same as a profile's.
-  var isCatalog = /^\\/catalog/.test(location.pathname);
+  // 1.14: the home is a list of cards too (the user's own feed); two plain scrolls to the bottom let it load more.
+  var isHome = location.pathname === '/' || location.pathname === '';
+  var isCatalog = /^\\/catalog/.test(location.pathname) || isHome;
+  var scrolls = 0;
   var lastCount = -1;
   var stableSince = 0;
   var itemSince = null;
@@ -340,16 +343,22 @@ export const PAGE_PROBE = `(function () {
         var count = countItemLinks();
         if (count !== lastCount) { lastCount = count; stableSince = Date.now(); }
         var none = /nessun risultato|nessun articolo|non abbiamo trovato|niente da mostrare/i.test(String(document.body ? document.body.innerText || '' : '').slice(0, 6000));
-        var settledC = (count > 0 && Date.now() - stableSince > 900) || (none && waitedC > 1500) || waitedC > 6000;
+        var settledC = (count > 0 && Date.now() - stableSince > 900) || (none && waitedC > 1500) || waitedC > (isHome ? 14000 : 6000);
+        if (settledC && isHome && scrolls < 2 && count > 0 && waitedC < 12000) {
+          scrolls++;
+          window.scrollTo(0, document.documentElement.scrollHeight);
+          stableSince = Date.now();
+          settledC = false;
+        }
         if (!settledC) {
           post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
           setTimeout(tick, 400);
           return;
         }
-        var found = readCards(80);
+        var found = readCards(isHome ? 120 : 80);
         var pricedC = 0;
         for (var fc = 0; fc < found.length; fc++) { if (found[fc].price) pricedC++; }
-        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
+        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', home: isHome, cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
         return;
       }
       post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: stopped, cfError: !stopped && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
@@ -470,18 +479,20 @@ export function VintedPageLoader({ ref }) {
     if (!current || current.id !== id || current.visible) return 'done'
     const verdict = decideState(stateRef.current, current.startedAt, Date.now())
     if (verdict === 'wait') return 'wait'
-    if (verdict === 'challenge') showToUser(id)
+    // A reading nobody is watching (1.14, the hunt and the feed) never puts the check in front of the user: it ends.
+    if (verdict === 'challenge' && current.silent) finish({ ok: false, reason: 'challenge' }, id)
+    else if (verdict === 'challenge') showToUser(id)
     else finish({ ok: false, reason: verdict }, id)
     return 'done'
   }, [finish, showToUser])
 
   useImperativeHandle(ref, () => ({
-    load(url, { onVisible } = {}) {
+    load(url, { onVisible, silent = false } = {}) {
       if (Platform.OS === 'web') return Promise.resolve({ ok: false, reason: 'unsupported' })
       finish({ ok: false, reason: 'cancelled' })
       return new Promise((resolve) => {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-        jobRef.current = { id, url, resolve, onVisible, visible: false, startedAt: Date.now(), noDataSince: null }
+        jobRef.current = { id, url, resolve, onVisible, silent, visible: false, startedAt: Date.now(), noDataSince: null }
         stateRef.current = null
         setJob({ id, url, visible: false })
         timersRef.current.push(setTimeout(() => {

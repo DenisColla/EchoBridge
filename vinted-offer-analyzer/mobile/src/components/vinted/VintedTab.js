@@ -29,7 +29,7 @@ export const VintedTab = forwardRef(function VintedTab({
   normalizeLink, analysedLink, strategy, result, saveState, calendarBusy, extracting, extractPhase, extractError = null,
   onAnalyze, onPick, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onDetails, onToast,
   onAim = null, onResale = null, onMargin = null, aiDepth = 'fast', onAiDepth = null,
-  capture = null, onConversation = null, onInbox = null, onRecordOffer = null, onOpenCounter = null, analysisReport = null,
+  onHunt = null, capture = null, onConversation = null, onInbox = null, onRecordOffer = null, onOpenCounter = null, analysisReport = null,
 }, ref) {
   const t = useTheme()
   const { height } = useWindowDimensions()
@@ -143,6 +143,9 @@ export const VintedTab = forwardRef(function VintedTab({
       ) : null}
       {menu ? (
         <View style={[styles.menu, { backgroundColor: t.card, borderTopColor: t.line }]}>
+          {onHunt && (page.type === 'catalog' || page.type === 'item') ? (
+            <InlineAction label="Caccia da questa pagina (24 ore)" onPress={() => { setMenu(false); onHunt({ url, type: page.type }) }} />
+          ) : null}
           <InlineAction label="Condividi la struttura di questa pagina" onPress={() => { setMenu(false); if (browserRef.current) browserRef.current.outline() }} />
           <InlineAction label="Condividi il registro di navigazione" onPress={async () => { setMenu(false); shareText('Registro browser Vinted', await visitLogText()) }} />
           {ready && analysisReport ? (
