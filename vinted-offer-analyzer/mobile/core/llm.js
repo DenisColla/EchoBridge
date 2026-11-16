@@ -177,6 +177,9 @@ export function buildLlmRequest(modelKey, prompt, images = [], opts = {}) {
     // `think: false` (1.13.1): a plain sorting job — the triage of the search cards took 45 s with thinking on.
     if (opts.think === false || (effort === 'low' && images.length)) body.thinking = { type: 'disabled' }
     else body.reasoning_effort = 'low'
+    // A fixed temperature for the jobs that must give the same answer twice (1.13.5: the same listing sorted twice
+    // came back with four «same» cards, then with none). Only without thinking, where the parameter applies.
+    if (typeof opts.temperature === 'number' && body.thinking) body.temperature = opts.temperature
     return { url: 'https://api.deepseek.com/chat/completions', headers: json, body }
   }
 

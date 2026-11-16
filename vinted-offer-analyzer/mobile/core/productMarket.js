@@ -13,7 +13,7 @@
  *                                              band, colour, brand, brandHref, category } | null
  *   productSearchFor(identity, { origin, query }) → { mode, url, query } | null
  *   cardFactsOf(text) → { title, brand, condition, size } from a card («titolo, marca: X, condizioni: Y, taglia: Z, 9.00 €…»)
- *   productMarketFrom(cards, { identity, mode, selfId, listPrice, verdicts })
+ *   productMarketFrom(cards, { identity, mode, selfId, listPrice, verdicts, strict })
  *     → { ok, market, basis, seen, kept, dropped, confidence } (`market`: the summary the engine takes, as for books)
  *
  * Left out: the listing itself, broken articles, accessories, another storage size, what the AI calls another product.
@@ -161,7 +161,7 @@ const PM_ACCESSORY = /^(cover|custodia|pellicola|vetro|caricatore|caricabatterie
  * The market from the cards of a search page ([{ id, price, text }]). `verdicts`: what the AI said of each card
  * (Map or object id → 'same' | 'variant' | 'family' | 'accessory' | 'other'), when it was asked.
  */
-export function productMarketFrom(cards, { identity = null, mode = 'model', selfId = null, listPrice = null, verdicts = null } = {}) {
+export function productMarketFrom(cards, { identity = null, mode = 'model', selfId = null, listPrice = null, verdicts = null, strict = true } = {}) {
   const id = identity && typeof identity === 'object' ? identity : {}
   const verdictOf = (cardId) => (verdicts instanceof Map ? verdicts.get(cardId) : verdicts && typeof verdicts === 'object' ? verdicts[cardId] : null) || null
   const judged = Boolean(verdicts && (verdicts instanceof Map ? verdicts.size : Object.keys(verdicts).length))
@@ -205,7 +205,11 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   let similar = false
   if (judged) {
     const same = pool.filter((r) => r.verdict === 'same')
-    if (same.length >= PRODUCT_MARKET.MIN) { if (same.length < pool.length) narrow(same, 'variante') } else similar = pool.some((r) => r.verdict !== 'same')
+    // `strict` false: the listing names no model (a «maglione H&M»), so «same» and «variant» are one thing — the
+    // AI told them apart one way on one run and another way on the next. Its word then only removes what is of
+    // another kind, and what is left is alike, never the same.
+    if (!strict) similar = pool.length > 0
+    else if (same.length >= PRODUCT_MARKET.MIN) { if (same.length < pool.length) narrow(same, 'variante') } else similar = pool.some((r) => r.verdict !== 'same')
   }
   // The same condition (it moves the price a lot) when three remain; the same size (it moves it little) only when
   // SIZE_MIN remain.

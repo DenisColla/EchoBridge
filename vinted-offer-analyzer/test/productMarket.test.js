@@ -248,3 +248,30 @@ test('product: cards the AI calls alike are not the same article — and the kin
   assert.match(prompt.text, /cappotto con cappotto, giubbotto con giubbotto/)
   assert.ok(!/cappotto con cappotto/.test(triagePrompt({ title: 'x' }, null, []).text))
 })
+
+test('product: the same listing sorted twice (16 Nov 22:13 and 22:14) — without a model, «same» and «variant» are one thing', () => {
+  // An H&M crew-neck jumper, new, size S, analysed twice a minute apart with the fast AI. First run: 4 «same» (all of
+  // size S, used) and 67 «variant», so a market of four used jumpers was used. Second run: no «same» at all, eleven
+  // new «variant» ones, nothing used. The listing names no model: the AI's line between the two is arbitrary.
+  const identity = { kind: 'brand', size: 'S', band: 'new', condition: 'Nuovo senza cartellino' }
+  const cards = [
+    ['Maglione H&M grigio scuro antracite girocollo - Taglia S', 8, 'Ottime', 'S'], ['Pullover girocollo H&M taglia S', 6, 'Ottime', 'S'],
+    ['Maglione H&M Uomo Taglia S Grigio Melange', 5.99, 'Ottime', 'S'], ['Pullover girocollo H&M color nero taglia S', 5, 'Ottime', 'S'],
+    ['Maglia manica lunga', 5, 'Nuovo senza cartellino', 'M'], ['Maglione uomo', 7, 'Nuovo senza cartellino', 'M'], ['Maglione leggero M', 11, 'Nuovo senza cartellino', 'M'],
+    ['Pullover uomo H&M', 4, 'Nuovo senza cartellino', 'M'], ['Maglione H&M', 5, 'Nuovo senza cartellino', 'S'], ['Maglione uomo H&M tg. M', 5, 'Ottime', 'M'],
+  ].map(([title, p, cond, size], i) => ({ id: String(i), price: p, text: `${title}, Brand: H&M, Condizioni: ${cond}, Taglia: ${size}, ${p} €` }))
+  const first = Object.fromEntries(cards.map((c, i) => [c.id, i < 4 ? 'same' : 'variant']))
+  const second = Object.fromEntries(cards.map((c) => [c.id, 'variant']))
+  const run = (verdicts) => productMarketFrom(cards, { identity, mode: 'brand', listPrice: 5, verdicts, strict: false })
+  const a = run(first)
+  const b = run(second)
+  // The two runs now give the same cards and the same answer: alike, told, not used.
+  assert.deepEqual([a.similar, a.ok, a.kept, a.market.medianPrice], [b.similar, b.ok, b.kept, b.market.medianPrice])
+  assert.deepEqual([a.similar, a.ok, a.kept, a.conditionMatched], [true, false, 5, true])
+  // With a model in the listing the AI's «same» is still what counts.
+  assert.deepEqual([productMarketFrom(cards, { identity, mode: 'brand', verdicts: first }).similar, productMarketFrom(cards, { identity, mode: 'brand', verdicts: first }).kept], [false, 4])
+  // A fixed temperature for the sorting, only where it applies (no thinking).
+  const prompt = { system: 's', text: 't', schema: { type: 'object' } }
+  assert.equal(buildLlmRequest('deepseek:deepseek-flash', prompt, [], { think: false, temperature: 0 }).body.temperature, 0)
+  assert.equal(buildLlmRequest('deepseek:deepseek-flash', prompt, [], { temperature: 0 }).body.temperature, undefined)
+})

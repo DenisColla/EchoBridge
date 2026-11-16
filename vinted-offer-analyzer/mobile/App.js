@@ -322,7 +322,7 @@ function Main() {
     const ai = { profondita: deep ? 'profonda' : 'veloce', scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0, ms_scheda: null, ms_smistamento: null }
     const t0 = Date.now()
     try {
-      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: deep ? 3000 : 900, timeoutMs: deep ? 45_000 : 20_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })
+      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: 900, timeoutMs: 20_000, maxAttempts: 1, think: false, temperature: 0 })
       ai.costo_usd += res.costUsd || 0
       if (res.costUsd) search.addSpend(res.modelKey, res.costUsd, null)
       ai.scheda = res.ok ? 'ok' : res.kind || 'failed'
@@ -331,6 +331,8 @@ function Main() {
         const product = core.cleanProduct(res.value, reference)
         ai.modello = res.modelKey
         ai.parole = product.query
+        // Whether the listing names a model decides how strict «the same article» can be.
+        ai.modello_articolo = product.model || null
         return { reference, product, ai }
       }
     } catch { ai.scheda = 'failed' }
@@ -356,26 +358,43 @@ function Main() {
         return { source: 'vinted', id: String(c.id), title: said.title, price: core.cardPriceOf(c.price), condition: said.condition || '' }
       }).filter((c) => c.price !== null && c.title && c.id !== String(selfId)).slice(0, 80)
       const deep = ai.profondita === 'profonda'
-      const tTriage = Date.now()
-      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch, { note: core.MARKET_TRIAGE_NOTE }), [], { effort: 'low', maxTokens: deep ? 8000 : 4000, timeoutMs: deep ? 90_000 : 30_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })))
-      ai.ms_smistamento = Date.now() - tTriage
-      const said = new Map()
-      let answered = 0
-      for (const r of answers) {
-        ai.costo_usd += r.costUsd || 0
-        if (r.costUsd) search.addSpend(r.modelKey, r.costUsd, null)
-        if (!(r.ok && r.value && Array.isArray(r.value.items))) continue
-        answered++
-        for (const it of r.value.items) {
-          const id = String((it && it.id) || '').trim().replace(/^#/, '').replace(/^vinted:/, '')
-          if (id && core.TRIAGE_VERDICTS.includes(it.verdict)) said.set(id, it.verdict)
+      const batches = core.triageBatches(candidates, 40)
+      // One sorting of all the cards, fast (no thinking, temperature 0: the same answer twice) or deep (it reasons).
+      const sort = async (thinking) => {
+        const t = Date.now()
+        const answers = await Promise.all(batches.map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch, { note: core.MARKET_TRIAGE_NOTE }), [], {
+          effort: 'low', maxTokens: thinking ? 8000 : 4000, timeoutMs: thinking ? 90_000 : 30_000, maxAttempts: 1, ...(thinking ? {} : { think: false, temperature: 0 }),
+        })))
+        const said = new Map()
+        let answered = 0
+        for (const r of answers) {
+          ai.costo_usd += r.costUsd || 0
+          if (r.costUsd) search.addSpend(r.modelKey, r.costUsd, null)
+          if (!(r.ok && r.value && Array.isArray(r.value.items))) continue
+          answered++
+          for (const it of r.value.items) {
+            const id = String((it && it.id) || '').trim().replace(/^#/, '').replace(/^vinted:/, '')
+            if (id && core.TRIAGE_VERDICTS.includes(it.verdict)) said.set(id, it.verdict)
+          }
+        }
+        return { said, answered, calls: answers.length, ms: Date.now() - t }
+      }
+      // Deep: the fast sorting runs beside it on the same cards, so the report shows where the two disagree — the
+      // only way to know whether the slow one is worth its seconds.
+      const [main, shadow] = await Promise.all([sort(deep), deep ? sort(false) : Promise.resolve(null)])
+      ai.ms_smistamento = main.ms
+      ai.smistamento = main.calls ? `${main.answered}/${main.calls}` : null
+      if (main.answered) verdicts = main.said
+      if (shadow && shadow.answered && main.answered) {
+        const differ = candidates.filter((c) => main.said.get(c.id) !== shadow.said.get(c.id))
+        ai.confronto = {
+          schede: candidates.length, concordi: candidates.length - differ.length, ms_veloce: shadow.ms,
+          diversi: differ.slice(0, 25).map((c) => `${c.title.slice(0, 60)} — ${c.price} € (${c.condition || '?'}): veloce ${shadow.said.get(c.id) || 'nessuno'} · profonda ${main.said.get(c.id) || 'nessuno'}`),
         }
       }
-      ai.smistamento = answers.length ? `${answered}/${answers.length}` : null
-      if (answered) verdicts = said
     }
     ai.costo_usd = Math.round(ai.costo_usd * 100000) / 100000
-    const found = cards ? core.productMarketFrom(cards, { identity, mode: q.mode, selfId, listPrice: ex.listPrice, verdicts }) : null
+    const found = cards ? core.productMarketFrom(cards, { identity, mode: q.mode, selfId, listPrice: ex.listPrice, verdicts, strict: !product || Boolean(String(product.model || '').trim()) }) : null
     const tried = [{ via: q.mode, parole: q.query, esito: res.ok ? (cards ? 'ok' : 'not_a_search') : res.reason || 'failed', visti: found ? found.seen : null, confrontabili: found ? found.kept : null, pagina: res.ok && res.details ? res.details.diag || null : null }]
     return { market: found && found.ok ? found.market : null, info: found, tried, identity, ai, ms: Date.now() - started }
   }
