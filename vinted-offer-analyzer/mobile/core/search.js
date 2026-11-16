@@ -275,7 +275,7 @@ const candidateId = (c) => `${c.source}:${c.id}`
  * Prompt of the triage call for one batch of candidates: the reference (no description) and one line per candidate
  * (id, channel, scrubbed title, price, condition; no description, to keep the call cheap).
  */
-export function triagePrompt(reference, product, candidates) {
+export function triagePrompt(reference, product, candidates, { note = '' } = {}) {
   const ref = reference || {}
   return {
     system: TRIAGE_SYSTEM,
@@ -293,6 +293,7 @@ export function triagePrompt(reference, product, candidates) {
         'Annunci candidati (#id [canale] titolo — prezzo — condizioni):',
         ...candidates.map((c) => `#${candidateId(c)} [${CHANNELS[c.source] ? CHANNELS[c.source].label : c.source || 'n.d.'}] ${c.title ? scrubContacts(c.title) : 'n.d.'} — ${Number.isFinite(c.price) ? formatEuro(c.price) : 'n.d.'} — ${c.condition || 'n.d.'}`),
       ].join('\n'),
+      ...(note ? [String(note)] : []),
       'Restituisci il JSON richiesto.',
     ].join('\n\n'),
     schema: TRIAGE_SCHEMA,

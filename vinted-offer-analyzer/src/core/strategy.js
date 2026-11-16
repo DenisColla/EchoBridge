@@ -449,7 +449,7 @@ export function strategyFor(form, now = new Date(), options = {}) {
   if (ownIsNew) priced.push({ id: 'tua', price: custom })
 
   const engineOptions = { ...options, bestPrice: true, sellerType: seller.type, ...(moment.kind === 'now' && !options.preferredSendAt ? { preferredSendAt: now } : {}) }
-  const analysed = priced.map((o) => {
+  const odds = priced.map((o) => {
     const result = analyzeOffer({ ...form, targetPrice: String(o.price).replace('.', ',') }, now, engineOptions)
     const discountPct = ((L - o.price) / L) * 100
     const engineP = result && result.ok && stFinite(result.probability) ? result.probability : null
@@ -459,6 +459,18 @@ export function strategyFor(form, now = new Date(), options = {}) {
     const n = cell.n * scale
     const shifted = engineP === null ? null : stSquash(stLogit(stClamp(engineP, 0.01, 0.99)) + STRATEGY.TYPE_LOGIT[seller.type] - STRATEGY.FIRST_HOURS_LOGIT * firstHours)
     const probability = shifted === null ? null : (STRATEGY.PRIOR_WEIGHT * shifted + cell.accepted * scale) / (STRATEGY.PRIOR_WEIGHT + n)
+    return { o, result, discountPct, engineP, b, cell, scale, n, probability }
+  })
+  // A lower offer is never more likely to pass than a higher one on the same listing. The user's own outcomes are
+  // counted by discount band, and a band with two lucky deals made the bold proposal «likelier» than the middle one
+  // (46% · 36% · 42% on a real listing), and so the recommended one.
+  let likeliest = Infinity
+  for (const x of [...odds].sort((x1, x2) => x2.o.price - x1.o.price)) {
+    if (x.probability === null) continue
+    if (x.probability > likeliest) x.probability = likeliest
+    likeliest = x.probability
+  }
+  const analysed = odds.map(({ o, result, discountPct, engineP, b, cell, scale, n, probability }) => {
     const counterRaw = (STRATEGY.PRIOR_WEIGHT * b.counter + cell.countered * scale) / (STRATEGY.PRIOR_WEIGHT + n)
     const counterChance = probability === null ? null : Math.min(counterRaw, Math.max(0, 0.95 - probability))
     const counterPrice = stR2(Math.min(L, L - STRATEGY.COUNTER_GIVE_SHARE * (L - o.price)))
@@ -522,12 +534,12 @@ export function strategyFor(form, now = new Date(), options = {}) {
       // The market the figures rest on, when one is known (1.12: for a book, the listings with the same ISBN or title):
       // how many listings, their median and middle half, and what they were matched by ('isbn' | 'title' | null).
       // The thin market the resale value was lowered by, when it was ('few'): how many listings and what they are.
-      hint: resale.source === 'few' ? { n: hint.n ?? null, basis: hint.basis || null } : null,
+      hint: resale.source === 'few' ? { n: hint.n ?? null, basis: hint.basis || null, similar: Boolean(hint.similar) } : null,
       market: market ? {
         n: market.n, medianPrice: market.medianPrice, p25Price: market.p25Price, p75Price: market.p75Price,
         minPrice: stFinite(market.minPrice) ? market.minPrice : null, maxPrice: stFinite(market.maxPrice) ? market.maxPrice : null,
         gapPct: stFinite(market.medianPrice) && market.medianPrice > 0 ? Math.round((L / market.medianPrice - 1) * 100) : null,
-        basis: market.basis || null, confidence: market.confidence || null,
+        basis: market.basis || null, similar: Boolean(market.similar), confidence: market.confidence || null,
       } : null,
     },
   }

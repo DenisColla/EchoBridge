@@ -357,7 +357,7 @@ function Main() {
       }).filter((c) => c.price !== null && c.title && c.id !== String(selfId)).slice(0, 80)
       const deep = ai.profondita === 'profonda'
       const tTriage = Date.now()
-      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: deep ? 8000 : 4000, timeoutMs: deep ? 90_000 : 30_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })))
+      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch, { note: core.MARKET_TRIAGE_NOTE }), [], { effort: 'low', maxTokens: deep ? 8000 : 4000, timeoutMs: deep ? 90_000 : 30_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })))
       ai.ms_smistamento = Date.now() - tTriage
       const said = new Map()
       let answered = 0
@@ -737,9 +737,11 @@ function Main() {
       const marketKey = normalizeVintedLink(link) || link
       // A market too thin or too spread to be used (but of the same article: by ISBN, model or the AI) still says what
       // not to count on: its lower quartile, when below this listing's price, caps the resale value.
-      const thin = bookRead && !bookRead.market && bookRead.info && bookRead.info.market && ['isbn', 'title', 'model', 'ai'].includes(bookRead.info.basis)
-        && Number.isFinite(ex.listPrice) && bookRead.info.market.p25Price < ex.listPrice
-        ? { amount: bookRead.info.market.p25Price, n: bookRead.info.market.n, basis: bookRead.info.basis } : null
+      // Cards that are only alike cap it by their median (what the typical one asks), the same article by its lower quartile.
+      const weakCap = bookRead && !bookRead.market && bookRead.info && bookRead.info.market && ['isbn', 'title', 'model', 'ai'].includes(bookRead.info.basis)
+        ? (bookRead.info.similar ? bookRead.info.market.medianPrice : bookRead.info.market.p25Price) : null
+      const thin = weakCap !== null && Number.isFinite(ex.listPrice) && weakCap < ex.listPrice
+        ? { amount: weakCap, n: bookRead.info.market.n, basis: bookRead.info.basis, similar: Boolean(bookRead.info.similar) } : null
       const bookEntry = bookRead && (bookRead.market || thin) ? { market: bookRead.market || null, hint: thin, at: new Date().toISOString() } : null
       if (bookEntry) {
         bookMarketRef.current.set(marketKey, bookEntry)
@@ -748,11 +750,14 @@ function Main() {
       setBookMarkets(Object.fromEntries(bookMarketRef.current))
       if (bookRead && bookRead.info) {
         const info = bookRead.info
-        const what = { isbn: 'dello stesso libro', title: 'con lo stesso titolo', model: 'dello stesso modello', ai: 'dello stesso articolo', brand: 'della stessa marca e categoria' }[info.basis] || 'simili'
+        const what = info.similar ? 'simili (non lo stesso articolo)'
+          : { isbn: 'dello stesso libro', title: 'con lo stesso titolo', model: 'dello stesso modello', ai: 'dello stesso articolo', brand: 'della stessa marca e categoria' }[info.basis] || 'simili'
         const count = `${info.kept} ${info.kept === 1 ? 'annuncio' : 'annunci'} ${what}`
+        const cap = thin ? ` Alla rivendita non conto su più di ${formatEuro(thin.amount)}.` : ''
         if (bookRead.market) showToast(`Mercato: ${count}. Si vende a ${formatEuro(bookRead.market.p25Price)} (quartile basso), mediana ${formatEuro(bookRead.market.medianPrice)}.`, 6000)
+        else if (info.similar && info.market) showToast(`${count}, tra ${formatEuro(info.market.minPrice)} e ${formatEuro(info.market.maxPrice)}: non alzano il valore di rivendita.${cap}`, 7000)
         else if (info.basis === 'brand' && info.market) showToast(`${count}, tra ${formatEuro(info.market.minPrice)} e ${formatEuro(info.market.maxPrice)}: troppo diversi per farne un valore.${bookRead.ai && bookRead.ai.scheda === 'auth' ? ' Con la chiave DeepSeek (Info → Laboratorio AI) riconosco lo stesso articolo.' : ''}`, 7000)
-        else showToast(`Mercato: ${count}, ${info.kept < 3 ? 'troppo pochi' : 'troppo diversi'} per farne un valore.${thin ? ` Alla rivendita non conto su più di ${formatEuro(thin.amount)}.` : ''}`, 6000)
+        else showToast(`Mercato: ${count}, ${info.kept < 3 ? 'troppo pochi' : 'troppo diversi'} per farne un valore.${cap}`, 6000)
       }
       contextRef.current = { link, extraction: ex, wardrobe, memberRaw, at: Date.now() }
       choiceRef.current = { kind: 'auto' }
@@ -1361,7 +1366,7 @@ function Main() {
         return {
           ...(id.kind ? { tipo: id.kind === 'model' ? 'modello' : 'marca', modello: id.model || null, capacita_gb: id.capacityGb ?? null, taglia: id.size || null, condizioni: id.condition || null, categoria: id.category || null }
             : { tipo: 'libro', isbn: id.isbn || null, titolo: id.title || null, autore: id.author || null }),
-          via: info ? info.basis : null, annunci_visti: info ? info.seen : null, confrontabili: info ? info.kept : null, usato: Boolean(read.market),
+          via: info ? info.basis : null, ...(info && info.verdicts ? { solo_simili: Boolean(info.similar), giudizi_tenuti: info.verdicts } : {}), annunci_visti: info ? info.seen : null, confrontabili: info ? info.kept : null, usato: Boolean(read.market),
           scartati: info ? info.dropped || null : null, ...(info && info.examples ? (Array.isArray(info.examples) ? { esempi_scartati: info.examples } : { esempi: info.examples }) : {}),
           ...(info && info.market ? {
             mediana: info.market.medianPrice, quartile_basso: info.market.p25Price, quartile_alto: info.market.p75Price, minimo: info.market.minPrice, massimo: info.market.maxPrice,

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildLlmRequest, capacitiesOf, cardFactsOf, productIdentityOf, productMarketFrom, productSearchFor, strategyFor } from '../src/core/index.js'
+import { MARKET_TRIAGE_NOTE, buildLlmRequest, capacitiesOf, cardFactsOf, productIdentityOf, productMarketFrom, productSearchFor, strategyFor, triagePrompt } from '../src/core/index.js'
 
 // What the pages of the three reports of 16 Nov (20:05–20:07) gave as data.
 const PHONE = {
@@ -198,10 +198,53 @@ test('strategy: a market too thin to be one can lower the resale value, never ra
   // Three listings of the same jumper, a quarter of them at 9,99 €: reselling at this listing's 15 € is not counted on.
   const low = strategyFor(form, at, { ...base, resaleHint: { amount: 9.99, n: 3, basis: 'ai' } })
   assert.deepEqual(low.costs.resale, { amount: 9.99, source: 'few' })
-  assert.deepEqual(low.costs.hint, { n: 3, basis: 'ai' })
+  assert.deepEqual(low.costs.hint, { n: 3, basis: 'ai', similar: false })
   assert.equal(low.costs.reachable, false) // not worth buying to sell again: said, instead of a margin of cents
   // Above the listing's price the thin market says nothing; a typed value and a real market come first.
   assert.deepEqual(strategyFor(form, at, { ...base, resaleHint: { amount: 22, n: 2, basis: 'model' } }).costs.resale, { amount: 15, source: 'listing' })
   assert.equal(strategyFor(form, at, { ...base, resale: 18, resaleHint: { amount: 9.99, n: 3 } }).costs.resale.source, 'user')
   assert.equal(strategyFor(form, at, { ...base, market: { n: 8, medianPrice: 20, p25Price: 17, p75Price: 24 }, resaleHint: { amount: 9.99, n: 3 } }).costs.resale.source, 'market')
+})
+
+test('strategy: a lower offer is never likelier to pass than a higher one (two lucky deals in one band)', () => {
+  // The coat of 16 Nov 21:28: 28 €, proposals 27 / 26 / 24 €. The user's history had deals accepted between 12,5% and
+  // 22,5% off and refusals below: the bold proposal came out at 42% against the middle one's 36%, and was recommended.
+  const records = [
+    { listPrice: 17, targetPrice: 14, status: 'accepted', firstOutcome: 'accepted' },
+    { listPrice: 20, targetPrice: 17, status: 'accepted', firstOutcome: 'accepted' },
+    { listPrice: 20, targetPrice: 19, status: 'declined', firstOutcome: 'declined' },
+    { listPrice: 30, targetPrice: 28, status: 'declined', firstOutcome: 'declined' },
+  ]
+  const form = { listPrice: '28', category: 'other', listingSignal: 'none', itemTitle: 'Cappotto' }
+  const s = strategyFor(form, new Date('2026-11-16T21:28:00Z'), { goal: 'keep', records, extraction: { shippingFrom: 3.09, uploadedDays: 2 } })
+  const byPrice = [...s.options].sort((a, b) => b.price - a.price)
+  for (let i = 1; i < byPrice.length; i++) assert.ok(byPrice[i].probability <= byPrice[i - 1].probability + 1e-12, byPrice.map((o) => `${o.price}: ${o.probability.toFixed(3)}`).join(' · '))
+  // The history still counts: without it the dearest proposal would be likelier than it is with two refusals there.
+  const plain = strategyFor(form, new Date('2026-11-16T21:28:00Z'), { goal: 'keep', extraction: { shippingFrom: 3.09, uploadedDays: 2 } })
+  assert.ok(byPrice[0].probability < [...plain.options].sort((a, b) => b.price - a.price)[0].probability)
+})
+
+test('product: cards the AI calls alike are not the same article — and the kind of garment decides', () => {
+  // The two real runs of 16 Nov on DEKKER outerwear: every card kept was a «variant», coats and jackets together
+  // (19 € to 120 €), and the market was called «alta» and used.
+  const identity = { kind: 'brand', size: 'M', band: 'used', condition: 'Ottime' }
+  const kept = [['Cappotto Dekker', 19], ['Cappotto Dekker uomo tg M', 20], ['Cappotto uomo Dekker', 68], ['Cappotto marca DEKKER', 50], ['Cappottino Uomo Dekker', 50], ['Cappotto da uomo Dekker', 45]]
+  const cards = kept.map(([title, p], i) => ({ id: String(i), price: p, text: `${title}, Brand: DEKKER, Condizioni: Ottime, Taglia: M, ${p}.00 €` }))
+  const alike = productMarketFrom(cards, { identity, mode: 'brand', listPrice: 28, verdicts: Object.fromEntries(cards.map((c) => [c.id, 'variant'])) })
+  assert.deepEqual([alike.similar, alike.verdicts, alike.kept], [true, { variant: 6 }, 6])
+  // Alike is never a market to rest the resale value on, however close the prices: told, not used.
+  assert.deepEqual([alike.confidence, alike.ok, alike.market.similar], ['bassa', false, true])
+  const tight = productMarketFrom(cards.map((c, i) => ({ ...c, price: 40 + i * 2 })), { identity, mode: 'brand', verdicts: Object.fromEntries(cards.map((c) => [c.id, 'variant'])) })
+  assert.deepEqual([tight.confidence, tight.ok], ['bassa', false])
+  // …and among cards that are only alike a cheap one is as real as a dear one: 10 € and 13 € stay beside 120 €.
+  const wide = [10, 13, 19, 20, 45, 45, 50, 50, 68, 120].map((p, i) => ({ id: `w${i}`, price: p, text: `Cappotto Dekker, Brand: DEKKER, Condizioni: Ottime, Taglia: M, ${p}.00 €` }))
+  const all = productMarketFrom(wide, { identity, mode: 'brand', verdicts: Object.fromEntries(wide.map((c) => [c.id, 'variant'])) })
+  assert.deepEqual([all.kept, all.market.minPrice, all.market.medianPrice], [10, 10, 45])
+  // The same article, by the AI's word, can be «alta».
+  const same = productMarketFrom(cards.map((c, i) => ({ ...c, price: 40 + i * 2 })), { identity, mode: 'brand', verdicts: Object.fromEntries(cards.map((c) => [c.id, 'same'])) })
+  assert.deepEqual([same.similar, same.confidence], [false, 'alta'])
+  // The rule the AI is given for this job travels in the prompt.
+  const prompt = triagePrompt({ title: 'Cappotto Dekker', brand: 'DEKKER' }, null, [{ source: 'vinted', id: '1', title: 'Giubbotto Dekker', price: 120, condition: 'Ottime' }], { note: MARKET_TRIAGE_NOTE })
+  assert.match(prompt.text, /cappotto con cappotto, giubbotto con giubbotto/)
+  assert.ok(!/cappotto con cappotto/.test(triagePrompt({ title: 'x' }, null, []).text))
 })

@@ -21,6 +21,18 @@
  * middle half is wider than PRODUCT_MARKET.MAX_SPREAD of its median loses a step of confidence.
  * These are asking prices of unsold listings: the engine takes their lower quartile as the resale value.
  */
+/**
+ * What the market asks of the triage (search.js triagePrompt, `note`). The shared rules call «variant» the same model
+ * with one thing different; clothes often have no model in their title, and the AI then took every garment of the
+ * brand as a variant (jackets at 45–120 € among the comparables of a coat, on a real run): the kind of garment decides.
+ */
+export const MARKET_TRIAGE_NOTE = [
+  'Regola per questo smistamento: serve il prezzo di mercato dello stesso articolo.',
+  '"same" solo se è lo stesso articolo: stessa marca, stesso tipo di capo o di oggetto e, quando il titolo li dice, stesso modello o linea.',
+  '"variant" se è lo stesso articolo con taglia, colore o condizioni diverse. Quando nessun titolo dice un modello, "variant" vale solo per lo stesso tipo di capo (cappotto con cappotto, giubbotto con giubbotto, jeans con jeans, maglione con maglione).',
+  'Un tipo di capo diverso della stessa marca è "family". Un lotto di più articoli, un capo da donna o da bambino quando si cerca da uomo (e viceversa), un articolo dichiarato difettoso sono "other".',
+].join(' ')
+
 export const PRODUCT_MARKET = Object.freeze({
   MIN: 3,
   /** Narrowing to the same size is worth it only when this many cards remain: size moves the price of clothes little,
@@ -30,6 +42,7 @@ export const PRODUCT_MARKET = Object.freeze({
   TRIM_FACTOR: 3,
   /** The same model, storage and condition does not vary threefold: beyond twice or half the median it is something else. */
   TRIM_MODEL: 2,
+  TRIM_SIMILAR_LOW: 5,
   /** (p75 − p25) / median above which the cards are too different to be one market. */
   MAX_SPREAD: 0.6,
 })
@@ -187,9 +200,12 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
     for (const r of pool) if (!keep.has(r.id)) drop(why, r)
     pool = alike
   }
+  // With enough cards the AI calls the same article, those are the market; else the variants stay and the result
+  // says the cards are alike, not the same (`similar`).
+  let similar = false
   if (judged) {
     const same = pool.filter((r) => r.verdict === 'same')
-    if (same.length >= PRODUCT_MARKET.MIN && same.length < pool.length) narrow(same, 'variante')
+    if (same.length >= PRODUCT_MARKET.MIN) { if (same.length < pool.length) narrow(same, 'variante') } else similar = pool.some((r) => r.verdict !== 'same')
   }
   // The same condition (it moves the price a lot) when three remain; the same size (it moves it little) only when
   // SIZE_MIN remain.
@@ -208,7 +224,10 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   if (pool.length >= PRODUCT_MARKET.TRIM_FROM) {
     const mid = pmPercentile(pool.map((r) => r.price).sort((x, y) => x - y), 0.5)
     const factor = mode === 'model' ? PRODUCT_MARKET.TRIM_MODEL : PRODUCT_MARKET.TRIM_FACTOR
-    const inside = pool.filter((r) => r.price >= mid / factor && r.price <= mid * factor)
+    // Among cards that are only alike a low price is as real as a high one (two coats at 10 € and 13 € were cut as
+    // «anomalies» beside jackets at 120 €): only the absurd ones go.
+    const low = similar ? PRODUCT_MARKET.TRIM_SIMILAR_LOW : factor
+    const inside = pool.filter((r) => r.price >= mid / low && r.price <= mid * factor)
     if (inside.length < pool.length) narrow(inside, 'prezzo anomalo')
   }
   const prices = pool.map((r) => r.price).sort((x, y) => x - y)
@@ -220,14 +239,18 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   }
   const n = prices.length
   const basis = mode === 'model' ? 'model' : judged ? 'ai' : 'brand'
-  const out = { ok: false, market: null, basis, seen: rows.length, kept: n, dropped, examples, confidence: null, conditionMatched, sizeMatched }
+  const verdictCount = {}
+  for (const r of pool) if (r.verdict) verdictCount[r.verdict] = (verdictCount[r.verdict] || 0) + 1
+  const out = { ok: false, market: null, basis, similar, verdicts: judged ? verdictCount : null, seen: rows.length, kept: n, dropped, examples, confidence: null, conditionMatched, sizeMatched }
   if (n < 2) return out
   const medianPrice = pmR2(pmPercentile(prices, 0.5))
   const p25Price = pmR2(pmPercentile(prices, 0.25))
   const p75Price = pmR2(pmPercentile(prices, 0.75))
   const spread = medianPrice > 0 ? (p75Price - p25Price) / medianPrice : null
   const steps = ['bassa', 'media', 'alta']
-  let level = basis === 'brand' || n < PRODUCT_MARKET.MIN ? 0 : n >= 5 && (conditionMatched || !id.band) ? 2 : 1
+  // Cards that are only alike (same brand and kind, no model to tell them by) are never a market to rest a resale
+  // value on, however many and however close: they are told, and can only lower what is counted on.
+  let level = basis === 'brand' || similar || n < PRODUCT_MARKET.MIN ? 0 : n >= 5 && (conditionMatched || !id.band) ? 2 : 1
   if (level > 0 && spread !== null && spread > PRODUCT_MARKET.MAX_SPREAD) level -= 1
   out.confidence = steps[level]
   out.ok = n >= PRODUCT_MARKET.MIN && level > 0
@@ -235,7 +258,7 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   out.market = {
     n, medianPrice, p25Price, p75Price, minPrice: prices[0], maxPrice: prices[n - 1],
     gapPct: pmFinite(L) && L > 0 && medianPrice > 0 ? Math.round((L / medianPrice - 1) * 100) : null,
-    basis, confidence: out.confidence, conditionMatched, sizeMatched, spread: spread === null ? null : pmR2(spread), source: 'vinted-market',
+    basis, similar, confidence: out.confidence, conditionMatched, sizeMatched, spread: spread === null ? null : pmR2(spread), source: 'vinted-market',
   }
   return out
 }
