@@ -23,6 +23,9 @@
  */
 export const PRODUCT_MARKET = Object.freeze({
   MIN: 3,
+  /** Narrowing to the same size is worth it only when this many cards remain: size moves the price of clothes little,
+   *  and three cards of one size were a worse market than thirteen of the same article (a real report). */
+  SIZE_MIN: 5,
   TRIM_FROM: 4,
   TRIM_FACTOR: 3,
   /** The same model, storage and condition does not vary threefold: beyond twice or half the median it is something else. */
@@ -150,7 +153,9 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
   const verdictOf = (cardId) => (verdicts instanceof Map ? verdicts.get(cardId) : verdicts && typeof verdicts === 'object' ? verdicts[cardId] : null) || null
   const judged = Boolean(verdicts && (verdicts instanceof Map ? verdicts.size : Object.keys(verdicts).length))
   const dropped = {}
-  const drop = (why) => { dropped[why] = (dropped[why] || 0) + 1; return false }
+  // Why each card was left out: the report shows a few of each kind, to judge the rules and the AI's sorting.
+  const fate = new Map()
+  const drop = (why, r) => { dropped[why] = (dropped[why] || 0) + 1; fate.set(r.id, why); return false }
   const seenIds = new Set()
   const rows = []
   for (const c of Array.isArray(cards) ? cards : []) {
@@ -162,49 +167,60 @@ export function productMarketFrom(cards, { identity = null, mode = 'model', self
     rows.push({ id: String(c.id), price, facts, said: pmNorm(c.text), title: pmNorm(facts.title), band: conditionBandOf(facts.condition), verdict: verdictOf(String(c.id)) })
   }
   let pool = rows.filter((r) => {
-    if (PM_BROKEN.test(r.said)) return drop('difettoso')
+    if (PM_BROKEN.test(r.said)) return drop('difettoso', r)
     const head = r.title.match(/[a-z]+/g) || []
-    if (head.slice(0, 2).some((w) => PM_ACCESSORY.test(w))) return drop('accessorio')
+    if (head.slice(0, 2).some((w) => PM_ACCESSORY.test(w))) return drop('accessorio', r)
     if (pmFinite(id.capacityGb)) {
       // The card's own storage field when it has one («Capacità di archiviazione: 256 GB»), else what its title names.
       const field = (r.said.match(/capacit[a-z ]*:\s*([^,]+)/) || [])[1]
       const named = field ? capacitiesOf(field) : capacitiesOf(r.title).filter((gb) => gb >= 32)
-      if (named.length && !named.includes(id.capacityGb)) return drop('altra capacità')
+      if (named.length && !named.includes(id.capacityGb)) return drop('altra capacità', r)
     }
-    if (r.verdict === 'accessory') return drop('accessorio')
-    if (r.verdict === 'other' || r.verdict === 'family') return drop('altro prodotto')
+    if (r.verdict === 'accessory') return drop('accessorio', r)
+    if (r.verdict === 'other' || r.verdict === 'family') return drop('altro prodotto', r)
     // Asked and not answered for: the AI did not vouch for this card.
-    if (judged && !r.verdict) return drop('non giudicato')
+    if (judged && !r.verdict) return drop('non giudicato', r)
     return true
   })
+  const narrow = (alike, why) => {
+    const keep = new Set(alike.map((r) => r.id))
+    for (const r of pool) if (!keep.has(r.id)) drop(why, r)
+    pool = alike
+  }
   if (judged) {
     const same = pool.filter((r) => r.verdict === 'same')
-    if (same.length >= PRODUCT_MARKET.MIN) { dropped.variante = pool.length - same.length || undefined; pool = same }
+    if (same.length >= PRODUCT_MARKET.MIN && same.length < pool.length) narrow(same, 'variante')
   }
-  // The same condition, then (clothes) the same size, when enough cards remain.
+  // The same condition (it moves the price a lot) when three remain; the same size (it moves it little) only when
+  // SIZE_MIN remain.
   let conditionMatched = false
   if (id.band) {
     const alike = pool.filter((r) => r.band === id.band)
-    if (alike.length >= PRODUCT_MARKET.MIN) { pool = alike; conditionMatched = true }
+    if (alike.length >= PRODUCT_MARKET.MIN) { if (alike.length < pool.length) narrow(alike, 'altra condizione'); conditionMatched = true }
   }
   let sizeMatched = false
   if (mode === 'brand' && id.size) {
     const want = pmNorm(id.size).replace(/\s+/g, '')
     const alike = pool.filter((r) => r.facts.size && pmNorm(r.facts.size).replace(/\s+/g, '') === want)
-    if (alike.length >= PRODUCT_MARKET.MIN) { pool = alike; sizeMatched = true }
+    if (pool.length && alike.length === pool.length) sizeMatched = true
+    else if (alike.length >= PRODUCT_MARKET.SIZE_MIN) { narrow(alike, 'altra taglia'); sizeMatched = true }
   }
-  let prices = pool.map((r) => r.price).sort((x, y) => x - y)
-  if (prices.length >= PRODUCT_MARKET.TRIM_FROM) {
-    const mid = pmPercentile(prices, 0.5)
-    const before = prices.length
+  if (pool.length >= PRODUCT_MARKET.TRIM_FROM) {
+    const mid = pmPercentile(pool.map((r) => r.price).sort((x, y) => x - y), 0.5)
     const factor = mode === 'model' ? PRODUCT_MARKET.TRIM_MODEL : PRODUCT_MARKET.TRIM_FACTOR
-    prices = prices.filter((p) => p >= mid / factor && p <= mid * factor)
-    if (before - prices.length) dropped['prezzo anomalo'] = before - prices.length
+    const inside = pool.filter((r) => r.price >= mid / factor && r.price <= mid * factor)
+    if (inside.length < pool.length) narrow(inside, 'prezzo anomalo')
   }
-  for (const k of Object.keys(dropped)) if (dropped[k] === undefined) delete dropped[k]
+  const prices = pool.map((r) => r.price).sort((x, y) => x - y)
+  const show = (r) => `${r.facts.title.slice(0, 60)} — ${r.price} €${r.facts.condition ? ` (${r.facts.condition}${r.facts.size ? `, ${r.facts.size}` : ''})` : ''}`
+  const perReason = {}
+  const examples = {
+    tenuti: pool.slice(0, 8).map((r) => (r.verdict ? `[${r.verdict}] ` : '') + show(r)),
+    scartati: rows.filter((r) => fate.has(r.id) && (perReason[fate.get(r.id)] = (perReason[fate.get(r.id)] || 0) + 1) <= 3).slice(0, 15).map((r) => `${fate.get(r.id)}: ${show(r)}`),
+  }
   const n = prices.length
   const basis = mode === 'model' ? 'model' : judged ? 'ai' : 'brand'
-  const out = { ok: false, market: null, basis, seen: rows.length, kept: n, dropped, confidence: null, conditionMatched, sizeMatched }
+  const out = { ok: false, market: null, basis, seen: rows.length, kept: n, dropped, examples, confidence: null, conditionMatched, sizeMatched }
   if (n < 2) return out
   const medianPrice = pmR2(pmPercentile(prices, 0.5))
   const p25Price = pmR2(pmPercentile(prices, 0.25))

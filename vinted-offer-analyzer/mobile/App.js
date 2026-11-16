@@ -43,6 +43,8 @@ const AIM_KEY = 'offerta-vinted.aim.v1'
 /** 1.13.1: the share of the resale value to keep as margin (0 = not losing), chosen in the cost panel. */
 const MARGIN_KEY = 'offerta-vinted.margin.v1'
 const MARGIN_CHOICES = [0, 10, 20, 30]
+/** 1.13.3: how the AI sorts the market cards — 'fast' (a few seconds) or 'deep' (it reasons first: about 45 s). */
+const AI_DEPTH_KEY = 'offerta-vinted.aiDepth.v1'
 
 const TABS = [
   { id: 'vinted', label: 'Vinted' },
@@ -147,12 +149,17 @@ function Main() {
    */
   const aimRef = useRef('resell')
   const marginRef = useRef(0)
+  const aiDepthRef = useRef('fast')
+  const [aiDepth, setAiDepth] = useState('fast')
   useEffect(() => {
     AsyncStorage.getItem(AIM_KEY).then((saved) => {
       if (saved === 'keep' || saved === 'resell') aimRef.current = saved
     }).catch(() => {})
     AsyncStorage.getItem(MARGIN_KEY).then((saved) => {
       if (MARGIN_CHOICES.includes(Number(saved))) marginRef.current = Number(saved)
+    }).catch(() => {})
+    AsyncStorage.getItem(AI_DEPTH_KEY).then((saved) => {
+      if (saved === 'deep' || saved === 'fast') { aiDepthRef.current = saved; setAiDepth(saved) }
     }).catch(() => {})
   }, [])
   const [saveState, setSaveState] = useState(null)
@@ -258,6 +265,12 @@ function Main() {
     const url = linkKeyOf(f)
     return search.marketFor(url) || bookInfoOf(url ? bookMarketRef.current.get(url) : null)
   }
+  /** In a handler: what a market too thin to be used still says of the resale value (strategyFor's resaleHint). */
+  const resaleHintFor = (f) => {
+    const url = linkKeyOf(f)
+    const book = url ? bookMarketRef.current.get(url) : null
+    return book && book.hint ? book.hint : null
+  }
   /** While rendering: the same picture, from state. */
   const marketShownFor = (f) => {
     const url = linkKeyOf(f)
@@ -305,10 +318,11 @@ function Main() {
       title: ex.title || '', brand: ex.brand || '', size: identity.size || '', categoryText: identity.category || ex.categoryText || '',
       description: ex.description || '', price: ex.listPrice, condition: identity.condition || ex.condition || '',
     }
-    const ai = { scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0, ms_scheda: null, ms_smistamento: null }
+    const deep = aiDepthRef.current === 'deep'
+    const ai = { profondita: deep ? 'profonda' : 'veloce', scheda: null, smistamento: null, modello: null, parole: null, costo_usd: 0, ms_scheda: null, ms_smistamento: null }
     const t0 = Date.now()
     try {
-      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: 900, timeoutMs: 20_000, maxAttempts: 1, think: false })
+      const res = await callChain(MARKET_CHAIN, core.productPrompt(reference), [], { effort: 'low', maxTokens: deep ? 3000 : 900, timeoutMs: deep ? 45_000 : 20_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })
       ai.costo_usd += res.costUsd || 0
       if (res.costUsd) search.addSpend(res.modelKey, res.costUsd, null)
       ai.scheda = res.ok ? 'ok' : res.kind || 'failed'
@@ -341,8 +355,9 @@ function Main() {
         const said = core.cardFactsOf(c.text)
         return { source: 'vinted', id: String(c.id), title: said.title, price: core.cardPriceOf(c.price), condition: said.condition || '' }
       }).filter((c) => c.price !== null && c.title && c.id !== String(selfId)).slice(0, 80)
+      const deep = ai.profondita === 'profonda'
       const tTriage = Date.now()
-      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: 4000, timeoutMs: 30_000, maxAttempts: 1, think: false })))
+      const answers = await Promise.all(core.triageBatches(candidates, 40).map((batch) => callChain(MARKET_CHAIN, core.triagePrompt(reference, product, batch), [], { effort: 'low', maxTokens: deep ? 8000 : 4000, timeoutMs: deep ? 90_000 : 30_000, maxAttempts: 1, ...(deep ? {} : { think: false }) })))
       ai.ms_smistamento = Date.now() - tTriage
       const said = new Map()
       let answered = 0
@@ -445,7 +460,7 @@ function Main() {
       // reading of this session (a saved offer opened again) says nothing about «online adesso».
       ...(ctx ? { readAt: ctx.at } : linkOf(nextForm) ? { readAt: 0 } : {}),
       // 1.11: the purchase as a whole. The resale value is the one typed, else the engine's default.
-      goal: aimRef.current, marginPct: marginRef.current, ...(Number.isFinite(parsePrice(nextForm.resalePrice)) && parsePrice(nextForm.resalePrice) > 0 ? { resale: parsePrice(nextForm.resalePrice) } : {}),
+      goal: aimRef.current, marginPct: marginRef.current, ...(resaleHintFor(nextForm) ? { resaleHint: resaleHintFor(nextForm) } : {}), ...(Number.isFinite(parsePrice(nextForm.resalePrice)) && parsePrice(nextForm.resalePrice) > 0 ? { resale: parsePrice(nextForm.resalePrice) } : {}),
       ...(pick.kind === 'option' ? { chosen: pick.id } : pick.kind === 'custom' ? { customPrice: pick.price } : {}),
     }))
     if (!strat.ok) {
@@ -554,6 +569,15 @@ function Main() {
       setPlan(null)
       runAnalysis(form, pinnedSendAt, { choice: { kind: 'auto' } })
     }
+  }
+
+  /** «AI: veloce / profonda»: whether the AI reasons before sorting the market cards. It counts from the next analysis. */
+  const changeAiDepth = (next) => {
+    if (next !== 'fast' && next !== 'deep') return
+    aiDepthRef.current = next
+    setAiDepth(next)
+    AsyncStorage.setItem(AI_DEPTH_KEY, next).catch(() => {})
+    showToast(next === 'deep' ? 'AI profonda: ragiona prima di smistare, circa 45 secondi in più. Vale dalla prossima analisi.' : 'AI veloce: pochi secondi. Vale dalla prossima analisi.', 4500)
   }
 
   /** «Lo rivendo a»: the price the article would be sold again at (blank = the engine's default). */
@@ -711,7 +735,12 @@ function Main() {
         setExtractPhase(null)
       }
       const marketKey = normalizeVintedLink(link) || link
-      const bookEntry = bookRead && bookRead.market ? { market: bookRead.market, at: new Date().toISOString() } : null
+      // A market too thin or too spread to be used (but of the same article: by ISBN, model or the AI) still says what
+      // not to count on: its lower quartile, when below this listing's price, caps the resale value.
+      const thin = bookRead && !bookRead.market && bookRead.info && bookRead.info.market && ['isbn', 'title', 'model', 'ai'].includes(bookRead.info.basis)
+        && Number.isFinite(ex.listPrice) && bookRead.info.market.p25Price < ex.listPrice
+        ? { amount: bookRead.info.market.p25Price, n: bookRead.info.market.n, basis: bookRead.info.basis } : null
+      const bookEntry = bookRead && (bookRead.market || thin) ? { market: bookRead.market || null, hint: thin, at: new Date().toISOString() } : null
       if (bookEntry) {
         bookMarketRef.current.set(marketKey, bookEntry)
         if (bookMarketRef.current.size > 30) bookMarketRef.current.delete(bookMarketRef.current.keys().next().value)
@@ -723,7 +752,7 @@ function Main() {
         const count = `${info.kept} ${info.kept === 1 ? 'annuncio' : 'annunci'} ${what}`
         if (bookRead.market) showToast(`Mercato: ${count}. Si vende a ${formatEuro(bookRead.market.p25Price)} (quartile basso), mediana ${formatEuro(bookRead.market.medianPrice)}.`, 6000)
         else if (info.basis === 'brand' && info.market) showToast(`${count}, tra ${formatEuro(info.market.minPrice)} e ${formatEuro(info.market.maxPrice)}: troppo diversi per farne un valore.${bookRead.ai && bookRead.ai.scheda === 'auth' ? ' Con la chiave DeepSeek (Info → Laboratorio AI) riconosco lo stesso articolo.' : ''}`, 7000)
-        else showToast(`Mercato: ${count}, ${info.kept < 3 ? 'troppo pochi' : 'troppo diversi'} per farne un valore.`, 5000)
+        else showToast(`Mercato: ${count}, ${info.kept < 3 ? 'troppo pochi' : 'troppo diversi'} per farne un valore.${thin ? ` Alla rivendita non conto su più di ${formatEuro(thin.amount)}.` : ''}`, 6000)
       }
       contextRef.current = { link, extraction: ex, wardrobe, memberRaw, at: Date.now() }
       choiceRef.current = { kind: 'auto' }
@@ -1333,7 +1362,7 @@ function Main() {
           ...(id.kind ? { tipo: id.kind === 'model' ? 'modello' : 'marca', modello: id.model || null, capacita_gb: id.capacityGb ?? null, taglia: id.size || null, condizioni: id.condition || null, categoria: id.category || null }
             : { tipo: 'libro', isbn: id.isbn || null, titolo: id.title || null, autore: id.author || null }),
           via: info ? info.basis : null, annunci_visti: info ? info.seen : null, confrontabili: info ? info.kept : null, usato: Boolean(read.market),
-          scartati: info ? info.dropped || null : null, ...(info && info.examples ? { esempi_scartati: info.examples } : {}),
+          scartati: info ? info.dropped || null : null, ...(info && info.examples ? (Array.isArray(info.examples) ? { esempi_scartati: info.examples } : { esempi: info.examples }) : {}),
           ...(info && info.market ? {
             mediana: info.market.medianPrice, quartile_basso: info.market.p25Price, quartile_alto: info.market.p75Price, minimo: info.market.minPrice, massimo: info.market.maxPrice,
             affidabilita: info.market.confidence, ...(id.kind ? { stessa_condizione: info.conditionMatched, stessa_taglia: info.sizeMatched, dispersione: info.market.spread } : {}),
@@ -1482,6 +1511,8 @@ function Main() {
           onAim={changeAim}
           onResale={changeResale}
           onMargin={changeMargin}
+          aiDepth={aiDepth}
+          onAiDepth={changeAiDepth}
           capture={capture}
           onConversation={onConversation}
           onInbox={onInbox}
@@ -1554,6 +1585,8 @@ function Main() {
                   onAim={changeAim}
                   onResale={changeResale}
           onMargin={changeMargin}
+          aiDepth={aiDepth}
+          onAiDepth={changeAiDepth}
                   onLever={scheduleLever}
                   onCopyMessage={noteMessageCopied}
                   link={form.link}

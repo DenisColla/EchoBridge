@@ -34,7 +34,7 @@ function Proposal({ option, selected, onPress }) {
  * left when the article is sold again, where a counter-offer would land. «Per rivendere» caps the proposals at the
  * price that does not lose; «Per me» only shows the costs.
  */
-function CostBlock({ strategy, chosen, onGoal, onResale, onMargin }) {
+function CostBlock({ strategy, chosen, onGoal, onResale, onMargin, aiDepth = 'fast', onAiDepth = null }) {
   const t = useTheme()
   const { costs } = strategy
   const resell = strategy.goal === 'resell'
@@ -48,7 +48,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale, onMargin }) {
   const mk = costs.market
   const alike = { isbn: 'dello stesso libro (ISBN)', title: 'con lo stesso titolo', model: 'dello stesso modello', ai: 'dello stesso articolo (riconosciuti dall\'AI)' }[mk && mk.basis] || 'simili'
   // The resale value is the market's lower quartile: asking prices of unsold listings, and the next buyer haggles too.
-  const from = costs.resale.source === 'market' ? ' (il quartile basso del mercato: il prezzo a cui si vende)' : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
+  const from = costs.resale.source === 'market' ? ' (il quartile basso del mercato: il prezzo a cui si vende)' : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : costs.resale.source === 'few' ? ` (${costs.hint && costs.hint.n ? `${costs.hint.n} annunci uguali` : 'pochi annunci uguali'}: troppo pochi per un mercato, ma non conto su di più)` : ''
   const gapWord = mk && Number.isFinite(mk.gapPct) && mk.gapPct !== 0 ? ` Questo annuncio è il ${Math.abs(mk.gapPct)}% ${mk.gapPct > 0 ? 'sopra' : 'sotto'}.` : ''
   const marketLine = mk ? `Mercato: ${mk.n} annunci ${alike}, mediana ${formatEuro(mk.medianPrice)}; la metà chiede tra ${formatEuro(mk.p25Price)} e ${formatEuro(mk.p75Price)}.${gapWord}` : null
   let counter = `Se controbatte arriverà verso ${formatEuro(chosen.landing)}, in tutto ${formatEuro(chosen.landingTotal)}`
@@ -113,6 +113,11 @@ function CostBlock({ strategy, chosen, onGoal, onResale, onMargin }) {
           {[0, 10, 20, 30].map((m) => <Chip key={m} compact label={`${m}%`} active={(costs.marginPct || 0) === m} onPress={() => onMargin && onMargin(m)} />)}
         </View>
       ) : null}
+      <View style={styles.inlineRow}>
+        <Text style={{ color: t.ink3, fontSize: 12, alignSelf: 'center' }}>AI del mercato</Text>
+        <Chip compact label="Veloce" active={aiDepth !== 'deep'} onPress={() => onAiDepth && onAiDepth('fast')} />
+        <Chip compact label="Profonda (lenta)" active={aiDepth === 'deep'} onPress={() => onAiDepth && onAiDepth('deep')} />
+      </View>
     </View>
   )
 }
@@ -121,7 +126,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale, onMargin }) {
  * The 1.8 hero: who the seller is, three proposals, when to send, the moves in order, one primary button.
  * `strategy` comes from strategyFor (core); `result` is the analysis of the chosen proposal.
  */
-export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null, onMargin = null }) {
+export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null, onMargin = null, aiDepth = 'fast', onAiDepth = null }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const { seller, options, moment, plan } = strategy
@@ -184,7 +189,7 @@ export function StrategyHero({ strategy, result, saveState = null, calendarBusy 
         </Body>
       )}
       {strategy.firstHours >= 0.5 ? <Body small muted>Annuncio appena caricato: nelle prime ore il venditore è al massimo della fiducia. Proposte più caute; invia subito, prima degli altri.</Body> : null}
-      {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} onMargin={onMargin} /> : null}
+      {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} onMargin={onMargin} aiDepth={aiDepth} onAiDepth={onAiDepth} /> : null}
 
       <View style={{ gap: 2 }}>
         <Text style={[styles.h2, { color: t.ink }]}>{when}</Text>

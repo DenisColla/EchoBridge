@@ -392,11 +392,15 @@ export function strategyFor(form, now = new Date(), options = {}) {
   const shipping = stFinite(options.shipping) && options.shipping >= 0 ? { amount: stR2(options.shipping), source: 'user' }
     : stFinite(ex.shippingFrom) && ex.shippingFrom >= 0 ? { amount: stR2(ex.shippingFrom), source: 'page' }
       : shippingEstimateFor({ category: categoryId, listPrice: L })
+  const hint = options.resaleHint && stFinite(options.resaleHint.amount) && options.resaleHint.amount > 0 ? options.resaleHint : null
   const resale = stFinite(options.resale) && options.resale > 0 ? { amount: stR2(options.resale), source: 'user' }
     // The market's lower quartile, not its median: these are asking prices of listings not sold yet, and whoever
     // buys from the user will make an offer too. A quarter of the sellers already ask this or less (the user's choice).
     : market && stFinite(market.p25Price) && market.p25Price > 0 ? { amount: stR2(market.p25Price), source: 'market' }
-      : { amount: L, source: 'listing' }
+      // A market too thin to be one (two or three listings of the same article) cannot raise the resale value, but it
+      // can lower it: where the same thing is asked 9,99 €, reselling this one at its 15 € is not to be counted on.
+      : hint && hint.amount < L ? { amount: stR2(hint.amount), source: 'few' }
+        : { amount: L, source: 'listing' }
   const marginPct = stFinite(options.marginPct) ? stClamp(options.marginPct, 0, 60) : 0
   const ceiling = ceilingPriceFor(resale.amount, shipping.amount, marginPct)
   const reachable = ceiling >= floor - 1e-9
@@ -507,7 +511,7 @@ export function strategyFor(form, now = new Date(), options = {}) {
     // How much of the «first hours» caution was applied (1 = just uploaded, 0 = a day old or more).
     firstHours: stR2(firstHours),
     // What the figures above were computed with: the protection on the listing price, the shipping and where it comes
-    // from ('page' | 'estimate' | 'user'), the resale value ('user' | 'market' | 'listing'), the highest price that
+    // from ('page' | 'estimate' | 'user'), the resale value ('user' | 'market' | 'few' | 'listing'), the highest price that
     // does not lose (`ceiling`), the lowest offer Vinted allows (`floor`), whether the two meet (`reachable`), and
     // what buying a «set» from this seller changes (`set`, null when he is not known to have other articles).
     costs: {
@@ -517,6 +521,8 @@ export function strategyFor(form, now = new Date(), options = {}) {
       set,
       // The market the figures rest on, when one is known (1.12: for a book, the listings with the same ISBN or title):
       // how many listings, their median and middle half, and what they were matched by ('isbn' | 'title' | null).
+      // The thin market the resale value was lowered by, when it was ('few'): how many listings and what they are.
+      hint: resale.source === 'few' ? { n: hint.n ?? null, basis: hint.basis || null } : null,
       market: market ? {
         n: market.n, medianPrice: market.medianPrice, p25Price: market.p25Price, p75Price: market.p75Price,
         minPrice: stFinite(market.minPrice) ? market.minPrice : null, maxPrice: stFinite(market.maxPrice) ? market.maxPrice : null,

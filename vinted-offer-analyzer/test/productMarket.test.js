@@ -52,7 +52,10 @@ const phoneCards = [
 test('product: the market of a phone — same model, same storage, same condition, no broken ones, no accessories', () => {
   const identity = productIdentityOf(PHONE)
   const m = productMarketFrom(phoneCards, { identity, mode: 'model', selfId: '4', listPrice: 1150 })
-  assert.deepEqual(m.dropped, { 'altra capacità': 1, difettoso: 1, accessorio: 1 })
+  assert.deepEqual(m.dropped, { 'altra capacità': 1, difettoso: 1, accessorio: 1, 'altra condizione': 1 })
+  // The report shows what was kept and a few of what was not, with the reason.
+  assert.equal(m.examples.tenuti.length, 4)
+  assert.ok(m.examples.scartati.some((x) => /^difettoso: Galaxy Z Fold7 schermo rotto — 400 €/.test(x)), JSON.stringify(m.examples.scartati))
   // Five phones are left, four of them new like the listing: those are the market.
   assert.deepEqual([m.seen, m.kept, m.basis, m.conditionMatched, m.confidence, m.ok], [8, 4, 'model', true, 'media', true])
   assert.deepEqual([m.market.minPrice, m.market.medianPrice, m.market.maxPrice, m.market.p25Price], [990, 1065, 1100, 1035])
@@ -85,7 +88,9 @@ test('product: clothes — without the AI the cards are only «same brand and ki
   const verdicts = { 1: 'same', 2: 'same', 3: 'same', 4: 'other', 5: 'variant', 6: 'same', 7: 'same' }
   const ai = productMarketFrom(cards, { identity, mode: 'brand', listPrice: 9, verdicts })
   assert.deepEqual([ai.basis, ai.kept, ai.confidence, ai.ok], ['ai', 4, 'media', true])
-  assert.deepEqual(ai.dropped, { 'altro prodotto': 1, variante: 1 })
+  assert.deepEqual(ai.dropped, { 'altro prodotto': 1, variante: 1, 'altra condizione': 1 })
+  assert.equal(ai.sizeMatched, true) // the four left are all size M
+  assert.match(ai.examples.tenuti[0], /^\[same\] Pantaloni tuta adidas tiro — 9 € \(Ottime, M\)/)
   assert.deepEqual([ai.market.medianPrice, ai.market.p25Price], [12.5, 11.25])
   const partial = productMarketFrom(cards, { identity, mode: 'brand', verdicts: new Map([['1', 'same'], ['2', 'same']]) })
   assert.deepEqual([partial.kept, partial.ok, partial.dropped['non giudicato']], [2, false, 5])
@@ -169,4 +174,34 @@ test('strategy: in the first hours the seller is at the peak of his confidence �
   // The same price is less likely to pass in the first hours.
   const same = (uploadedDays) => strategyFor(form, at, { goal: 'keep', seller, customPrice: 12, extraction: { shippingFrom: 2.59, uploadedDays } }).options.find((o) => o.id === 'tua' || Math.abs(o.price - 12) < 0.005).probability
   assert.ok(same(2 / 24) < same(2) - 0.03, `${same(2 / 24)} < ${same(2)}`)
+})
+
+test('product: the report of 16 Nov 21:12 — three cards of one size are a worse market than all the same articles', () => {
+  // A Jack & Jones jumper, new, size S: the AI kept 13 cards, 3 of them in size S (9,99 · 9,99 · 25 €). Narrowed to
+  // those the market was «bassa» and unused; the size moves the price of a jumper little.
+  const identity = { kind: 'brand', size: 'S', band: 'new', condition: 'Nuovo senza cartellino' }
+  const prices = [['S', 9.99], ['S', 9.99], ['S', 25], ['M', 12], ['M', 14], ['L', 13], ['L', 15], ['XL', 12.5], ['M', 16], ['L', 11]]
+  const cards = prices.map(([size, p], i) => ({ id: String(i), price: p, text: `Maglione Jack & Jones JJstudio Knit, Brand: Jack & Jones, Condizioni: Nuovo senza cartellino, Taglia: ${size}, ${p} €` }))
+  const verdicts = Object.fromEntries(cards.map((c) => [c.id, 'same']))
+  const m = productMarketFrom(cards, { identity, mode: 'brand', listPrice: 15, verdicts })
+  assert.deepEqual([m.kept, m.sizeMatched, m.conditionMatched, m.ok], [10, false, true, true])
+  assert.deepEqual([m.market.p25Price, m.market.medianPrice], [11.25, 12.75])
+  // With five of the same size, the size is the market.
+  const more = productMarketFrom([...cards, { id: 'a', price: 11, text: 'Jack & Jones knit, Condizioni: Nuovo senza cartellino, Taglia: S, 11 €' }, { id: 'b', price: 12, text: 'JJ knit crew, Condizioni: Nuovo con cartellino, Taglia: S, 12 €' }], { identity, mode: 'brand', verdicts: { ...verdicts, a: 'same', b: 'same' } })
+  assert.deepEqual([more.kept, more.sizeMatched, more.dropped['altra taglia']], [5, true, 7])
+})
+
+test('strategy: a market too thin to be one can lower the resale value, never raise it', () => {
+  const form = { listPrice: '15', category: 'other', listingSignal: 'none', itemTitle: 'Maglione' }
+  const at = new Date('2026-11-16T21:12:00Z')
+  const base = { goal: 'resell', extraction: { shippingFrom: 2.59, uploadedDays: 2 } }
+  // Three listings of the same jumper, a quarter of them at 9,99 €: reselling at this listing's 15 € is not counted on.
+  const low = strategyFor(form, at, { ...base, resaleHint: { amount: 9.99, n: 3, basis: 'ai' } })
+  assert.deepEqual(low.costs.resale, { amount: 9.99, source: 'few' })
+  assert.deepEqual(low.costs.hint, { n: 3, basis: 'ai' })
+  assert.equal(low.costs.reachable, false) // not worth buying to sell again: said, instead of a margin of cents
+  // Above the listing's price the thin market says nothing; a typed value and a real market come first.
+  assert.deepEqual(strategyFor(form, at, { ...base, resaleHint: { amount: 22, n: 2, basis: 'model' } }).costs.resale, { amount: 15, source: 'listing' })
+  assert.equal(strategyFor(form, at, { ...base, resale: 18, resaleHint: { amount: 9.99, n: 3 } }).costs.resale.source, 'user')
+  assert.equal(strategyFor(form, at, { ...base, market: { n: 8, medianPrice: 20, p25Price: 17, p75Price: 24 }, resaleHint: { amount: 9.99, n: 3 } }).costs.resale.source, 'market')
 })
