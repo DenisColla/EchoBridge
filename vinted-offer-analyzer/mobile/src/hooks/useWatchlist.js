@@ -13,7 +13,7 @@ const REOFFER_OUTCOMES = ['declined', 'no_reply']
 /** After the seller answers a message sent before the offer, the offer itself should follow within this many hours (§4.1). */
 export const AFTER_REPLY_HOURS = 2
 /** Raw extraction fields kept on the item (engine-spec §6): what the page said, before the form bucketed it. */
-const EXTRACTION_FIELDS = ['uploadedDays', 'sellerLastSeenDays', 'sellerFeedbackCount', 'sellerRating', 'sellerBusiness', 'sellerBadges', 'condition', 'brand', 'categoryText']
+const EXTRACTION_FIELDS = ['shippingFrom', 'uploadedDays', 'sellerLastSeenDays', 'sellerFeedbackCount', 'sellerRating', 'sellerBusiness', 'sellerBadges', 'condition', 'brand', 'categoryText']
 
 const finiteMs = (v) => {
   const t = v ? new Date(v).getTime() : NaN

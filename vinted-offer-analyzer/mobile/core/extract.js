@@ -136,7 +136,7 @@ export function parseVintedItemHtml(html, details = null) {
   const out = {
     title: null, listPrice: null, currency: null, brand: null, condition: null, categoryText: null, description: null, color: null, url: null, photo: null,
     uploadedText: null, uploadedDays: null, sellerUsername: null, sellerRating: null, sellerFeedbackCount: null, sellerLastSeenText: null, sellerLastSeenDays: null,
-    sellerBusiness: null, sellerBadges: [], sellerPath: null,
+    sellerBusiness: null, sellerBadges: [], sellerPath: null, shippingFrom: null,
     signals: { views: null, interested: null, oldPrice: null, priceDropped: null, priceDrop: null, bundleOffered: null, bundleDiscountPct: null, lastSeenDays: null, sellerItems: null, reserved: null },
     found: [], missing: [], unread: [],
   }
@@ -238,6 +238,13 @@ export function parseVintedItemHtml(html, details = null) {
     const phrase = firstMatch(visible, SELLER_SEEN_RE)
     const days = phrase ? parseRelativeItalian(phrase) : null
     if (days !== null) { out.sellerLastSeenText = phrase.trim(); out.sellerLastSeenDays = days }
+  }
+
+  // «Spedizione · da 2,29 €»: what the buyer pays on top of the price and of Vinted's protection.
+  const shipFrom = firstMatch(visible, /spedizione[^€\d]{0,40}?da\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*€/i)
+  if (shipFrom) {
+    const amount = Number(shipFrom.replace(',', '.'))
+    if (Number.isFinite(amount) && amount >= 0 && amount < 100) out.shippingFrom = amount
   }
 
   // DOM-only signals: the probe's scrape first (what the hydrated page showed), then regexes on the HTML.

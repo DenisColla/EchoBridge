@@ -277,12 +277,20 @@ export const PAGE_PROBE = `(function () {
       var blocked = isChallenge();
       if (ready && !blocked && !isCfError()) {
         if (itemSince === null) itemSince = Date.now();
-        if (document.querySelectorAll('a[href*="/items/"]').length < 1 && Date.now() - itemSince < 4000) {
+        // The profile fills in steps (the page is heavy and this view is hidden): wait for the articles, or for the
+        // profile's own figures and then a little more, before reading. 4 s were not enough on a real phone.
+        var waited = Date.now() - itemSince;
+        var hasItems = document.querySelectorAll('a[href*="/items/"]').length > 0;
+        var hasInfo = /\\d\\s+follower|\\d\\s+recension|\\d\\s+articol/i.test(document.body ? document.body.textContent || '' : '');
+        if (!(hasItems || (hasInfo && waited > 5000)) && waited < 12000) {
           post({ type: 'state', url: location.href, ready: true, complete: document.readyState === 'complete', challenge: false, cfError: false, item: true, vh: window.innerHeight, title: (document.title || '').slice(0, 80) });
-          setTimeout(tick, 300);
+          setTimeout(tick, 400);
           return;
         }
-        post({ type: 'html', url: location.href, html: '', details: readMember() });
+        var read = readMember();
+        // What the page looked like when it was read, without a name or a number: tells an empty wardrobe from a page not read.
+        if (read) read.diag = { waitedMs: waited, textLen: (document.body ? document.body.textContent || '' : '').length, itemLinks: document.querySelectorAll('a[href*="/items/"]').length, hasInfo: hasInfo, path: location.pathname.replace(/\\d{3,}/g, '{id}').replace(/\\{id\\}-[^/]+/, '{id}-{nome}') };
+        post({ type: 'html', url: location.href, html: '', details: read });
         return;
       }
       post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: blocked, cfError: !blocked && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });

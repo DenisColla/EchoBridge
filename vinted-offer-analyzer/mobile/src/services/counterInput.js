@@ -24,9 +24,16 @@ export const formOfItem = (item) => item.form || {
   targetPrice: String(item.targetPrice ?? '').replace('.', ','), listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', link: item.link || '',
 }
 
+/** The most an offer saved «per rivendere» may pay without losing (its ceiling), else null: the planner's budget. */
+export const budgetOfItem = (item) => {
+  const st = item && item.strategy
+  return st && st.goal === 'resell' && Number.isFinite(st.ceiling) && st.ceiling > 0 ? st.ceiling : null
+}
+
 /**
  * The engine input for «the seller answered this saved offer with `sellerPrice`», with the planner's defaults (no
- * budget, no competition, received now): what the reply planner would compute if opened and left as it is.
+ * competition, received now; the budget is the ceiling of an offer made to sell again, else none): what the reply
+ * planner would compute if opened and left as it is.
  * `previousOffer`: the user's figure as Vinted shows it, when known; else the last one of the saved history.
  * A counter-offer already in the history without an answer of ours is replaced by this one (he changed his figure).
  */
@@ -43,7 +50,7 @@ export function counterRawFor(item, sellerPrice, { previousOffer = null, receive
   return {
     ...form,
     previousOffer: Number.isFinite(B) ? priceText(B) : '', sellerCounter: priceText(sellerPrice), counterMode: 'eur', receivedAgo,
-    maxPrice: '', channel: 'button', competition: false, publicPrice: false, offerSentAt: item.sentAt || null,
+    maxPrice: budgetOfItem(item) !== null ? priceText(budgetOfItem(item)) : '', channel: 'button', competition: false, publicPrice: false, offerSentAt: item.sentAt || null,
     ...(entries.length ? { history: [...entries, { by: 'seller', price: sellerPrice, at: null, receivedUncertaintyMinutes: 0 }] } : {}),
   }
 }

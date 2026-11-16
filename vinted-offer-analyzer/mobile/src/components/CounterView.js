@@ -30,7 +30,8 @@ export function CounterView({ context, onClose, onSave, onCalendar, calendarBusy
     sellerCounter: recalculating ? priceText(last.price) : Number.isFinite(context.prefillCounter) ? priceText(context.prefillCounter) : '',
     counterMode: 'eur',
     receivedAgo: 'just_now',
-    maxPrice: '',
+    // 1.11: an offer made to sell again never goes above the price that does not lose.
+    maxPrice: Number.isFinite(context.prefillMax) && context.prefillMax > 0 ? priceText(context.prefillMax) : '',
     chat: false,
     competition: false,
     publicPrice: false,

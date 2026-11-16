@@ -26,8 +26,9 @@ import { useExpectedCurve } from './src/hooks/useExpectedCurve.js'
 import { useVintedBridge } from './src/hooks/useVintedBridge.js'
 import { VintedNotices } from './src/components/VintedNotices.js'
 import { VintedTab } from './src/components/vinted/VintedTab.js'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { copyText } from './src/services/clipboard.js'
-import { counterRawFor, policyTargetFor } from './src/services/counterInput.js'
+import { budgetOfItem, counterRawFor, policyTargetFor } from './src/services/counterInput.js'
 import { VIA_LABEL, eventNotesFor, openCalendarWithEvent } from './src/services/calendar.js'
 import { ensureNotificationPermission, listenToReminderTaps, scheduleReminderAt } from './src/services/notifications.js'
 import { recordRead } from './src/services/readStats.js'
@@ -37,6 +38,8 @@ import { logVisit } from './src/services/vintedDiag.js'
 import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { space, useTheme } from './src/theme.js'
 import { Collapsible } from './src/components/ui.js'
+
+const AIM_KEY = 'offerta-vinted.aim.v1'
 
 const TABS = [
   { id: 'vinted', label: 'Vinted' },
@@ -135,6 +138,16 @@ function Main() {
   const choiceRef = useRef({ kind: 'auto' })
   /** The last strategy computed and the form it was computed for: what a save right after runAnalysis stores. */
   const lastRunRef = useRef(null)
+  /**
+   * 1.11 — what the purchase is for: 'resell' (the proposals never cost more than the resale gives back) or 'keep'
+   * (the costs are only shown). Remembered between launches.
+   */
+  const aimRef = useRef('resell')
+  useEffect(() => {
+    AsyncStorage.getItem(AIM_KEY).then((saved) => {
+      if (saved === 'keep' || saved === 'resell') aimRef.current = saved
+    }).catch(() => {})
+  }, [])
   const [saveState, setSaveState] = useState(null)
   const [goal, setGoal] = useState(0.7)
   const [plan, setPlan] = useState(null)
@@ -309,6 +322,8 @@ function Main() {
       // The seller's last visit ages with the time passed since the page was read; a form that carries a link but no
       // reading of this session (a saved offer opened again) says nothing about «online adesso».
       ...(ctx ? { readAt: ctx.at } : linkOf(nextForm) ? { readAt: 0 } : {}),
+      // 1.11: the purchase as a whole. The resale value is the one typed, else the engine's default.
+      goal: aimRef.current, ...(Number.isFinite(parsePrice(nextForm.resalePrice)) && parsePrice(nextForm.resalePrice) > 0 ? { resale: parsePrice(nextForm.resalePrice) } : {}),
       ...(pick.kind === 'option' ? { chosen: pick.id } : pick.kind === 'custom' ? { customPrice: pick.price } : {}),
     }))
     if (!strat.ok) {
@@ -395,6 +410,26 @@ function Main() {
     setForm(nextForm)
     setPlan(null)
     runAnalysis(nextForm, pinnedSendAt, { choice: option.id === 'tua' ? { kind: 'custom', price: option.price } : { kind: 'option', id: option.id } })
+  }
+
+  /** «Per rivendere» / «Per me»: the proposals are computed again for the new aim, and the best one is picked again. */
+  const changeAim = (next) => {
+    if (next !== 'keep' && next !== 'resell') return
+    aimRef.current = next
+    AsyncStorage.setItem(AIM_KEY, next).catch(() => {})
+    if (strategy) {
+      setPlan(null)
+      runAnalysis(form, pinnedSendAt, { choice: { kind: 'auto' } })
+    }
+  }
+
+  /** «Lo rivendo a»: the price the article would be sold again at (blank = the engine's default). */
+  const changeResale = (text) => {
+    const value = parsePrice(text)
+    const nextForm = { ...form, resalePrice: Number.isFinite(value) && value > 0 ? String(value).replace('.', ',') : '' }
+    setForm(nextForm)
+    setPlan(null)
+    runAnalysis(nextForm, pinnedSendAt, { choice: { kind: 'auto' } })
   }
 
   /** A lever with a reminder («metti nei preferiti e aspetta», «aspetta 7 giorni»): one notification, no item in the list. */
@@ -511,6 +546,7 @@ function Main() {
         const byPage = details && typeof details.sellerUrl === 'string' && /\/member\/\d+/.test(details.sellerUrl) ? details.sellerUrl : null
         const sellerUrl = byName || byPage
         profileRead.sellerLink = byName ? 'name' : byPage ? 'page' : null
+        profileRead.sellerNameRead = Boolean(ex.sellerUsername)
         if (sellerUrl) {
           setExtractPhase('seller')
           const member = await pageLoaderRef.current.load(sellerUrl, { onVisible: () => setExtractPhase('verify') })
@@ -518,6 +554,7 @@ function Main() {
             memberRaw = member.details
             wardrobe = wardrobeFromProbe(member.details)
             profileRead.memberPage = wardrobe ? 'ok' : 'nothing_read'
+            profileRead.memberSeen = member.details.diag || null
           } else profileRead.memberPage = member.ok ? 'not_a_profile' : member.reason || 'failed'
         }
         setExtractPhase(null)
@@ -909,7 +946,11 @@ function Main() {
       if (seller && saved && !saved.sellerName) patch.sellerName = seller
       if (Object.keys(patch).length) await watchlist.update(itemId, patch)
       const rec = outcome.recommended
-      const move = rec && rec.id === 'accept' ? `conviene accettare a ${formatEuro(price)}` : rec && Number.isFinite(rec.price) ? `rilancia a ${formatEuro(rec.price)}` : 'apri la Lista'
+      const budget = budgetOfItem(item)
+      // No reply fits under the ceiling of an offer made to sell again: the plan is to leave it, and it says why.
+      const move = rec && rec.id === 'accept' ? `conviene accettare a ${formatEuro(price)}`
+        : rec && Number.isFinite(rec.price) ? `rilancia a ${formatEuro(rec.price)}`
+          : outcome.kind === 'walk_away' && budget !== null ? `è sopra il tetto di ${formatEuro(budget)}, non conviene: lascia o aspetta che scenda` : 'apri la Lista'
       showToast(`«${shortTitle(item.title)}»: controproposta di ${formatEuro(price)} registrata. Piano: ${move}.`, 7000)
       return 'saved'
     } catch {
@@ -1110,7 +1151,17 @@ function Main() {
         tratti: (strategy.seller.traits || []).map((x) => `${x.pts > 0 ? '+' : ''}${x.pts} ${x.label}`),
       },
       momento: strategy.moment,
-      proposte: (strategy.options || []).map((o) => ({ tipo: o.id, prezzo: o.price, sconto_pct: o.discountPct, probabilita_pct: Number.isFinite(o.probability) ? Math.round(o.probability * 100) : null, consigliata: Boolean(o.recommended) })),
+      // 1.11: the purchase as a whole. The shipping is the listing's («page»), an estimate, or typed; the resale the
+      // listing price, the market's median, or typed.
+      costi: strategy.costs ? {
+        scopo: strategy.goal, spedizione: strategy.costs.shipping.amount, spedizione_da: strategy.costs.shipping.source,
+        rivendita: strategy.costs.resale.amount, rivendita_da: strategy.costs.resale.source, tetto: strategy.costs.ceiling, minimo_vinted: strategy.costs.floor,
+        tetto_raggiungibile: strategy.costs.reachable, senza_margine: strategy.costs.noMargin,
+      } : null,
+      proposte: (strategy.options || []).map((o) => ({
+        tipo: o.id, prezzo: o.price, sconto_pct: o.discountPct, probabilita_pct: Number.isFinite(o.probability) ? Math.round(o.probability * 100) : null, consigliata: Boolean(o.recommended),
+        totale: o.total ?? null, margine: o.margin ?? null, controproposta_attesa: o.landing ?? null, margine_medio: o.expectedMargin ?? null,
+      })),
     }, null, 1)
   }
 
@@ -1119,7 +1170,7 @@ function Main() {
       itemTitle: item.title || '', category: item.category || '', listPrice: String(item.listPrice ?? '').replace('.', ','),
       targetPrice: String(item.targetPrice ?? '').replace('.', ','), listingAge: 'unknown', sellerProfile: 'unknown', listingSignal: 'none', link: item.link || '',
     }
-    setCounterContext({ key: `${item.id}-${Date.now()}`, source: 'item', itemId: item.id, form: item.form || fallbackForm, history: item.negotiation || [], offerSentAt: item.sentAt || null, link: item.link || '', prefillCounter: Number.isFinite(prefillCounter) ? prefillCounter : null })
+    setCounterContext({ key: `${item.id}-${Date.now()}`, source: 'item', itemId: item.id, form: item.form || fallbackForm, history: item.negotiation || [], offerSentAt: item.sentAt || null, link: item.link || '', prefillCounter: Number.isFinite(prefillCounter) ? prefillCounter : null, prefillMax: budgetOfItem(item) })
     scrollTop()
   }
 
@@ -1231,6 +1282,8 @@ function Main() {
           onCopyMessage={noteMessageCopied}
           onDetails={() => setTab('calcola')}
           onToast={browserToast}
+          onAim={changeAim}
+          onResale={changeResale}
           capture={capture}
           onConversation={onConversation}
           onInbox={onInbox}
@@ -1300,6 +1353,8 @@ function Main() {
                   onApplyPrice={applyPrice}
                   strategy={strategy}
                   onPickProposal={pickProposal}
+                  onAim={changeAim}
+                  onResale={changeResale}
                   onLever={scheduleLever}
                   onCopyMessage={noteMessageCopied}
                   link={form.link}

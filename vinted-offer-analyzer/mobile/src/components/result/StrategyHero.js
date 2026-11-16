@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { capitalize, formatEuro, toPercent } from '../../../core/index.js'
 import { copyText } from '../../services/clipboard.js'
 import { radius, space, toneColors, useTheme } from '../../theme.js'
-import { Badge, Body, Button, Card, InlineAction, Note } from '../ui.js'
+import { Badge, Body, Button, Card, Chip, Field, InlineAction, Note } from '../ui.js'
 
 const TYPE_TONE = { facile: 'good', medio: 'warn', difficile: 'bad' }
 const CONFIDENCE = { alta: 'profilo completo', media: 'profilo parziale', bassa: 'pochi dati sul venditore' }
@@ -24,7 +24,73 @@ function Proposal({ option, selected, onPress }) {
       {option.recommended ? <Text style={[styles.star, { color: t.accentInk }]} accessibilityLabel="paga meno in media">★</Text> : null}
       <Text style={[styles.proposalPrice, { color: t.ink }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{formatEuro(option.price)}</Text>
       <Text style={[styles.proposalSub, { color: t.ink3 }]} numberOfLines={1}>−{Math.round(option.discountPct)}% · {toPercent(option.probability)}%</Text>
+      {Number.isFinite(option.total) ? <Text style={[styles.proposalSub, { color: t.ink3 }]} numberOfLines={1}>tot. {formatEuro(option.total)}</Text> : null}
     </Pressable>
+  )
+}
+
+/**
+ * The purchase as a whole (1.11): what the chosen proposal costs with Vinted's protection and the shipping, what is
+ * left when the article is sold again, where a counter-offer would land. «Per rivendere» caps the proposals at the
+ * price that does not lose; «Per me» only shows the costs.
+ */
+function CostBlock({ strategy, chosen, onGoal, onResale }) {
+  const t = useTheme()
+  const { costs } = strategy
+  const resell = strategy.goal === 'resell'
+  const typed = costs.resale.source === 'user'
+  const [text, setText] = useState(typed ? String(costs.resale.amount).replace('.', ',') : '')
+  const resale = costs.resale.amount
+  const shipWord = costs.shipping.source === 'estimate' ? 'spedizione (stima)' : 'spedizione'
+  const gain = chosen.margin
+  const tone = toneColors(t, gain >= 0 ? 'good' : 'bad')
+  const from = costs.resale.source === 'market' ? ' (la mediana degli annunci simili)' : costs.resale.source === 'listing' ? ' (il prezzo dell\'annuncio)' : ''
+  let counter = `Se controbatte arriverà verso ${formatEuro(chosen.landing)}, in tutto ${formatEuro(chosen.landingTotal)}`
+  if (!resell) counter += '.'
+  else if (chosen.landingMargin >= 0) counter += ': resti in guadagno, puoi chiudere.'
+  else if (costs.reachable) counter += `: rilancia e chiudi solo fino a ${formatEuro(costs.ceiling)}.`
+  else counter += '.'
+  return (
+    <View style={[styles.costs, { borderColor: t.line }]}>
+      <View style={styles.inlineRow}>
+        <Chip compact label="Per rivendere" active={resell} onPress={() => onGoal && onGoal('resell')} />
+        <Chip compact label="Per me" active={!resell} onPress={() => onGoal && onGoal('keep')} />
+      </View>
+      <Body small>
+        Con {formatEuro(chosen.price)} paghi in tutto <Text style={{ fontWeight: '700' }}>{formatEuro(chosen.total)}</Text>: {formatEuro(chosen.fee)} di commissione Vinted e {formatEuro(costs.shipping.amount)} di {shipWord}.
+      </Body>
+      {resell ? (
+        <Body small style={{ color: tone.fg, fontWeight: '600' }}>
+          {gain >= 0 ? `Rivendendolo a ${formatEuro(resale)}${from} ti restano ${formatEuro(gain)}.` : `Rivendendolo a ${formatEuro(resale)}${from} ci perdi ${formatEuro(-gain)}.`}
+        </Body>
+      ) : (
+        <Body small muted>Se un giorno lo rivendi, per non perderci dovrai chiedere almeno {formatEuro(chosen.total)}.</Body>
+      )}
+      {resell && costs.reachable ? <Body small muted>Tetto per non perderci: {formatEuro(costs.ceiling)}. Nessuna delle tre proposte lo supera.</Body> : null}
+      {resell && !costs.reachable ? (
+        <Body small muted>
+          Per non perderci dovresti pagarlo al massimo {formatEuro(costs.ceiling)}, ma Vinted non lascia offrire meno di {formatEuro(costs.floor)}: rivendendo a {formatEuro(resale)} il margine non c'è. Vale se lo tieni, o se vale di più: scrivi sotto a quanto lo rivendi.
+        </Body>
+      ) : null}
+      <Body small muted>{counter}</Body>
+      {resell ? (
+        <View style={styles.resale}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Field
+              label="Lo rivendo a"
+              value={text}
+              onChangeText={setText}
+              placeholder={String(resale).replace('.', ',')}
+              keyboardType="decimal-pad"
+              suffix="€"
+              returnKeyType="done"
+              onSubmitEditing={() => onResale && onResale(text)}
+            />
+          </View>
+          <Button label="Ricalcola" variant="secondary" small onPress={() => onResale && onResale(text)} />
+        </View>
+      ) : null}
+    </View>
   )
 }
 
@@ -32,7 +98,7 @@ function Proposal({ option, selected, onPress }) {
  * The 1.8 hero: who the seller is, three proposals, when to send, the moves in order, one primary button.
  * `strategy` comes from strategyFor (core); `result` is the analysis of the chosen proposal.
  */
-export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage }) {
+export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const { seller, options, moment, plan } = strategy
@@ -85,9 +151,16 @@ export function StrategyHero({ strategy, result, saveState = null, calendarBusy 
           <Body small>La tua cifra: {formatEuro(own.price)} (−{Math.round(own.discountPct)}%) · {toPercent(own.probability)}%</Body>
         </Pressable>
       ) : null}
-      <Body small muted>
-        ★ = paga meno in media. Con {formatEuro(chosen.price)} paghi in media {formatEuro(chosen.expectedPrice)} tra sì, controproposte e no. {history}{counter}
-      </Body>
+      {strategy.costs && strategy.goal === 'resell' && !strategy.costs.noMargin ? (
+        <Body small muted>
+          ★ = guadagna di più in media, contando che se rifiuta non compri. {history}
+        </Body>
+      ) : (
+        <Body small muted>
+          ★ = paga meno in media. Con {formatEuro(chosen.price)} paghi in media {formatEuro(chosen.expectedPrice)} tra sì, controproposte e no. {history}{strategy.costs ? '' : counter}
+        </Body>
+      )}
+      {strategy.costs && Number.isFinite(chosen.total) ? <CostBlock key={`${input.listPrice}|${input.itemTitle}|${strategy.costs.resale.source}|${strategy.costs.resale.amount}`} strategy={strategy} chosen={chosen} onGoal={onGoal} onResale={onResale} /> : null}
 
       <View style={{ gap: 2 }}>
         <Text style={[styles.h2, { color: t.ink }]}>{when}</Text>
@@ -139,7 +212,9 @@ const styles = StyleSheet.create({
   eyebrowAction: { paddingVertical: 0, minHeight: 0, flexShrink: 0 },
   inlineRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm },
   proposals: { flexDirection: 'row', gap: space.sm },
-  proposal: { flex: 1, minWidth: 0, borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 8, paddingVertical: 10, gap: 2, minHeight: 84, justifyContent: 'center' },
+  proposal: { flex: 1, minWidth: 0, borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 8, paddingVertical: 10, gap: 2, minHeight: 98, justifyContent: 'center' },
+  costs: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: space.sm, gap: 6 },
+  resale: { flexDirection: 'row', alignItems: 'flex-end', gap: space.sm },
   proposalLabel: { fontSize: 11, fontWeight: '700' },
   star: { position: 'absolute', top: 4, right: 6, fontSize: 10, fontWeight: '800' },
   proposalPrice: { fontSize: 20, fontWeight: '800', lineHeight: 26, fontVariant: ['tabular-nums'] },

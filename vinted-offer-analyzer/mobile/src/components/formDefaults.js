@@ -8,4 +8,6 @@ export const EMPTY_FORM = {
   listingAge: 'unknown',
   sellerProfile: 'unknown',
   listingSignal: 'none',
+  // 1.11: the price the article would be sold again at (blank = the market's median when known, else the listing price).
+  resalePrice: '',
 }

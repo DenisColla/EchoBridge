@@ -16,6 +16,7 @@ import { CATEGORIES, VINTED } from './constants.js'
 import { analyzeOffer, parsePrice } from './analyze.js'
 import { formatEuro } from './messages.js'
 import { policyAgeTierOf, policyBandOf, precisePriceFor } from './policy.js'
+import { ceilingPriceFor, purchaseCost, shippingEstimateFor } from './costs.js'
 
 const stFinite = (v) => typeof v === 'number' && Number.isFinite(v)
 const stClamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
@@ -302,6 +303,8 @@ export function planFor({ type, price, title }) {
 
 /**
  * The whole strategy for a form. Options: everything analyzeOffer takes (profile, market, records, key, month) plus
+ * `goal` ('keep' | 'resell'), `resale` (the price the article would be sold again at; default the market's median,
+ * else the listing price), `shipping` (default the listing's «Spedizione da…», else an estimate), `marginPct`,
  * `extraction`, `signals`, `wardrobe` (for the seller profile), `chosen` ('prudente' | 'consigliata' | 'audace' or a
  * price), `seller` (a profile already computed) and `readAt` (ms: when the listing page was read, so the seller's
  * last visit ages with the time passed since; 0 = not read now). Returns
@@ -344,7 +347,7 @@ export function strategyFor(form, now = new Date(), options = {}) {
     return p === null ? null : Math.min(p, stR2(L - (L < 20 ? 0.5 : 1)))
   }
   const wanted = [['prudente', Math.max(STRATEGY.MIN_PTS, center - STRATEGY.PRUDENT_STEP_PTS)], ['consigliata', center], ['audace', Math.min(VINTED.MAX_DISCOUNT_PCT - 2, center + STRATEGY.BOLD_STEP_PTS)]]
-  const priced = []
+  let priced = []
   for (const [id, pts] of wanted) {
     let price = priceAt(pts)
     if (price === null) continue
@@ -355,6 +358,35 @@ export function strategyFor(form, now = new Date(), options = {}) {
     priced.push({ id, price })
   }
   if (!priced.length) priced.push({ id: 'consigliata', price: stR2(L - step) })
+
+  // 1.11 — what the purchase really costs (price + Vinted's protection + shipping) and what is left when the article
+  // is sold again. `goal` 'resell': no proposal may cost more than the resale gives back, so the three are capped at
+  // the ceiling (the dearest one is the ceiling itself, the others open below it: the counter-offer is where the
+  // deal usually lands). `goal` 'keep' (the default): the proposals stay the seller's, the costs are only shown.
+  const goal = options.goal === 'resell' ? 'resell' : 'keep'
+  const categoryId = form.category && typeof form.category === 'object' ? form.category.id : form.category
+  const shipping = stFinite(options.shipping) && options.shipping >= 0 ? { amount: stR2(options.shipping), source: 'user' }
+    : stFinite(ex.shippingFrom) && ex.shippingFrom >= 0 ? { amount: stR2(ex.shippingFrom), source: 'page' }
+      : shippingEstimateFor({ category: categoryId, listPrice: L })
+  const resale = stFinite(options.resale) && options.resale > 0 ? { amount: stR2(options.resale), source: 'user' }
+    : market && stFinite(market.medianPrice) && market.medianPrice > 0 ? { amount: stR2(market.medianPrice), source: 'market' }
+      : { amount: L, source: 'listing' }
+  const marginPct = stFinite(options.marginPct) ? stClamp(options.marginPct, 0, 60) : 0
+  const ceiling = ceilingPriceFor(resale.amount, shipping.amount, marginPct)
+  const reachable = ceiling >= floor - 1e-9
+  if (goal === 'resell' && reachable) {
+    let cap = Math.floor(ceiling / step + 1e-9) * step
+    if (cap >= L) cap = L - step
+    const capped = []
+    for (const o of priced) {
+      let price = Math.min(o.price, cap)
+      const prev = capped.length ? capped[capped.length - 1].price : null
+      if (prev !== null && price >= prev) price = prev - step
+      if (price < floor - 1e-9 || price <= 0) continue
+      capped.push({ ...o, price: stR2(price) })
+    }
+    if (capped.length) priced = capped
+  }
   // A price the user typed that is none of the three rides along as «La tua cifra» and is the one analysed.
   const custom = stFinite(options.customPrice) ? stR2(Math.max(options.customPrice, Math.ceil(floor * 100) / 100)) : null
   const ownIsNew = custom !== null && custom > 0 && custom < L && !priced.some((o) => Math.abs(o.price - custom) < 0.005)
@@ -375,7 +407,16 @@ export function strategyFor(form, now = new Date(), options = {}) {
     const counterChance = probability === null ? null : Math.min(counterRaw, Math.max(0, 0.95 - probability))
     const counterPrice = stR2(Math.min(L, L - STRATEGY.COUNTER_GIVE_SHARE * (L - o.price)))
     const expectedPrice = probability === null ? null : stR2(probability * o.price + counterChance * counterPrice + (1 - probability - counterChance) * L)
-    return { id: o.id, label: OPTION_LABEL[o.id], price: o.price, discountPct: Math.round(discountPct * 10) / 10, probability, engineProbability: engineP, counterChance, counterPrice, expectedPrice, saving: stR2(L - o.price), history: { n: cell.n, accepted: cell.accepted, countered: cell.countered }, result }
+    const cost = purchaseCost(o.price, shipping.amount)
+    const landed = purchaseCost(counterPrice, shipping.amount)
+    const margin = stR2(resale.amount - cost.total)
+    const landingMargin = stR2(resale.amount - landed.total)
+    // What is gained on average when a refusal costs nothing (the article is simply not bought): the deal at this
+    // price, or the counter-offer when it still leaves something.
+    const expectedMargin = probability === null ? null : stR2(probability * margin + counterChance * Math.max(0, landingMargin))
+    return {
+      fee: cost.fee, total: cost.total, margin, landing: counterPrice, landingTotal: landed.total, landingMargin, safe: o.price <= ceiling + 1e-9, expectedMargin,
+      id: o.id, label: OPTION_LABEL[o.id], price: o.price, discountPct: Math.round(discountPct * 10) / 10, probability, engineProbability: engineP, counterChance, counterPrice, expectedPrice, saving: stR2(L - o.price), history: { n: cell.n, accepted: cell.accepted, countered: cell.countered }, result }
   })
   const scored = analysed.filter((o) => o.expectedPrice !== null && o.id !== 'tua')
   // The cheapest on average wins; within 1% of the listing price the type decides (difficile → the gentler option).
@@ -383,6 +424,18 @@ export function strategyFor(form, now = new Date(), options = {}) {
   if (scored.length > 1) {
     const near = scored.filter((o) => o.expectedPrice - best.expectedPrice <= 0.01 * L)
     if (near.length > 1) best = seller.type === 'difficile' ? near[0] : seller.type === 'facile' ? near[near.length - 1] : near.find((o) => o.id === 'consigliata') || best
+  }
+  // To sell again: the proposal that gains the most on average among those that cannot lose (a refusal costs nothing:
+  // the article is simply not bought). Within 1% of the listing price the type decides, as above. When no proposal can
+  // gain, the cheapest on average stays and `noMargin` says so.
+  let noMargin = false
+  if (goal === 'resell') {
+    const gain = scored.filter((o) => o.safe && o.expectedMargin !== null && o.expectedMargin > 0.004)
+    if (gain.length) {
+      const top = gain.reduce((a, b) => (b.expectedMargin > a.expectedMargin ? b : a))
+      const close = gain.filter((o) => top.expectedMargin - o.expectedMargin <= 0.01 * L)
+      best = close.length > 1 ? (seller.type === 'difficile' ? close[0] : seller.type === 'facile' ? close[close.length - 1] : close.find((o) => o.id === 'consigliata') || top) : top
+    } else noMargin = true
   }
   const chosenOpt = (typeof options.chosen === 'string' ? analysed.find((o) => o.id === options.chosen) : null)
     || (custom !== null ? analysed.find((o) => Math.abs(o.price - custom) < 0.005) : null) || best
@@ -398,6 +451,13 @@ export function strategyFor(form, now = new Date(), options = {}) {
     plan: planFor({ type: seller.type, price: chosenOpt.price, title: form.itemTitle }),
     experience,
     result,
+    goal,
+    // What the figures above were computed with: the protection on the listing price, the shipping and where it comes
+    // from ('page' | 'estimate' | 'user'), the resale value ('user' | 'market' | 'listing'), the highest price that
+    // does not lose (`ceiling`), the lowest offer Vinted allows (`floor`), whether the two meet (`reachable`).
+    costs: {
+      fee: purchaseCost(L, 0).fee, shipping, resale, marginPct, ceiling: stR2(ceiling), floor: stR2(Math.ceil(floor * 100 - 1e-7) / 100), reachable, noMargin,
+    },
   }
 }
 
@@ -410,5 +470,11 @@ export function strategySnapshot(strategy) {
     traits: (strategy.seller.traits || []).map((t) => t.id), confidence: strategy.seller.confidence,
     option: strategy.chosenId, recommended: strategy.recommendedId, moment: strategy.moment ? strategy.moment.kind : null,
     probability: chosen ? chosen.probability : null, expectedPrice: chosen ? chosen.expectedPrice : null,
+    // 1.11: the purchase as a whole and the resale it was judged against.
+    goal: strategy.goal || 'keep',
+    total: chosen && stFinite(chosen.total) ? chosen.total : null, margin: chosen && stFinite(chosen.margin) ? chosen.margin : null,
+    shipping: strategy.costs ? strategy.costs.shipping.amount : null, shippingSource: strategy.costs ? strategy.costs.shipping.source : null,
+    resale: strategy.costs ? strategy.costs.resale.amount : null, resaleSource: strategy.costs ? strategy.costs.resale.source : null,
+    ceiling: strategy.costs ? strategy.costs.ceiling : null,
   }
 }
