@@ -12,11 +12,13 @@
  *
  *   nextRefreshDelayMs(random)          → milliseconds until the next reading
  *   toleranceFor(signals)               → 0 | 10 | 15 (% above the highest price)
+ *   cardsFromHtml(html)                 → the cards of a downloaded page, from its own markup
  *   findFromCard(card, origin)          → what a card says of an article
  *   mergeFinds(finds, cards, { at })    → { finds, fresh } (one entry per article, price drops kept)
  *   rankFinds(finds, job)               → the list as shown, best first
  *   jobEndsAt(job) · jobActive(job, now)
  */
+import { decodeEntities } from './extract.js'
 import { cardFactsOf, cardPriceOf, conditionBandOf } from './productMarket.js'
 
 export const WATCH = Object.freeze({
@@ -54,24 +56,73 @@ export function toleranceFor(signals) {
 }
 
 /**
- * The hearts a card shows. After the card's description («…, 28.00 €, 30.10 €») its visible text begins with an
- * optional badge and the count («Ricercato 23 DEKKER M · Ottime…», «3 H&M M ·…»): the last such number, else null.
+ * The hearts a card shows. After the card's description («…, 28.00 €, 30.10 €», on the home followed by «Include la
+ * commissione Vinted») its visible text begins with an optional badge and the count («Ricercato 23 DEKKER M ·
+ * Ottime…», «3 H&M M ·…», «1 Domyos Ottime 24,00 €»): the last such number, else null. A reading of the page that
+ * found the heart button itself (`card.hearts`) is preferred to this.
  */
 export function favouritesOfCard(text) {
   let last = null
-  for (const m of String(text || '').matchAll(/\d+\.\d{2}\s?€\s+(?:[A-Za-zÀ-ÿ]+\s+)?(\d{1,5})\s+[^\d\s]/g)) last = Number(m[1])
+  const re = /\d+\.\d{2}\s?€\s+(?:include\s+la\s+(?:commissione\s+vinted|protezione\s+acquisti)\s+)?(?:[A-Za-zÀ-ÿ]+\s+)?(\d{1,5})\s+[^\d\s]/gi
+  for (const m of String(text || '').matchAll(re)) last = Number(m[1])
   return last
 }
 
-/** What a card says of an article: { id, title, brand, condition, band, size, price, favourites, url }, or null. */
+/**
+ * The cards of a page downloaded without a browser, from its own markup: every link to an article that carries the
+ * description («titolo, brand: X, condizioni: Y, 24.00 €, 25.90 € …») in its `title`, and the hearts of the button
+ * that follows it. The same shape the in-app reader gives: { id, price, text, hearts }.
+ */
+export function cardsFromHtml(html, limit = 120) {
+  const src = String(html || '')
+  const out = []
+  const seen = new Set()
+  const tags = /<a\b[^>]*>/gi
+  let m
+  while ((m = tags.exec(src)) && out.length < limit) {
+    const tag = m[0]
+    const id = (tag.match(/\bhref="[^"]*\/items\/(\d{6,})/) || [])[1]
+    const title = (tag.match(/\btitle="([^"]*)"/) || [])[1]
+    if (!id || !title || seen.has(id)) continue
+    const text = decodeEntities(title).replace(/\s+/g, ' ').trim()
+    const price = (text.match(/(\d+(?:[.,]\d{2})?)\s?€/) || [])[1] || null
+    if (!price) continue
+    seen.add(id)
+    // What belongs to this card: up to the next link to another article.
+    const tail = src.slice(m.index + tag.length, m.index + tag.length + 4000)
+    const next = tail.search(/<a\b[^>]*\/items\/\d{6,}/i)
+    const own = next >= 0 ? tail.slice(0, next) : tail
+    const hearts = own.match(/preferiti da\s*(\d+)/i)
+    out.push({ id, price, text: text.slice(0, 300), hearts: hearts ? Number(hearts[1]) : /favourite/i.test(own) ? 0 : null, boost: /bump-text/i.test(own) })
+  }
+  return out
+}
+
+/**
+ * What a card says of an article: { id, title, brand, condition, band, size, price, favourites, boost, url }, or
+ * null. A card is what the in-app reader or cardsFromHtml give ({ id, price, text, hearts }), or an entry of the
+ * search page's own data (catalog.js: { source: 'vinted', id, title, price, brand, size, condition, favourites,
+ * promoted, url }).
+ */
 export function findFromCard(card, origin = 'https://www.vinted.it') {
   if (!card || card.id === undefined || card.id === null) return null
+  const base = String(origin).replace(/\/+$/, '')
+  if (card.source === 'vinted' && typeof card.title === 'string') {
+    const amount = cardPriceOf(card.price)
+    if (amount === null) return null
+    return {
+      id: String(card.id), title: card.title, brand: card.brand || null, condition: card.condition || null, band: conditionBandOf(card.condition),
+      size: card.size || null, price: amount, favourites: wtFinite(card.favourites) ? card.favourites : null, boost: card.promoted === true,
+      url: typeof card.url === 'string' && card.url ? card.url : `${base}/items/${card.id}`,
+    }
+  }
   const price = cardPriceOf(card.price)
   if (price === null) return null
   const said = cardFactsOf(card.text)
   return {
     id: String(card.id), title: said.title || '', brand: said.brand || null, condition: said.condition || null, band: conditionBandOf(said.condition),
-    size: said.size || null, price, favourites: favouritesOfCard(card.text), url: `${String(origin).replace(/\/+$/, '')}/items/${card.id}`,
+    size: said.size || null, price, favourites: wtFinite(card.hearts) ? card.hearts : favouritesOfCard(card.text),
+    boost: card.boost === true || /\bcon boost\b/i.test(String(card.text || '')), url: `${base}/items/${card.id}`,
   }
 }
 

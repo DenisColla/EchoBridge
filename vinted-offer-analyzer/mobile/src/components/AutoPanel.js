@@ -21,9 +21,11 @@ const countdown = (ms) => {
  * - Semi-automatica: a search (typed here, or taken from the page open in the Vinted tab: `draft`) is read again for
  *   24 hours; the best article within the highest price is proposed, and the user sends the offer.
  * - Automatica: the user's Vinted home is read again for 8 hours and what passed there is ranked.
- * The readings happen while the app is open; a verification asked by Vinted stops the job.
+ * `background` ({ service, battery, android }): whether the service that keeps the readings going with the app behind
+ * is running, and whether Android leaves the app without battery restrictions. A verification asked by Vinted stops
+ * the job.
  */
-export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false }) {
+export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null }) {
   const t = useTheme()
   const { mode, job, finds, draft } = auto
   const [words, setWords] = useState('')
@@ -42,7 +44,8 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const shown = rankFinds(finds, job && job.kind === 'hunt' ? job : null).slice(0, 60)
   const stopped = job && job.stopped
   const status = !job ? null
-    : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · leggo…'} · fino alle ${clock(jobEndsAt(job))}`
+    : running && job.waiting ? `In pausa · ${job.reads || 0} letture: Vinted ha risposto con un controllo mentre l'app era dietro. Riprendo da qui, con l'app aperta.`
+      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · leggo…'} · fino alle ${clock(jobEndsAt(job))}`
       : stopped === 'verifica' ? 'Fermata: Vinted ha chiesto una verifica. Aprila nella scheda Vinted, poi riavvia.'
         : stopped === 'utente' ? 'Fermata da te.'
           : `Finita: ${job.reads || 0} letture.`
@@ -71,13 +74,24 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         ) : null}
         {mode === 'auto' ? (
           <View style={{ gap: space.sm }}>
-            <Body small muted>Per {WATCH.FEED_HOURS} ore rileggo la tua home di Vinted ogni 8–12 minuti e tengo quello che passa: i più cercati e quelli che calano di prezzo in cima.</Body>
+            <Body small muted>Per {WATCH.FEED_HOURS} ore rileggo la tua home di Vinted ogni 8–12 minuti e tengo quello che passa: i più cercati e quelli che calano di prezzo in cima. Con l'app aperta la scorro e ne leggo di più; con l'app dietro arrivano solo i primi articoli.</Body>
             <ButtonRow>
               <Button label={`Avvia la vetrina (${WATCH.FEED_HOURS} ore)`} small disabled={running || busy} onPress={onStartFeed} />
             </ButtonRow>
           </View>
         ) : null}
-        {mode !== 'manual' ? <Body small muted>Per ora legge mentre l'app è aperta sullo schermo: finché una ricerca è in corso tengo lo schermo acceso (meglio col telefono in carica). Se esci dall'app le letture si fermano e riprendono quando torni. Se Vinted chiede una verifica mi fermo e te lo dico.</Body> : null}
+        {mode !== 'manual' ? (
+          <View style={{ gap: space.xs }}>
+            <Body small muted>Le letture continuano anche con l'app dietro o lo schermo spento: una notifica fissa resta visibile finché la ricerca è in corso. Non chiudere l'app dalle app recenti. Se Vinted chiede una verifica mi fermo e te lo dico.</Body>
+            {background && background.android && background.battery === false ? (
+              <View style={{ gap: space.xs }}>
+                <Body small style={{ color: t.warnInk || t.ink, fontWeight: '600' }}>Batteria: Android limita l'app. Per 24 ore di fila serve «Senza restrizioni»: Impostazioni dell'app › Batteria.</Body>
+                {onBattery ? <InlineAction label="Apri le impostazioni dell'app" onPress={onBattery} /> : null}
+              </View>
+            ) : null}
+            {background && background.android && background.battery === true ? <Body small muted>Batteria: senza restrizioni.</Body> : null}
+          </View>
+        ) : null}
       </Card>
 
       {job ? (
@@ -85,6 +99,9 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           <SectionLabel>{job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}{job.label ? ` · ${job.label}` : ''}</SectionLabel>
           <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
           {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
+          {running && background && background.android ? (
+            <Body small muted>{background.service ? 'Lavoro in background attivo (notifica fissa).' : 'Lavoro in background non attivo: leggo solo con l\'app aperta e tengo lo schermo acceso.'}</Body>
+          ) : null}
           <ButtonRow>
             {running ? <Button label="Ferma" variant="secondary" small onPress={onStop} /> : null}
             <Button label="Condividi il diario" variant="ghost" small onPress={onShareLog} />
@@ -100,7 +117,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text numberOfLines={1} style={{ color: t.ink, fontWeight: '600' }}>{f.title || 'Articolo'}</Text>
               <Text numberOfLines={1} style={{ color: t.ink3, fontSize: 12 }}>
-                {[f.brand, f.size, f.condition, Number.isFinite(f.favourites) ? `${f.favourites} ♥` : null, f.seen > 1 ? `visto ${f.seen} volte` : null].filter(Boolean).join(' · ')}
+                {[f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null, f.seen > 1 ? `visto ${f.seen} volte` : null].filter(Boolean).join(' · ')}
               </Text>
               {f.exceptional || f.tolerancePct || f.eligible === false ? (
                 <Text numberOfLines={1} style={{ color: f.eligible === false ? t.ink3 : t.accentInk, fontSize: 12, fontWeight: '600' }}>

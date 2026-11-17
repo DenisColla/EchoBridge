@@ -1,0 +1,26 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <application>
+    <!-- 1.15: keeps the readings of a hunt going with the app behind; it shows a fixed notification while it runs. -->
+    <service
+      android:name=".WatchKeepAliveService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Reads again, every few minutes, a search the user saved, and notifies the best find" />
+    </service>
+    <!-- Read-only listener: it only copies the title and text of Vinted's own notifications into the app's storage. -->
+    <service
+      android:name=".VintedNotificationService"
+      android:label="Vinted Caccia"
+      android:exported="true"
+      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+      <intent-filter>
+        <action android:name="android.service.notification.NotificationListenerService" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

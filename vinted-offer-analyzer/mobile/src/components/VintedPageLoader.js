@@ -243,9 +243,23 @@ export const PAGE_PROBE = `(function () {
         // Laid out, one element per line: glued, a title ending in a digit would change the price after it.
         if (!p) p = String(node.innerText || text(node)).slice(0, 600).match(PRICE);
       }
+      // The hearts from the heart button itself («Aggiungi ai preferiti. Aggiunto ai preferiti da 11»): 0 when the
+      // button shows no count, null when no button was found. A boosted article carries its own label.
+      var hearts = null;
+      var boost = false;
+      if (box) {
+        var favs = box.querySelectorAll('button[aria-label]');
+        for (var fb = 0; fb < favs.length && hearts === null; fb++) {
+          var lab = String(favs[fb].getAttribute('aria-label') || '');
+          var hm = lab.match(/preferiti da\\s*(\\d+)/i);
+          if (hm) hearts = parseInt(hm[1], 10);
+          else if (/preferiti/i.test(lab)) hearts = 0;
+        }
+        boost = !!box.querySelector('[data-testid*="bump"]');
+      }
       var img = box ? box.querySelector('img[alt]') : null;
       var words = (title + ' ' + (img ? String(img.getAttribute('alt') || '') : '') + ' ' + (box ? String(box.innerText || text(box)) : '')).replace(/\\s+/g, ' ').trim().slice(0, 300);
-      out.push({ id: m[1], price: p ? p[1] : null, text: words, mark: String(a.getAttribute('data-testid') || a.className || '').replace(/\\d{3,}/g, '{id}').slice(0, 60) });
+      out.push({ id: m[1], price: p ? p[1] : null, text: words, hearts: hearts, boost: boost, mark: String(a.getAttribute('data-testid') || a.className || '').replace(/\\d{3,}/g, '{id}').slice(0, 60) });
     }
     return out;
   };
@@ -330,6 +344,7 @@ export const PAGE_PROBE = `(function () {
   var isHome = location.pathname === '/' || location.pathname === '';
   var isCatalog = /^\\/catalog/.test(location.pathname) || isHome;
   var scrolls = 0;
+  var countAtScroll = 0;
   var lastCount = -1;
   var stableSince = 0;
   var itemSince = null;
@@ -343,10 +358,14 @@ export const PAGE_PROBE = `(function () {
         var count = countItemLinks();
         if (count !== lastCount) { lastCount = count; stableSince = Date.now(); }
         var none = /nessun risultato|nessun articolo|non abbiamo trovato|niente da mostrare/i.test(String(document.body ? document.body.innerText || '' : '').slice(0, 6000));
-        var settledC = (count > 0 && Date.now() - stableSince > 900) || (none && waitedC > 1500) || waitedC > (isHome ? 14000 : 6000);
-        if (settledC && isHome && scrolls < 2 && count > 0 && waitedC < 12000) {
+        // The home loads its next articles when its end comes into view, and they take a moment to arrive: after
+        // a move to the end the count is given 2.5 s to grow before the next move (four at most, 20 s in all).
+        var settledC = (count > 0 && Date.now() - stableSince > (scrolls > 0 ? 2500 : 900)) || (none && waitedC > 1500) || waitedC > (isHome ? 20000 : 6000);
+        // A move that brought nothing new is the last one.
+        if (settledC && isHome && scrolls < 4 && count > 0 && count < 60 && waitedC < 17000 && (scrolls === 0 || count > countAtScroll)) {
           scrolls++;
-          window.scrollTo(0, document.documentElement.scrollHeight);
+          countAtScroll = count;
+          window.scrollTo(0, Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0));
           stableSince = Date.now();
           settledC = false;
         }
@@ -358,7 +377,7 @@ export const PAGE_PROBE = `(function () {
         var found = readCards(isHome ? 120 : 80);
         var pricedC = 0;
         for (var fc = 0; fc < found.length; fc++) { if (found[fc].price) pricedC++; }
-        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', home: isHome, cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
+        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', home: isHome, cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, scrolls: scrolls, height: document.documentElement.scrollHeight, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
         return;
       }
       post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: stopped, cfError: !stopped && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });

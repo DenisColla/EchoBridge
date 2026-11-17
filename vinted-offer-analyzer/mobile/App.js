@@ -35,7 +35,9 @@ import { recordRead } from './src/services/readStats.js'
 import { badgeCountOf, counterStatsOf, linkIdOf } from './src/services/segments.js'
 import { planInboxRows, planOfferCapture, readConversation } from './src/services/vintedConversation.js'
 import { logVisit } from './src/services/vintedDiag.js'
-import { fetchVintedItemPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
+import { fetchVintedItemPage, fetchVintedListPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
+import { vintedBridge } from './src/services/vintedBridge.js'
+import { keepAliveState, startKeepAlive, stopKeepAlive, updateKeepAlive } from './src/services/watchKeepAlive.js'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import { AutoPanel } from './src/components/AutoPanel.js'
 import { space, useTheme } from './src/theme.js'
@@ -613,9 +615,11 @@ function Main() {
 
   /* ───────── 1.14: «caccia» (semi-automatic) and «vetrina» (automatic) ─────────
    * One job at a time: a page (a search, or the user's Vinted home) read again after a wait drawn between 8 and 12
-   * minutes, in a hidden browser of its own, while the app is open. What the cards say is kept and ranked (core
-   * watch.js). A verification asked by Vinted stops the job: nothing here imitates a person or works around a check.
-   * The app never sends an offer by itself: the hunt ends with a notification, and the user sends it.
+   * minutes. A search is downloaded as it is; the home, which loads as it is scrolled, is read in a hidden browser
+   * of its own. What the articles say is kept and ranked (core watch.js). 1.15: a service of the app keeps the
+   * readings going with the app behind or the screen off (only the download works there). A verification asked by
+   * Vinted stops the job: nothing here imitates a person or works around a check. The app never sends an offer by
+   * itself: the hunt ends with a notification, and the user sends it.
    */
   const watchLoaderRef = useRef(null)
   const [auto, setAuto] = useState({ mode: 'manual', job: null, finds: [], log: [], draft: null })
@@ -626,6 +630,10 @@ function Main() {
   const watchBusyRef = useRef(false)
   const watchReadRef = useRef(() => {})
   const [autoBusy, setAutoBusy] = useState(false)
+  // Whether the service that keeps the readings going in the background is running, and what Android says of the
+  // battery restrictions of the app (null: unknown).
+  const [serviceOn, setServiceOn] = useState(false)
+  const [batteryOk, setBatteryOk] = useState(() => vintedBridge.isBatteryUnrestricted())
   const saveAuto = (next) => {
     autoRef.current = next
     setAuto(next)
@@ -634,6 +642,24 @@ function Main() {
   const notifyNow = (title, body, link = null) => scheduleReminderAt({ itemId: null, link, at: Date.now() + 6500, title, body, kind: 'auto' }).catch(() => null)
   const shareText = async (title, message) => { try { await Share.share({ title, message }) } catch { /* cancelled */ } }
   const setWatchNext = (at) => { watchNextRef.current = at; setWatchNextAt(at) }
+  const clockOf = (ms) => new Date(ms).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })
+  const serviceWords = (job, nextAt = null) => [
+    `${job.kind === 'hunt' ? 'Caccia' : 'Vetrina'} in corso${job.label ? ` · ${String(job.label).slice(0, 40)}` : ''}`,
+    `${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'} · ${autoRef.current.finds.length} trovati${nextAt ? ` · prossima verso le ${clockOf(nextAt)}` : ''} · fino alle ${clockOf(core.jobEndsAt(job))}`,
+  ]
+  /** Starts the background service for the running job (the app must be in front) and notes whether it holds. */
+  const keepJobAlive = () => {
+    const job = autoRef.current.job
+    if (Platform.OS !== 'android' || !core.jobActive(job)) return
+    const asked = startKeepAlive(...serviceWords(job, watchNextRef.current))
+    setTimeout(() => {
+      const state = keepAliveState()
+      const on = Boolean(asked && state && state.running)
+      setServiceOn(on)
+      const now = autoRef.current
+      if (now.job && now.job.startedAt === job.startedAt && !now.job.stopped) saveAuto({ ...now, job: { ...now.job, servizio: { attivo: on, errore: (state && state.error) || (asked ? null : 'non avviato') } } })
+    }, 1500)
+  }
   const scheduleWatch = () => {
     if (watchTimerRef.current) clearTimeout(watchTimerRef.current)
     watchTimerRef.current = null
@@ -642,6 +668,7 @@ function Main() {
     const delay = Math.min(core.nextRefreshDelayMs(), Math.max(1000, core.jobEndsAt(job) - Date.now()))
     setWatchNext(Date.now() + delay)
     watchTimerRef.current = setTimeout(() => watchReadRef.current(), delay)
+    updateKeepAlive(...serviceWords(job, Date.now() + delay))
   }
   const endJob = (reason) => {
     const base = autoRef.current
@@ -651,6 +678,8 @@ function Main() {
     setWatchNext(null)
     const job = { ...base.job, stopped: reason, stoppedAt: Date.now() }
     saveAuto({ ...base, job })
+    stopKeepAlive()
+    setServiceOn(false)
     if (reason === 'verifica') notifyNow('Ricerca fermata', 'Vinted chiede una verifica: aprila nella scheda Vinted, poi riavvia la ricerca.')
     if (reason !== 'fine') return
     const ranked = core.rankFinds(base.finds, job.kind === 'hunt' ? job : null)
@@ -660,35 +689,80 @@ function Main() {
       else notifyNow('Caccia finita', `Niente entro ${formatEuro(job.maxPrice)} in ${job.reads || 0} letture.`)
     } else notifyNow('Vetrina finita', `${ranked.length} articoli raccolti in ${job.reads || 0} letture: li trovi nella scheda Caccia.`)
   }
+  /**
+   * One reading of a list page → { ok, via, cards } or { ok: false, via, reason }.
+   * A search is downloaded as it is: lighter than a browser, and the page's own data say more than its cards (the
+   * in-app browser, a real one, is asked only when the download gives no list). The home loads as it is scrolled, so
+   * with the app in front it is read in the hidden browser. With the app behind only the download is possible.
+   */
+  const readListPage = async (url, { home = false, front = true } = {}) => {
+    // The web build has no in-app browser: what a test hands over stands in for the page (cards, or a refusal).
+    const handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
+    if (Array.isArray(handed)) return { ok: true, via: 'prova', cards: handed }
+    if (handed && handed.reason) return { ok: false, via: 'browser', reason: handed.reason }
+    const viaBrowser = async () => {
+      if (!watchLoaderRef.current) return { ok: false, via: 'browser', reason: 'failed' }
+      let res
+      try { res = await watchLoaderRef.current.load(url, { silent: true }) } catch { res = { ok: false, reason: 'failed' } }
+      const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
+      if (cards) return { ok: true, via: 'browser', cards, diag: res.details.diag || null }
+      return { ok: false, via: 'browser', reason: res.ok ? 'non_una_lista' : res.reason || 'failed' }
+    }
+    const viaDownload = async () => {
+      const dl = await fetchVintedListPage(url)
+      if (!dl.html) return { ok: false, via: 'scaricata', reason: dl.reason || 'failed' }
+      const data = core.parseVintedCatalog(dl.html).items
+      if (data.length) return { ok: true, via: 'scaricata', cards: data }
+      const marked = core.cardsFromHtml(dl.html)
+      if (marked.length) return { ok: true, via: 'scaricata_html', cards: marked }
+      // A page with no article: Vinted's check, an error, or a search with no result.
+      const challenge = dl.mitigated || Boolean(core.detectVintedChallenge(dl.html))
+      return { ok: false, via: 'scaricata', reason: challenge ? 'challenge' : dl.ok ? 'vuota' : 'http', stato: dl.status }
+    }
+    if (home && front) {
+      const seen = await viaBrowser()
+      if (seen.ok || seen.reason === 'challenge') return seen
+      const got = await viaDownload()
+      return got.ok ? got : seen
+    }
+    const got = await viaDownload()
+    if (got.ok || !front) return got
+    const seen = await viaBrowser()
+    return seen.ok || seen.reason === 'challenge' ? seen : { ...seen, scaricata: got.reason }
+  }
   const watchRead = async () => {
     const job = autoRef.current.job
     if (!job || job.stopped || watchBusyRef.current) return
     if (!core.jobActive(job)) { endJob('fine'); return }
-    if (!watchLoaderRef.current) return
     watchBusyRef.current = true
     setWatchNext(null)
     const t0 = Date.now()
+    const front = AppState.currentState !== 'background' && AppState.currentState !== 'inactive'
     let res
-    // The web build has no in-app browser: what a test hands over stands in for the page (cards, or a refusal).
-    const handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
-    try {
-      res = Array.isArray(handed) ? { ok: true, details: { kind: 'catalog', cards: handed, diag: null } }
-        : handed && handed.reason ? { ok: false, reason: handed.reason }
-          : await watchLoaderRef.current.load(job.url, { silent: true })
-    } catch { res = { ok: false, reason: 'failed' } }
+    try { res = await readListPage(job.url, { home: job.kind === 'feed', front }) } catch { res = { ok: false, via: null, reason: 'failed' } }
     watchBusyRef.current = false
     const now = Date.now()
     const base = autoRef.current
     if (!base.job || base.job.stopped) return
     // Another job was started while this page was loading: this reading is dropped and the new job gets its first one.
     if (base.job.startedAt !== job.startedAt) { setTimeout(() => watchReadRef.current(), 300); return }
-    const cards = res.ok && res.details && res.details.kind === 'catalog' && Array.isArray(res.details.cards) ? res.details.cards : null
-    const entry = { quando: new Date(now).toISOString(), ms: now - t0, esito: res.ok ? (cards ? 'ok' : 'non_una_lista') : res.reason || 'failed', schede: cards ? cards.length : null }
-    // A reading that found nothing says what the page looked like, to tell an empty search from a page not read.
-    if (res.ok && (!cards || !cards.length) && res.details && res.details.diag) entry.pagina = res.details.diag
+    const cards = res.ok ? res.cards : null
+    const entry = { quando: new Date(now).toISOString(), ms: now - t0, via: res.via, sfondo: !front, esito: res.ok ? 'ok' : res.reason || 'failed', schede: cards ? cards.length : null }
+    if (res.scaricata) entry.scaricata = res.scaricata
+    if (res.stato) entry.stato = res.stato
+    // A reading in the browser says what the page looked like: how far the home went, an empty search.
+    if (res.diag) entry.pagina = { ...res.diag, sample: cards && cards.length ? undefined : res.diag.sample }
     if (!res.ok && res.reason === 'challenge') {
-      saveAuto({ ...base, log: [...base.log, entry] })
-      endJob('verifica')
+      if (res.via === 'browser') {
+        // The browser itself was asked to verify: the job stops, the user does it by hand.
+        saveAuto({ ...base, log: [...base.log, entry].slice(-80) })
+        endJob('verifica')
+        return
+      }
+      // The download met the check with the app behind: no further attempt until the app is in front again, where
+      // the browser reads the page (see the AppState listener).
+      if (!job.waiting) notifyNow('Ricerca in pausa', 'Vinted ha risposto con un controllo: apri l\'app per riprendere le letture.')
+      saveAuto({ ...base, job: { ...job, waiting: 'verifica' }, log: [...base.log, entry].slice(-80) })
       return
     }
     let { finds } = base
@@ -699,7 +773,7 @@ function Main() {
       fresh = merged.fresh
       entry.nuovi = fresh.length
     }
-    const next = { ...job, reads: (job.reads || 0) + 1, lastReadAt: now, told: job.told || [] }
+    const next = { ...job, reads: (job.reads || 0) + 1, lastReadAt: now, told: job.told || [], waiting: null }
     if (job.kind === 'hunt' && cards) {
       // An exceptional one is told at once, each article once: on Vinted the best ones do not wait a day.
       for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
@@ -712,14 +786,14 @@ function Main() {
     else endJob('fine')
   }
   useEffect(() => { watchReadRef.current = watchRead })
-  // While a job runs the screen stays on (the app in front, the phone better on charge): with the screen off Android
-  // stops the timers, and the readings with them.
+  // Without the background service (it did not start, an older Android) the screen stays on while a job runs, the
+  // app in front: with the screen off Android stops the timers, and the readings with them.
   const watchOn = Boolean(auto.job && !auto.job.stopped)
   useEffect(() => {
-    if (!watchOn || Platform.OS === 'web') return undefined
+    if (!watchOn || serviceOn || Platform.OS === 'web') return undefined
     activateKeepAwakeAsync('ovt-watch').catch(() => {})
     return () => { Promise.resolve(deactivateKeepAwake('ovt-watch')).catch(() => {}) }
-  }, [watchOn])
+  }, [watchOn, serviceOn])
   // What was saved comes back; a job still inside its hours goes on, and when the app comes to the front again a
   // reading that is overdue happens at once (the timers do not run while the app is closed).
   useEffect(() => {
@@ -734,14 +808,18 @@ function Main() {
       // A job whose hours ran out while the app was closed ends now, with its summary.
       if (next.job && !next.job.stopped && !core.jobActive(next.job)) { setTimeout(() => endJob('fine'), 1500); return }
       if (!core.jobActive(next.job)) return
-      if (Date.now() - (next.job.lastReadAt || 0) >= core.WATCH.REFRESH_MIN_S * 1000) setTimeout(() => watchReadRef.current(), 4000)
+      // The app was closed and reopened: the service that kept the job alive went with it, and starts again.
+      keepJobAlive()
+      if (next.job.waiting || Date.now() - (next.job.lastReadAt || 0) >= core.WATCH.REFRESH_MIN_S * 1000) setTimeout(() => watchReadRef.current(), 4000)
       else scheduleWatch()
     }).catch(() => {})
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return
+      setBatteryOk(vintedBridge.isBatteryUnrestricted())
       const job = autoRef.current.job
       if (job && !job.stopped && !core.jobActive(job)) endJob('fine')
-      else if (core.jobActive(job) && !watchBusyRef.current && (!watchNextRef.current || watchNextRef.current <= Date.now())) watchReadRef.current()
+      // Back in front: a reading that is overdue, or one that waited for the browser, happens now.
+      else if (core.jobActive(job) && !watchBusyRef.current && (job.waiting || !watchNextRef.current || watchNextRef.current <= Date.now())) watchReadRef.current()
     })
     return () => { sub.remove(); if (watchTimerRef.current) clearTimeout(watchTimerRef.current) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -751,6 +829,7 @@ function Main() {
     // A new job starts its own list and its own diary.
     saveAuto({ ...base, job: { ...job, startedAt: Date.now(), reads: 0, told: [] }, finds: [], log: [], draft: null })
     showToast(job.kind === 'hunt' ? 'Caccia avviata: leggo la ricerca ogni 8–12 minuti.' : 'Vetrina avviata: leggo la tua home ogni 8–12 minuti.', 4000)
+    keepJobAlive()
     setTimeout(() => watchReadRef.current(), 300)
   }
   const startHunt = ({ words, maxPrice, size = null }) => {
@@ -781,42 +860,51 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.15.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
-      try { out.prove.push({ prova, ms: Date.now() - t, ...(await fn()) }) } catch (e) { out.prove.push({ prova, ms: Date.now() - t, errore: String((e && e.message) || e).slice(0, 140) }) }
+      let said
+      try { said = await fn() } catch (e) { said = { errore: String((e && e.message) || e).slice(0, 140) } }
+      out.prove.push({ prova, ms: Date.now() - t, ...said })
     }
-    const articles = (html) => new Set([...String(html).matchAll(/\/items\/(\d{6,})/g)].map((m) => m[1])).size
+    const brief = (f) => (f ? { titolo: f.title, prezzo: f.price, marca: f.brand, taglia: f.size, condizioni: f.condition, cuori: f.favourites, boost: f.boost } : null)
     const page = (url) => async () => {
-      const r = await fetch(url, { headers: { Accept: 'text/html' } })
-      const html = await r.text()
-      return { stato: r.status, caratteri: html.length, articoli: articles(html), verifica: /captcha-delivery|challenge-platform\/h\//.test(html) }
+      const dl = await fetchVintedListPage(url)
+      if (!dl.html) return { esito: dl.reason || 'failed' }
+      const data = core.parseVintedCatalog(dl.html).items
+      const marked = core.cardsFromHtml(dl.html)
+      const first = data.length ? data[0] : marked.length ? marked[0] : null
+      const said = {
+        stato: dl.status, caratteri: dl.html.length, articoli: new Set([...dl.html.matchAll(/\/items\/(\d{6,})/g)].map((m) => m[1])).size,
+        dai_dati: data.length, dal_markup: marked.length, primo: brief(first ? core.findFromCard(first, VINTED_ORIGIN) : null),
+        verifica: !first && (dl.mitigated || Boolean(core.detectVintedChallenge(dl.html))),
+      }
+      if (!first) {
+        // Nothing read: how the page writes its first article, with any account name removed.
+        const at = dl.html.search(/\/items\/\d{6,}/)
+        if (at >= 0) said.intorno = dl.html.slice(Math.max(0, at - 220), at + 260).replace(/login\\?":\\?"[^"\\]+/g, 'login":"…').replace(/\s+/g, ' ')
+      }
+      return said
     }
     const hidden = (url) => async () => {
       if (!watchLoaderRef.current) return { esito: 'nessun browser' }
       const r = await watchLoaderRef.current.load(url, { silent: true })
-      return { esito: r.ok ? 'ok' : r.reason || 'failed', schede: r.ok && r.details && Array.isArray(r.details.cards) ? r.details.cards.length : null, pagina: r.ok && r.details ? r.details.diag || null : null }
+      const cards = r.ok && r.details && Array.isArray(r.details.cards) ? r.details.cards : null
+      return { esito: r.ok ? 'ok' : r.reason || 'failed', schede: cards ? cards.length : null, primo: brief(cards && cards.length ? core.findFromCard(cards[0], VINTED_ORIGIN) : null), pagina: r.ok && r.details ? r.details.diag || null : null }
     }
-    await timed('ricerca scaricata senza aprirla', page(`${VINTED_ORIGIN}/catalog?search_text=libro&order=newest_first`))
-    await timed('home scaricata senza aprirla', page(`${VINTED_ORIGIN}/`))
-    await timed('ricerca come dati', async () => {
-      const r = await fetch(`${VINTED_ORIGIN}/api/v2/catalog/items?search_text=libro&per_page=20&order=newest_first`, { headers: { Accept: 'application/json' } })
-      const text = await r.text()
-      let json = null
-      try { json = JSON.parse(text) } catch { /* not JSON */ }
-      const items = json && Array.isArray(json.items) ? json.items : null
-      return { stato: r.status, tipo: r.headers.get('content-type'), articoli: items ? items.length : null, campi: items && items[0] ? Object.keys(items[0]).slice(0, 30) : null }
-    })
+    await timed('ricerca scaricata', page(`${VINTED_ORIGIN}/catalog?search_text=libro&order=newest_first`))
+    await timed('home scaricata', page(`${VINTED_ORIGIN}/`))
     if (!core.jobActive(autoRef.current.job)) {
       await timed('ricerca letta nel browser nascosto', hidden(`${VINTED_ORIGIN}/catalog?search_text=libro&order=newest_first`))
       await timed('home letta nel browser nascosto', hidden(`${VINTED_ORIGIN}/`))
     } else out.nota = 'una ricerca è in corso: le due letture nel browser nascosto non sono state rifatte'
+    out.sfondo = { servizio: keepAliveState(), batteria_senza_restrizioni: vintedBridge.isBatteryUnrestricted() }
     setAutoBusy(false)
     shareText('Prova di fattibilità', JSON.stringify(out, null, 1))
   }
   const shareWatchLog = () => {
     const { job, log, finds } = autoRef.current
-    shareText('Diario della ricerca', JSON.stringify({ lavoro: job ? { tipo: job.kind, avviato: new Date(job.startedAt).toISOString(), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, prezzo_massimo: job.maxPrice ?? null } : null, trovati: finds.length, letture: log }, null, 1))
+    shareText('Diario della ricerca', JSON.stringify({ lavoro: job ? { tipo: job.kind, avviato: new Date(job.startedAt).toISOString(), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, in_attesa: job.waiting || null, prezzo_massimo: job.maxPrice ?? null, servizio: job.servizio || null } : null, batteria_senza_restrizioni: vintedBridge.isBatteryUnrestricted(), trovati: finds.length, letture: log }, null, 1))
   }
 
   /** «Lo rivendo a»: the price the article would be sold again at (blank = the engine's default). */
@@ -1894,6 +1982,8 @@ function Main() {
               auto={auto}
               nextAt={watchNextAt}
               busy={autoBusy}
+              background={{ service: serviceOn, battery: batteryOk, android: Platform.OS === 'android' }}
+              onBattery={() => vintedBridge.openAppSettings()}
               onMode={changeAutoMode}
               onStartHunt={startHunt}
               onStartFeed={startFeed}

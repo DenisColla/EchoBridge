@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'it.migelino.offertavinted'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.vintedbridge"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  implementation "androidx.core:core-ktx:1.17.0"
+  // HeadlessJsTaskService (WatchKeepAliveService): the version is the app's own React Native.
+  implementation 'com.facebook.react:react-android'
+}

@@ -52,6 +52,26 @@ export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
   }
 }
 
+/**
+ * Downloads a list page (a search, the home) with the app's own plain request: no browser identity is claimed, and
+ * what comes back is handed over as it is. Returns { ok, html, status, mitigated } (`mitigated`: Cloudflare says it
+ * answered with its check) or { ok: false, html: null, reason: 'timeout' | 'network' }. Never throws.
+ */
+export async function fetchVintedListPage(url, { timeoutMs = 25_000 } = {}) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller ? controller.signal : undefined, headers: { Accept: 'text/html' } })
+    const html = await response.text()
+    const mitigated = response.headers && typeof response.headers.get === 'function' ? response.headers.get('cf-mitigated') === 'challenge' : false
+    return { ok: response.ok, html, status: response.status, mitigated }
+  } catch (error) {
+    return { ok: false, html: null, reason: error && error.name === 'AbortError' ? 'timeout' : 'network' }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Reads the clipboard and returns a Vinted item link if one is there (null otherwise, never throws). */
 export async function readVintedLinkFromClipboard() {
   try {

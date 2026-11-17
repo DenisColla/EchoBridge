@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { WATCH, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, rankFinds, toleranceFor } from '../src/core/index.js'
+import { WATCH, cardsFromHtml, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, rankFinds, toleranceFor } from '../src/core/index.js'
 
 test('watch: the next reading comes after any minute and second between 8:00 and 12:00, drawn anew each time', () => {
   assert.equal(nextRefreshDelayMs(() => 0), 8 * 60 * 1000)
@@ -35,7 +35,7 @@ test('watch: what a card says — title, price, condition, size and hearts', () 
   assert.equal(favouritesOfCard(TOP), 3)
   assert.equal(favouritesOfCard('Libro, Condizioni: Ottime, 7.00 €, 8.05 €'), null)
   assert.deepEqual(findFromCard({ id: 8800000001, price: '28,00', text: COAT }), {
-    id: '8800000001', title: 'Cappotto Dekker', brand: 'DEKKER', condition: 'Ottime', band: 'used', size: 'M', price: 28, favourites: 23, url: 'https://www.vinted.it/items/8800000001',
+    id: '8800000001', title: 'Cappotto Dekker', brand: 'DEKKER', condition: 'Ottime', band: 'used', size: 'M', price: 28, favourites: 23, boost: false, url: 'https://www.vinted.it/items/8800000001',
   })
   assert.equal(findFromCard({ id: 1, price: null, text: COAT }), null)
 })
@@ -86,4 +86,40 @@ test('watch: a card price is read with or without the euro sign', () => {
   assert.equal(findFromCard({ id: 1, price: '18,00 €', text }).price, 18)
   assert.equal(findFromCard({ id: 1, price: '1.150,00', text }).price, 1150)
   assert.equal(findFromCard({ id: 1, price: '€', text }), null)
+})
+
+// The home as the phone reads it (17 November 2026): «Include la commissione Vinted» after the prices, then the hearts.
+const HOME = 'Manubri, brand: Domyos, condizioni: Ottime, 24.00 €, 25.90 € Include la commissione Vinted Manubri, brand: Domyos, condizioni: Ottime, 24.00 €, 25.90 € Include la commissione Vinted 1 Domyos Ottime 24,00 € 25,90 € incl.'
+
+test('watch: a card of the home — hearts after «Include la commissione Vinted», and the heart button when it was read', () => {
+  assert.equal(favouritesOfCard(HOME), 1)
+  const said = findFromCard({ id: 8800000002, price: '24.00', text: HOME })
+  assert.deepEqual([said.title, said.brand, said.condition, said.price, said.favourites, said.boost], ['Manubri', 'Domyos', 'Ottime', 24, 1, false])
+  // the button read on the page wins over the text: a title beginning with a number is not a count of hearts
+  const numbered = '3 libri Zerocalcare, condizioni: Ottime, 8.00 €, 9.10 € Include la commissione Vinted 3 libri Zerocalcare Con boost Ottime 8,00 €'
+  assert.equal(findFromCard({ id: 2, price: '8.00', text: numbered, hearts: 0 }).favourites, 0)
+  assert.equal(findFromCard({ id: 2, price: '8.00', text: numbered, hearts: 0 }).boost, true)
+})
+
+test('watch: an entry of the search page data becomes a find as it is', () => {
+  const entry = { source: 'vinted', id: '10328455376', title: 'Nike air max moto 2k 40,5', url: 'https://www.vinted.it/items/10328455376-nike-air-max-moto-2k-405', price: 25, brand: 'Nike', size: '40,5', condition: 'Nuovo con cartellino', favourites: 15, promoted: true }
+  assert.deepEqual(findFromCard(entry), {
+    id: '10328455376', title: 'Nike air max moto 2k 40,5', brand: 'Nike', condition: 'Nuovo con cartellino', band: 'new', size: '40,5', price: 25, favourites: 15, boost: true,
+    url: 'https://www.vinted.it/items/10328455376-nike-air-max-moto-2k-405',
+  })
+  const { finds, fresh } = mergeFinds([], [entry, { source: 'vinted', id: '1', title: 'Senza prezzo', price: null }], { at: 10 })
+  assert.deepEqual([finds.length, fresh], [1, ['10328455376']])
+})
+
+test('watch: the cards of a downloaded page, from its markup', () => {
+  const html = `<div data-testid="feed-item"><a class="x" data-testid="feed-item--overlay-link" href="https://www.vinted.it/items/8800000011-seven-sons?referrer=homepage" title="Seven sons - Robert Windom, condizioni: Nuovo senza cartellino, 18.00 €, 19.60 € Include la commissione Vinted"></a>
+    <button aria-label="Aggiungi ai preferiti. Aggiunto ai preferiti da 11" data-testid="feed-item--favourite"><span data-testid="favourite-count-text">11</span></button><p data-testid="feed-item--bump-text">Con boost</p></div>
+    <div data-testid="feed-item"><a data-testid="feed-item--overlay-link" href="/items/8800000012-decathlon" title="Felpa &quot;basic&quot;, brand: H&amp;M, condizioni: Nuovo senza cartellino, taglia: M, 30.00 €, 32.20 € Include la commissione Vinted"></a>
+    <button aria-label="Aggiungi ai preferiti" data-testid="feed-item--favourite"></button></div>
+    <a href="/items/8800000011-seven-sons" title="doppione, 1.00 €"></a><a href="/member/12">profilo</a><a href="/items/8800000013-x">senza titolo</a>`
+  const cards = cardsFromHtml(html)
+  assert.deepEqual(cards.map((c) => [c.id, c.price, c.hearts, c.boost]), [['8800000011', '18.00', 11, true], ['8800000012', '30.00', 0, false]])
+  const finds = cards.map((c) => findFromCard(c))
+  assert.deepEqual(finds.map((f) => [f.title, f.brand, f.size, f.price, f.favourites]), [['Seven sons - Robert Windom', null, null, 18, 11], ['Felpa "basic"', 'H&M', 'M', 30, 0]])
+  assert.deepEqual(cardsFromHtml(''), [])
 })
