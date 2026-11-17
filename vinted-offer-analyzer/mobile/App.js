@@ -681,7 +681,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.17.0', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.18.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said
@@ -1808,6 +1808,8 @@ function Main() {
               onStop={() => watchEngine.stopJob()}
               onOpen={(url) => { setTab('vinted'); if (vintedRef.current) vintedRef.current.open(url) }}
               onClearFinds={() => watchEngine.clearFinds()}
+              onVote={(id, vote) => watchEngine.vote(id, vote)}
+              onProfile={(next) => watchEngine.setProfile(next)}
               onFeasibility={runFeasibility}
               onShareLog={shareWatchLog}
             />

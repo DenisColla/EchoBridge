@@ -1,5 +1,6 @@
 import * as Clipboard from 'expo-clipboard'
 import { detectVintedChallenge } from '../../core/index.js'
+import { xhrRequest } from './http.js'
 
 const MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36'
 
@@ -54,22 +55,14 @@ export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
 
 /**
  * Downloads a list page (a search, the home) with the app's own plain request: no browser identity is claimed, and
- * what comes back is handed over as it is. Returns { ok, html, status, mitigated } (`mitigated`: Cloudflare says it
- * answered with its check) or { ok: false, html: null, reason: 'timeout' | 'network' }. Never throws.
+ * what comes back is handed over as it is. It uses xhrRequest, which answers with the app behind too (http.js).
+ * Returns { ok, html, status, mitigated } (`mitigated`: Cloudflare says it answered with its check) or
+ * { ok: false, html: null, reason: 'timeout' | 'network' }. Never throws.
  */
 export async function fetchVintedListPage(url, { timeoutMs = 25_000 } = {}) {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
-  try {
-    const response = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller ? controller.signal : undefined, headers: { Accept: 'text/html' } })
-    const html = await response.text()
-    const mitigated = response.headers && typeof response.headers.get === 'function' ? response.headers.get('cf-mitigated') === 'challenge' : false
-    return { ok: response.ok, html, status: response.status, mitigated }
-  } catch (error) {
-    return { ok: false, html: null, reason: error && error.name === 'AbortError' ? 'timeout' : 'network' }
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+  const res = await xhrRequest({ url, headers: { Accept: 'text/html' }, timeoutMs })
+  if (res.text === null) return { ok: false, html: null, reason: res.error === 'timeout' ? 'timeout' : 'network' }
+  return { ok: res.ok, html: res.text, status: res.status, mitigated: res.header('cf-mitigated') === 'challenge' }
 }
 
 /** Reads the clipboard and returns a Vinted item link if one is there (null otherwise, never throws). */

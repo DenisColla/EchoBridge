@@ -1,0 +1,18 @@
+{
+ "data": "2026-11-17",
+ "domanda": "A quale prezzo d'annuncio lo compreresti per rivenderlo? (quattro prezzi proposti, a margini di circa 35, 27, 19 e 11% del valore di rivendita)",
+ "nota": "L'utente ha anche detto che la lista di taratura «va molto bene» e che sulle ottime condizioni andrebbe «un po' più al ribasso».",
+ "scelte": [
+  { "articolo": "Samsung Galaxy S25 Ultra 256 GB", "categoria": "telefoni", "rivendita": 590, "prezzo_scelto": 405, "margine_pct": 27 },
+  { "articolo": "Nintendo Switch OLED 64 GB", "categoria": "console_giochi", "rivendita": 200, "prezzo_scelto": 130, "margine_pct": 28 },
+  { "articolo": "Sony WH-1000XM5", "categoria": "audio", "rivendita": 150, "prezzo_scelto": 100, "margine_pct": 27 },
+  { "articolo": "Amazon Kindle Paperwhite 11ª generazione", "categoria": "tablet_ereader_wearable", "rivendita": 70, "prezzo_scelto": 40, "margine_pct": 35 },
+  { "articolo": "Chainsaw Man vol. 1–11", "categoria": "fumetti_manga", "rivendita": 34, "prezzo_scelto": 19, "margine_pct": 28 },
+  { "articolo": "Harry Potter, cofanetto 7 volumi", "categoria": "libri", "rivendita": 65, "prezzo_scelto": 34, "margine_pct": 35 },
+  { "articolo": "adidas Samba OG", "categoria": "sneakers", "rivendita": 48, "prezzo_scelto": 25, "margine_pct": 36 },
+  { "articolo": "The North Face 1996 Retro Nuptse", "categoria": "abbigliamento", "rivendita": 150, "prezzo_scelto": 85, "margine_pct": 37 },
+  { "articolo": "Garmin Forerunner 255", "categoria": "sport", "rivendita": 150, "prezzo_scelto": 90, "margine_pct": 35 },
+  { "articolo": "LEGO Star Wars 75257 Millennium Falcon", "categoria": "lego_collezionismo", "rivendita": 100, "prezzo_scelto": 62, "margine_pct": 27 }
+ ],
+ "lettura": "Due livelli: circa 27% dove la rivendita è sicura (telefoni, console, audio, LEGO, serie manga), circa 35% altrove (abbigliamento, scarpe, libri, e-reader, orologi sportivi). Nessuna scelta sotto il 27%."
+}

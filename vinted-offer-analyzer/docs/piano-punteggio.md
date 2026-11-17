@@ -1,7 +1,9 @@
 # Piano: il punteggio di interesse (vetrina e caccia)
 
-Deciso con l'utente il 17 novembre 2026. Stato: fase 1 consegnata con la 1.17.0, in attesa di prova sul telefono;
-fasi 2–5 da fare, dopo il giudizio dell'utente sulla lista di taratura (`docs/taratura/lista-taratura-30.xlsx`).
+Deciso con l'utente il 17 novembre 2026. Stato: fasi 1–4 nel codice con la 1.18.0 (`src/core/interest.js`,
+`mobile/src/services/watchEngine.js`), da provare sul telefono; fase 5 (taratura dagli esiti) da fare.
+La lista di taratura (`docs/taratura/lista-taratura-30.xlsx`) è stata giudicata «molto bene» dall'utente, che ha poi
+scelto dieci prezzi d'acquisto (`docs/taratura/scelte-utente.json`): da lì vengono i margini qui sotto.
 
 ## Decisioni dell'utente
 
@@ -21,25 +23,32 @@ e nessun aggiramento dei controlli di Vinted; all'AI vanno solo titoli, prezzi e
 variante, condizioni, difetti, completezza); il voto esce da una formula del motore, così è stabile, spiegabile e
 uguale con qualsiasi AI. Non si addestra un modello: si danno una scheda di giudizio, riferimenti reali e memoria.
 
-## Il punteggio 0–100 (pesi iniziali per la compravendita)
+## Il punteggio 0–100 (come è nel codice)
 
-| Voce | Peso | Misura |
+`voto = 40·convenienza + 20·domanda + 15·qualità + 10·trattabilità + 10·pertinenza + 5·venditore` (ogni voce da 0 a 1)
+
+| Voce | Peso | Come si calcola |
 |---|---|---|
-| Convenienza | 40 | Guadagno atteso: valore di rivendita prudente meno costo vero (prezzo + protezione 0,70 € + 5% + spedizione), in % del valore e in euro |
-| Domanda | 20 | Cuori per ora dall'inserimento, «Ricercato», annunci simili che spariscono tra una lettura e l'altra |
-| Qualità | 15 | Condizioni, completezza, parole di difetto |
-| Trattabilità | 10 | Probabilità che il venditore scenda (`negotiationFor`: ore online, cali, boost) |
-| Pertinenza | 10 | Categorie, marche, autori, taglie del profilo e del comportamento |
-| Venditore | 5 | Recensioni e affidabilità, quando letto |
+| Convenienza | 40 | Guadagno rivendendo al valore prudente, dopo prezzo + protezione (0,70 € + 5%) + spedizione, diviso per il **margine che l'utente chiede**: vale 0,8 al suo «lo compro», 1 un terzo sopra, 0,1 in pari |
+| Domanda | 20 | Cuori (0 → 0,45 … oltre 40 → 1), più un poco se crescono mentre l'articolo è osservato |
+| Qualità | 15 | Condizioni dichiarate (nuovo con cartellino 1 … discrete 0,35), meno i difetti letti dall'AI |
+| Trattabilità | 10 | Quanto sconto serve per arrivare al prezzo d'acquisto: 1 se è già sotto, 0,05 oltre il 40% che Vinted non lascia offrire |
+| Pertinenza | 10 | Categorie, parole e taglie del profilo, pollici; in una caccia la corrispondenza con il prodotto cercato |
+| Venditore | 5 | Neutro (0,7) finché l'annuncio non viene letto |
 
-Sopra la formula:
+**Margine chiesto** (dalle dieci scelte dell'utente): **27%** dove la rivendita è sicura (telefoni, console e giochi,
+audio, LEGO e collezionismo, fumetti e manga), **35%** altrove. Sotto 5 € di guadagno non è mai un «sì».
 
-- **Fiducia**: senza riferimento letto dal vero il voto è «provvisorio» e non supera 70.
-- **Rischio**: griffato molto sotto mercato, venditore senza recensioni, parole di difetto abbassano il voto.
-- **Soglie di partenza** (da tarare sulla lista): voto ≥ 85 se resta un guadagno del 30% e di almeno 5 €; voto ≥ 70 con
-  il 15% e almeno 3 €. Gli articoli sotto i 10–15 € comprati da soli non arrivano mai a 70: valgono solo in lotto.
+Sopra la somma:
 
-Ogni articolo mostra voto, fiducia e tre motivi.
+- **Senza convenienza il voto non sale**: non supera `35 + 65·convenienza`.
+- **Provvisorio**: se il valore è solo una stima dell'AI (presa un 10% più bassa), il voto non supera 70.
+- **Non identificato o senza valore**: non supera 55. **Difettoso, non il prodotto cercato, pollice giù**: non supera 40.
+- **Marca molto contraffatta a prezzo sospetto**: 12 punti in meno e l'avviso di verificare.
+
+Etichette: **85+ affare**, **70+ da comprare**, **55+ da trattare** (c'è scritto a quale offerta diventa da comprare),
+sotto **lascia**. Ogni articolo mostra voto, etichetta e i motivi. Gli articoli sotto i 10–15 € comprati da soli non
+arrivano a 70: lo dicono («vale in lotto»).
 
 ## Schede di categoria
 
@@ -55,12 +64,16 @@ partenza porta solo i fatti stabili e le correzioni dell'utente.
 
 ## Catena a ogni lettura (dentro gli 8–12 minuti)
 
-1. Raccolta: solo i nuovi o quelli cambiati di prezzo.
-2. Scrematura a regole, gratis.
-3. Scheda dell'AI a lotti (10–20 articoli per chiamata, veloce, temperatura 0).
-4. Riferimento vero per i promettenti: stessa ricerca su Vinted (mediana, quartile basso), con memoria di un giorno.
-5. Punteggio e motivi; sopra 85 avviso subito.
-6. A fine sessione: classifica, analisi completa dei primi dieci (venditore, costi, proposta), offerta a un tocco.
+1. Lettura della pagina (scaricata) e raccolta: un articolo per riga, con il primo e l'ultimo avvistamento.
+2. Sveglia per la lettura successiva, prima di tutto il resto.
+3. Scheda dell'AI per gli articoli nuovi: lotti da 10, quattro chiamate affiancate, 40 articoli a lettura al massimo.
+4. Riferimento: nella caccia sono i risultati stessi della ricerca (quelli che l'AI dice essere il prodotto cercato);
+   nella vetrina tre ricerche su Vinted a lettura per i promettenti e poi per i più cari, con memoria di un giorno.
+5. Voto e motivi di tutti; un «affare» con valore letto dal mercato viene notificato subito, una volta sola.
+6. A fine sessione: notifica con il primo della classifica; l'analisi completa dei primi dieci è ancora da fare.
+
+Tetto di spesa dell'AI per ricerca: 0,60 $. Niente in una lettura aspetta un timer dell'app (con l'app dietro possono
+non scattare): le richieste di rete passano da `services/http.js`.
 
 ## La caccia
 
@@ -71,11 +84,13 @@ variante, altro). «Il migliore» è il voto più alto entro il massimo, non il 
 ## Fasi
 
 1. **Fondamenta** — letture avviate dalla sveglia di Android, motore fuori dall'interfaccia, diario con l'innesco.
-   *Consegnata con la 1.17.0; da provare a telefono bloccato.*
-2. **Punteggio sulla vetrina** — scheda dell'AI a lotti, voto, motivi, classifica, avviso sopra 85.
-3. **Riferimenti e pertinenza** — mercato letto con memoria, altri mercati, ricerca web per i primi, profilo e pollici.
-4. **Caccia con punteggio** — corrispondenza, i quattro segnali, primi tre con analisi completa.
-5. **Taratura** — pesi e soglie dai giudizi sulla lista e dagli esiti dell'utente.
+   *Nel codice dalla 1.17.0; da provare a telefono bloccato.*
+2. **Punteggio sulla vetrina** — scheda dell'AI a lotti, voto, motivi, classifica, avviso sopra 85. *Nel codice (1.18.0).*
+3. **Riferimenti e pertinenza** — mercato Vinted letto con memoria, profilo e pollici: *nel codice (1.18.0)*.
+   Altri mercati dell'usato (Subito, Wallapop), ricerca web per i primi e lista di partenza: *da fare*.
+4. **Caccia con punteggio** — corrispondenza, segnali del +10/15%, il migliore per voto: *nel codice (1.18.0)*.
+   Analisi completa dei primi a fine ricerca e venditore solido: *da fare*.
+5. **Taratura** — pesi e soglie dagli esiti dell'utente: *da fare* (i margini vengono già dalle sue dieci scelte).
 
 ## Cosa esiste già nel motore e va riusato
 

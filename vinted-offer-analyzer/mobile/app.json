@@ -2,7 +2,7 @@
   "expo": {
     "name": "Vinted Caccia",
     "slug": "offerta-vinted-timing",
-    "version": "1.17.0",
+    "version": "1.18.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "offertavintedcaccia",
@@ -13,7 +13,7 @@
     ],
     "android": {
       "package": "it.migelino.offertavinted.caccia",
-      "versionCode": 35,
+      "versionCode": 36,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#3730a3"

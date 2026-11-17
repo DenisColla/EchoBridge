@@ -1,4 +1,5 @@
 import { authHeaders, buildLlmRequest, llmCost, modelByKey, parseLlmResponse, readModelJson } from '../../core/index.js'
+import { xhrRequest } from './http.js'
 import { getApiKey } from './secrets.js'
 
 /**
@@ -41,28 +42,20 @@ export async function callModel(modelKey, prompt, images = [], { effort = 'low',
   let last = null
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal && signal.aborted) return { ok: false, error: 'Annullato', kind: 'cancelled', costUsd: spent, latencyMs: Date.now() - started }
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-    const onAbort = () => controller.abort()
-    if (signal) signal.addEventListener('abort', onAbort)
-    let response = null
-    try {
-      response = await fetch(request.url, { method: 'POST', headers: { ...request.headers, ...authHeaders(model.provider, key) }, body: JSON.stringify(request.body), signal: controller.signal })
-      const raw = await response.text()
+    // xhrRequest, not fetch: the answer must arrive with the app behind too (see http.js). Its timeout is the network
+    // layer's own.
+    const got = await xhrRequest({ method: 'POST', url: request.url, headers: { ...request.headers, ...authHeaders(model.provider, key) }, body: JSON.stringify(request.body), timeoutMs, signal })
+    const response = got.text === null ? null : { status: got.status, headers: { get: (name) => got.header(name) } }
+    if (response) {
       let json = null
       try {
-        json = raw ? JSON.parse(raw.trim()) : null
+        json = got.text ? JSON.parse(got.text.trim()) : null
       } catch {
         json = null
       }
-      last = parseLlmResponse(model.provider, response.status, json, raw, response.headers)
-    } catch (e) {
-      const aborted = e && e.name === 'AbortError'
-      last = { ok: false, error: aborted ? (signal && signal.aborted ? 'Annullato' : `Nessuna risposta entro ${Math.round(timeoutMs / 1000)} s`) : `Rete: ${String(e && e.message ? e.message : e)}`, retryable: !(signal && signal.aborted), kind: aborted && signal && signal.aborted ? 'cancelled' : 'network' }
-    } finally {
-      clearTimeout(timer)
-      if (signal) signal.removeEventListener('abort', onAbort)
-    }
+      last = parseLlmResponse(model.provider, got.status, json, got.text, response.headers)
+    } else if (got.error === 'cancelled') last = { ok: false, error: 'Annullato', retryable: false, kind: 'cancelled' }
+    else last = { ok: false, error: got.error === 'timeout' ? `Nessuna risposta entro ${Math.round(timeoutMs / 1000)} s` : 'Rete: richiesta non riuscita', retryable: true, kind: 'network' }
     // A call that produced tokens is billed even when its answer is unusable.
     if (last.usage) spent += llmCost(modelKey, last.usage, new Date()) || 0
     if (last.ok || !last.retryable || attempt === maxAttempts - 1) break

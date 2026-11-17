@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { AppState, Platform } from 'react-native'
 import * as core from '../../core/index.js'
 import { scheduleReminderAt } from './notifications.js'
+import { askCards, loadProfile, lookupReference, saveProfile } from './interestService.js'
 import { fetchVintedListPage } from './vinted.js'
 import { vintedBridge } from './vintedBridge.js'
 
@@ -24,6 +25,12 @@ import { vintedBridge } from './vintedBridge.js'
  * in front and when the download gives no list. A check asked by Vinted is never worked around: met by the download
  * with the app behind it pauses the job until the app is in front; asked of the browser it stops the job.
  * The engine never sends an offer: a hunt ends with a notification, and the user sends it.
+ *
+ * 1.18: after each reading comes the judgement (judge): the AI's cards for the new articles, a reference for the
+ * promising ones (a hunt's own results are its market; the feed asks Vinted for the same product, three searches a
+ * reading at most), and the interest score of all (core interest.js). The next alarm is set before it, so that a
+ * judgement cut short never breaks the chain. Nothing in a reading waits on a timer of the app: with the app behind
+ * they may not fire (http.js).
  */
 export const AUTO_KEY = 'offerta-vinted.auto.v1'
 export const WATCH_TICK_TASK = 'OvtWatchTick'
@@ -33,12 +40,20 @@ const LOG_MAX = 80
 const BOOT_AT = Date.now()
 /** A reading that has not ended after this long is taken for lost (the task was cut): the next one may start. */
 const BUSY_STALE_MS = 150_000
+/** New articles given to the AI in one reading (the rest wait for the next), and searches of the market in one. */
+const CARDS_PER_TICK = 40
+const LOOKUPS_PER_TICK = 3
+/** What the AI may cost in one job, in dollars: past it the scores go on with the cards there are. */
+const AI_BUDGET_USD = 0.6
+/** The judgement stops asking past this many milliseconds from the start of the reading (the task has two minutes). */
+const JUDGE_BUDGET_MS = 85_000
 
 let state = { mode: 'manual', job: null, finds: [], log: [], draft: null }
 let loading = null
 let busySince = 0
 let netTimer = null
 let browserReader = null
+let profile = null
 const listeners = new Set()
 
 const euro = (v) => core.formatEuro(v)
@@ -46,7 +61,7 @@ const clockOf = (ms) => new Date(ms).toLocaleTimeString('it-IT', { hour: '2-digi
 
 function snapshot() {
   const job = state.job
-  return { ...state, nextAt: job && !job.stopped && !job.waiting ? job.nextAt || null : null, reading: busySince > 0 }
+  return { ...state, nextAt: job && !job.stopped && !job.waiting ? job.nextAt || null : null, reading: busySince > 0, profile }
 }
 function emit() {
   const now = snapshot()
@@ -66,7 +81,7 @@ function set(next) {
 
 function load() {
   if (!loading) {
-    loading = AsyncStorage.getItem(AUTO_KEY).then((raw) => {
+    loading = AsyncStorage.getItem(AUTO_KEY).then(async (raw) => {
       const saved = raw ? JSON.parse(raw) : null
       if (saved && typeof saved === 'object') {
         state = {
@@ -74,6 +89,7 @@ function load() {
           finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: state.draft,
         }
       }
+      profile = await loadProfile()
       emit()
     }).catch(() => {})
   }
@@ -121,12 +137,104 @@ async function endJob(reason) {
   await set({ ...base, job })
   if (reason === 'verifica') await notify('Ricerca fermata', 'Vinted chiede una verifica: aprila nella scheda Vinted, poi riavvia la ricerca.')
   if (reason !== 'fine') return
-  const ranked = core.rankFinds(base.finds, job.kind === 'hunt' ? job : null)
+  const ranked = core.rankFinds(state.finds, job.kind === 'hunt' ? job : null)
+  const voted = (f) => (f.score ? ` · voto ${f.score.total}${f.score.provisional ? ' provvisorio' : ''}` : '')
   if (job.kind === 'hunt') {
-    const best = ranked.find((f) => f.eligible)
-    if (best) await notify(`Caccia finita: ${best.title || 'il migliore'} a ${euro(best.price)}`, 'Tocca per aprirlo: lo analizzo, poi cuore e offerta con un tocco.', best.url)
+    // The best is the highest score within the price, not the cheapest; what is not the product searched is left out.
+    const best = ranked.find((f) => f.eligible && !(f.card && f.card.match === 'no'))
+    if (best) await notify(`Caccia finita: ${best.title || 'il migliore'} a ${euro(best.price)}${voted(best)}`, 'Tocca per aprirlo: lo analizzo, poi cuore e offerta con un tocco.', best.url)
     else await notify('Caccia finita', `Niente entro ${euro(job.maxPrice)} in ${job.reads || 0} letture.`)
-  } else await notify('Vetrina finita', `${ranked.length} articoli raccolti in ${job.reads || 0} letture: li trovi nella scheda Caccia.`)
+  } else {
+    const top = ranked.filter((f) => f.score && f.score.total >= 70)
+    const first = top[0] || ranked[0]
+    await notify('Vetrina finita', `${ranked.length} articoli in ${job.reads || 0} letture, ${top.length} da comprare.${first ? ` Il primo: ${first.title || 'articolo'} a ${euro(first.price)}${voted(first)}.` : ''}`, first ? first.url : null)
+  }
+}
+
+/** The score of every find with what is known now (no request): after a thumb or a change of the interests. */
+function rescored(finds, job) {
+  return finds.map((f) => (f.card || f.ref ? { ...f, score: core.interestScore(f, { card: f.card || null, ref: f.ref || null, profile, match: job && job.kind === 'hunt' && f.card ? f.card.match : null }) } : f))
+}
+
+/**
+ * The judgement after a reading: cards, references, scores, and the notification of an «affare». `t0`: when the
+ * reading started. What it did goes into the last line of the diary.
+ */
+async function judge(t0) {
+  const job = state.job
+  if (!job) return
+  const startedAt = job.startedAt
+  const began = Date.now()
+  const note = {}
+  let list = state.finds
+  let spent = job.aiCost || 0
+  // 1. The AI's cards for the articles that have none, the newest first.
+  const waiting = list.filter((f) => !f.card && (f.cardTried || 0) < 2).sort((a, b) => b.lastSeen - a.lastSeen).slice(0, CARDS_PER_TICK)
+  if (waiting.length && spent < AI_BUDGET_USD && Date.now() - t0 < JUDGE_BUDGET_MS) {
+    const got = await askCards(waiting, { target: job.kind === 'hunt' ? job.label || '' : '' })
+    spent += got.costUsd
+    note.schede = Object.keys(got.cards).length
+    note.chieste = waiting.length
+    if (got.error) note.ai = got.error
+    const asked = new Set(waiting.map((f) => f.id))
+    list = list.map((f) => (got.cards[f.id] ? { ...f, card: got.cards[f.id] } : asked.has(f.id) ? { ...f, cardTried: (f.cardTried || 0) + 1 } : f))
+  } else if (waiting.length && spent >= AI_BUDGET_USD) note.ai = 'budget'
+  // 2. The reference.
+  if (job.kind === 'hunt') {
+    // The results of the hunt's own search are the market of what it looks for: no other request.
+    const same = list.filter((f) => f.card && f.card.match === 'si')
+    list = list.map((f) => {
+      if (!f.card) return f
+      const others = same.filter((o) => o.id !== f.id)
+      const alike = others.filter((o) => !f.band || !o.band || o.band === f.band)
+      // Only for what is the product searched: a variant or another thing is worth what the AI estimates for it.
+      const market = f.card.match === 'si' ? core.marketReferenceOf((alike.length >= 5 ? alike : others).map((o) => o.price)) : null
+      return { ...f, ref: market || core.aiReferenceOf(f.card) }
+    })
+  } else {
+    list = list.map((f) => (f.ref || !f.card ? f : { ...f, ref: core.aiReferenceOf(f.card) }))
+    // A search of Vinted for the same product, three a reading, a day of memory each: first the promising ones by
+    // the AI's estimate, then the dearest (where an estimate that is off costs the most).
+    const promising = list
+      .filter((f) => f.card && !f.refTried && (!f.ref || f.ref.source !== 'market') && f.card.words.length && f.card.confidence >= 0.5 && !f.card.risks.includes('difettoso'))
+      .map((f) => ({ f, total: core.interestScore(f, { card: f.card, ref: f.ref || null, profile }).total }))
+      .sort((a, b) => Number(b.total >= 55) - Number(a.total >= 55) || (b.total >= 55 ? b.total - a.total : b.f.price - a.f.price))
+    let searched = 0
+    for (const { f } of promising) {
+      if (searched >= LOOKUPS_PER_TICK || Date.now() - t0 > JUDGE_BUDGET_MS) break
+      const res = await lookupReference(f, f.card)
+      if (!res.ok) {
+        note.mercato = res.reason
+        // Vinted's check, or no network: no other search in this reading.
+        break
+      }
+      if (!res.cached) searched += 1
+      list = list.map((x) => (x.id === f.id ? { ...x, ref: res.ref || x.ref, refTried: true } : x))
+    }
+    if (promising.length) note.mercati = searched
+  }
+  // 3. The scores, on the state as it is now (the user may have voted or emptied the list meanwhile).
+  const now = state
+  if (!now.job || now.job.startedAt !== startedAt) return
+  const judged = new Map(list.map((f) => [f.id, f]))
+  let finds = now.finds.map((f) => {
+    const j = judged.get(f.id)
+    return j ? { ...f, card: j.card, cardTried: j.cardTried, ref: j.ref, refTried: j.refTried } : f
+  })
+  finds = rescored(finds, now.job)
+  note.con_voto = finds.filter((f) => f.score).length
+  note.ms = Date.now() - began
+  const told = now.job.told || []
+  const next = { ...now.job, aiCost: Math.round(spent * 10000) / 10000, ai: note.ai || null, told }
+  // An «affare» whose value was read from the market is told at once, each article once.
+  const deals = finds.filter((f) => f.score && f.score.total >= 85 && !f.score.provisional && !told.includes(f.id) && !(job.kind === 'hunt' && Number.isFinite(job.maxPrice) && f.price > job.maxPrice * 1.15))
+    .sort((a, b) => b.score.total - a.score.total).slice(0, 2)
+  for (const f of deals) {
+    next.told = [...next.told, f.id]
+    await notify(`Affare (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`, `${f.score.reasons[0] || ''}. Tocca per aprirlo.`, f.url)
+  }
+  const log = now.log.length ? [...now.log.slice(0, -1), { ...now.log[now.log.length - 1], giudizio: note }] : now.log
+  await set({ ...now, job: next, finds, log })
 }
 
 /**
@@ -215,16 +323,20 @@ async function tick(source = 'timer') {
       entry.nuovi = merged.fresh.length
     }
     const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
-    if (job.kind === 'hunt' && cards) {
-      // An exceptional one is told at once, each article once: on Vinted the best ones do not wait a day.
+    if (job.kind === 'hunt' && cards && base.job.ai === 'auth') {
+      // Without an AI key there are no scores: an article far under the highest price is told at once, each once.
       for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
         next.told = [...next.told, f.id]
         await notify(`Affare: ${f.title || 'articolo'} a ${euro(f.price)}`, `Sotto il ${Math.round(core.WATCH.EXCEPTIONAL_SHARE * 100)}% del tuo massimo di ${euro(job.maxPrice)}. Tocca per aprirlo.`, f.url)
       }
     }
     await set({ ...base, job: next, finds, log })
-    if (core.jobActive(next)) await schedule()
-    else await endJob('fine')
+    // The next alarm first: whatever happens to the judgement, the chain of readings goes on.
+    const active = core.jobActive(next)
+    if (active) await schedule()
+    try { await judge(t0) } catch { /* the scores wait for the next reading */ }
+    if (!active) await endJob('fine')
+    else showStatus()
     return res.ok ? 'letto' : 'non letto'
   } catch {
     // Whatever went wrong after the page was read, the chain of alarms must not break.
@@ -281,6 +393,27 @@ export const watchEngine = {
     return tick('avvio')
   },
   stopJob: () => endJob('utente'),
+  /** The user's interests changed: saved, and every score follows. */
+  async setProfile(next) {
+    await load()
+    profile = await saveProfile(next)
+    return set({ ...state, finds: rescored(state.finds, state.job) })
+  },
+  /** A thumb on a find (1, −1, or 0 to take it back): the article follows at once, its brand and category learn. */
+  async vote(id, vote) {
+    await load()
+    const target = state.finds.find((f) => f.id === id)
+    if (!target) return null
+    const before = target.vote || 0
+    if (vote !== before) {
+      let likes = profile ? profile.likes : {}
+      if (before) likes = core.learnFromVote(likes, target, target.card || null, -before)
+      if (vote) likes = core.learnFromVote(likes, target, target.card || null, vote)
+      profile = await saveProfile({ likes })
+    }
+    const finds = state.finds.map((f) => (f.id === id ? { ...f, vote: vote || undefined } : f))
+    return set({ ...state, finds: rescored(finds, state.job) })
+  },
   tick,
   resume,
   /** What «Condividi il diario» shares: the job, how Android's alarms are doing, and every reading. */
@@ -292,10 +425,20 @@ export const watchEngine = {
       lavoro: job ? {
         tipo: job.kind, avviato: iso(job.startedAt), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, in_attesa: job.waiting || null,
         prezzo_massimo: job.maxPrice ?? null, prossima: iso(job.nextAt), sveglia: job.sveglia ?? null,
+        ai: job.ai || null, ai_costo_usd: job.aiCost || 0,
       } : null,
       sveglie: alarm ? { esatte: alarm.exact, impostata_per: iso(alarm.scheduledAt), ultima_suonata: iso(alarm.firedAt), ultima_lettura_avviata: iso(alarm.tickAt), errore: alarm.error || null, errore_alle: iso(alarm.errorAt) } : null,
       batteria_senza_restrizioni: vintedBridge.isBatteryUnrestricted(),
       trovati: finds.length,
+      voti: {
+        con_voto: finds.filter((f) => f.score).length, provvisori: finds.filter((f) => f.score && f.score.provisional).length,
+        affare: finds.filter((f) => f.score && f.score.total >= 85).length, da_comprare: finds.filter((f) => f.score && f.score.total >= 70 && f.score.total < 85).length,
+        da_trattare: finds.filter((f) => f.score && f.score.total >= 55 && f.score.total < 70).length,
+      },
+      primi: core.rankFinds(finds, job && job.kind === 'hunt' ? job : null).slice(0, 8).map((f) => ({
+        titolo: f.title, prezzo: f.price, voto: f.score ? f.score.total : null, provvisorio: f.score ? f.score.provisional : null, categoria: f.card ? f.card.category : null,
+        riferimento: f.ref ? { valore: f.ref.value, da: f.ref.source, annunci: f.ref.n } : null, motivi: f.score ? f.score.reasons : null,
+      })),
       letture: log,
     }
   },
