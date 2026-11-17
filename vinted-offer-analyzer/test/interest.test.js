@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  INTEREST, aiReferenceOf, buyPriceFor, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, marketReferenceOf, pertinenceOf,
-  rankByInterest, requiredMarginFor,
+  INTEREST, aiReferenceOf, buyPriceFor, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, lookupWorthOf, lotOf, marketReferenceOf,
+  pertinenceOf, rankByInterest, referenceAmong, requiredMarginFor, seriesPiecesOf,
 } from '../src/core/index.js'
 
 const card = (category, extra = {}) => ({ category, kind: '', brand: '', model: '', variant: '', query: '', words: [], defects: [], pieces: 1, weightKg: 0, newPrice: 0, usedLow: 0, usedHigh: 0, confidence: 0.8, risks: [], match: null, ...extra })
@@ -165,4 +165,135 @@ test('interest: the list — best score first, a sure one before a provisional o
 test('interest: shipping by the weight the card estimates, never under what a valuable article costs to send', () => {
   const ship = (category, weightKg) => interestScore(find(50), { card: card(category, { weightKg }), ref: market(100) }).shipping
   assert.deepEqual([ship('libri', 0.4), ship('libri', 4.5), ship('sport', 20), ship('telefoni', 0.3), ship('console_giochi', 1.5), ship('libri', 0), ship('lego_collezionismo', 0)], [3, 6, 10, 5, 6, 3, 6])
+})
+
+/* ───────── lots and prices far from the reference (1.18.2, from the diary of 17 November 2026) ───────── */
+
+const cand = (id, title, price, condition = 'Ottime') => ({ source: 'vinted', id: String(id), title, brand: '', price, condition })
+
+test('interest: how many volumes a title sells', () => {
+  const cases = [
+    ['Ken il guerriero Deluxe Edition 1-4', 4], ['One Piece 98', 1], ['Naruto vol. 1 2 3', 3], ['Harry Potter 1/7', 7], ['Death Note 12 volumi', 12],
+    ['Tex dal 500 al 510', 11], ['Diario di una schiappa 3 e 4', 2], ['Demon Slayer vol.1-23 + fanbook', 23], ['Dragon Ball 1-2-3', 3], ['One Piece 1 – 10', 10],
+    ['Topolino n° 3 4 5', 3], ['Lotto 5 libri gialli', 5],
+    // not counts: an age, a title made of numbers, a volume and an edition, a year, an ISBN, a volume number before a word
+    ['Libro bambini 3-6 anni', 1], ['24/7 il capitalismo', 1], ['Volume 1 edizione 2', 1], ['Il nome della rosa 1980', 1], ['978-88-04-12345 Mondadori', 1],
+    ['Naruto 12 manga planet', 1], ["L'estate in cui Hikaru é morto", 1],
+    // a lot that does not say how many
+    ['Lotto fumetti Dylan Dog', null], ['Berserk serie completa', null],
+  ]
+  for (const [title, pieces] of cases) assert.equal(seriesPiecesOf(title), pieces, title)
+})
+
+test('interest: what kind of lot a find is', () => {
+  const manga = card('fumetti_manga')
+  assert.deepEqual(lotOf({ title: 'Ken il guerriero Deluxe Edition 1-4' }, manga), { pieces: 4, series: true, comparable: true })
+  assert.deepEqual(lotOf({ title: 'One Piece 98' }, manga), { pieces: 1, series: true, comparable: true })
+  // the title does not say: what the AI understood
+  assert.deepEqual(lotOf({ title: 'Il Signore degli Anelli trilogia' }, card('libri', { pieces: 3 })), { pieces: 3, series: true, comparable: true })
+  assert.deepEqual(lotOf({ title: 'Berserk serie completa' }, manga), { pieces: null, series: true, comparable: false })
+  assert.deepEqual(lotOf({ title: 'Berserk serie completa' }, card('fumetti_manga', { pieces: 41 })), { pieces: 41, series: true, comparable: true })
+  // outside a series a lot is a thing of its own: the AI's estimate of the whole stays
+  assert.deepEqual(lotOf({ title: 'Lotto 5 magliette Nike' }, card('abbigliamento', { pieces: 5 })), { pieces: 5, series: false, comparable: false })
+  assert.deepEqual(lotOf({ title: 'Stock magliette' }, card('abbigliamento')), { pieces: null, series: false, comparable: false })
+  assert.deepEqual(lotOf({ title: 'Sony WH-1000XM5' }, card('audio')), { pieces: 1, series: false, comparable: true })
+})
+
+test('interest: «Ken il guerriero Deluxe Edition 1-4» at 130 € is compared volume by volume, not with single volumes', () => {
+  const ken = { id: '1', title: 'Ken il guerriero Deluxe Edition 1-4', condition: 'Nuovo con cartellino', price: 130, favourites: 7 }
+  const c = card('fumetti_manga', { words: ['ken', 'guerriero', 'deluxe'], query: 'ken il guerriero deluxe edition', pieces: 4, weightKg: 2.5, usedLow: 60, usedHigh: 80 })
+  const results = [
+    cand(2, 'Ken il guerriero deluxe edition 3', 20), cand(3, 'Ken il Guerriero Deluxe Edition vol. 7', 22), cand(4, 'ken il guerriero deluxe 1', 24), cand(5, 'Ken il guerriero Deluxe 12', 21),
+    cand(6, 'Ken il guerriero deluxe edition 1-10', 190), cand(7, 'Ken il guerriero Deluxe 1/6', 108), cand(8, 'Ken il guerriero deluxe serie completa', 300),
+    cand(9, 'Ken il guerriero Deluxe 5 e 6', 40), cand(10, 'Ken il guerriero edizione Star Comics 4', 5),
+  ]
+  // one volume of each listing: 20, 22, 24, 21, 19, 18, (unknown lot left out), 20; «Star Comics» has no «deluxe»
+  assert.deepEqual(comparablesOf(results, c, ken).sort((a, b) => a - b), [18, 19, 20, 20, 21, 22, 24])
+  const ref = marketReferenceOf(comparablesOf(results, c, ken), { pieces: 4 })
+  assert.deepEqual(ref, { value: 78, median: 80, n: 7, source: 'market', unit: 19.5, pieces: 4 })
+  const s = interestScore(ken, { card: c, ref })
+  assert.equal(s.label, 'lascia')
+  assert.match(s.reasons[0], /^Rivendendo a 78 € \(4 pezzi a 19,50 €, da 7 annunci\) perdi /)
+  assert.equal(s.unsure, null)
+  // a single volume is compared with single volumes only, whatever their number
+  const one = { id: '99', title: 'Ken il guerriero Deluxe Edition 2', condition: 'Ottime', price: 15 }
+  assert.deepEqual(comparablesOf(results, { ...c, pieces: 1 }, one).sort((a, b) => a - b), [20, 21, 22, 24])
+})
+
+test('interest: a lot outside a series, or of unknown size, has no market of its own', () => {
+  const shirts = { id: '1', title: 'Lotto 5 magliette Nike', condition: 'Buone', price: 30 }
+  const c = card('abbigliamento', { words: ['nike'], pieces: 5 })
+  assert.deepEqual(comparablesOf([cand(2, 'Maglietta Nike', 10), cand(3, 'T-shirt Nike', 12), cand(4, 'Nike maglia', 9)], c, shirts), [])
+  // a single shirt still leaves the lots out
+  assert.deepEqual(comparablesOf([cand(2, 'Maglietta Nike', 10), cand(3, 'Lotto magliette Nike', 40), cand(4, 'Nike maglia', 9)], { ...c, pieces: 1 }, { ...shirts, title: 'Maglietta Nike' }), [10, 9])
+})
+
+test('interest: a hunt reads its market from its own results, piece by piece', () => {
+  const c = (pieces = 1) => card('fumetti_manga', { pieces, match: 'si' })
+  const others = [
+    { id: '2', title: 'Chainsaw Man 3', price: 4, card: c() }, { id: '3', title: 'Chainsaw Man 5', price: 4.5, card: c() }, { id: '4', title: 'Chainsaw Man 1-11', price: 38.5, card: c(11) },
+    { id: '5', title: 'Chainsaw Man lotto', price: 20, card: c() }, { id: '6', title: 'Chainsaw Man 8', price: 5, card: c() },
+  ]
+  // a lot of 11: 4, 4.5, 3.5, 5 a volume (the lot of unknown size is left out) → the lower quartile 3.875 × 11
+  assert.deepEqual(referenceAmong({ id: '1', title: 'Chainsaw Man 1–11', price: 19 }, c(11), others), { value: 42.63, median: 46.75, n: 4, source: 'market', unit: 3.88, pieces: 11 })
+  // a single volume: the singles only
+  assert.deepEqual(referenceAmong({ id: '1', title: 'Chainsaw Man 2', price: 3 }, c(), others), { value: 4.25, median: 4.5, n: 3, source: 'market' })
+  assert.equal(referenceAmong({ id: '1', title: 'Chainsaw Man lotto', price: 3 }, c(), others), null)
+})
+
+test('interest: asked many times what the same thing sells for is «da verificare», not a loss stated as a fact', () => {
+  // the diary: «L'estate in cui Hikaru é morto» at 46.80 €, the AI priced one volume (about 8-10 €)
+  const hikaru = { id: '1', title: "L'estate in cui Hikaru é morto", condition: 'Ottime', price: 46.8, favourites: 13 }
+  const c = card('libri', { usedLow: 8, usedHigh: 10 })
+  const s = interestScore(hikaru, { card: c, ref: aiReferenceOf(c) })
+  assert.equal(s.unsure, 'prezzo')
+  assert.equal(s.label, 'da verificare')
+  assert.ok(s.total >= INTEREST.CHECK_MIN && s.total <= INTEREST.UNKNOWN_CAP && INTEREST.UNKNOWN_CAP < 55)
+  assert.equal(s.reasons[0], "Chiesto 4,7 volte la stima dell'AI (10 €): forse un lotto o un'edizione particolare, da aprire")
+  assert.ok(!s.reasons.some((r) => /perdi|vale in lotto/.test(r)))
+  assert.equal(s.margin, null)
+  // the same with the market of the single volume read
+  const m = interestScore(hikaru, { card: c, ref: { value: 5.5, median: 6, n: 20, source: 'market' } })
+  assert.equal(m.reasons[0], "Chiesto 7,8 volte il prezzo di 20 annunci uguali (6 €): forse un lotto o un'edizione particolare, da aprire")
+  assert.deepEqual([m.label, m.unsure, m.provisional], ['da verificare', 'prezzo', false])
+  // dear, but the same thing: a loss, said as such (the diary's kettlebell at 50 € against 25-30 €)
+  const bell = interestScore({ id: '2', title: 'Kettlebel 12 kg', condition: 'Buone', price: 50, favourites: 8 }, { card: card('sport', { usedLow: 25, usedHigh: 30, weightKg: 12 }), ref: aiReferenceOf(card('sport', { usedLow: 25, usedHigh: 30 })) })
+  assert.deepEqual([bell.label, bell.unsure], ['lascia', null])
+  assert.match(bell.reasons[0], /perdi 40,70 €/)
+  // cheap things are never «odd»: a 9 € comic against an estimate of 3 €
+  assert.equal(interestScore({ id: '3', title: 'Fumetto', condition: 'Ottime', price: 9 }, { card: card('fumetti_manga', { usedLow: 2, usedHigh: 3 }), ref: aiReferenceOf(card('fumetti_manga', { usedLow: 2, usedHigh: 3 })) }).unsure, null)
+})
+
+test('interest: what cannot be judged is never «da trattare»', () => {
+  const good = find(80, { condition: 'Nuovo con cartellino', favourites: 60 })
+  const none = interestScore(good, { card: card('audio'), ref: null })
+  assert.deepEqual([none.label, none.unsure], ['da verificare', 'riferimento'])
+  assert.ok(none.total <= 54)
+  const lost = interestScore(good, { card: card('altro', { risks: ['non_identificato'] }), ref: market(200) })
+  assert.deepEqual([lost.label, lost.unsure], ['da verificare', 'identita'])
+  // thumbs down or broken: left, whatever is unknown
+  assert.equal(interestScore({ ...good, vote: -1 }, { card: card('audio'), ref: null }).label, 'lascia')
+})
+
+test('interest: a resale value too low for any margin says so in the right words', () => {
+  const s = interestScore(find(4, { favourites: 29 }), { card: card('libri'), ref: aiReferenceOf(card('libri', { usedLow: 3, usedHigh: 4 })) })
+  assert.ok(s.reasons.includes('Si rivende a troppo poco per lasciare un margine da solo: vale in lotto'))
+})
+
+test('interest: «12kg» and «12 kg» are the same words', () => {
+  const bell = { id: '1', title: 'Kettlebel 12 kg', condition: 'Buone', price: 50 }
+  const c = card('sport', { words: ['kettlebell', '12kg'] })
+  const results = [cand(2, 'Kettlebell 12kg ghisa', 25), cand(3, 'kettlebell 12 kg', 28), cand(4, 'Kettlebell 12 Kg Domyos', 22), cand(5, 'Kettlebell 8 kg', 15), cand(6, 'Kettlebell 20kg', 40)]
+  assert.deepEqual(comparablesOf(results, c, bell), [25, 28, 22])
+})
+
+test('interest: which searches of the market come first', () => {
+  const worth = (price, favourites, score) => lookupWorthOf({ price, favourites }, score)
+  // close to a buy before everything; then a price the estimate does not explain; then hearts and money
+  const near = worth(20, 0, { total: 60, unsure: null })
+  const odd = worth(46.8, 13, { total: 50, unsure: 'prezzo' })
+  const wanted = worth(9, 58, { total: 35, unsure: null })
+  const dear = worth(130, 7, { total: 35, unsure: null })
+  const plain = worth(4, 0, { total: 35, unsure: null })
+  assert.ok(near > odd && odd > wanted && wanted > dear && dear > plain, JSON.stringify([near, odd, wanted, dear, plain].map(Math.round)))
 })

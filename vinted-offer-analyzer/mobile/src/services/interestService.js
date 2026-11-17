@@ -10,7 +10,7 @@ import { fetchVintedListPage } from './vinted.js'
  * Nothing here needs a screen of the app: it runs in the background task too.
  * To the AI go titles, brands, sizes, conditions and prices of the listings, never a seller's name.
  */
-const REFS_KEY = 'offerta-vinted.refs.v1'
+const REFS_KEY = 'offerta-vinted.refs.v2'
 const PROFILE_KEY = 'offerta-vinted.profile.v1'
 const ORIGIN = 'https://www.vinted.it'
 const REF_TTL_MS = 24 * 3600 * 1000
@@ -91,19 +91,23 @@ function saveRefs() {
   refs = Object.fromEntries(entries)
   return AsyncStorage.setItem(REFS_KEY, JSON.stringify(refs)).catch(() => {})
 }
-const keyOf = (card, find) => `${(card.words || []).join('+') || card.query}|${card.variant || ''}|${find.band || ''}`.toLowerCase()
+const keyOf = (card, find, pieces) => `${(card.words || []).join('+') || card.query}|${card.variant || ''}|${find.band || ''}|${pieces}`.toLowerCase()
 
 /**
  * The reference of one article from Vinted's own market: the same search a person would do, its results read from
- * the page, the same product among them, its lower quartile. A day of memory for each product.
- * → { ok: true, ref | null, cached } or { ok: false, reason } ('challenge', 'timeout', 'network', 'vuota').
+ * the page, the same product among them, its lower quartile (for a lot of volumes: of one volume, times the lot).
+ * A day of memory for each product. A lot that cannot be compared (core lotOf) is not searched.
+ * → { ok: true, ref | null, cached, seen, same } (seen: results read, same: those that are the same product) or
+ * { ok: false, reason } ('challenge', 'timeout', 'network', 'vuota').
  */
 export async function lookupReference(find, card, now = Date.now()) {
   if (!card || !card.query || !(card.words || []).length) return { ok: true, ref: null, cached: false }
+  const lot = core.lotOf(find, card)
+  if (!lot.comparable) return { ok: true, ref: null, cached: true }
   const all = await loadRefs()
-  const key = keyOf(card, find)
+  const key = keyOf(card, find, lot.pieces)
   const known = all[key]
-  if (known && now - known.at < REF_TTL_MS) return { ok: true, ref: known.ref, cached: true }
+  if (known && now - known.at < REF_TTL_MS) return { ok: true, ref: known.ref, cached: true, seen: known.seen ?? null, same: known.same ?? null }
   // The web build has no way to Vinted: what a test hands over stands in for the search page.
   const handed = typeof window !== 'undefined' && window.__ovtMarketPages ? window.__ovtMarketPages[card.query] : null
   let items
@@ -114,10 +118,11 @@ export async function lookupReference(find, card, now = Date.now()) {
     items = core.parseVintedCatalog(dl.html).items
     if (!items.length && (dl.mitigated || core.detectVintedChallenge(dl.html))) return { ok: false, reason: 'challenge' }
   }
-  const ref = core.marketReferenceOf(core.comparablesOf(items, card, find))
-  all[key] = { ref, at: now, seen: items.length }
+  const prices = core.comparablesOf(items, card, find)
+  const ref = core.marketReferenceOf(prices, { pieces: lot.pieces })
+  all[key] = { ref, at: now, seen: items.length, same: prices.length }
   await saveRefs()
-  return { ok: true, ref, cached: false }
+  return { ok: true, ref, cached: false, seen: items.length, same: prices.length }
 }
 
 const EMPTY_PROFILE = { categories: [], words: [], sizes: [], likes: {} }

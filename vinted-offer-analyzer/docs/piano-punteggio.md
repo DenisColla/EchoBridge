@@ -43,7 +43,11 @@ Sopra la somma:
 
 - **Senza convenienza il voto non sale**: non supera `35 + 65·convenienza`.
 - **Provvisorio**: se il valore è solo una stima dell'AI (presa un 10% più bassa), il voto non supera 70.
-- **Non identificato o senza valore**: non supera 55. **Difettoso, non il prodotto cercato, pollice giù**: non supera 40.
+- **Prezzo che non si può giudicare** (non identificato, senza valore, o chiesto oltre 2,5 volte quello a cui la
+  stessa cosa si vende e sopra 15 €): non supera 54 ed è **«da verificare»**, mai «da trattare» (1.18.2).
+  **Difettoso, non il prodotto cercato, pollice giù**: non supera 40.
+- **Lotti** (1.18.2): i volumi di una serie (libri, fumetti, manga) si confrontano a pezzo e il valore del lotto è il
+  prezzo di un pezzo per i suoi pezzi; un lotto di altro tipo, o che non dice quanti pezzi, tiene la stima dell'AI.
 - **Marca molto contraffatta a prezzo sospetto**: 12 punti in meno e l'avviso di verificare.
 
 Etichette: **85+ affare**, **70+ da comprare**, **55+ da trattare** (c'è scritto a quale offerta diventa da comprare),

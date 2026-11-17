@@ -14,12 +14,20 @@
  *   score = 40·convenienza + 20·domanda + 15·qualità + 10·trattabilità + 10·pertinenza + 5·venditore   (each 0–1)
  *
  * and above the sum: without a good price the score cannot be high (the gate), a value that only the AI estimated
- * makes it «provvisorio» (70 at most), and an article that was not identified stops at 55.
+ * makes it «provvisorio» (70 at most), and an article whose price cannot be judged (not identified, no reference,
+ * or asked many times its reference) stops under «da trattare» and is called «da verificare».
+ *
+ * Lots (1.18.2, from the first diary of real cards: «Ken il guerriero Deluxe Edition 1-4» at 130 € was compared with
+ * single volumes at 40 €). Volumes of a series (books, comics) are compared piece by piece: the reference of a lot is
+ * the price of one piece times its pieces. A lot of anything else keeps the AI's estimate of the whole.
  *
  *   interestPrompt(items, { target })       → the prompt of one batch of cards
  *   cleanInterestCards(value, items)        → { id: card }
- *   comparablesOf(candidates, card, find)   → the prices of the same product among the results of a search
- *   marketReferenceOf(prices)               → { value, median, n } (value: the lower quartile) or null
+ *   seriesPiecesOf(title)                   → how many volumes a title sells (1, n, or null: a lot of unknown size)
+ *   lotOf(find, card)                       → { pieces, series, comparable }
+ *   comparablesOf(candidates, card, find)   → the prices of one piece of the same product among the results of a search
+ *   marketReferenceOf(prices, { pieces })   → { value, median, n } (value: the lower quartile, times the pieces) or null
+ *   referenceAmong(find, card, others)      → the same from other finds that are the same product (a hunt's results)
  *   aiReferenceOf(card)                     → the same from the AI's own estimate, marked as such
  *   interestScore(find, { card, ref, profile, match }) → { total, label, provisional, parts, margin, target, reasons }
  *   rankByInterest(finds)                   → best first
@@ -51,8 +59,14 @@ export const INTEREST = Object.freeze({
   /** «Più al ribasso»: a value that only the AI estimated is taken a little lower. */
   AI_PRUDENCE: 0.9,
   PROVISIONAL_CAP: 70,
-  UNKNOWN_CAP: 55,
+  /** An article whose price cannot be judged stays under «da trattare» (55): from CHECK_MIN up it is «da verificare». */
+  UNKNOWN_CAP: 54,
+  CHECK_MIN: 45,
   REJECTED_CAP: 40,
+  /** Asked this many times what the same thing sells for (and at least ODD_PRICE_MIN €): it is likely another thing,
+   *  a lot or a rare edition, and the loss the numbers would show is not a fact. */
+  ODD_PRICE_TIMES: 2.5,
+  ODD_PRICE_MIN: 15,
   /** Vinted lets an offer go down to 60% of the price. */
   MAX_OFFER_DISCOUNT: 0.4,
   LABELS: Object.freeze([[85, 'affare'], [70, 'da comprare'], [55, 'da trattare'], [0, 'lascia']]),
@@ -71,7 +85,9 @@ export const INTEREST = Object.freeze({
 const itFinite = (v) => typeof v === 'number' && Number.isFinite(v)
 const itR2 = (v) => Math.round(v * 100) / 100
 const itClamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v))
-const itWords = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\+/g, ' plus ').split(/[^a-z0-9]+/).filter(Boolean)
+const itWords = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\+/g, ' plus ')
+  // «12kg» and «12 kg» are the same two words.
+  .replace(/(\d)(kg|gr|g|cm|mm|ml|cl|lt|l|gb|tb|mah)\b/g, '$1 $2').split(/[^a-z0-9]+/).filter(Boolean)
 const itEuro = (v) => `${(Math.round(v * 100) / 100).toLocaleString('it-IT', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 })} €`
 const IT_BROKEN = /\b(rott[oaie]|non funziona\w*|difett\w+|per ricambi|da riparare|guast[oaie]|crep[ao]t?\w*|scheggiat\w+|schermo rotto|non si accende)\b/i
 const IT_ACCESSORY = ['cover', 'custodia', 'pellicola', 'cavo', 'caricatore', 'ricambio', 'ricambi', 'adesivo', 'skin', 'cinturino', 'scatola vuota', 'solo scatola', 'vetro temperato']
@@ -117,9 +133,9 @@ export const INTEREST_SCHEMA = {
 const INTEREST_SYSTEM = [
   'Sei un perito dell\'usato in Italia: valuti annunci di Vinted per chi compra per rivendere.',
   'Per ogni annuncio ricevi id, titolo, marca, taglia, condizioni dichiarate e prezzo. Compili una scheda per ciascuno, con lo stesso id.',
-  'Identità: usa solo ciò che c\'è nel testo. categoria: una delle voci ammesse. tipo: che cos\'è, in 1-3 parole (es. "smartphone", "cuffie over-ear", "graphic novel", "piumino"). marca, modello, variante (memoria, taglia, edizione, volume, colore): stringa vuota se non ci sono; non inventare modelli.',
+  'Identità: usa solo ciò che c\'è nel testo. categoria: una delle voci ammesse (un manga, un fumetto o una graphic novel sono "fumetti_manga" anche quando il titolo non lo dice). tipo: che cos\'è, in 1-3 parole (es. "smartphone", "cuffie over-ear", "graphic novel", "piumino"). marca, modello, variante (memoria, taglia, edizione, volume, colore): stringa vuota se non ci sono; non inventare modelli.',
   'cerca: 2-5 parole per trovare lo stesso prodotto su Vinted, senza aggettivi né condizioni. parole: 1-3 parole minuscole che un annuncio dello stesso prodotto deve contenere (es. ["s25","ultra"], ["1000xm5"], ["persepolis"]).',
-  'difetti: difetti o mancanze dichiarati nel titolo (lista vuota se nessuno). pezzi: quanti articoli sono venduti insieme (1 se uno solo). peso_kg: il peso stimato del pacco in chili, per tutti i pezzi (0 se non sai stimarlo).',
+  'difetti: difetti o mancanze dichiarati nel titolo (lista vuota se nessuno). pezzi: quanti articoli sono venduti insieme (1 se uno solo; "1-4", "vol. 1 2 3", "lotto di 5 libri", "serie completa" sono più pezzi: se il numero non è scritto, stimalo). peso_kg: il peso stimato del pacco in chili, per tutti i pezzi (0 se non sai stimarlo).',
   'Prezzi in euro, dal tuo sapere sul mercato italiano, prudenti: nuovo = prezzo a cui si compra nuovo oggi; usato_min e usato_max = fascia a cui si vende tra privati NELLE CONDIZIONI DICHIARATE, per tutti i pezzi dell\'annuncio. Se non conosci il prodotto metti 0 e una fiducia bassa: è meglio 0 di un numero inventato.',
   'fiducia: da 0 a 1, quanto sei sicuro dell\'identificazione e dei prezzi. rischi: "falso" se è un articolo di marca molto contraffatto a un prezzo sospetto, "difettoso", "incompleto", "ricambio_accessorio" se l\'annuncio è un accessorio o un ricambio e non il prodotto, "non_identificato" se dal testo non si capisce che cos\'è.',
   'corrisponde: solo quando ti è dato che cosa cerca l\'utente: "si" se l\'annuncio è proprio quel prodotto, "variante" se è lo stesso modello in un\'altra versione, "no" se è altro; "nd" quando non ti è dato che cosa cerca.',
@@ -191,15 +207,73 @@ export function cleanInterestCards(value, items) {
 
 const itBand = (condition) => (/nuovo/i.test(String(condition || '')) ? 'new' : /ottim|buon|discret|soddisfacent/i.test(String(condition || '')) ? 'used' : null)
 
+/* ───────── lots: how many pieces a listing sells ───────── */
+
+/** Where a lot is pieces of one series (volumes) and is worth its pieces; elsewhere a lot is a thing of its own. */
+const IT_SERIES = ['libri', 'fumetti_manga']
+const IT_NUM = '(?<!\\d)\\d{1,3}(?!\\d)'
+/** After a number, what makes it a measure (an age, a size, a weight) and not a count of volumes. */
+const IT_MEASURE = '(?!\\s*(?:anni|anno|mesi|years|ans|mois|cm|mm|kg|gr?\\b|ml|euro|€|pagine|pag\\b|ore\\b|%))'
+const IT_COUNTED = new RegExp('(?<!\\d)(\\d{1,2})\\s*(?:volumi|vol|libri|numeri|albi|fumetti|tomi|romanzi)\\b')
+const IT_SPAN = new RegExp(`\\bdal?\\s+(${IT_NUM})\\s+al?\\s+(${IT_NUM})${IT_MEASURE}`)
+const IT_LISTED = new RegExp(`\\b(?:volumi|volume|vol|numeri|nn|n°)\\.?\\s*(${IT_NUM}(?:\\s*(?:[-/,+&]|\\be\\b)?\\s*${IT_NUM})+)${IT_MEASURE}`)
+const IT_GROUP = new RegExp(`(${IT_NUM}(?:\\s*(?:[-/,+&]|\\be\\b)\\s*${IT_NUM})+)${IT_MEASURE}`)
+const IT_LOT_UNKNOWN = /\b(lotto|lotti|stock|bundle|blocco|serie completa|collezione completa|collana completa|intera serie|tutti i volumi|tutta la serie)\b/i
+const IT_LOT_MAX = 150
+
+/** «1-4» → 4, «1/10» → 10, «1, 2, 3» → 3, «1 e 2» → 2; 1 when the numbers are not a run of volumes («24/7»). */
+function itRunOf(group) {
+  const nums = group.match(/\d+/g).map(Number)
+  if (nums.length === 2 && /^\d+\s*[-/]\s*\d+$/.test(group.trim())) return nums[1] > nums[0] ? nums[1] - nums[0] + 1 : 1
+  return nums.every((n, i) => i === 0 || n > nums[i - 1]) ? nums.length : 1
+}
+
+/**
+ * How many volumes the title of a book or a comic sells: «Ken il guerriero 1-4» → 4, «3 volumi» → 3,
+ * «dal 1 al 10» → 10, «vol. 1 2 3» → 3; 1 for one volume; null for a lot that does not say how many
+ * («lotto fumetti», «serie completa»). Ages and measures are not counts («3-6 anni»).
+ */
+export function seriesPiecesOf(title) {
+  const said = String(title || '').toLowerCase().replace(/[–—]/g, '-')
+  const sane = (n) => (n >= 2 && n <= IT_LOT_MAX ? n : null)
+  const counted = IT_COUNTED.exec(said)
+  if (counted && sane(Number(counted[1]))) return Number(counted[1])
+  const span = IT_SPAN.exec(said)
+  if (span && sane(Number(span[2]) - Number(span[1]) + 1)) return Number(span[2]) - Number(span[1]) + 1
+  const group = IT_LISTED.exec(said) || IT_GROUP.exec(said)
+  if (group && sane(itRunOf(group[1]))) return itRunOf(group[1])
+  return IT_LOT_UNKNOWN.test(said) ? null : 1
+}
+
+/**
+ * What kind of lot a find is: { pieces: how many (1 for one article, null when a lot does not say), series: its
+ * pieces are volumes of a series, comparable: its market can be read from a search }. A lot is compared only as
+ * volumes of a series, piece by piece; a lot of anything else keeps the AI's estimate of the whole.
+ */
+export function lotOf(find, card) {
+  const series = IT_SERIES.includes((card && card.category) || 'altro')
+  const title = String((find && find.title) || '')
+  const said = card && itFinite(card.pieces) && card.pieces >= 2 ? Math.min(Math.round(card.pieces), IT_LOT_MAX) : null
+  let pieces
+  if (series) {
+    const read = seriesPiecesOf(title)
+    // What the title says first; then what the AI understood («trilogia completa» → 3).
+    pieces = read === null ? said : read >= 2 ? read : said || 1
+  } else pieces = said || (IT_LOT.test(title) ? null : 1)
+  return { pieces, series, comparable: pieces === 1 || (series && pieces !== null) }
+}
+
 /**
  * The same product among the results of a search (catalog.js candidates): the titles carry the card's words, are not
- * accessories or lots, do not differ on capacity, size or model number, and are in the same state (new or used) when
- * enough are. Returns their prices.
+ * accessories, do not differ on capacity, size or model number, and are in the same state (new or used) when enough
+ * are. Returns the prices of ONE piece: for a single article the lots are left out; for a lot of volumes every
+ * listing counts by its price a volume. Empty for a lot that cannot be compared (see lotOf).
  */
 export function comparablesOf(candidates, card, find) {
   const must = (card && Array.isArray(card.words) ? card.words : []).flatMap((w) => itWords(w))
   if (!must.length) return []
-  const lot = card.pieces > 1
+  const lot = lotOf(find, card)
+  if (!lot.comparable) return []
   const accessory = card.risks && card.risks.includes('ricambio_accessorio')
   const rows = []
   for (const c of Array.isArray(candidates) ? candidates : []) {
@@ -209,14 +283,22 @@ export function comparablesOf(candidates, card, find) {
     // «1000xm5» also matches «wh-1000xm5» written as one word, «s25» does not match «s25fe».
     if (!must.every((w) => said.includes(w) || (w.length >= 5 && joined.includes(w)))) continue
     if (!accessory && IT_ACCESSORY.some((w) => joined.includes(` ${w} `))) continue
-    if (!lot && IT_LOT.test(String(c.title || ''))) continue
     if (IT_BROKEN.test(String(c.title || ''))) continue
-    if (attributeConflict(find.title || '', c.title || '')) continue
-    rows.push({ price: c.price, band: itBand(c.condition) })
+    let price = c.price
+    if (lot.series) {
+      // Volumes of one series cost alike whatever their number: no conflict of «model» between volume 3 and 7.
+      const pieces = seriesPiecesOf(c.title)
+      if (pieces === null || (pieces > 1 && lot.pieces === 1)) continue
+      price = c.price / pieces
+    } else {
+      if (IT_LOT.test(String(c.title || ''))) continue
+      if (attributeConflict(find.title || '', c.title || '')) continue
+    }
+    rows.push({ price, band: itBand(c.condition) })
   }
   const band = find.band || itBand(find.condition)
   const same = band ? rows.filter((r) => r.band === band) : []
-  return (same.length >= 5 ? same : rows).map((r) => r.price)
+  return (same.length >= 5 ? same : rows).map((r) => itR2(r.price))
 }
 
 const itPercentile = (sorted, p) => {
@@ -227,15 +309,49 @@ const itPercentile = (sorted, p) => {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (at - lo)
 }
 
-/** From the prices of the same product: { value: the lower quartile, median, n, source: 'market' }, or null under three. */
-export function marketReferenceOf(prices) {
+/**
+ * From the prices of one piece of the same product: { value: the lower quartile, median, n, source: 'market' }, or
+ * null under three. For a lot of `pieces` volumes value and median are of the whole lot, with `unit` and `pieces`.
+ */
+export function marketReferenceOf(prices, { pieces = 1 } = {}) {
   let sorted = (Array.isArray(prices) ? prices : []).filter((p) => itFinite(p) && p > 0).sort((a, b) => a - b)
   if (sorted.length < INTEREST.MARKET_MIN) return null
   // What costs a third or three times the middle is another thing (an accessory, a lot, a mistake).
   const mid = itPercentile(sorted, 0.5)
   if (sorted.length >= 4) sorted = sorted.filter((p) => p >= mid / 3 && p <= mid * 3)
   if (sorted.length < INTEREST.MARKET_MIN) return null
-  return { value: itR2(itPercentile(sorted, 0.25)), median: itR2(itPercentile(sorted, 0.5)), n: sorted.length, source: 'market' }
+  const many = itFinite(pieces) && pieces > 1 ? Math.round(pieces) : 1
+  const unit = itPercentile(sorted, 0.25)
+  const ref = { value: itR2(unit * many), median: itR2(itPercentile(sorted, 0.5) * many), n: sorted.length, source: 'market' }
+  return many > 1 ? { ...ref, unit: itR2(unit), pieces: many } : ref
+}
+
+/**
+ * The reference of a find from other finds that are the same product (`others`: finds with their card, as a hunt's
+ * own results): piece by piece as in comparablesOf. Null when the find cannot be compared or the others are few.
+ */
+export function referenceAmong(find, card, others) {
+  const lot = lotOf(find, card)
+  if (!lot.comparable) return null
+  const prices = []
+  for (const o of Array.isArray(others) ? others : []) {
+    if (!o || !itFinite(o.price) || o.price <= 0) continue
+    const other = lotOf(o, o.card || null)
+    if (!other.comparable || (other.pieces > 1 && lot.pieces === 1)) continue
+    prices.push(o.price / other.pieces)
+  }
+  return marketReferenceOf(prices, { pieces: lot.pieces })
+}
+
+/**
+ * How much a search of the market is worth for a find, to choose the few done at each reading: first what is close
+ * to a buy (the search makes it sure), then what the AI's estimate explains worst (asked many times its estimate),
+ * then where many want it and where more money is at stake.
+ */
+export function lookupWorthOf(find, score) {
+  const hearts = itFinite(find.favourites) ? Math.max(0, find.favourites) : 0
+  const price = itFinite(find.price) ? Math.max(0, find.price) : 0
+  return (score && score.total >= 55 ? 100 : 0) + (score && score.unsure === 'prezzo' ? 15 : 0) + 12 * Math.log1p(hearts) + 8 * Math.log1p(price)
 }
 
 /** The reference from the AI's own estimate (the low end of its used range, a little lower still), or null. */
@@ -335,7 +451,8 @@ const labelOf = (total) => INTEREST.LABELS.find(([min]) => total >= min)[1]
 /**
  * The score of one article. `card`: the AI's card (null when there is none); `ref`: its reference (marketReferenceOf
  * or aiReferenceOf, null when there is none); `profile`: the user's interests; `match`: in a hunt, whether it is the
- * product searched ('si' | 'variante' | 'no').
+ * product searched ('si' | 'variante' | 'no'). In the result `unsure` says why the price could not be judged
+ * ('riferimento' | 'prezzo' | 'identita'), or is null.
  */
 export function interestScore(find, { card = null, ref = null, profile = null, match = null } = {}) {
   const W = INTEREST.WEIGHTS
@@ -352,7 +469,19 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   let margin = null
   let target = { buy: null, deal: null }
   let neg = { n: 0.3, discount: null }
-  if (ref && itFinite(ref.value) && ref.value > 0 && itFinite(price) && price > 0) {
+  // Why the price cannot be judged, when it cannot: 'riferimento' (no value to compare with), 'prezzo' (asked many
+  // times what the same thing sells for), 'identita' (the AI did not understand what it is).
+  let unsure = null
+  const known = ref && itFinite(ref.value) && ref.value > 0 && itFinite(price) && price > 0
+  // What the same thing sells for at most: the middle of the market, or the top of the AI's range.
+  const usual = !known ? null : ref.source === 'market' ? ref.median : card && itFinite(card.usedHigh) && card.usedHigh > 0 ? card.usedHigh : ref.value / INTEREST.AI_PRUDENCE
+  if (known && price >= INTEREST.ODD_PRICE_MIN && itFinite(usual) && usual > 0 && price >= INTEREST.ODD_PRICE_TIMES * usual) {
+    // The numbers would say a heavy loss; more likely the listing is not what the reference prices.
+    unsure = 'prezzo'
+    const times = price / usual
+    const lot = (ref.pieces || (card && card.pieces) || 1) > 1
+    reasons.push(`Chiesto ${(times >= 10 ? Math.round(times) : Math.round(times * 10) / 10).toLocaleString('it-IT')} volte ${ref.source === 'market' ? `il prezzo di ${ref.n} annunci uguali` : 'la stima dell\'AI'} (${itEuro(usual)}): ${lot ? 'forse un\'edizione rara' : 'forse un lotto o un\'edizione particolare'}, da aprire`)
+  } else if (known) {
     const cost = itR2(price + vintedBuyerFee(price) + shipping)
     const profit = itR2(ref.value - cost)
     const pct = profit / ref.value
@@ -361,15 +490,19 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     if (profit < INTEREST.MIN_PROFIT) c = Math.min(c, 0.5)
     target = { buy: buyPriceFor(ref.value, shipping, required), deal: buyPriceFor(ref.value, shipping, required * 1.3) }
     neg = negotiabilityOf(find, target.buy)
-    const about = ref.source === 'market' ? `${itEuro(ref.value)} (${ref.n} annunci uguali)` : `circa ${itEuro(ref.value)} (stima dell'AI)`
+    const about = ref.source !== 'market' ? `circa ${itEuro(ref.value)} (stima dell'AI)`
+      : ref.pieces > 1 ? `${itEuro(ref.value)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci)` : `${itEuro(ref.value)} (${ref.n} annunci uguali)`
     if (profit >= INTEREST.MIN_PROFIT) reasons.push(`Rivendendo a ${about} restano ${itEuro(profit)} (${margin.pct}%)`)
     else if (profit > 0) reasons.push(`Rivendendo a ${about} restano solo ${itEuro(profit)}`)
     else reasons.push(`Rivendendo a ${about} perdi ${itEuro(-profit)}`)
-    if (target.buy === null) reasons.push('Costa troppo poco per lasciare un margine da solo: vale in lotto')
+    if (target.buy === null) reasons.push('Si rivende a troppo poco per lasciare un margine da solo: vale in lotto')
     else if (neg.discount === 0) reasons.push(`Sotto il tuo prezzo di acquisto (${itEuro(target.buy)})`)
     else if (neg.discount <= INTEREST.MAX_OFFER_DISCOUNT) reasons.push(`Con un'offerta a ${itEuro(target.buy)} (−${Math.round(neg.discount * 100)}%) è da comprare`)
     else reasons.push(`Da comprare solo a ${itEuro(target.buy)}: sotto il minimo d'offerta di Vinted`)
-  } else reasons.push('Non ho un valore di riferimento: non so dire se il prezzo è buono')
+  } else {
+    unsure = 'riferimento'
+    reasons.push('Non ho un valore di riferimento: non so dire se il prezzo è buono')
+  }
 
   let total = W.convenienza * c + W.domanda * d + W.qualita * q + W.trattabilita * neg.n + W.pertinenza * p + W.venditore * v
   // Without a good price the rest does not make an article worth buying to sell again.
@@ -384,12 +517,14 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   if (itFinite(find.favourites) && find.favourites >= 6) reasons.push(`${find.favourites} cuori`)
   if (itFinite(find.was) && find.was > price) reasons.push(`Calato da ${itEuro(find.was)}`)
   const provisional = !ref || ref.source !== 'market'
-  if (!ref || risks.includes('non_identificato')) total = Math.min(total, INTEREST.UNKNOWN_CAP)
+  if (!unsure && risks.includes('non_identificato')) unsure = 'identita'
+  if (unsure) total = Math.min(total, INTEREST.UNKNOWN_CAP)
   else if (provisional) total = Math.min(total, INTEREST.PROVISIONAL_CAP)
   if (broken || match === 'no' || find.vote === -1) total = Math.min(total, INTEREST.REJECTED_CAP)
   total = Math.round(itClamp(total, 0, 100))
   return {
-    total, label: labelOf(total), provisional,
+    // What cannot be judged is never «da trattare»: it is to be looked at, or left.
+    total, label: unsure ? (total >= INTEREST.CHECK_MIN ? 'da verificare' : 'lascia') : labelOf(total), provisional, unsure,
     parts: { convenienza: itR2(c), domanda: itR2(d), qualita: itR2(q), trattabilita: itR2(neg.n), pertinenza: itR2(p), venditore: itR2(v) },
     margin, target, shipping, reasons: reasons.slice(0, 4),
   }

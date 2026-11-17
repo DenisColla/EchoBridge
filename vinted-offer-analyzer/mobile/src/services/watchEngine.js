@@ -58,8 +58,11 @@ const ASK_BUDGET_MS = 50_000
 const CARD_TRIES = 2
 /** The last judgement had no AI at all: no key, a key the phone did not let be read, a key the provider refused. */
 const NO_AI = ['nokey', 'keyerror', 'auth']
-/** The shape of what is saved: 2 since 1.18.1 (a try of a card counts only when the AI answered). */
-const SAVED_V = 2
+/**
+ * The shape of what is saved: 2 since 1.18.1 (a try of a card counts only when the AI answered), 3 since 1.18.2 (a
+ * lot is compared piece by piece: the references read from the market before are read again).
+ */
+const SAVED_V = 3
 
 let state = { mode: 'manual', job: null, finds: [], log: [], draft: null }
 let loading = null
@@ -110,9 +113,19 @@ function load() {
           finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: state.draft,
         }
         // 1.18.0 counted a try of a card even when no key was there to ask with: those articles are asked again.
-        if (saved.v !== SAVED_V) {
+        const v = Number(saved.v) || 1
+        if (v < 2) {
           state.finds = state.finds.map((f) => (!f.card && f.cardTried ? { ...f, cardTried: 0 } : f))
           if (state.job && state.job.ai === 'auth') state.job = { ...state.job, ai: null }
+        }
+        if (v < 3) {
+          state.finds = state.finds.map((f) => {
+            if (!f.refTried && !(f.ref && f.ref.source === 'market')) return f
+            const next = { ...f }
+            delete next.refTried
+            if (next.ref && next.ref.source === 'market') delete next.ref
+            return next
+          })
         }
       }
       profile = await loadProfile()
@@ -225,18 +238,20 @@ async function judge(t0, { lookups = true, source = null } = {}) {
       const others = same.filter((o) => o.id !== f.id)
       const alike = others.filter((o) => !f.band || !o.band || o.band === f.band)
       // Only for what is the product searched: a variant or another thing is worth what the AI estimates for it.
-      const market = f.card.match === 'si' ? core.marketReferenceOf((alike.length >= 5 ? alike : others).map((o) => o.price)) : null
+      // A lot of volumes among them counts by its price a volume; a lot of anything else keeps the AI's estimate.
+      const market = f.card.match === 'si' ? core.referenceAmong(f, f.card, alike.length >= 5 ? alike : others) : null
       return { ...f, ref: market || core.aiReferenceOf(f.card) }
     })
   } else {
     list = list.map((f) => (f.ref || !f.card ? f : { ...f, ref: core.aiReferenceOf(f.card) }))
-    // A search of Vinted for the same product, three a reading, a day of memory each: first the promising ones by
-    // the AI's estimate, then the dearest (where an estimate that is off costs the most).
+    // A search of Vinted for the same product, three a reading, a day of memory each: first what is close to a buy,
+    // then what the AI's estimate explains worst, what many want and what costs most (core lookupWorthOf).
     const promising = list
-      .filter((f) => f.card && !f.refTried && (!f.ref || f.ref.source !== 'market') && f.card.words.length && f.card.confidence >= 0.5 && !f.card.risks.includes('difettoso'))
-      .map((f) => ({ f, total: core.interestScore(f, { card: f.card, ref: f.ref || null, profile }).total }))
-      .sort((a, b) => Number(b.total >= 55) - Number(a.total >= 55) || (b.total >= 55 ? b.total - a.total : b.f.price - a.f.price))
+      .filter((f) => f.card && !f.refTried && (!f.ref || f.ref.source !== 'market') && f.card.words.length && f.card.confidence >= 0.5 && !f.card.risks.includes('difettoso') && core.lotOf(f, f.card).comparable)
+      .map((f) => ({ f, worth: core.lookupWorthOf(f, core.interestScore(f, { card: f.card, ref: f.ref || null, profile })) }))
+      .sort((a, b) => b.worth - a.worth)
     let searched = 0
+    const looked = []
     for (const { f } of lookups ? promising : []) {
       if (searched >= LOOKUPS_PER_TICK || Date.now() - t0 > JUDGE_BUDGET_MS) break
       const res = await lookupReference(f, f.card)
@@ -246,9 +261,12 @@ async function judge(t0, { lookups = true, source = null } = {}) {
         break
       }
       if (!res.cached) searched += 1
+      // For the diary: what was searched and how many of the results were the same product.
+      looked.push({ per: String(f.title || '').slice(0, 36), cerca: f.card.query, parole: f.card.words, visti: res.seen ?? null, uguali: res.same ?? null, valore: res.ref ? res.ref.value : null, ...(res.ref && res.ref.pieces ? { pezzi: res.ref.pieces } : {}), ...(res.cached ? { memoria: true } : {}) })
       list = list.map((x) => (x.id === f.id ? { ...x, ref: res.ref || x.ref, refTried: true } : x))
     }
     if (lookups && promising.length) note.mercati = searched
+    if (looked.length) note.ricerche = looked
   }
   // 3. The scores, on the state as it is now (the user may have voted or emptied the list meanwhile).
   const now = state
@@ -541,7 +559,8 @@ export const watchEngine = {
         da_trattare: finds.filter((f) => f.score && f.score.total >= 55 && f.score.total < 70).length,
       },
       primi: core.rankFinds(finds, job && job.kind === 'hunt' ? job : null).slice(0, 8).map((f) => ({
-        titolo: f.title, prezzo: f.price, voto: f.score ? f.score.total : null, provvisorio: f.score ? f.score.provisional : null, categoria: f.card ? f.card.category : null,
+        titolo: f.title, prezzo: f.price, voto: f.score ? f.score.total : null, etichetta: f.score ? f.score.label : null, provvisorio: f.score ? f.score.provisional : null,
+        categoria: f.card ? f.card.category : null, pezzi: f.card ? core.lotOf(f, f.card).pieces : null, stima_ai: f.card ? [f.card.usedLow, f.card.usedHigh] : null, fiducia: f.card ? f.card.confidence : null,
         riferimento: f.ref ? { valore: f.ref.value, da: f.ref.source, annunci: f.ref.n } : null, motivi: f.score ? f.score.reasons : null,
       })),
       letture: log,

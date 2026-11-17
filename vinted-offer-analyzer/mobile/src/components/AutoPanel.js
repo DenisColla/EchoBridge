@@ -183,7 +183,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
               <Pressable onPress={() => onOpen(f.url)} accessibilityRole="button" style={{ flex: 1, minWidth: 0 }}>
                 <Text numberOfLines={1} style={{ color: t.ink, fontWeight: '600' }}>{f.title || 'Articolo'}</Text>
                 <Text numberOfLines={1} style={{ color: t.ink3, fontSize: 12 }}>
-                  {[f.score ? `${f.score.label}${f.score.provisional ? ' (provvisorio)' : ''}` : null, f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null].filter(Boolean).join(' · ')}
+                  {[f.score ? `${f.score.label}${f.score.provisional && !f.score.unsure ? ' (provvisorio)' : ''}` : null, f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null].filter(Boolean).join(' · ')}
                 </Text>
                 {f.score && f.score.reasons.length ? <Text numberOfLines={3} style={{ color: t.ink2, fontSize: 12 }}>{f.score.reasons.slice(0, 2).join(' · ')}</Text> : null}
                 {f.exceptional || f.tolerancePct || f.eligible === false ? (
