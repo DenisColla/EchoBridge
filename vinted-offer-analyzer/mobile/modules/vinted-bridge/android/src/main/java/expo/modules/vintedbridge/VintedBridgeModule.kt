@@ -2,7 +2,6 @@ package expo.modules.vintedbridge
 
 import android.content.ComponentName
 import android.content.Context
-import android.app.NotificationManager
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
@@ -60,43 +59,28 @@ class VintedBridgeModule : Module() {
       true
     }
 
-    // 1.15: the service that keeps a hunt reading with the app behind. Started with the app in front, by the user
-    // starting a job; every call answers false instead of failing.
-    Function("startWatchService") { title: String, text: String ->
-      try {
-        val intent = Intent(context, WatchKeepAliveService::class.java)
-          .putExtra(WatchKeepAliveService.EXTRA_TITLE, title)
-          .putExtra(WatchKeepAliveService.EXTRA_TEXT, text)
-        context.startService(intent)
-        true
-      } catch (e: Throwable) {
-        WatchKeepAliveService.lastError = "start " + e.javaClass.simpleName + ": " + (e.message ?: "")
-        false
-      }
+    // 1.17: the readings of a hunt are started by Android's alarm clock (WatchAlarms.kt). Every call answers instead
+    // of failing.
+    Function("scheduleWatchAlarm") { atMs: Double ->
+      WatchAlarms.schedule(context, atMs.toLong())
     }
 
-    Function("updateWatchService") { title: String, text: String ->
-      try {
-        if (!WatchKeepAliveService.running) false else {
-          val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-          manager.notify(WatchKeepAliveService.NOTIFICATION_ID, WatchKeepAliveService.notificationOf(context, title, text))
-          true
-        }
-      } catch (e: Throwable) {
-        false
-      }
+    Function("cancelWatchAlarm") {
+      WatchAlarms.cancel(context)
+      true
     }
 
-    Function("stopWatchService") {
-      try {
-        context.stopService(Intent(context, WatchKeepAliveService::class.java))
-      } catch (e: Throwable) {
-        false
-      }
+    Function("watchAlarmInfo") {
+      WatchAlarms.info(context)
     }
 
-    Function("watchServiceState") {
-      bundleOf("running" to WatchKeepAliveService.running, "error" to WatchKeepAliveService.lastError)
+    Function("showWatchStatus") { title: String, text: String ->
+      WatchAlarms.showStatus(context, title, text)
+    }
+
+    Function("hideWatchStatus") {
+      WatchAlarms.hideStatus(context)
+      true
     }
 
     // Whether Android lets the app work without battery restrictions («Senza restrizioni»).

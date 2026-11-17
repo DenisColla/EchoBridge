@@ -3,15 +3,16 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <application>
-    <!-- 1.15: keeps the readings of a hunt going with the app behind; it shows a fixed notification while it runs. -->
+    <!-- 1.17: one reading of a hunt, started by the alarm below; in the foreground only for the seconds it takes. -->
     <service
-      android:name=".WatchKeepAliveService"
+      android:name=".WatchTickService"
       android:exported="false"
       android:foregroundServiceType="specialUse">
       <property
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="Reads again, every few minutes, a search the user saved, and notifies the best find" />
     </service>
+    <receiver android:name=".WatchAlarmReceiver" android:exported="false" />
     <!-- Read-only listener: it only copies the title and text of Vinted's own notifications into the app's storage. -->
     <service
       android:name=".VintedNotificationService"

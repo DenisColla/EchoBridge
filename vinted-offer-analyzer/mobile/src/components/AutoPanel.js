@@ -21,9 +21,9 @@ const countdown = (ms) => {
  * - Semi-automatica: a search (typed here, or taken from the page open in the Vinted tab: `draft`) is read again for
  *   24 hours; the best article within the highest price is proposed, and the user sends the offer.
  * - Automatica: the user's Vinted home is read again for 8 hours and what passed there is ranked.
- * `background` ({ service, battery, android }): whether the service that keeps the readings going with the app behind
- * is running, and whether Android leaves the app without battery restrictions. A verification asked by Vinted stops
- * the job.
+ * `background` ({ alarm, battery, android }): how Android's alarm clock, which starts the readings with the app in
+ * any state, answered for the running job ('exact' | 'inexact' | 'failed' | null), and whether Android leaves the app
+ * without battery restrictions. A verification asked by Vinted stops the job.
  */
 export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null }) {
   const t = useTheme()
@@ -45,7 +45,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const stopped = job && job.stopped
   const status = !job ? null
     : running && job.waiting ? `In pausa · ${job.reads || 0} letture: Vinted ha risposto con un controllo mentre l'app era dietro. Riprendo da qui, con l'app aperta.`
-      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · leggo…'} · fino alle ${clock(jobEndsAt(job))}`
+      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${auto.reading ? ' · leggo…' : nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
       : stopped === 'verifica' ? 'Fermata: Vinted ha chiesto una verifica. Aprila nella scheda Vinted, poi riavvia.'
         : stopped === 'utente' ? 'Fermata da te.'
           : `Finita: ${job.reads || 0} letture.`
@@ -82,7 +82,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         ) : null}
         {mode !== 'manual' ? (
           <View style={{ gap: space.xs }}>
-            <Body small muted>Le letture continuano anche con l'app dietro o lo schermo spento: una notifica fissa resta visibile finché la ricerca è in corso. Non chiudere l'app dalle app recenti. Se Vinted chiede una verifica mi fermo e te lo dico.</Body>
+            <Body small muted>Ogni lettura la fa partire la sveglia di sistema di Android: avviene anche con l'app dietro, lo schermo spento o l'app chiusa. Una notifica resta visibile finché la ricerca è in corso. Se Vinted chiede una verifica mi fermo e te lo dico.</Body>
             {background && background.android && background.battery === false ? (
               <View style={{ gap: space.xs }}>
                 <Body small style={{ color: t.warnInk || t.ink, fontWeight: '600' }}>Batteria: Android limita l'app. Per 24 ore di fila serve «Senza restrizioni»: Impostazioni dell'app › Batteria.</Body>
@@ -100,7 +100,11 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
           {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
           {running && background && background.android ? (
-            <Body small muted>{background.service ? 'Lavoro in background attivo (notifica fissa).' : 'Lavoro in background non attivo: leggo solo con l\'app aperta e tengo lo schermo acceso.'}</Body>
+            <Body small muted>
+              {background.alarm === 'exact' ? 'Sveglie di sistema attive: leggo anche con l\'app chiusa.'
+                : background.alarm === 'inexact' ? 'Sveglie non esatte: con l\'app dietro Android può ritardare o saltare le letture.'
+                  : 'Senza sveglie di sistema: leggo solo con l\'app aperta e tengo lo schermo acceso.'}
+            </Body>
           ) : null}
           <ButtonRow>
             {running ? <Button label="Ferma" variant="secondary" small onPress={onStop} /> : null}
