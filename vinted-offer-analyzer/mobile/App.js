@@ -1726,7 +1726,7 @@ function Main() {
       {vintedActive ? null : (
         <View style={[styles.header, { borderBottomColor: t.line }]}>
           <View style={[styles.logo, { backgroundColor: t.accent }]}><Text style={[styles.logoText, { color: t.onAccent }]}>€</Text></View>
-          <Text style={[styles.appName, { color: t.ink, flex: 1 }]} numberOfLines={1}>Offerta Vinted Timing</Text>
+          <Text style={[styles.appName, { color: t.ink, flex: 1 }]} numberOfLines={1}>Offerta Vinted · Caccia</Text>
         </View>
       )}
 

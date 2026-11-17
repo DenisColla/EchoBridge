@@ -207,7 +207,7 @@ export function InfoView({ stats, items, learning = null, onToast = () => {}, on
           <Body muted small>
             {vinted.enabled
               ? 'Quando Vinted ti avvisa di un\'offerta accettata, rifiutata o di una controproposta, l\'app collega la notifica all\'offerta in Lista. Legge solo le notifiche di Vinted, sul telefono, e non fa nulla dentro Vinted.'
-              : 'Serve l\'«accesso alle notifiche». Su un\'app installata a mano Android chiede prima un passo: Impostazioni › App › Offerta Vinted Timing › menu ⋮ › «Consenti impostazioni con restrizioni». Poi attiva l\'accesso qui sotto.'}
+              : 'Serve l\'«accesso alle notifiche». Su un\'app installata a mano Android chiede prima un passo: Impostazioni › App › Vinted Caccia › menu ⋮ › «Consenti impostazioni con restrizioni». Poi attiva l\'accesso qui sotto.'}
           </Body>
           <Row>
             {vinted.enabled ? null : <Button label="Attiva l'accesso alle notifiche" small onPress={() => vinted.openSettings()} />}

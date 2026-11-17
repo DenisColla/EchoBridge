@@ -1,22 +1,22 @@
 {
   "expo": {
-    "name": "Offerta Vinted Timing",
+    "name": "Vinted Caccia",
     "slug": "offerta-vinted-timing",
-    "version": "1.14.0",
+    "version": "1.14.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "scheme": "offertavinted",
+    "scheme": "offertavintedcaccia",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "assetBundlePatterns": [
       "**/*"
     ],
     "android": {
-      "package": "it.migelino.offertavinted",
-      "versionCode": 31,
+      "package": "it.migelino.offertavinted.caccia",
+      "versionCode": 32,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0f766e"
+        "backgroundColor": "#3730a3"
       },
       "permissions": [
         "android.permission.POST_NOTIFICATIONS",
@@ -46,7 +46,7 @@
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#0f766e"
+          "color": "#3730a3"
         }
       ],
       [
@@ -55,7 +55,7 @@
           "image": "./assets/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#0f766e"
+          "backgroundColor": "#3730a3"
         }
       ],
       [

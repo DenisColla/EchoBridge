@@ -3,6 +3,7 @@
 App Android (Expo / React Native) dell'analizzatore di offerte Vinted. Usa lo **stesso motore** della versione web
 (`../src/core`, copiato in `core/`) e aggiunge quello che serve per agire al momento giusto:
 
+- **1.14.1 — la versione con la «Caccia» è un'app a sé**: `package` `it.migelino.offertavinted.caccia`, nome «Vinted Caccia», icona indaco. Si installa accanto all'app stabile (1.13.5) e non la aggiorna né ne tocca i dati; parte vuota (accesso a Vinted, chiave AI e permesso delle notifiche vanno dati di nuovo). Il codice è quello della 1.14.0.
 - **1.14.0 — tre modalità, nella nuova scheda «Caccia»**: *Manuale* (come sempre), *Semi-automatica* (una ricerca — scritta a parole, oppure presa dalla pagina aperta con «Caccia da questa pagina» nel menu del browser — riletta per 24 ore entro un prezzo massimo) e *Automatica* (la home di Vinted riletta per 8 ore, in cima i più cercati e quelli che calano di prezzo). Regole in `core/watch.js`: dopo ogni lettura l'attesa è estratta di nuovo tra 8:00 e 12:00 (minuti e secondi), un affare sotto il 70% del massimo viene notificato subito, un articolo veramente buono può superare il massimo del 10% (due segnali) o del 15% (tre): per ora contano i due segnali che una scheda mostra (nuovo, taglia giusta). L'app non manda mai l'offerta da sola: la caccia finisce con una notifica che apre il migliore. Le letture avvengono in un secondo browser nascosto e solo con l'app aperta (lo schermo resta acceso finché una ricerca è in corso); se Vinted chiede una verifica la ricerca si ferma e lo dice — niente imita una persona né aggira un controllo. «Prova di fattibilità» misura sul telefono in che modi ricerca e home si riescono a leggere, «Condividi il diario» l'esito di ogni lettura.
 - **1.13.5 — lo stesso annuncio analizzato due volte** (un maglione H&M, a un minuto di distanza, sempre con l'AI veloce): la prima volta 4 schede «same» e 67 «variant», e un mercato di quattro maglioni usati; la seconda nessuna «same», undici «variant» nuove, nessun mercato. (1) **Risposte ripetibili**: scheda prodotto e smistamento veloce girano a temperatura 0, così la stessa domanda dà la stessa risposta (e le stesse parole di ricerca). (2) **Senza un modello, «same» e «variant» sono la stessa cosa**: se l'annuncio non nomina un modello (lo dice la scheda prodotto), il giudizio dell'AI serve solo a togliere ciò che è di un altro tipo; quello che resta è «simile», mai «lo stesso articolo», quindi non alza il valore di rivendita. Con un modello (Levi's 511, JJstudio) «same» conta come prima. (3) **Veloce e profonda nello stesso rapporto**: in modalità profonda lo smistamento veloce gira accanto sulle stesse schede e il rapporto elenca dove i due giudizi differiscono (`confronto`), senza dover rifare l'analisi.
 - **1.13.4 — dai primi due rapporti con le schede tenute e scartate** (un cappotto e un giubbotto DEKKER, uno con l'AI veloce e uno con la profonda). (1) **Una proposta più bassa non può essere più probabile di una più alta**: gli esiti dell'utente sono contati per fascia di sconto, e due affari riusciti in una fascia davano all'audace il 42% contro il 36% della proposta di mezzo, e la stella. Ora le probabilità non salgono mai scendendo di prezzo. (2) **«Simili» non è «lo stesso articolo»**: su capi senza un modello nel titolo l'AI chiamava «variante» ogni capo della marca (giubbotti da 45–120 € tra i confronti di un cappotto), e quel mercato veniva usato con affidabilità «alta». Ora all'AI si dice che decide il tipo di capo (cappotto con cappotto, giubbotto con giubbotto); gli annunci solo simili vengono detti ma **non alzano mai il valore di rivendita**: possono solo abbassarlo, al loro prezzo tipico; e tra i simili un prezzo basso è vero quanto uno alto (due cappotti a 10 e 13 € erano stati tagliati come «anomalie»). (3) Il rapporto dice se i tenuti erano «same» o «variant».
@@ -86,7 +87,18 @@ Il log completo di ogni esecuzione è in `tools\ultimo-build.log`.
 - **Via USB**: attiva "Opzioni sviluppatore" → "Debug USB" sul telefono, collegalo e lancia `install-on-phone.bat`.
 - **Senza cavo**: copia `dist\OffertaVintedTiming.apk` sul telefono (Drive, Telegram "Messaggi salvati", cavo) e aprilo dal gestore file; alla prima installazione Android chiede di consentire le app da origini sconosciute per quell'app.
 
-L'APK è firmato con la chiave di debug generata da Expo: si installa su qualsiasi telefono ma non è pubblicabile sul Play Store così com'è. Per aggiornare l'app basta installare il nuovo APK sopra il vecchio (stesso `package`, `it.migelino.offertavinted`).
+L'APK è firmato con la chiave di debug generata da Expo: si installa su qualsiasi telefono ma non è pubblicabile sul Play Store così com'è.
+
+**Due app distinte, installabili una accanto all'altra** (dalla 1.14.1):
+
+| | App stabile | App «Caccia» |
+|---|---|---|
+| Nome sul telefono | Offerta Vinted Timing (icona verde) | Vinted Caccia (icona indaco) |
+| `package` | `it.migelino.offertavinted` | `it.migelino.offertavinted.caccia` |
+| File | `dist/OffertaVintedTiming-arm64.apk` | `dist/VintedCaccia-arm64.apk` |
+| Versione | 1.13.5, ferma (commit `73508ee`) | 1.14.x, dove prosegue lo sviluppo |
+
+Hanno dati separati: lista, esperienza, chiavi AI e accesso a Vinted non passano dall'una all'altra. Questo codice costruisce l'app «Caccia»; l'app stabile non viene più ricostruita (per rifarla com'era: il codice al commit `73508ee`). Per aggiornare un'app basta installare sopra il nuovo APK con lo stesso `package`.
 
 ### Se qualcosa va storto
 
