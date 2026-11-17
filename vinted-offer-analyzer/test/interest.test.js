@@ -126,8 +126,16 @@ test('interest: the prompt carries titles, conditions and prices, never a contac
   ] }, items)
   assert.deepEqual(Object.keys(cards), ['11', '12'])
   assert.deepEqual([cards['11'].category, cards['11'].words, cards['11'].usedLow, cards['11'].usedHigh, cards['11'].confidence, cards['11'].risks, cards['11'].match], ['audio', ['1000xm5', 'x', 'y'], 140, 180, 1, ['falso'], 'si'])
-  assert.deepEqual([cards['12'].category, cards['12'].pieces, cards['12'].weightKg, cards['11'].weightKg, cards['12'].newPrice, cards['12'].confidence, cards['12'].match, cards['12'].defects], ['altro', 1, 0, 0.8, 0, 0.3, null, ['graffi']])
+  assert.deepEqual([cards['12'].category, cards['12'].pieces, cards['12'].weightKg, cards['11'].weightKg, cards['12'].newPrice, cards['12'].confidence, cards['12'].match, cards['12'].defects], ['altro', 1, 0, 0.8, 0, 0.85, null, ['graffi']])
   assert.deepEqual(cleanInterestCards(null, items), {})
+  // what a model gets wrong in a long answer is forgiven, card by card
+  const loose = cleanInterestCards({ items: [
+    { id: 11, categoria: 'audio', parole: '1000xm5, sony', nuovo: '230,00 €', usato_min: '150', usato_max: '1.180', fiducia: 'alta', pezzi: '2', peso_kg: '0,8', rischi: 'falso', corrisponde: 'Sì' },
+    { id: '12', fiducia: 85 },
+  ] }, items)
+  assert.deepEqual([loose['11'].words, loose['11'].newPrice, loose['11'].usedLow, loose['11'].usedHigh, loose['11'].confidence, loose['11'].pieces, loose['11'].weightKg, loose['11'].risks, loose['11'].match, loose['11'].kind],
+    [['1000xm5', 'sony'], 230, 150, 1180, 0.85, 2, 0.8, ['falso'], 'si', ''])
+  assert.deepEqual([loose['12'].category, loose['12'].confidence, loose['12'].words, loose['12'].usedLow], ['altro', 0.85, [], 0])
 })
 
 test('interest: the same product among the results of a search, and its lower quartile', () => {

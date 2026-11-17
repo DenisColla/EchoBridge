@@ -30,8 +30,10 @@ export async function askCards(items, { target = '' } = {}) {
     const res = await callChain(MARKET_CHAIN, core.interestPrompt(batch, { target }), [], { effort: 'low', maxTokens: 400 + 260 * batch.length, timeoutMs: 60_000, maxAttempts: 1, think: false, temperature: 0 })
     out.calls += 1
     out.costUsd += res.costUsd || 0
-    if (res.ok && res.value) Object.assign(out.cards, core.cleanInterestCards(res.value, batch))
-    else out.error = res.kind || 'failed'
+    // An answer that is JSON but strays from the schema in one card is still read: the cleaner judges card by card.
+    const usable = res.value && (res.ok || res.kind === 'schema') ? core.cleanInterestCards(res.value, batch) : {}
+    Object.assign(out.cards, usable)
+    if (!Object.keys(usable).length) out.error = res.kind || 'failed'
   }
   for (let i = 0; i < batches.length; i += PARALLEL) {
     await Promise.all(batches.slice(i, i + PARALLEL).map((b) => run(b).catch(() => { out.error = 'failed' })))

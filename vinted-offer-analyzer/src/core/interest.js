@@ -143,9 +143,21 @@ export function interestPrompt(items, { target = '' } = {}) {
 }
 
 const itText = (v, max = 60) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '')
-const itMoney = (v) => (itFinite(v) && v > 0 && v < 100000 ? itR2(v) : 0)
+/** A number however the model wrote it (230, "230", "230,50 €"); NaN when it is none. */
+const itNumber = (v) => (typeof v === 'number' ? v : typeof v === 'string' && /\d/.test(v) ? Number(v.replace(/\.(?=\d{3}\b)/g, '').replace(',', '.').replace(/[^\d.]/g, '')) : NaN)
+const itMoney = (v) => {
+  const n = itNumber(v)
+  return itFinite(n) && n > 0 && n < 100000 ? itR2(n) : 0
+}
+/** A list however the model wrote it: a list, or one text with commas. */
+const itList = (v) => (Array.isArray(v) ? v : typeof v === 'string' && v.trim() ? v.split(/[,;]+/) : []).filter((x) => typeof x === 'string')
+const IT_CONFIDENCE_WORDS = { alta: 0.85, media: 0.6, bassa: 0.3 }
 
-/** The AI's answer → { id: card }, with every field in its place and nothing that was not asked for. */
+/**
+ * The AI's answer → { id: card }, with every field in its place and nothing that was not asked for. It forgives what a
+ * model gets wrong in a long answer (a number written as text, a list as one text, a missing field): one card that is
+ * off must not lose the other nine.
+ */
 export function cleanInterestCards(value, items) {
   const known = new Set((Array.isArray(items) ? items : []).map((f) => String(f.id)))
   const out = {}
@@ -155,17 +167,21 @@ export function cleanInterestCards(value, items) {
     if (!known.has(id) || out[id]) continue
     const lo = itMoney(raw.usato_min)
     const hi = itMoney(raw.usato_max)
+    const pieces = Math.round(itNumber(raw.pezzi))
+    const weight = itNumber(raw.peso_kg)
+    const sure = itNumber(raw.fiducia)
+    const match = itText(raw.corrisponde, 12).toLowerCase().replace('sì', 'si')
     out[id] = {
       category: INTEREST_CATEGORIES.includes(raw.categoria) ? raw.categoria : 'altro',
       kind: itText(raw.tipo, 40), brand: itText(raw.marca, 40), model: itText(raw.modello, 60), variant: itText(raw.variante, 40),
-      query: itText(raw.cerca, 60), words: (Array.isArray(raw.parole) ? raw.parole : []).map((w) => itWords(w).join(' ')).filter(Boolean).slice(0, 3),
-      defects: (Array.isArray(raw.difetti) ? raw.difetti : []).map((d) => itText(d, 40)).filter(Boolean).slice(0, 4),
-      pieces: Number.isInteger(raw.pezzi) && raw.pezzi > 1 && raw.pezzi < 200 ? raw.pezzi : 1,
-      weightKg: itFinite(raw.peso_kg) && raw.peso_kg > 0 && raw.peso_kg < 100 ? itR2(raw.peso_kg) : 0,
+      query: itText(raw.cerca, 60), words: itList(raw.parole).map((w) => itWords(w).join(' ')).filter(Boolean).slice(0, 3),
+      defects: itList(raw.difetti).map((d) => itText(d, 40)).filter(Boolean).slice(0, 4),
+      pieces: pieces > 1 && pieces < 200 ? pieces : 1,
+      weightKg: itFinite(weight) && weight > 0 && weight < 100 ? itR2(weight) : 0,
       newPrice: itMoney(raw.nuovo), usedLow: lo && hi ? Math.min(lo, hi) : lo || hi, usedHigh: lo && hi ? Math.max(lo, hi) : hi || lo,
-      confidence: itFinite(raw.fiducia) ? itClamp(raw.fiducia) : 0.3,
-      risks: (Array.isArray(raw.rischi) ? raw.rischi : []).filter((r) => INTEREST_RISKS.includes(r)),
-      match: ['si', 'variante', 'no'].includes(raw.corrisponde) ? raw.corrisponde : null,
+      confidence: itFinite(sure) ? itClamp(sure > 1.5 ? sure / 100 : sure) : IT_CONFIDENCE_WORDS[itText(raw.fiducia, 10).toLowerCase()] ?? 0.3,
+      risks: itList(raw.rischi).map((r) => r.trim()).filter((r) => INTEREST_RISKS.includes(r)),
+      match: ['si', 'variante', 'no'].includes(match) ? match : null,
     }
   }
   return out
