@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from '
 import { Linking, Platform, StyleSheet, View } from 'react-native'
 import { WebView } from 'react-native-webview'
 import { PAY_WINDOW_MINUTES, SIGNIN_WINDOW_MINUTES, VINTED_HOME, decideNavigation, isCheckoutUrl, isGoogleSignInUrl, isVintedUrl } from '../../services/vintedNav.js'
+import { offerFlowScript } from '../../services/offerFlow.js'
 import { useTheme } from '../../theme.js'
 import { Body, Card } from '../ui.js'
 
@@ -12,7 +13,8 @@ import { Body, Card } from '../ui.js'
  * it also reports the offers shown (the user's requests and the seller's own offers: price, crossed price, status,
  * whether it can still be bought) with the listing they are about, and the rows of
  * the conversation list (who, last message): this is how an offer made on Vinted reaches the list by itself.
- * It only reads: nothing is clicked, typed or sent, and no function of the page is replaced.
+ * It only reads: nothing is clicked, typed or sent, and no function of the page is replaced. (The one thing that
+ * acts on a page is «cuore e offerta con un tocco», a script of its own run on the user's tap: services/offerFlow.js.)
  */
 const WATCH = `(function () {
   if (window.__ovtWatch) return;
@@ -130,7 +132,7 @@ true;`
  * what a conversation page shows (services/vintedConversation.js reads them). Imperative API: goBack(), canGoBack(),
  * reload(), home(), outline() (asks the page for its outline, answered through `onOutline`).
  */
-export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlocked, onOutline, onLoading, onConversation, onInbox }, ref) {
+export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlocked, onOutline, onLoading, onConversation, onInbox, onOfferFlow = null }, ref) {
   const t = useTheme()
   const webRef = useRef(null)
   const backRef = useRef(false)
@@ -146,6 +148,8 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
     home: () => { if (webRef.current) webRef.current.injectJavaScript(`location.href = ${JSON.stringify(VINTED_HOME)}; true;`) },
     open: (url) => { if (webRef.current && isVintedUrl(url)) webRef.current.injectJavaScript(`location.href = ${JSON.stringify(url)}; true;`) },
     outline: () => { if (webRef.current) webRef.current.injectJavaScript('window.__ovtOutline && window.__ovtOutline(); true;') },
+    // «Cuore e offerta con un tocco»: only on the user's tap, on the listing shown (services/offerFlow.js).
+    sendOffer: (params) => { if (webRef.current) webRef.current.injectJavaScript(offerFlowScript(params)) },
   }), [])
 
   const seen = useCallback((url) => {
@@ -186,8 +190,9 @@ export const VintedBrowser = forwardRef(function VintedBrowser({ onPage, onBlock
     // What a page says about offers counts only when the page shown is Vinted's (the address comes from the WebView, not from the page).
     // (the WebView's address lags on Vinted, which moves between pages without loading: the page's own is the one kept)
     else if (msg.type === 'conv' && onConversation && msg.conv && typeof msg.conv === 'object' && isVintedUrl(at) && isVintedUrl(msg.url)) onConversation({ url: msg.url, conv: msg.conv })
+    else if (msg.type === 'offerFlow' && onOfferFlow && isVintedUrl(at)) onOfferFlow(msg)
     else if (msg.type === 'inbox' && onInbox && Array.isArray(msg.rows) && isVintedUrl(at)) onInbox(msg.rows)
-  }, [seen, onOutline, onConversation, onInbox])
+  }, [seen, onOutline, onConversation, onInbox, onOfferFlow])
 
   if (Platform.OS === 'web') {
     return <View style={styles.fill}><Card><Body>Il browser di Vinted funziona solo nell'app Android.</Body></Card></View>

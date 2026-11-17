@@ -126,7 +126,7 @@ function CostBlock({ strategy, chosen, onGoal, onResale, onMargin, aiDepth = 'fa
  * The 1.8 hero: who the seller is, three proposals, when to send, the moves in order, one primary button.
  * `strategy` comes from strategyFor (core); `result` is the analysis of the chosen proposal.
  */
-export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null, onMargin = null, aiDepth = 'fast', onAiDepth = null }) {
+export function StrategyHero({ strategy, result, saveState = null, calendarBusy = false, onPick, onEdit, onSave, onSaveAndMarkSent, onOneTap = null, onCalendar, onCounter, onCopyMessage, onGoal = null, onResale = null, onMargin = null, aiDepth = 'fast', onAiDepth = null }) {
   const t = useTheme()
   const [copied, setCopied] = useState(false)
   const { seller, options, moment, plan } = strategy
@@ -220,9 +220,11 @@ export function StrategyHero({ strategy, result, saveState = null, calendarBusy 
         </View>
       ) : (
         <View style={{ gap: space.sm }}>
+          {/* Only where the listing is open in the app's browser: the heart, the amount and «Offri», on this tap. */}
+          {onOneTap ? <Button label={`Cuore + offerta di ${formatEuro(chosen.price)} con un tocco`} onPress={() => onOneTap(chosen.price)} /> : null}
           {sendNow
-            ? <Button label={`L'ho inviata a ${formatEuro(chosen.price)}`} onPress={onSaveAndMarkSent || onSave} />
-            : <Button label="Salva e ricordamelo" onPress={onSave} />}
+            ? <Button label={`L'ho inviata a ${formatEuro(chosen.price)}`} variant={onOneTap ? 'secondary' : 'primary'} onPress={onSaveAndMarkSent || onSave} />
+            : <Button label="Salva e ricordamelo" variant={onOneTap ? 'secondary' : 'primary'} onPress={onSave} />}
           <View style={styles.actionRow}>
             {sendNow
               ? <Button label="Salva per dopo" variant="ghost" small onPress={onSave} />

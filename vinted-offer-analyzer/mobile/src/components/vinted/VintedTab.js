@@ -1,6 +1,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { Pressable, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
-import { formatEuro } from '../../../core/index.js'
+import { formatEuro, vintedBuyerFee } from '../../../core/index.js'
+import { copyText } from '../../services/clipboard.js'
+import { OFFER_FLOW_REASONS } from '../../services/offerFlow.js'
 import { logVisit, visitLogText } from '../../services/vintedDiag.js'
 import { pageOf, siteOf } from '../../services/vintedNav.js'
 import { space, useTheme } from '../../theme.js'
@@ -71,6 +73,58 @@ export const VintedTab = forwardRef(function VintedTab({
   })
   const handleConversation = useCallback((msg) => { if (convRef.current) convRef.current(msg) }, [])
   const handleInbox = useCallback((rows) => { if (inboxRef.current) inboxRef.current(rows) }, [])
+  /* «Cuore e offerta con un tocco» (1.16): the user's tap on the button of a proposal runs, in the page and in plain
+   * sight, the heart, «Fai un'offerta», the amount and «Offri» (services/offerFlow.js). The panel closes so that the
+   * page is seen; what the page answers becomes a message here, and a sent offer goes to the list as sent. */
+  const [flow, setFlow] = useState(null)
+  const flowRef = useRef(null)
+  const flowTimer = useRef(null)
+  const sentRef = useRef(onSaveAndMarkSent)
+  const planRef = useRef(null)
+  useEffect(() => {
+    sentRef.current = onSaveAndMarkSent
+    planRef.current = strategy && Array.isArray(strategy.plan) ? strategy.plan : null
+  })
+  useEffect(() => () => { if (flowTimer.current) clearTimeout(flowTimer.current) }, [])
+  const sendOneTap = (amount) => {
+    const fee = vintedBuyerFee(amount)
+    if (!ready || flowRef.current || !browserRef.current || fee === null) return
+    const total = Math.round((amount + fee) * 100) / 100
+    flowRef.current = { amount, total }
+    setFlow({ amount })
+    setPanel(false)
+    onToast(`Metto il cuore e preparo l'offerta di ${formatEuro(amount)}…`, 5000)
+    browserRef.current.sendOffer({ amount, expectedTotal: total })
+    // The page answers within half a minute, or not at all (it moved elsewhere): the button comes back.
+    flowTimer.current = setTimeout(() => {
+      if (!flowRef.current) return
+      flowRef.current = null
+      setFlow(null)
+      onToast('La pagina non mi ha risposto: guarda su Vinted se l\'offerta è partita.', 8000)
+    }, 35_000)
+  }
+  const handleOfferFlow = useCallback((msg) => {
+    const run = flowRef.current
+    if (!run || !msg || msg.step !== 'done') return
+    if (flowTimer.current) clearTimeout(flowTimer.current)
+    flowRef.current = null
+    setFlow(null)
+    const heart = msg.heart === 'added' ? 'Cuore messo. ' : msg.heart === 'already' ? 'Il cuore c\'era già. ' : ''
+    if (msg.ok && msg.sent) {
+      if (sentRef.current) sentRef.current()
+      const message = planRef.current ? planRef.current.find((step) => step && step.text) : null
+      const copied = message ? copyText(message.text) : Promise.resolve(false)
+      Promise.resolve(copied).catch(() => false).then((ok) => {
+        setTimeout(() => onToast(`${heart}Offerta di ${formatEuro(run.amount)} inviata (${formatEuro(run.total)} con la protezione).${ok ? ' Il messaggio è copiato: incollalo nella chat.' : ''}`, 9000), 900)
+      })
+      return
+    }
+    const why = OFFER_FLOW_REASONS[msg.reason] || OFFER_FLOW_REASONS.error
+    const detail = msg.reason === 'check_failed'
+      ? ` Vinted mostra ${msg.total || 'un totale che non leggo'}, mi aspettavo ${formatEuro(run.total)}: l'importo è nel campo, controlla e tocca tu «Offri».`
+      : msg.said ? ` Vinted dice: «${String(msg.said).slice(0, 90)}»` : ''
+    onToast(`${heart}Offerta non inviata: ${why}.${detail}`, 10000)
+  }, [onToast])
   const cap = page.type === 'conversation' && capture && capture.convId === page.id ? capture : null
   // A new page closes the panel of the previous listing; a finished analysis of this listing opens it.
   const lastLinkRef = useRef(null)
@@ -100,6 +154,7 @@ export const VintedTab = forwardRef(function VintedTab({
 
   let action = null
   if (extracting) action = <Body small muted>{PHASE[extractPhase] || 'Leggo l\'annuncio…'}</Body>
+  else if (flow) action = <Body small muted numberOfLines={1}>Invio l'offerta di {formatEuro(flow.amount)}…</Body>
   else if (ready) action = <Button label={panel ? 'Chiudi' : `★ ${formatEuro(chosen.price)} · proposte`} small variant={panel ? 'secondary' : 'primary'} onPress={() => setPanel((v) => !v)} />
   else if (link) action = <Button label="Analizza" small onPress={() => onAnalyze(link)} />
   else if (cap && cap.state === 'needs_analysis') {
@@ -128,6 +183,7 @@ export const VintedTab = forwardRef(function VintedTab({
         }}
         onConversation={handleConversation}
         onInbox={handleInbox}
+        onOfferFlow={handleOfferFlow}
         onOutline={({ url: at, lines, controls }) => {
           logVisit(at, 'struttura condivisa')
           shareText('Struttura pagina Vinted', JSON.stringify({ pagina: pageOf(at).type, elementi: lines, controlli: controls }, null, 1))
@@ -136,7 +192,7 @@ export const VintedTab = forwardRef(function VintedTab({
       {panel && ready ? (
         <View style={[styles.panel, { backgroundColor: t.bg, borderTopColor: t.line, maxHeight: Math.round(height * 0.62) }]}>
           <ScrollView contentContainerStyle={{ padding: space.md, gap: space.sm }} keyboardShouldPersistTaps="handled">
-            <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPick} onEdit={onDetails} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} onMargin={onMargin} aiDepth={aiDepth} onAiDepth={onAiDepth} />
+            <StrategyHero strategy={strategy} result={result} saveState={saveState} calendarBusy={calendarBusy} onPick={onPick} onEdit={onDetails} onSave={onSave} onSaveAndMarkSent={onSaveAndMarkSent} onOneTap={flow ? null : sendOneTap} onCalendar={onCalendar} onCounter={onCounter} onCopyMessage={onCopyMessage} onGoal={onAim} onResale={onResale} onMargin={onMargin} aiDepth={aiDepth} onAiDepth={onAiDepth} />
             <Button label="Tutti i dettagli in Calcola" variant="ghost" small onPress={onDetails} />
           </ScrollView>
         </View>

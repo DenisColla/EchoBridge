@@ -358,11 +358,14 @@ export const PAGE_PROBE = `(function () {
         var count = countItemLinks();
         if (count !== lastCount) { lastCount = count; stableSince = Date.now(); }
         var none = /nessun risultato|nessun articolo|non abbiamo trovato|niente da mostrare/i.test(String(document.body ? document.body.innerText || '' : '').slice(0, 6000));
-        // The home loads its next articles when its end comes into view, and they take a moment to arrive: after
-        // a move to the end the count is given 2.5 s to grow before the next move (four at most, 20 s in all).
-        var settledC = (count > 0 && Date.now() - stableSince > (scrolls > 0 ? 2500 : 900)) || (none && waitedC > 1500) || waitedC > (isHome ? 20000 : 6000);
+        // The home loads its next articles when its end comes into view, and they take a moment to arrive: four
+        // moves at most, 22 s in all.
+        // The home answers to a move only once it is fully loaded (its scripts attach what loads the next articles):
+        // the first move waits for that, and each move gives the count 4.5 s to grow.
+        var loadedC = document.readyState === 'complete' || waitedC > 6000;
+        var settledC = (count > 0 && Date.now() - stableSince > (scrolls > 0 ? 4500 : 900) && (!isHome || loadedC)) || (none && waitedC > 1500) || waitedC > (isHome ? 22000 : 6000);
         // A move that brought nothing new is the last one.
-        if (settledC && isHome && scrolls < 4 && count > 0 && count < 60 && waitedC < 17000 && (scrolls === 0 || count > countAtScroll)) {
+        if (settledC && isHome && scrolls < 4 && count > 0 && count < 60 && waitedC < 18000 && (scrolls === 0 || count > countAtScroll)) {
           scrolls++;
           countAtScroll = count;
           window.scrollTo(0, Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0));
@@ -377,7 +380,7 @@ export const PAGE_PROBE = `(function () {
         var found = readCards(isHome ? 120 : 80);
         var pricedC = 0;
         for (var fc = 0; fc < found.length; fc++) { if (found[fc].price) pricedC++; }
-        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', home: isHome, cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, scrolls: scrolls, height: document.documentElement.scrollHeight, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
+        post({ type: 'html', url: location.href, html: '', details: { kind: 'catalog', home: isHome, cards: found, diag: { waitedMs: waitedC, cards: found.length, priced: pricedC, scrolls: scrolls, height: document.documentElement.scrollHeight, scrollY: Math.round(window.scrollY || 0), state: document.readyState, none: none, card: found.length ? found[0].mark : null, sample: found.length ? found[0].text.slice(0, 200) : null } } });
         return;
       }
       post({ type: 'state', url: location.href, ready: ready, complete: document.readyState === 'complete', challenge: stopped, cfError: !stopped && ready && isCfError(), vh: window.innerHeight, title: (document.title || '').slice(0, 80) });

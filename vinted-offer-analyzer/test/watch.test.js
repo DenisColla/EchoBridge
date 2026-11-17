@@ -107,6 +107,7 @@ test('watch: an entry of the search page data becomes a find as it is', () => {
     id: '10328455376', title: 'Nike air max moto 2k 40,5', brand: 'Nike', condition: 'Nuovo con cartellino', band: 'new', size: '40,5', price: 25, favourites: 15, boost: true,
     url: 'https://www.vinted.it/items/10328455376-nike-air-max-moto-2k-405',
   })
+  assert.equal(findFromCard({ source: 'vinted', id: '7', title: 'Diamante azul - Care Santos', brand: 'Diamante azul - Care Santos', price: 1 }).brand, null)
   const { finds, fresh } = mergeFinds([], [entry, { source: 'vinted', id: '1', title: 'Senza prezzo', price: null }], { at: 10 })
   assert.deepEqual([finds.length, fresh], [1, ['10328455376']])
 })

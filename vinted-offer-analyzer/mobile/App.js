@@ -232,7 +232,12 @@ function Main() {
     if (data && data.kind === 'auto') {
       // A find of the hunt or the end of a job: the article opens in the Vinted tab, else the list of what was found.
       setCounterContext(null)
-      if (data.link && vintedRef.current) { setTab('vinted'); vintedRef.current.open(data.link) } else setTab('caccia')
+      if (data.link && vintedRef.current) {
+        setTab('vinted')
+        vintedRef.current.open(data.link)
+        // Its analysis starts by itself: the proposals, and «cuore e offerta» with one tap, are ready when it ends.
+        if (extractRef.current) extractRef.current(data.link)
+      } else setTab('caccia')
       return
     }
     if (data && data.kind === 'monthly') {
@@ -685,7 +690,7 @@ function Main() {
     const ranked = core.rankFinds(base.finds, job.kind === 'hunt' ? job : null)
     if (job.kind === 'hunt') {
       const best = ranked.find((f) => f.eligible)
-      if (best) notifyNow(`Caccia finita: ${best.title || 'il migliore'} a ${formatEuro(best.price)}`, 'Tocca per aprirlo: analizzalo e manda tu cuore, messaggio e offerta.', best.url)
+      if (best) notifyNow(`Caccia finita: ${best.title || 'il migliore'} a ${formatEuro(best.price)}`, 'Tocca per aprirlo: lo analizzo, poi cuore e offerta con un tocco.', best.url)
       else notifyNow('Caccia finita', `Niente entro ${formatEuro(job.maxPrice)} in ${job.reads || 0} letture.`)
     } else notifyNow('Vetrina finita', `${ranked.length} articoli raccolti in ${job.reads || 0} letture: li trovi nella scheda Caccia.`)
   }
@@ -739,7 +744,7 @@ function Main() {
     const t0 = Date.now()
     const front = AppState.currentState !== 'background' && AppState.currentState !== 'inactive'
     let res
-    try { res = await readListPage(job.url, { home: job.kind === 'feed', front }) } catch { res = { ok: false, via: null, reason: 'failed' } }
+    try { res = await readListPage(job.url, { home: job.kind === 'feed' && (job.homeFew || 0) < 2, front }) } catch { res = { ok: false, via: null, reason: 'failed' } }
     watchBusyRef.current = false
     const now = Date.now()
     const base = autoRef.current
@@ -762,7 +767,7 @@ function Main() {
       // The download met the check with the app behind: no further attempt until the app is in front again, where
       // the browser reads the page (see the AppState listener).
       if (!job.waiting) notifyNow('Ricerca in pausa', 'Vinted ha risposto con un controllo: apri l\'app per riprendere le letture.')
-      saveAuto({ ...base, job: { ...job, waiting: 'verifica' }, log: [...base.log, entry].slice(-80) })
+      saveAuto({ ...base, job: { ...base.job, waiting: 'verifica' }, log: [...base.log, entry].slice(-80) })
       return
     }
     let { finds } = base
@@ -773,7 +778,11 @@ function Main() {
       fresh = merged.fresh
       entry.nuovi = fresh.length
     }
-    const next = { ...job, reads: (job.reads || 0) + 1, lastReadAt: now, told: job.told || [], waiting: null }
+    // From the job as it is now, not as it was when the page was asked: the state of the service was noted meanwhile.
+    const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
+    // The home in the browser: when moving to its end brings nothing twice, the download gives the same articles in
+    // a tenth of the time, and the rest of the job reads it that way.
+    if (job.kind === 'feed' && res.via === 'browser' && cards) next.homeFew = cards.length <= 12 ? (base.job.homeFew || 0) + 1 : 0
     if (job.kind === 'hunt' && cards) {
       // An exceptional one is told at once, each article once: on Vinted the best ones do not wait a day.
       for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
@@ -860,7 +869,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.15.0', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.16.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said
@@ -1367,7 +1376,7 @@ function Main() {
     return () => sub.remove()
   }, [vintedActive])
 
-  const browserToast = useCallback((m) => showToast(m, 4000), [showToast])
+  const browserToast = useCallback((m, ms = 4000) => showToast(m, ms), [showToast])
 
   /** A proposal chosen in the browser panel: the analysis follows it and the figure is ready to paste in Vinted's offer. */
   const pickInBrowser = async (option) => {

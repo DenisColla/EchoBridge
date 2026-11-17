@@ -111,7 +111,8 @@ export function findFromCard(card, origin = 'https://www.vinted.it') {
     const amount = cardPriceOf(card.price)
     if (amount === null) return null
     return {
-      id: String(card.id), title: card.title, brand: card.brand || null, condition: card.condition || null, band: conditionBandOf(card.condition),
+      // An article without a brand carries its title in the brand's place: that is no brand.
+      id: String(card.id), title: card.title, brand: card.brand && card.brand !== card.title ? card.brand : null, condition: card.condition || null, band: conditionBandOf(card.condition),
       size: card.size || null, price: amount, favourites: wtFinite(card.favourites) ? card.favourites : null, boost: card.promoted === true,
       url: typeof card.url === 'string' && card.url ? card.url : `${base}/items/${card.id}`,
     }
