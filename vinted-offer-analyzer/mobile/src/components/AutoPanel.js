@@ -53,7 +53,24 @@ function InterestsCard({ profile, onSave }) {
   )
 }
 
-export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null }) {
+/**
+ * What the last judgement says about the AI, in the user's words: [text, loud] or null. `job.ai` comes from the
+ * engine (watchEngine judge): 'nokey', 'keyerror', 'auth', 'balance', 'budget', 'network'…
+ */
+function aiNoteOf(job) {
+  switch (job.ai) {
+    case 'nokey': return ['Manca la chiave dell\'AI: senza schede non ci sono voti. Inseriscila in Info › «Apri il laboratorio» › DeepSeek: appena la salvi valuto da solo quello che ho trovato.', true]
+    case 'keyerror': return ['La chiave dell\'AI c\'è, ma in questa lettura il telefono non l\'ha lasciata leggere. Le schede arrivano con l\'app aperta: tocca «Valuta adesso».', true]
+    case 'auth': return ['L\'AI ha rifiutato la chiave: controllala in Info › «Apri il laboratorio», poi tocca «Valuta adesso».', true]
+    case 'balance': return ['Il credito dell\'AI è finito: ricaricalo dal sito del fornitore, poi tocca «Valuta adesso».', true]
+    case 'budget': return ['Tetto di spesa dell\'AI raggiunto per questa ricerca: i voti proseguono con le schede che ci sono.', false]
+    case 'network': case 'rate': case 'server': return ['L\'AI non ha risposto in questa lettura (rete o servizio occupato): riprovo alla prossima, oppure tocca «Valuta adesso».', false]
+    case 'errore': return ['La valutazione si è interrotta per un errore dell\'app: condividi il diario, così lo correggo.', true]
+    default: return job.ai ? [`La risposta dell'AI non era leggibile (${job.ai}): riprovo alla prossima lettura.`, false] : null
+  }
+}
+
+export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null, onJudge = null }) {
   const t = useTheme()
   const { mode, job, finds, draft, profile } = auto
   const [words, setWords] = useState('')
@@ -73,6 +90,8 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const stopped = job && job.stopped
   const scored = finds.filter((f) => f.score).length
   const provisional = finds.filter((f) => f.score && f.score.provisional).length
+  const noCard = finds.filter((f) => !f.card).length
+  const aiNote = job ? aiNoteOf(job) : null
   const status = !job ? null
     : running && job.waiting ? `In pausa · ${job.reads || 0} letture: Vinted ha risposto con un controllo mentre l'app era dietro. Riprendo da qui, con l'app aperta.`
       : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${auto.reading ? ' · leggo…' : nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
@@ -129,9 +148,10 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           <SectionLabel>{job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}{job.label ? ` · ${job.label}` : ''}</SectionLabel>
           <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
           {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
-          {job.ai === 'auth' ? <Body small style={{ color: t.warn, fontWeight: '600' }}>Manca la chiave dell'AI: senza schede i voti restano provvisori. Inseriscila in Info › «Apri il laboratorio» › DeepSeek.</Body> : null}
-          {job.ai === 'budget' ? <Body small muted>Tetto di spesa dell'AI raggiunto per questa ricerca: i voti proseguono con le schede che ci sono.</Body> : null}
-          {scored ? <Body small muted>{scored} con voto{provisional ? `, ${provisional} provvisori` : ''}{job.aiCost ? ` · AI ${job.aiCost.toFixed(3).replace('.', ',')} $` : ''}</Body> : null}
+          {auto.judging ? <Body small style={{ fontWeight: '600' }}>Chiedo le schede all'AI…</Body>
+            : aiNote ? <Body small muted={!aiNote[1]} style={aiNote[1] ? { color: t.warn, fontWeight: '600' } : null}>{aiNote[0]}</Body> : null}
+          {!auto.judging && aiNote && job.aiDetail && job.ai !== 'budget' ? <Body small muted>{job.aiDetail}</Body> : null}
+          {scored || noCard ? <Body small muted>{[scored ? `${scored} con voto${provisional ? `, ${provisional} provvisori` : ''}` : null, noCard ? `${noCard} senza scheda` : null, job.aiCost ? `AI ${job.aiCost.toFixed(3).replace('.', ',')} $` : null].filter(Boolean).join(' · ')}</Body> : null}
           {running && background && background.android ? (
             <Body small muted>
               {background.alarm === 'exact' ? 'Sveglie di sistema attive: leggo anche con l\'app chiusa.'
@@ -141,6 +161,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           ) : null}
           <ButtonRow>
             {running ? <Button label="Ferma" variant="secondary" small onPress={onStop} /> : null}
+            {onJudge && noCard ? <Button label={auto.judging ? 'Valuto…' : `Valuta adesso (${noCard})`} variant={aiNote && aiNote[1] ? 'primary' : 'secondary'} small disabled={Boolean(auto.judging)} onPress={onJudge} /> : null}
             <Button label="Condividi il diario" variant="ghost" small onPress={onShareLog} />
           </ButtonRow>
         </Card>

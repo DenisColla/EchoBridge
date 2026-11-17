@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import * as core from '../../core/index.js'
 import { MARKET_CHAIN, callChain } from '../hooks/useSearch.js'
+import { keyStatus } from './secrets.js'
 import { fetchVintedListPage } from './vinted.js'
 
 /**
@@ -18,29 +19,59 @@ const REFS_MAX = 300
 const BATCH = 10
 const PARALLEL = 4
 
+/** How a call ended when the AI gave nothing for a cause that is not in the listings: asking again costs nothing. */
+const FREE_FAILURES = ['auth', 'balance', 'rate', 'server', 'network', 'cancelled', 'request']
+
 /**
- * The cards of `items` (finds) → { cards: { id: card }, costUsd, error }. `error`: 'auth' when no AI key is set,
- * else what the last failed call said; cards that did arrive are returned all the same.
+ * The cards of `items` (finds) → { cards: { id: card }, answered: [id], costUsd, error, detail, calls }.
+ * `answered`: the listings of the batches the AI did answer, with a card or without: only those count as asked.
+ * `error`: 'nokey' when no AI key is set, 'keyerror' when the phone did not let the key be read, else how the last
+ * call without cards ended ('auth' = the provider refused the key, 'network', 'schema'…), with what it said in
+ * `detail`; cards that did arrive are returned all the same.
  */
 export async function askCards(items, { target = '' } = {}) {
+  const out = { cards: {}, answered: [], costUsd: 0, error: null, detail: null, calls: 0 }
+  // The key first: without one no call is made and no listing counts as asked.
+  const keys = await Promise.all([...new Set(MARKET_CHAIN.map((m) => m.split(':')[0]))].map((p) => keyStatus(p)))
+  if (!keys.some((k) => k.state === 'present')) {
+    const refused = keys.find((k) => k.state === 'unreadable')
+    out.error = refused ? 'keyerror' : 'nokey'
+    out.detail = refused ? refused.error || null : null
+    return out
+  }
   const batches = []
   for (let i = 0; i < items.length; i += BATCH) batches.push(items.slice(i, i + BATCH))
-  const out = { cards: {}, costUsd: 0, error: null, calls: 0 }
   const run = async (batch) => {
     const res = await callChain(MARKET_CHAIN, core.interestPrompt(batch, { target }), [], { effort: 'low', maxTokens: 400 + 260 * batch.length, timeoutMs: 60_000, maxAttempts: 1, think: false, temperature: 0 })
     out.calls += 1
     out.costUsd += res.costUsd || 0
     // An answer that is JSON but strays from the schema in one card is still read: the cleaner judges card by card.
-    const usable = res.value && (res.ok || res.kind === 'schema') ? core.cleanInterestCards(res.value, batch) : {}
+    let usable = {}
+    let broke = null
+    if (res.value && (res.ok || res.kind === 'schema')) {
+      try { usable = core.cleanInterestCards(res.value, batch) } catch (e) { broke = String((e && e.message) || e).slice(0, 140) }
+    }
     Object.assign(out.cards, usable)
-    if (!Object.keys(usable).length) out.error = res.kind || 'failed'
+    if (res.ok || !FREE_FAILURES.includes(res.kind)) out.answered.push(...batch.map((f) => f.id))
+    // A good answer with no card for these listings is no fault of the AI's service: they simply stay without.
+    if (broke || (!res.ok && !Object.keys(usable).length)) {
+      out.error = broke ? 'failed' : res.kind || 'failed'
+      out.detail = broke || (res.error ? String(res.error).slice(0, 140) : null)
+    }
   }
   for (let i = 0; i < batches.length; i += PARALLEL) {
-    await Promise.all(batches.slice(i, i + PARALLEL).map((b) => run(b).catch(() => { out.error = 'failed' })))
-    // No key at all: the other batches would say the same.
-    if (out.error === 'auth' && !Object.keys(out.cards).length) break
+    await Promise.all(batches.slice(i, i + PARALLEL).map((b) => run(b).catch((e) => { out.error = 'failed'; out.detail = String((e && e.message) || e).slice(0, 140) })))
+    // The key refused, or no network: the other batches would say the same.
+    if (FREE_FAILURES.includes(out.error) && !Object.keys(out.cards).length) break
   }
   return out
+}
+
+/** For the diary: how the key of each provider the cards may use is doing, never the key ({ deepseek: 'present', … }). */
+export async function aiKeyReport() {
+  const providers = [...new Set(MARKET_CHAIN.map((m) => m.split(':')[0]))]
+  const states = await Promise.all(providers.map((p) => keyStatus(p)))
+  return Object.fromEntries(providers.map((p, i) => [p, states[i].error ? `${states[i].state}: ${states[i].error}` : states[i].state]))
 }
 
 let refs = null

@@ -1,6 +1,6 @@
 # Piano: il punteggio di interesse (vetrina e caccia)
 
-Deciso con l'utente il 17 novembre 2026. Stato: fasi 1–4 nel codice con la 1.18.0 (`src/core/interest.js`,
+Deciso con l'utente il 17 novembre 2026. Stato: fasi 1–4 nel codice dalla 1.18.0 (`src/core/interest.js`,
 `mobile/src/services/watchEngine.js`), da provare sul telefono; fase 5 (taratura dagli esiti) da fare.
 La lista di taratura (`docs/taratura/lista-taratura-30.xlsx`) è stata giudicata «molto bene» dall'utente, che ha poi
 scelto dieci prezzi d'acquisto (`docs/taratura/scelte-utente.json`): da lì vengono i margini qui sotto.
@@ -71,6 +71,10 @@ partenza porta solo i fatti stabili e le correzioni dell'utente.
    nella vetrina tre ricerche su Vinted a lettura per i promettenti e poi per i più cari, con memoria di un giorno.
 5. Voto e motivi di tutti; un «affare» con valore letto dal mercato viene notificato subito, una volta sola.
 6. A fine sessione: notifica con il primo della classifica; l'analisi completa dei primi dieci è ancora da fare.
+
+Il giudizio (passi 3–5, senza le ricerche di mercato) parte anche senza una lettura: quando si salva una chiave
+dell'AI, quando l'app torna davanti con articoli senza scheda, e con «Valuta adesso» (1.18.1). Un articolo conta come
+chiesto solo se l'AI ha risposto; dopo due risposte senza scheda resta senza, finché non lo si chiede a mano.
 
 Tetto di spesa dell'AI per ricerca: 0,60 $. Niente in una lettura aspetta un timer dell'app (con l'app dietro possono
 non scattare): le richieste di rete passano da `services/http.js`.

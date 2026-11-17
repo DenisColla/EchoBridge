@@ -38,6 +38,7 @@ import { logVisit } from './src/services/vintedDiag.js'
 import { fetchVintedItemPage, fetchVintedListPage, normalizeVintedLink, readVintedLinkFromClipboard } from './src/services/vinted.js'
 import { vintedBridge } from './src/services/vintedBridge.js'
 import { watchEngine } from './src/services/watchEngine.js'
+import { aiKeyReport } from './src/services/interestService.js'
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake'
 import { AutoPanel } from './src/components/AutoPanel.js'
 import { space, useTheme } from './src/theme.js'
@@ -681,7 +682,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.18.0', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.18.1', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said
@@ -723,7 +724,7 @@ function Main() {
     setAutoBusy(false)
     shareText('Prova di fattibilità', JSON.stringify(out, null, 1))
   }
-  const shareWatchLog = () => shareText('Diario della ricerca', JSON.stringify(watchEngine.diary(), null, 1))
+  const shareWatchLog = async () => shareText('Diario della ricerca', JSON.stringify({ ...watchEngine.diary(), chiave_ai: await aiKeyReport().catch(() => null) }, null, 1))
 
   /** «Lo rivendo a»: the price the article would be sold again at (blank = the engine's default). */
   const changeResale = (text) => {
@@ -1810,6 +1811,7 @@ function Main() {
               onClearFinds={() => watchEngine.clearFinds()}
               onVote={(id, vote) => watchEngine.vote(id, vote)}
               onProfile={(next) => watchEngine.setProfile(next)}
+              onJudge={() => watchEngine.judgeNow('utente')}
               onFeasibility={runFeasibility}
               onShareLog={shareWatchLog}
             />

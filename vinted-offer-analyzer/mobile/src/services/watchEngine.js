@@ -3,6 +3,7 @@ import { AppState, Platform } from 'react-native'
 import * as core from '../../core/index.js'
 import { scheduleReminderAt } from './notifications.js'
 import { askCards, loadProfile, lookupReference, saveProfile } from './interestService.js'
+import { onKeyChange } from './secrets.js'
 import { fetchVintedListPage } from './vinted.js'
 import { vintedBridge } from './vintedBridge.js'
 
@@ -31,6 +32,10 @@ import { vintedBridge } from './vintedBridge.js'
  * reading at most), and the interest score of all (core interest.js). The next alarm is set before it, so that a
  * judgement cut short never breaks the chain. Nothing in a reading waits on a timer of the app: with the app behind
  * they may not fire (http.js).
+ *
+ * 1.18.1: an article counts as asked only when the AI answered (no key, a key the phone did not let be read, no
+ * network: asked again at the next occasion), and the judgement also runs with no reading (judgeNow): when a key is
+ * saved, when the app comes back in front with articles still without their card, when the user asks.
  */
 export const AUTO_KEY = 'offerta-vinted.auto.v1'
 export const WATCH_TICK_TASK = 'OvtWatchTick'
@@ -47,10 +52,21 @@ const LOOKUPS_PER_TICK = 3
 const AI_BUDGET_USD = 0.6
 /** The judgement stops asking past this many milliseconds from the start of the reading (the task has two minutes). */
 const JUDGE_BUDGET_MS = 85_000
+/** The AI is asked only within this long from the start of the reading: a call may last a minute. */
+const ASK_BUDGET_MS = 50_000
+/** An article the AI answered about without giving a card is asked this many times in all. */
+const CARD_TRIES = 2
+/** The last judgement had no AI at all: no key, a key the phone did not let be read, a key the provider refused. */
+const NO_AI = ['nokey', 'keyerror', 'auth']
+/** The shape of what is saved: 2 since 1.18.1 (a try of a card counts only when the AI answered). */
+const SAVED_V = 2
 
 let state = { mode: 'manual', job: null, finds: [], log: [], draft: null }
 let loading = null
 let busySince = 0
+let judgingSince = 0
+let judgeChain = Promise.resolve()
+let judgingNow = 0
 let netTimer = null
 let browserReader = null
 let profile = null
@@ -58,10 +74,15 @@ const listeners = new Set()
 
 const euro = (v) => core.formatEuro(v)
 const clockOf = (ms) => new Date(ms).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })
+/** The articles the AI still owes a card to. */
+const waitingOf = (finds) => finds.filter((f) => !f.card && (f.cardTried || 0) < CARD_TRIES)
 
 function snapshot() {
   const job = state.job
-  return { ...state, nextAt: job && !job.stopped && !job.waiting ? job.nextAt || null : null, reading: busySince > 0, profile }
+  return {
+    ...state, nextAt: job && !job.stopped && !job.waiting ? job.nextAt || null : null, reading: busySince > 0, profile,
+    judging: judgingSince > 0, waitingCards: waitingOf(state.finds).length, noCard: state.finds.filter((f) => !f.card).length,
+  }
 }
 function emit() {
   const now = snapshot()
@@ -70,7 +91,7 @@ function emit() {
   })
 }
 function persist() {
-  return AsyncStorage.setItem(AUTO_KEY, JSON.stringify({ mode: state.mode, job: state.job, finds: state.finds, log: state.log.slice(-LOG_MAX) })).catch(() => {})
+  return AsyncStorage.setItem(AUTO_KEY, JSON.stringify({ v: SAVED_V, mode: state.mode, job: state.job, finds: state.finds, log: state.log.slice(-LOG_MAX) })).catch(() => {})
 }
 /** The new state, shown and saved; the promise ends when it is on disk (a background task must wait for it). */
 function set(next) {
@@ -87,6 +108,11 @@ function load() {
         state = {
           mode: ['manual', 'semi', 'auto'].includes(saved.mode) ? saved.mode : 'manual', job: saved.job || null,
           finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: state.draft,
+        }
+        // 1.18.0 counted a try of a card even when no key was there to ask with: those articles are asked again.
+        if (saved.v !== SAVED_V) {
+          state.finds = state.finds.map((f) => (!f.card && f.cardTried ? { ...f, cardTried: 0 } : f))
+          if (state.job && state.job.ai === 'auth') state.job = { ...state.job, ai: null }
         }
       }
       profile = await loadProfile()
@@ -157,10 +183,11 @@ function rescored(finds, job) {
 }
 
 /**
- * The judgement after a reading: cards, references, scores, and the notification of an «affare». `t0`: when the
- * reading started. What it did goes into the last line of the diary.
+ * The judgement: cards, references, scores, and the notification of an «affare». `t0`: when the reading started.
+ * After a reading (no `source`) what it did goes into the last line of the diary; asked with no reading (`source`:
+ * who asked, see judgeNow) it gets a line of its own, and no search of the market (`lookups: false`).
  */
-async function judge(t0) {
+async function judge(t0, { lookups = true, source = null } = {}) {
   const job = state.job
   if (!job) return
   const startedAt = job.startedAt
@@ -168,17 +195,27 @@ async function judge(t0) {
   const note = {}
   let list = state.finds
   let spent = job.aiCost || 0
+  // What the job says about the AI: as it was, unless the AI is asked now.
+  let ai = job.ai || null
+  let aiDetail = job.aiDetail || null
   // 1. The AI's cards for the articles that have none, the newest first.
-  const waiting = list.filter((f) => !f.card && (f.cardTried || 0) < 2).sort((a, b) => b.lastSeen - a.lastSeen).slice(0, CARDS_PER_TICK)
-  if (waiting.length && spent < AI_BUDGET_USD && Date.now() - t0 < JUDGE_BUDGET_MS) {
+  const waiting = waitingOf(list).sort((a, b) => b.lastSeen - a.lastSeen).slice(0, CARDS_PER_TICK)
+  if (!waiting.length) ai = aiDetail = null
+  else if (spent >= AI_BUDGET_USD) { ai = 'budget'; aiDetail = null }
+  else if (Date.now() - t0 < ASK_BUDGET_MS) {
     const got = await askCards(waiting, { target: job.kind === 'hunt' ? job.label || '' : '' })
     spent += got.costUsd
     note.schede = Object.keys(got.cards).length
     note.chieste = waiting.length
-    if (got.error) note.ai = got.error
-    const asked = new Set(waiting.map((f) => f.id))
-    list = list.map((f) => (got.cards[f.id] ? { ...f, card: got.cards[f.id] } : asked.has(f.id) ? { ...f, cardTried: (f.cardTried || 0) + 1 } : f))
-  } else if (waiting.length && spent >= AI_BUDGET_USD) note.ai = 'budget'
+    ai = got.error || null
+    aiDetail = got.error ? got.detail || null : null
+    // A try is one the AI answered: with no key, no network or a refusal the article is asked again, as many times
+    // as it takes.
+    const answered = new Set(got.answered)
+    list = list.map((f) => (got.cards[f.id] ? { ...f, card: got.cards[f.id] } : answered.has(f.id) ? { ...f, cardTried: (f.cardTried || 0) + 1 } : f))
+  }
+  if (ai) note.ai = ai
+  if (aiDetail) note.ai_dettaglio = aiDetail
   // 2. The reference.
   if (job.kind === 'hunt') {
     // The results of the hunt's own search are the market of what it looks for: no other request.
@@ -200,7 +237,7 @@ async function judge(t0) {
       .map((f) => ({ f, total: core.interestScore(f, { card: f.card, ref: f.ref || null, profile }).total }))
       .sort((a, b) => Number(b.total >= 55) - Number(a.total >= 55) || (b.total >= 55 ? b.total - a.total : b.f.price - a.f.price))
     let searched = 0
-    for (const { f } of promising) {
+    for (const { f } of lookups ? promising : []) {
       if (searched >= LOOKUPS_PER_TICK || Date.now() - t0 > JUDGE_BUDGET_MS) break
       const res = await lookupReference(f, f.card)
       if (!res.ok) {
@@ -211,7 +248,7 @@ async function judge(t0) {
       if (!res.cached) searched += 1
       list = list.map((x) => (x.id === f.id ? { ...x, ref: res.ref || x.ref, refTried: true } : x))
     }
-    if (promising.length) note.mercati = searched
+    if (lookups && promising.length) note.mercati = searched
   }
   // 3. The scores, on the state as it is now (the user may have voted or emptied the list meanwhile).
   const now = state
@@ -223,18 +260,77 @@ async function judge(t0) {
   })
   finds = rescored(finds, now.job)
   note.con_voto = finds.filter((f) => f.score).length
+  note.senza_scheda = finds.filter((f) => !f.card).length
   note.ms = Date.now() - began
   const told = now.job.told || []
-  const next = { ...now.job, aiCost: Math.round(spent * 10000) / 10000, ai: note.ai || null, told }
   // An «affare» whose value was read from the market is told at once, each article once.
   const deals = finds.filter((f) => f.score && f.score.total >= 85 && !f.score.provisional && !told.includes(f.id) && !(job.kind === 'hunt' && Number.isFinite(job.maxPrice) && f.price > job.maxPrice * 1.15))
     .sort((a, b) => b.score.total - a.score.total).slice(0, 2)
-  for (const f of deals) {
-    next.told = [...next.told, f.id]
-    await notify(`Affare (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`, `${f.score.reasons[0] || ''}. Tocca per aprirlo.`, f.url)
-  }
-  const log = now.log.length ? [...now.log.slice(0, -1), { ...now.log[now.log.length - 1], giudizio: note }] : now.log
+  const next = { ...now.job, aiCost: Math.round(spent * 10000) / 10000, ai, aiDetail, told: [...told, ...deals.map((f) => f.id)] }
+  const last = now.log[now.log.length - 1]
+  const line = { quando: new Date().toISOString(), innesco: source, solo_giudizio: true, giudizio: note }
+  // The same judgement with nothing new (no key yet, each time the app comes in front) keeps one line, counted.
+  const again = source && last && last.solo_giudizio && last.innesco === source && !note.schede && last.giudizio && !last.giudizio.schede && (last.giudizio.ai || null) === (note.ai || null)
+  const log = again ? [...now.log.slice(0, -1), { ...line, volte: (last.volte || 1) + 1 }]
+    : source ? [...now.log, line].slice(-LOG_MAX)
+      : last ? [...now.log.slice(0, -1), { ...last, giudizio: note }] : now.log
+  // Saved before anything else is waited for: nothing the user does meanwhile is written over.
   await set({ ...now, job: next, finds, log })
+  for (const f of deals) await notify(`Affare (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`, `${f.score.reasons[0] || ''}. Tocca per aprirlo.`, f.url)
+}
+
+/** One judgement at a time: the one of a reading and one asked with no reading wait for each other. Never throws. */
+function runJudge(t0, opts) {
+  // A judgement that never came back (the task was cut) does not hold the next ones.
+  if (judgingSince && Date.now() - judgingSince > BUSY_STALE_MS) judgeChain = Promise.resolve()
+  judgeChain = judgeChain.then(async () => {
+    judgingSince = Date.now()
+    emit()
+    try {
+      await judge(t0, opts)
+    } catch (e) {
+      // The scores wait for the next reading; what broke is written where the user and the diary show it.
+      const said = String((e && e.message) || e).slice(0, 160)
+      try {
+        if (state.job) await set({ ...state, job: { ...state.job, ai: 'errore', aiDetail: said }, log: [...state.log, { quando: new Date().toISOString(), innesco: (opts && opts.source) || 'lettura', solo_giudizio: true, giudizio: { errore: said } }].slice(-LOG_MAX) })
+      } catch { /* nothing more to do */ }
+    }
+    judgingSince = 0
+    emit()
+  })
+  return judgeChain
+}
+
+/**
+ * The judgement with no reading of Vinted. `source`, as written in the diary: 'chiave' a key of the AI was just
+ * saved, 'ritorno' the app came back in front with articles still without their card, 'utente' the user asked
+ * («Valuta adesso»). Up to three rounds of cards, as long as each brings some; the searches of the market stay with
+ * the readings. Returns a word that says what happened; it never throws.
+ */
+async function judgeNow(source = 'utente') {
+  try {
+    await load()
+    if (!state.job || !state.finds.length) return 'niente'
+    // Coming back in front is no reason for a second judgement; a new key and the user's own request wait their turn.
+    if (source === 'ritorno' && (judgingNow || (judgingSince && Date.now() - judgingSince < BUSY_STALE_MS))) return 'occupato'
+    judgingNow += 1
+    try {
+      // Asked by the user or with a new key: what the AI left without a card is asked once more.
+      if (source !== 'ritorno' && state.finds.some((f) => !f.card && f.cardTried)) await set({ ...state, finds: state.finds.map((f) => (!f.card && f.cardTried ? { ...f, cardTried: 0 } : f)) })
+      if (!waitingOf(state.finds).length) return 'niente'
+      for (let round = 0; round < 3; round++) {
+        const before = state.finds.filter((f) => f.card).length
+        await runJudge(Date.now(), { lookups: false, source })
+        // Another round only for articles not asked yet (more than one round holds), and only if this one brought cards.
+        if (!waitingOf(state.finds).some((f) => !f.cardTried) || state.finds.filter((f) => f.card).length === before) break
+      }
+      return 'valutato'
+    } finally {
+      judgingNow -= 1
+    }
+  } catch {
+    return 'errore'
+  }
 }
 
 /**
@@ -323,7 +419,7 @@ async function tick(source = 'timer') {
       entry.nuovi = merged.fresh.length
     }
     const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
-    if (job.kind === 'hunt' && cards && base.job.ai === 'auth') {
+    if (job.kind === 'hunt' && cards && NO_AI.includes(base.job.ai)) {
       // Without an AI key there are no scores: an article far under the highest price is told at once, each once.
       for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
         next.told = [...next.told, f.id]
@@ -334,7 +430,7 @@ async function tick(source = 'timer') {
     // The next alarm first: whatever happens to the judgement, the chain of readings goes on.
     const active = core.jobActive(next)
     if (active) await schedule()
-    try { await judge(t0) } catch { /* the scores wait for the next reading */ }
+    await runJudge(t0)
     if (!active) await endJob('fine')
     else showStatus()
     return res.ok ? 'letto' : 'non letto'
@@ -349,17 +445,23 @@ async function tick(source = 'timer') {
 async function resume() {
   await load()
   const job = state.job
-  if (job && !job.stopped && !core.jobActive(job)) return endJob('fine')
-  if (!core.jobActive(job)) return null
-  if (job.waiting || !job.nextAt || job.nextAt <= Date.now()) return tick('ritorno')
-  // The alarm may be gone (the phone was restarted, the app updated): asking again for the same moment costs nothing.
-  vintedBridge.scheduleWatchAlarm(job.nextAt)
-  armNet(job.nextAt)
-  showStatus()
+  if (job && !job.stopped && !core.jobActive(job)) await endJob('fine')
+  else if (core.jobActive(job)) {
+    // A reading that is due judges too.
+    if (job.waiting || !job.nextAt || job.nextAt <= Date.now()) return tick('ritorno')
+    // The alarm may be gone (the phone was restarted, the app updated): asking again for the same moment costs nothing.
+    vintedBridge.scheduleWatchAlarm(job.nextAt)
+    armNet(job.nextAt)
+    showStatus()
+  }
+  // Articles still without their card (no key then, a key the phone did not let be read, no network): now, in front.
+  if (job && waitingOf(state.finds).length) judgeNow('ritorno')
   return null
 }
 
 AppState.addEventListener('change', (next) => { if (next === 'active') resume() })
+// A key of the AI saved in the lab: what was waiting for it is judged at once, with no reading.
+onKeyChange((provider, present) => { if (present) judgeNow('chiave') })
 
 export const watchEngine = {
   load,
@@ -416,6 +518,7 @@ export const watchEngine = {
   },
   tick,
   resume,
+  judgeNow,
   /** What «Condividi il diario» shares: the job, how Android's alarms are doing, and every reading. */
   diary() {
     const { job, log, finds } = state
@@ -425,11 +528,13 @@ export const watchEngine = {
       lavoro: job ? {
         tipo: job.kind, avviato: iso(job.startedAt), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, in_attesa: job.waiting || null,
         prezzo_massimo: job.maxPrice ?? null, prossima: iso(job.nextAt), sveglia: job.sveglia ?? null,
-        ai: job.ai || null, ai_costo_usd: job.aiCost || 0,
+        ai: job.ai || null, ai_dettaglio: job.aiDetail || null, ai_costo_usd: job.aiCost || 0,
       } : null,
       sveglie: alarm ? { esatte: alarm.exact, impostata_per: iso(alarm.scheduledAt), ultima_suonata: iso(alarm.firedAt), ultima_lettura_avviata: iso(alarm.tickAt), errore: alarm.error || null, errore_alle: iso(alarm.errorAt) } : null,
       batteria_senza_restrizioni: vintedBridge.isBatteryUnrestricted(),
       trovati: finds.length,
+      senza_scheda: finds.filter((f) => !f.card).length,
+      in_attesa_della_scheda: waitingOf(finds).length,
       voti: {
         con_voto: finds.filter((f) => f.score).length, provvisori: finds.filter((f) => f.score && f.score.provisional).length,
         affare: finds.filter((f) => f.score && f.score.total >= 85).length, da_comprare: finds.filter((f) => f.score && f.score.total >= 70 && f.score.total < 85).length,
