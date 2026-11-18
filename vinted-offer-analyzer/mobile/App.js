@@ -652,7 +652,7 @@ function Main() {
   }, [watchNeedsScreen])
   const startJob = async (job) => {
     await ensureNotificationPermission().catch(() => false)
-    showToast(job.kind === 'hunt' ? 'Caccia avviata: leggo la ricerca ogni 8–12 minuti.' : 'Vetrina avviata: leggo la tua home ogni 8–12 minuti.', 4000)
+    showToast(job.kind === 'hunt' ? 'Avviata: rileggo la ricerca ogni 8–12 minuti.' : Array.isArray(job.sources) && job.sources.length ? 'Avviata: leggo le tue ricerche a rotazione, una ogni 8–12 minuti.' : 'Avviata: leggo la tua home ogni 8–12 minuti.', 4000)
     watchEngine.startJob(job)
   }
   const startHunt = ({ words, maxPrice, size = null }) => {
@@ -696,7 +696,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.20.2', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.21.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said

@@ -262,3 +262,131 @@ export function rankFinds(finds, job = null) {
   return list.map((f) => ({ ...f, dropped: wtFinite(f.was) && f.was > f.price ? wtR2(f.was - f.price) : 0 }))
     .sort((a, b) => wtScore(b) - wtScore(a) || (b.favourites || 0) - (a.favourites || 0) || b.dropped - a.dropped || b.lastSeen - a.lastSeen)
 }
+
+/* ───────── which searches to follow (1.21) ─────────
+ * «Novità» reads the user's own searches: what they bring depends on how they are worded. A search that names only
+ * a kind of thing («maglia», «dischi 10 kg») brings hundreds of listings with no resale value to compare with; a
+ * brand, an author or a model brings fewer, and comparable. The first diary of «novità» (18 November 2026): two
+ * searches of the first kind gave 0 articles from 55 out of 151, the third gave the two that were bought.
+ */
+
+/** Words that say what kind of thing it is, its colour, size or state — not which one. */
+const WT_GENERIC = new Set(('maglia maglie maglietta magliette maglione maglioni felpa felpe giacca giacche giubbotto giubbotti cappotto cappotti piumino piumini pantalone pantaloni jeans gonna gonne vestito vestiti abito abiti camicia camicie '
+  + 'scarpa scarpe stivale stivali sneakers sandali borsa borse zaino zaini cintura cinture cappello cappelli sciarpa sciarpe costume costumi tuta tute pigiama intimo calze guanti occhiali '
+  + 'libro libri fumetto fumetti manga dvd cd vinile vinili disco dischi gioco giochi videogioco videogiochi rivista riviste romanzo romanzi '
+  + 'telefono telefoni cellulare cellulari smartphone tablet cuffie auricolari console computer pc portatile tv televisore orologio orologi fotocamera cover custodia caricatore cavo '
+  + 'peso pesi manubrio manubri bilanciere panca bici bicicletta casco tenda lampada tazza tazze piatto piatti giocattolo giocattoli peluche bambola bambole puzzle carte quadro quadri '
+  + 'nero nera neri nere bianco bianca bianchi bianche rosso rossa blu verde giallo gialla grigio grigia rosa marrone beige azzurro viola arancione '
+  + 'uomo donna bambino bambina bambini unisex ragazzo ragazza neonato '
+  + 'nuovo nuova nuovi nuove usato usata usati usate vintage originale originali lotto stock set kit pezzi pezzo taglia misura '
+  + 'xs s m l xl xxl xxxl kg g gr cm mm lt ml pz').split(' '))
+const WT_STOP = new Set('di da per con in su sotto sopra e ed il lo la i gli le un una uno a al alla allo ai del della dello dei delle degli tra fra o'.split(' '))
+const wtWords = (text) => String(text || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9']+/).map((w) => w.replace(/^'+|'+$/g, '')).filter((w) => w && !WT_STOP.has(w))
+const wtKindOnly = (w) => WT_GENERIC.has(w) || /^\d+([.,]\d+)?(kg|g|gr|cm|mm|lt|l|ml|pz)?$/.test(w)
+const wtKey = (label) => String(label || '').replace(/\s+/g, ' ').trim().toLowerCase()
+
+export const SEARCHES = Object.freeze({
+  /** Fewer articles read than this say nothing yet about a search. */
+  YIELD_MIN: 60,
+  /** Under this share from the list's threshold, and none worth a notification, a search brings little. */
+  YIELD_POOR: 0.03,
+  /** More words than this make a search of one thing only. */
+  WORDS_MAX: 5,
+})
+
+/**
+ * How a search to follow is worded, before it runs: { kind, text } or null when there is nothing to say.
+ * 'generica': it names only a kind of thing; 'lunga': so many words that it is one article, not a search.
+ */
+export function searchAdviceOf(text) {
+  const words = wtWords(text)
+  if (!words.length) return null
+  if (words.every(wtKindOnly)) return { kind: 'generica', text: 'Dice solo che tipo di oggetto è: aggiungi una marca, un autore o un modello, altrimenti non c\'è un prezzo di rivendita con cui confrontare.' }
+  if (words.length > SEARCHES.WORDS_MAX) return { kind: 'lunga', text: 'Molto precisa: usciranno pochi annunci nuovi. Per un articolo solo c\'è «Un articolo».' }
+  return null
+}
+
+/**
+ * What each search followed brought: { [search, lower case]: { articoli, da_55, da_70, lavori } }. `history`: the
+ * summaries of the jobs that ended (endJob: `resa` is sourceReport of what that job read); `live`: sourceReport of
+ * the job that is running, or null. The home and a hunt are not searches to follow.
+ */
+export function searchYields(history, live = null) {
+  const out = {}
+  const add = (rows, jobs) => {
+    for (const r of Array.isArray(rows) ? rows : []) {
+      const key = r ? wtKey(r.fonte) : ''
+      if (!key || key === 'home' || key === 'caccia' || key === 'altro' || key === 'feed' || key === 'hunt') continue
+      const now = out[key] || { articoli: 0, da_55: 0, da_70: 0, lavori: 0 }
+      out[key] = { articoli: now.articoli + (wtFinite(r.articoli) ? r.articoli : 0), da_55: now.da_55 + (wtFinite(r.da_55) ? r.da_55 : 0), da_70: now.da_70 + (wtFinite(r.da_70) ? r.da_70 : 0), lavori: now.lavori + jobs }
+    }
+  }
+  for (const h of Array.isArray(history) ? history : []) if (h && h.tipo !== 'hunt') add(h.resa, 1)
+  add(live, 1)
+  return out
+}
+
+/** A search's yield in a word: 'buona' | 'scarsa' | 'nulla', or null when too little was read to say. */
+export function yieldVerdictOf(y) {
+  if (!y || !wtFinite(y.articoli) || y.articoli < SEARCHES.YIELD_MIN) return null
+  if (!y.da_55) return 'nulla'
+  return !y.da_70 && y.da_55 / y.articoli < SEARCHES.YIELD_POOR ? 'scarsa' : 'buona'
+}
+
+/**
+ * The line under a search followed: what it brought and what to do with it. → { text, tone, verdict } with tone
+ * 'good' | 'warn' | 'neutral'. `y`: its entry in searchYields, or nothing when it never ran.
+ */
+export function searchLineOf(label, y = null, { showMin = 55, tellMin = 70 } = {}) {
+  const advice = searchAdviceOf(label)
+  const verdict = yieldVerdictOf(y)
+  const count = y && y.articoli ? `${y.da_55} da ${showMin} su ${y.articoli} letti${y.da_70 ? ` (${y.da_70} da ${tellMin})` : ''}` : null
+  if (verdict === 'buona') return { text: `${count}: rende, tienila`, tone: 'good', verdict }
+  if (verdict === 'nulla') return { text: `${count}: non rende. ${advice ? 'Nomina solo un tipo di oggetto: metti marca, autore o modello.' : 'Cambiala, o stringila su un modello.'}`, tone: 'warn', verdict }
+  if (verdict === 'scarsa') return { text: `${count}: rende poco${advice && advice.kind === 'generica' ? ', è troppo generica' : ''}`, tone: 'warn', verdict }
+  if (advice) return { text: `${count ? `${count}. ` : ''}${advice.kind === 'generica' ? 'Nomina solo un tipo di oggetto: metti marca, autore o modello.' : 'Molto precisa: pochi annunci nuovi.'}`, tone: 'warn', verdict }
+  return { text: count ? `${count}: ancora poco per dirlo` : 'Mai provata', tone: 'neutral', verdict }
+}
+
+const WT_NO_BRAND = /^(n\.?d\.?|nessun[ao]?|senza marca|altro|non specificat[oa]|sconosciut[oa]|generic[oa]|vari[e]?|-+)$/i
+const WT_BY_MODEL = ['telefoni', 'console_giochi', 'audio', 'informatica', 'elettronica', 'abbigliamento', 'scarpe']
+
+/**
+ * Searches worth following that the user does not follow yet: [{ label, why }], the first `max`.
+ * - one that paid in a past job and is not followed any more;
+ * - the brand (the author, for books and comics) of what he liked: a thumb up, a score of his own or of the engine
+ *   from `tellMin`. Where a brand alone is too wide (phones, clothes) the model goes with it;
+ * - a brand that took two thumbs up more than down.
+ * Nothing that names only a kind of thing, and nothing that a followed search already covers.
+ */
+export function searchIdeasOf({ finds = [], waits = [], likes = null, history = [], following = [], tellMin = 70, max = 5 } = {}) {
+  const taken = (Array.isArray(following) ? following : []).map(wtKey).filter(Boolean)
+  const out = []
+  const offer = (raw, why) => {
+    const label = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+    const key = wtKey(label)
+    if (key.length < 3 || WT_NO_BRAND.test(key) || searchAdviceOf(label)) return
+    // A followed search that is wider covers it; one that is narrower («will eisner contratto con dio») does not.
+    if (taken.some((w) => ` ${key} `.includes(` ${w} `)) || out.some((o) => wtKey(o.label) === key)) return
+    out.push({ label, why })
+  }
+  const yields = searchYields(history)
+  for (const [key, y] of Object.entries(yields).sort((a, b) => b[1].da_55 - a[1].da_55)) {
+    if (yieldVerdictOf(y) === 'buona') offer(key, `ha già reso ${y.da_55} da 55 su ${y.articoli}`)
+  }
+  const liked = [...(Array.isArray(finds) ? finds : []), ...(Array.isArray(waits) ? waits : [])]
+    .filter((f) => f && !f.gone && f.vote !== -1 && (f.vote === 1 || (wtFinite(f.rated) && f.rated >= tellMin) || wtScore(f) >= tellMin))
+    .sort((a, b) => Number(b.vote === 1) - Number(a.vote === 1) || wtScore(b) - wtScore(a))
+  for (const f of liked) {
+    const card = f.card || {}
+    const brand = String(card.brand || f.brand || '').trim()
+    if (!brand) continue
+    const model = String(card.model || '').trim()
+    const title = String(f.title || '').slice(0, 30)
+    offer(WT_BY_MODEL.includes(card.category) && model && model.split(/\s+/).length <= 3 ? `${brand} ${model}` : brand, f.vote === 1 ? `il tuo pollice su «${title}»` : `«${title}» ha preso ${wtScore(f)}`)
+  }
+  for (const [key, n] of Object.entries(likes && typeof likes === 'object' ? likes : {}).sort((a, b) => b[1] - a[1])) {
+    if (key.startsWith('brand:') && n >= 2) offer(key.slice(6), `${n} pollici in su`)
+  }
+  return out.slice(0, Math.max(0, max))
+}

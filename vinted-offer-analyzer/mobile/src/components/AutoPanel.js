@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds, sourceReport } from '../../core/index.js'
+import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport } from '../../core/index.js'
 import { space, toneColors as toneOf, useTheme } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Chip, Collapsible, Field, InlineAction, SectionLabel } from './ui.js'
 
-const MODES = [
-  { id: 'manual', label: 'Manuale' },
-  { id: 'semi', label: 'Semi-automatica' },
-  { id: 'auto', label: 'Automatica' },
+/** What can run by itself, in the user's words (1.21): the engine's modes are 'auto' (the first and the last) and 'semi'. */
+const CHOICES = [
+  { id: 'news', label: 'Ricerche' },
+  { id: 'hunt', label: 'Un articolo' },
+  { id: 'home', label: 'Home' },
 ]
+const isNews = (job) => Boolean(job && job.kind === 'feed' && Array.isArray(job.sources) && job.sources.length)
+const titleOf = (job) => (job.kind === 'hunt' ? `Un articolo${job.label ? ` · ${job.label}` : ''}` : isNews(job) ? 'Le mie ricerche' : 'La mia home')
+const keyOf = (label) => String(label || '').replace(/\s+/g, ' ').trim().toLowerCase()
 const clock = (ms) => new Date(ms).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })
 const countdown = (ms) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -16,11 +20,13 @@ const countdown = (ms) => {
 }
 
 /**
- * «Caccia» (1.14): the three modes and what the two automatic ones found.
- * - Manuale: nothing runs by itself.
- * - Semi-automatica: a search (typed here, or taken from the page open in the Vinted tab: `draft`) is read again for
- *   24 hours; the best article within the highest price is proposed, and the user sends the offer.
- * - Automatica: the user's Vinted home is read again for 8 hours and what passed there is ranked.
+ * «Caccia»: what runs by itself and what it found. Since 1.21 the screen asks one thing, «what do I run?»:
+ * - Le mie ricerche («novità»): the searches the user follows, read in turn from their newest listing for 8 hours.
+ *   Each shows what it brought so far, and what he liked suggests others.
+ * - Un articolo (the hunt): a search (typed here, or taken from the page open in the Vinted tab: `draft`) is read
+ *   again for 24 hours; the best article within the highest price is proposed, and the user sends the offer.
+ * - La mia home: the user's Vinted home is read again for 8 hours and what passed there is ranked.
+ * While a job runs its card comes first and the choice is not shown; the details and the tools are folded away.
  * `background` ({ alarm, battery, android }): how Android's alarm clock, which starts the readings with the app in
  * any state, answered for the running job ('exact' | 'inexact' | 'failed' | null), and whether Android leaves the app
  * without battery restrictions. A verification asked by Vinted stops the job.
@@ -31,22 +37,20 @@ const listOf = (text) => String(text || '').split(/[,;\n]+/).map((w) => w.trim()
 /** The user's interests: the categories he trades in, the brands, authors and words he follows, his sizes. */
 function InterestsCard({ profile, onSave }) {
   const [categories, setCategories] = useState(profile ? profile.categories : [])
-  const [words, setWords] = useState(profile ? profile.words.join(', ') : '')
   const [sizes, setSizes] = useState(profile ? profile.sizes.join(', ') : '')
   const [saved, setSaved] = useState(false)
   const toggle = (key) => { setSaved(false); setCategories((now) => (now.includes(key) ? now.filter((k) => k !== key) : [...now, key])) }
-  const summary = categories.length || words.trim() ? `${categories.length} categorie${words.trim() ? ` · ${listOf(words).length} parole` : ''}` : 'non compilati: conta solo il prezzo'
+  const summary = categories.length || sizes.trim() ? `${categories.length} ${categories.length === 1 ? 'categoria' : 'categorie'}${sizes.trim() ? ` · taglie ${listOf(sizes).join(', ')}` : ''}` : 'non compilati: conta solo il prezzo'
   return (
     <Collapsible title="I tuoi interessi" summary={summary}>
       <View style={{ gap: space.sm }}>
-        <Body small muted>Pesano per un decimo del voto. Le categorie che scegli salgono, le altre scendono; un pollice su un articolo insegna anche la sua marca e la sua categoria.</Body>
+        <Body small muted>Pesano per un decimo del voto: le categorie che scegli salgono, le altre scendono. Le ricerche che segui contano già come interessi, e un pollice insegna marca e categoria.</Body>
         <View style={styles.row}>
           {INTEREST_CATEGORIES.filter((k) => k !== 'altro').map((key) => <Chip key={key} compact label={INTEREST_CATEGORY_LABELS[key]} active={categories.includes(key)} onPress={() => toggle(key)} />)}
         </View>
-        <Field label="Marche, autori, parole che segui" value={words} onChangeText={(v) => { setSaved(false); setWords(v) }} placeholder="es. Zerocalcare, Samsung, Nuptse" autoCapitalize="none" />
         <Field label="Le tue taglie (vestiti e scarpe)" value={sizes} onChangeText={(v) => { setSaved(false); setSizes(v) }} placeholder="es. M, 42, W32" autoCapitalize="characters" />
         <ButtonRow>
-          <Button label={saved ? 'Salvati' : 'Salva gli interessi'} small variant="secondary" onPress={() => { onSave({ categories, words: listOf(words), sizes: listOf(sizes) }); setSaved(true) }} />
+          <Button label={saved ? 'Salvati' : 'Salva gli interessi'} small variant="secondary" onPress={() => { onSave({ categories, sizes: listOf(sizes) }); setSaved(true) }} />
         </ButtonRow>
       </View>
     </Collapsible>
@@ -70,6 +74,38 @@ function aiNoteOf(job) {
   }
 }
 
+/**
+ * What changes every second (the countdown to the next reading), apart: the panel and its list are drawn again
+ * only when something happens, not sixty times a minute (1.21).
+ */
+function Ticking({ children }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  return children(now)
+}
+
+/** A search followed: what it brought so far, and what to do with it. */
+function SearchRow({ label, line, onRemove = null }) {
+  const t = useTheme()
+  const color = line.tone === 'neutral' ? t.ink3 : toneOf(t, line.tone).fg
+  return (
+    <View style={[styles.search, { borderColor: t.line }]}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text numberOfLines={1} style={{ color: t.ink, fontWeight: '600' }}>{label}</Text>
+        <Text numberOfLines={3} style={{ color, fontSize: 12 }}>{line.text}</Text>
+      </View>
+      {onRemove ? (
+        <Pressable onPress={onRemove} accessibilityRole="button" accessibilityLabel={`Togli ${label}`} hitSlop={6} style={({ pressed }) => [styles.rate, { borderColor: t.line, marginTop: 0, opacity: pressed ? 0.7 : 1 }]}>
+          <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '700', color: t.ink2 }}>Togli</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  )
+}
+
 /** The scores the user may give with one touch. */
 const RATING_STEPS = [40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
 
@@ -83,7 +119,8 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const running = jobActive(job, now)
   useEffect(() => {
     if (!running) return undefined
-    const id = setInterval(() => setNow(Date.now()), 1000)
+    // Only to see the job's end: the countdown ticks in its own component.
+    const id = setInterval(() => setNow(Date.now()), 20000)
     return () => clearInterval(id)
   }, [running])
 
@@ -94,13 +131,29 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const [showAll, setShowAll] = useState(false)
   const [rating, setRating] = useState(null)
   const ranked = rankFinds(finds.filter((f) => !Number.isFinite(f.hidden) && !f.waiting), job && job.kind === 'hunt' ? job : null)
-  // «Novità»: the searches to follow are the user's own words (his interests), until he types others here.
-  const [newsEdit, setNewsEdit] = useState(null)
-  const newsText = newsEdit !== null ? newsEdit : profile && Array.isArray(profile.words) ? profile.words.join(', ') : ''
-  const newsList = listOf(newsText).slice(0, WATCH.ROTATION_MAX)
+  // What to run: his searches unless he chose otherwise; a page handed over by the Vinted tab is one article.
+  const [picked, setPicked] = useState(null)
+  const what = draft ? 'hunt' : picked || (mode === 'semi' ? 'hunt' : job && job.kind === 'feed' && !isNews(job) ? 'home' : 'news')
+  const pick = (id) => { setPicked(id); onMode(id === 'hunt' ? 'semi' : 'auto') }
+  const [details, setDetails] = useState(false)
+  // The searches followed are the user's own words (his interests): saved as they change, shown at once.
+  const [edited, setEdited] = useState(null)
+  const [typing, setTyping] = useState('')
+  const searches = edited || (profile && Array.isArray(profile.words) ? profile.words : [])
+  const followed = searches.slice(0, WATCH.ROTATION_MAX)
+  const change = (next) => { setEdited(next); if (onProfile) onProfile({ words: next }) }
+  const typed = typing.replace(/\s+/g, ' ').trim().slice(0, 60)
+  const canAdd = typed.length >= 2 && searches.length < WATCH.ROTATION_MAX && !searches.some((w) => keyOf(w) === keyOf(typed))
+  const add = (label) => { if (searches.length < WATCH.ROTATION_MAX && !searches.some((w) => keyOf(w) === keyOf(label))) change([...searches, label]) }
+  const typedAdvice = typed.length >= 2 ? searchAdviceOf(typed) : null
   const waits = Array.isArray(auto.waits) ? auto.waits : []
-  // Where reading pays: how many of what each source brought are worth a look.
+  // Where reading pays: how many of what each source brought are worth a look — in this job, and in those before.
   const report = sourceReport(finds).filter((r) => r.articoli > 0)
+  const news = isNews(job)
+  const yields = searchYields(auto.history, news && !job.stopped ? report : null)
+  const lineOf = (label) => searchLineOf(label, yields[keyOf(label)], { showMin: INTEREST.SHOW_MIN, tellMin: INTEREST.TELL_MIN })
+  const ideas = searchIdeasOf({ finds, waits, likes: profile ? profile.likes : null, history: auto.history, following: searches, tellMin: INTEREST.TELL_MIN })
+  const others = report.filter((r) => !news || !job.sources.some((x) => keyOf(x.label) === keyOf(r.fonte)))
   const strong = ranked.filter((f) => f.score && f.score.total >= INTEREST.SHOW_MIN)
   const weak = ranked.length - strong.length
   const shown = (showAll ? ranked : strong).slice(0, 60)
@@ -113,100 +166,122 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const staleNote = !running || !job.stale || job.stale < 2 ? null
     : job.staleWhy === 'sessione' ? `Le ultime ${job.stale} letture non hanno letto nulla: Vinted chiede di rinnovare la sessione. Tieni l'app aperta un momento: la rinnovo con il browser.`
       : `Le ultime ${job.stale} letture non hanno letto nulla (${job.staleWhy === 'network' || job.staleWhy === 'timeout' ? 'rete' : 'pagina senza articoli'}).`
-  const status = !job ? null
+  const statusAt = (at) => (!job ? null
     : running && job.waiting ? `In pausa · ${job.reads || 0} letture: Vinted ha risposto con un controllo mentre l'app era dietro. Riprendo da qui, con l'app aperta.`
-      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${job.empty ? ` (${job.empty} a vuoto)` : ''}${auto.reading ? ' · leggo…' : nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
+      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${job.empty ? ` (${job.empty} a vuoto)` : ''}${auto.reading ? ' · leggo…' : nextAt && nextAt > at ? ` · prossima tra ${countdown(nextAt - at)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
       : stopped === 'verifica' ? 'Fermata: Vinted ha chiesto una verifica. Aprila nella scheda Vinted, poi riavvia.'
         : stopped === 'utente' ? 'Fermata da te.'
-          : `Finita: ${job.reads || 0} letture${job.empty ? `, ${job.empty} a vuoto` : ''}.`
+          : `Finita: ${job.reads || 0} letture${job.empty ? `, ${job.empty} a vuoto` : ''}.`)
+
+  // The job's card: first while it runs, after the choice once it ended. What needs the user is said; the rest folds.
+  const alarmNote = !running || !background || !background.android || background.alarm === 'exact' ? null
+    : background.alarm === 'inexact' ? 'Sveglie non esatte: con l\'app dietro Android può ritardare o saltare le letture.'
+      : 'Senza sveglie di sistema: leggo solo con l\'app aperta e tengo lo schermo acceso.'
+  const batteryNote = background && background.android && background.battery === false ? (
+    <View style={{ gap: space.xs }}>
+      <Body small style={{ color: t.warnInk || t.ink, fontWeight: '600' }}>Batteria: Android limita l'app. Per ore di fila serve «Senza restrizioni»: Impostazioni dell'app › Batteria.</Body>
+      {onBattery ? <InlineAction label="Apri le impostazioni dell'app" onPress={onBattery} /> : null}
+    </View>
+  ) : null
+  const counts = [scored ? `${scored} con voto${provisional ? `, ${provisional} provvisori` : ''}` : null, noCard ? `${noCard} senza scheda` : null, job && job.aiCost ? `AI ${job.aiCost.toFixed(3).replace('.', ',')} $` : null].filter(Boolean).join(' · ')
+  const jobCard = job ? (
+    <Card>
+      <SectionLabel>{running ? '' : 'Ultima ricerca · '}{titleOf(job)}</SectionLabel>
+      {running && !job.waiting ? <Ticking>{(at) => <Body small>{statusAt(at)}</Body>}</Ticking>
+        : <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{statusAt(now)}</Body>}
+      {staleNote ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{staleNote}</Body> : null}
+      {auto.judging ? <Body small style={{ fontWeight: '600' }}>Chiedo le schede all'AI…</Body>
+        : aiNote && aiNote[1] ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{aiNote[0]}</Body> : null}
+      {alarmNote ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{alarmNote}</Body> : null}
+      {running ? batteryNote : null}
+      {running && news ? job.sources.map((x) => <SearchRow key={x.label} label={x.label} line={lineOf(x.label)} />) : null}
+      <ButtonRow>
+        {running ? <Button label="Ferma" variant="secondary" small onPress={onStop} /> : null}
+        {onJudge && noCard ? <Button label={auto.judging ? 'Valuto…' : `Valuta adesso (${noCard})`} variant={aiNote && aiNote[1] ? 'primary' : 'secondary'} small disabled={Boolean(auto.judging)} onPress={onJudge} /> : null}
+        <Button label="Condividi il diario" variant="ghost" small onPress={onShareLog} />
+      </ButtonRow>
+      <InlineAction label={details ? 'Nascondi i dettagli' : 'Dettagli'} tone="neutral" onPress={() => setDetails(!details)} />
+      {details ? (
+        <View style={{ gap: space.xs }}>
+          {counts ? <Body small muted>{counts}</Body> : null}
+          {!auto.judging && aiNote && !aiNote[1] ? <Body small muted>{aiNote[0]}</Body> : null}
+          {!auto.judging && aiNote && job.aiDetail && job.ai !== 'budget' ? <Body small muted>{job.aiDetail}</Body> : null}
+          {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
+          {others.length ? <Body small muted>Resa: {others.slice(0, 6).map((r) => `${r.fonte} ${r.da_55} su ${r.articoli}${r.da_70 ? ` (${r.da_70} da ${INTEREST.TELL_MIN})` : ''}`).join(' · ')} da {INTEREST.SHOW_MIN} in su.</Body> : null}
+          {running && background && background.android && background.alarm === 'exact' ? <Body small muted>Sveglie di sistema attive: leggo anche con l'app chiusa.</Body> : null}
+          {background && background.android && background.battery === true ? <Body small muted>Batteria: senza restrizioni.</Body> : null}
+        </View>
+      ) : null}
+    </Card>
+  ) : null
 
   return (
     <View style={{ gap: space.md }}>
-      <Card>
-        <SectionLabel>Modalità</SectionLabel>
-        <View style={styles.row}>
-          {MODES.map((m) => <Chip key={m.id} compact label={m.label} active={mode === m.id} onPress={() => onMode(m.id)} />)}
-        </View>
-        {mode === 'manual' ? <Body small muted>Come sempre: apri un annuncio e lo analizzi tu. Niente gira da solo.</Body> : null}
-        {mode === 'semi' ? (
-          <View style={{ gap: space.sm }}>
-            <Body small muted>Dimmi cosa cerchi e quanto vuoi spendere al massimo: per {WATCH.HUNT_HOURS} ore rileggo la ricerca ogni 8–12 minuti. L'AI dice quali annunci sono proprio quel prodotto e ognuno prende un voto; un affare te lo dico subito, alla fine ti propongo quello col voto più alto e l'offerta la mandi tu, con un tocco.</Body>
-            {draft ? <Body small>Dalla pagina aperta: <Text style={{ fontWeight: '700' }}>{draft.label}</Text></Body> : (
-              <Field label="Cosa cerco" value={words} onChangeText={setWords} placeholder="es. Levi's 511 W32" returnKeyType="done" />
-            )}
-            <Field label="Taglia (se conta)" value={size} onChangeText={setSize} placeholder="es. M, W32, 42" returnKeyType="done" />
-            <Field label="Prezzo massimo" value={maxText} onChangeText={setMaxText} placeholder="20" keyboardType="decimal-pad" suffix="€" returnKeyType="done" />
-            <Body small muted>Per un articolo veramente buono salgo del 10% con due segnali e del 15% con tre: nuovo, proprio il prodotto cercato (e la taglia, se l'hai scritta), sotto il mercato. Il venditore solido si aggiunge quando leggo l'annuncio.</Body>
-            <ButtonRow>
-              <Button label={`Avvia la caccia (${WATCH.HUNT_HOURS} ore)`} small disabled={!canHunt || running || busy} onPress={() => onStartHunt({ words: draft ? null : words.trim(), maxPrice, size: size.trim() || null })} />
-            </ButtonRow>
-          </View>
-        ) : null}
-        {mode === 'auto' ? (
-          <View style={{ gap: space.sm }}>
-            <Body small muted>Per {WATCH.FEED_HOURS} ore rileggo la tua home di Vinted ogni 8–12 minuti: ogni volta una decina di articoli scelti da Vinted per te. L'AI compila la scheda di ognuno, per i promettenti leggo il mercato, e li metto in classifica per voto. Un affare te lo dico subito.</Body>
-            <ButtonRow>
-              <Button label={`Avvia la vetrina (${WATCH.FEED_HOURS} ore)`} small disabled={running || busy} onPress={onStartFeed} />
-            </ButtonRow>
-            {onStartNews ? (
-              <View style={{ gap: space.sm }}>
-                <Body small muted>Oppure le novità: per {WATCH.FEED_HOURS} ore leggo le tue ricerche dal più recente, una per lettura e a rotazione. È lì che un annuncio compare appena pubblicato, prima che Vinted lo proponga nella home (se mai lo fa).</Body>
-                <Field label={`Ricerche da seguire (fino a ${WATCH.ROTATION_MAX}, separate da virgola)`} value={newsText} onChangeText={setNewsEdit} placeholder="es. zerocalcare, chainsaw man variant, absolute dc" autoCapitalize="none" />
-                <ButtonRow>
-                  <Button label={`Avvia le novità (${WATCH.FEED_HOURS} ore)`} variant="secondary" small disabled={!newsList.length || running || busy} onPress={() => onStartNews(newsList)} />
-                </ButtonRow>
-              </View>
-            ) : null}
-          </View>
-        ) : null}
-        {mode !== 'manual' ? (
-          <View style={{ gap: space.xs }}>
-            <Body small muted>Ogni lettura la fa partire la sveglia di sistema di Android: avviene anche con l'app dietro, lo schermo spento o l'app chiusa. Una notifica resta visibile finché la ricerca è in corso. Se Vinted chiede una verifica mi fermo e te lo dico.</Body>
-            {background && background.android && background.battery === false ? (
-              <View style={{ gap: space.xs }}>
-                <Body small style={{ color: t.warnInk || t.ink, fontWeight: '600' }}>Batteria: Android limita l'app. Per 24 ore di fila serve «Senza restrizioni»: Impostazioni dell'app › Batteria.</Body>
-                {onBattery ? <InlineAction label="Apri le impostazioni dell'app" onPress={onBattery} /> : null}
-              </View>
-            ) : null}
-            {background && background.android && background.battery === true ? <Body small muted>Batteria: senza restrizioni.</Body> : null}
-          </View>
-        ) : null}
-      </Card>
-
-      {job ? (
+      {running ? jobCard : (
         <Card>
-          <SectionLabel>{job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}{job.label ? ` · ${job.label}` : ''}</SectionLabel>
-          <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
-          {staleNote ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{staleNote}</Body> : null}
-          {Array.isArray(job.sources) && job.sources.length ? <Body small muted>Ricerche: {job.sources.map((x) => x.label).join(', ')}.</Body> : null}
-          {report.length ? (
-            <Body small muted>Resa: {report.slice(0, 6).map((r) => `${r.fonte} ${r.da_55} su ${r.articoli}${r.da_70 ? ` (${r.da_70} da ${INTEREST.TELL_MIN})` : ''}`).join(' · ')} da {INTEREST.SHOW_MIN} in su.</Body>
+          <SectionLabel>Cosa faccio girare?</SectionLabel>
+          <View style={styles.row}>
+            {CHOICES.map((c) => <Chip key={c.id} compact label={c.label} active={what === c.id} onPress={() => pick(c.id)} />)}
+          </View>
+          {what === 'news' ? (
+            <View style={{ gap: space.sm }}>
+              <Body small muted>Per {WATCH.FEED_HOURS} ore leggo le tue ricerche dal più recente, una per volta: un annuncio lo vedi appena pubblicato.</Body>
+              {followed.map((label) => <SearchRow key={label} label={label} line={lineOf(label)} onRemove={() => change(searches.filter((w) => w !== label))} />)}
+              {searches.length > followed.length ? <Body small muted>Seguo le prime {WATCH.ROTATION_MAX}: le altre {searches.length - followed.length} contano solo come interessi.</Body> : null}
+              {!followed.length ? <Body small muted>Rende una marca, un autore o un modello: «zerocalcare», «lego star wars», «nintendo switch oled». Un tipo di oggetto («maglia», «dischi») no: non ha un prezzo di rivendita con cui confrontare.</Body> : null}
+              {searches.length < WATCH.ROTATION_MAX ? (
+                <View style={{ gap: space.xs }}>
+                  <Field label={`Aggiungi una ricerca (${searches.length} di ${WATCH.ROTATION_MAX})`} value={typing} onChangeText={setTyping} placeholder="marca, autore o modello" autoCapitalize="none" returnKeyType="done" onSubmitEditing={() => { if (canAdd) { add(typed); setTyping('') } }} />
+                  {typedAdvice ? <Body small style={{ color: t.warn }}>{typedAdvice.text}</Body> : null}
+                  <ButtonRow>
+                    <Button label="Aggiungi" variant="secondary" small disabled={!canAdd} onPress={() => { add(typed); setTyping('') }} />
+                  </ButtonRow>
+                </View>
+              ) : null}
+              {ideas.length && searches.length < WATCH.ROTATION_MAX ? (
+                <View style={{ gap: space.xs }}>
+                  <Body small muted>Idee da ciò che ti è piaciuto o ha già reso (tocca per aggiungere):</Body>
+                  <View style={styles.row}>
+                    {ideas.map((i) => <Chip key={i.label} compact label={`+ ${i.label}`} onPress={() => add(i.label)} />)}
+                  </View>
+                </View>
+              ) : null}
+              <ButtonRow>
+                <Button label={`Avvia per ${WATCH.FEED_HOURS} ore`} small disabled={!followed.length || busy || !onStartNews} onPress={() => onStartNews(followed)} />
+              </ButtonRow>
+            </View>
           ) : null}
-          {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
-          {auto.judging ? <Body small style={{ fontWeight: '600' }}>Chiedo le schede all'AI…</Body>
-            : aiNote ? <Body small muted={!aiNote[1]} style={aiNote[1] ? { color: t.warn, fontWeight: '600' } : null}>{aiNote[0]}</Body> : null}
-          {!auto.judging && aiNote && job.aiDetail && job.ai !== 'budget' ? <Body small muted>{job.aiDetail}</Body> : null}
-          {scored || noCard ? <Body small muted>{[scored ? `${scored} con voto${provisional ? `, ${provisional} provvisori` : ''}` : null, noCard ? `${noCard} senza scheda` : null, job.aiCost ? `AI ${job.aiCost.toFixed(3).replace('.', ',')} $` : null].filter(Boolean).join(' · ')}</Body> : null}
-          {running && background && background.android ? (
-            <Body small muted>
-              {background.alarm === 'exact' ? 'Sveglie di sistema attive: leggo anche con l\'app chiusa.'
-                : background.alarm === 'inexact' ? 'Sveglie non esatte: con l\'app dietro Android può ritardare o saltare le letture.'
-                  : 'Senza sveglie di sistema: leggo solo con l\'app aperta e tengo lo schermo acceso.'}
-            </Body>
+          {what === 'hunt' ? (
+            <View style={{ gap: space.sm }}>
+              <Body small muted>Per {WATCH.HUNT_HOURS} ore rileggo una ricerca precisa entro il tuo prezzo massimo: un affare te lo dico subito, alla fine ti propongo il migliore.</Body>
+              {draft ? <Body small>Dalla pagina aperta: <Text style={{ fontWeight: '700' }}>{draft.label}</Text></Body> : (
+                <Field label="Cosa cerco" value={words} onChangeText={setWords} placeholder="es. Levi's 511 W32" returnKeyType="done" />
+              )}
+              <Field label="Taglia (se conta)" value={size} onChangeText={setSize} placeholder="es. M, W32, 42" returnKeyType="done" />
+              <Field label="Prezzo massimo" value={maxText} onChangeText={setMaxText} placeholder="20" keyboardType="decimal-pad" suffix="€" returnKeyType="done" />
+              <ButtonRow>
+                <Button label={`Avvia per ${WATCH.HUNT_HOURS} ore`} small disabled={!canHunt || busy} onPress={() => onStartHunt({ words: draft ? null : words.trim(), maxPrice, size: size.trim() || null })} />
+              </ButtonRow>
+            </View>
           ) : null}
-          <ButtonRow>
-            {running ? <Button label="Ferma" variant="secondary" small onPress={onStop} /> : null}
-            {onJudge && noCard ? <Button label={auto.judging ? 'Valuto…' : `Valuta adesso (${noCard})`} variant={aiNote && aiNote[1] ? 'primary' : 'secondary'} small disabled={Boolean(auto.judging)} onPress={onJudge} /> : null}
-            <Button label="Condividi il diario" variant="ghost" small onPress={onShareLog} />
-          </ButtonRow>
+          {what === 'home' ? (
+            <View style={{ gap: space.sm }}>
+              <Body small muted>Per {WATCH.FEED_HOURS} ore rileggo la tua home di Vinted: a ogni lettura una decina di articoli scelti da Vinted per te.</Body>
+              <ButtonRow>
+                <Button label={`Avvia per ${WATCH.FEED_HOURS} ore`} small disabled={busy} onPress={onStartFeed} />
+              </ButtonRow>
+            </View>
+          ) : null}
+          {batteryNote}
         </Card>
-      ) : null}
+      )}
+      {!running ? jobCard : null}
 
       <Card>
         <SectionLabel>Trovati{shown.length ? ` · ${shown.length}` : ''}{showAll ? '' : ` · da ${INTEREST.SHOW_MIN} in su`}</SectionLabel>
-        {!ranked.length ? <Body small muted>Ancora niente. Avvia una caccia o la vetrina: qui compare quello che trovano da {INTEREST.SHOW_MIN} in su.</Body> : null}
+        {!ranked.length ? <Body small muted>Ancora niente: qui compare quello che una ricerca trova da {INTEREST.SHOW_MIN} in su.</Body> : null}
         {ranked.length && !shown.length ? <Body small muted>Niente da {INTEREST.SHOW_MIN} in su, per ora: {weak === 1 ? 'l\'articolo letto sta' : `i ${weak} articoli letti stanno`} sotto, e non {weak === 1 ? 'vale' : 'valgono'} un'offerta.</Body> : null}
-        {shown.length ? <Body small muted>Dal voto più alto. Da {INTEREST.TELL_MIN} ti avviso subito; tra {INTEREST.SHOW_MIN} e {INTEREST.TELL_MIN - 1} c'è scritta l'offerta che lo rende da comprare. Con «Dai voto», sotto i pollici, scrivi il voto che gli daresti tu: sposta i prossimi della stessa categoria.</Body> : null}
+        {shown.length ? <Body small muted>Dal voto più alto. Da {INTEREST.TELL_MIN} ti avviso subito.</Body> : null}
         {shown.map((f) => {
           const tone = f.score ? toneOf(t, SCORE_TONE[f.score.label] || 'neutral') : null
           // His own score: a button under the thumbs on every article that has a score (1.19.1: as a line of text
@@ -226,7 +301,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
                 <Text numberOfLines={1} style={{ color: t.ink3, fontSize: 12 }}>
                   {[f.score ? `${f.score.label}${f.score.rated ? ' (voto tuo)' : f.score.provisional && !f.score.unsure ? ' (provvisorio)' : ''}` : null, f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null].filter(Boolean).join(' · ')}
                 </Text>
-                {f.score && f.score.reasons.length ? <Text numberOfLines={3} style={{ color: t.ink2, fontSize: 12 }}>{f.score.reasons.slice(0, 2).join(' · ')}</Text> : null}
+                {f.score && f.score.reasons.length ? <Text numberOfLines={4} style={{ color: t.ink2, fontSize: 12 }}>{f.score.reasons.slice(0, 3).join(' · ')}</Text> : null}
                 {f.exceptional || f.tolerancePct || f.eligible === false ? (
                   <Text numberOfLines={1} style={{ color: f.eligible === false ? t.ink3 : t.accentInk, fontSize: 12, fontWeight: '600' }}>
                     {f.eligible === false ? `oltre il massimo (${formatEuro(f.limit)})` : [f.exceptional ? 'sotto il 70% del massimo' : null, f.tolerancePct ? `veramente buono: fino a ${formatEuro(f.limit)}` : null].filter(Boolean).join(' · ')}
@@ -280,13 +355,13 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         })}
         {weak ? <InlineAction label={showAll ? `Mostra solo da ${INTEREST.SHOW_MIN} in su` : `Mostra anche ${weak === 1 ? 'quello' : `i ${weak}`} sotto ${INTEREST.SHOW_MIN}`} tone="neutral" onPress={() => setShowAll(!showAll)} /> : null}
         {ranked.length ? <InlineAction label="Svuota i trovati" onPress={onClearFinds} /> : null}
-        {ranked.length ? <Body small muted>Svuotare non cancella quello che hai insegnato: pollici e voti tuoi restano in memoria e valgono per le prossime ricerche.</Body> : null}
+        {ranked.length ? <Body small muted>Pollici e voti tuoi restano in memoria.</Body> : null}
       </Card>
 
       {waits.length ? (
         <Card>
           <SectionLabel>In attesa · {waits.length}</SectionLabel>
-          <Body small muted>Li riguardo ogni tanto mentre una ricerca è in corso, e subito quando Vinted notifica un prezzo più basso (serve il tuo cuore sull'annuncio). Ti avviso quando uno arriva a {INTEREST.TELL_MIN}.</Body>
+          <Body small muted>Li riguardo mentre una ricerca gira e quando Vinted notifica un ribasso (serve il tuo cuore). Ti avviso a {INTEREST.TELL_MIN}.</Body>
           {waits.map((w) => {
             const tone = w.score ? toneOf(t, SCORE_TONE[w.score.label] || 'neutral') : null
             const buy = w.score && w.score.target ? w.score.target.buy : null
@@ -321,13 +396,17 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
 
       {onProfile ? <InterestsCard key={profile ? 'loaded' : 'empty'} profile={profile} onSave={onProfile} /> : null}
 
-      <Card muted>
-        <SectionLabel>Prova di fattibilità</SectionLabel>
-        <Body small muted>Misura sul tuo telefono in che modi la ricerca e la home si riescono a leggere. Dura meno di un minuto; il risultato lo condividi con chi sviluppa l'app.</Body>
-        <ButtonRow>
-          <Button label={busy ? 'Provo…' : 'Esegui la prova'} variant="secondary" small disabled={busy} onPress={onFeasibility} />
-        </ButtonRow>
-      </Card>
+      <Collapsible title="Strumenti e spiegazioni" summary="come lavoro, prova di fattibilità">
+        <View style={{ gap: space.sm }}>
+          <Body small muted>Ogni lettura, una ogni 8–12 minuti, la fa partire la sveglia di sistema di Android: avviene anche con l'app dietro, lo schermo spento o l'app chiusa, e una notifica resta visibile finché la ricerca gira. Se Vinted chiede una verifica mi fermo e te lo dico.</Body>
+          <Body small muted>L'AI compila la scheda di ogni articolo, per i promettenti leggo il mercato e l'annuncio, e il voto li mette in classifica. Tra {INTEREST.SHOW_MIN} e {INTEREST.TELL_MIN - 1} c'è scritta l'offerta che lo rende da comprare; con «Dai voto» scrivi il voto che gli daresti tu, e i prossimi della stessa categoria si spostano.</Body>
+          <Body small muted>«Un articolo»: per uno veramente buono salgo del 10% sul prezzo massimo con due segnali e del 15% con tre (nuovo, proprio il prodotto cercato e la taglia, sotto il mercato, venditore solido).</Body>
+          <Body small muted>Prova di fattibilità: misura in che modi la ricerca e la home si riescono a leggere su questo telefono. Meno di un minuto; il risultato lo condividi con chi sviluppa l'app.</Body>
+          <ButtonRow>
+            <Button label={busy ? 'Provo…' : 'Esegui la prova'} variant="secondary" small disabled={busy} onPress={onFeasibility} />
+          </ButtonRow>
+        </View>
+      </Collapsible>
     </View>
   )
 }
@@ -335,6 +414,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
 const styles = StyleSheet.create({
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs },
   find: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm },
+  search: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.xs, borderTopWidth: StyleSheet.hairlineWidth },
   score: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   thumb: { width: 30, height: 26, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   // As wide as the two thumbs above it.

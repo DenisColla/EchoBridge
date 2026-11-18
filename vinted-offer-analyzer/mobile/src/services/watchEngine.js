@@ -929,6 +929,12 @@ export const watchEngine = {
         da_comprare_a: w.score && w.score.target ? w.score.target.buy : null, guardato: iso(w.checkedAt), stato: w.gone || (w.due ? 'da guardare' : 'in attesa'),
       })),
       storico: state.history,
+      ricerche_seguite: (() => {
+        const live = job && job.kind === 'feed' && Array.isArray(job.sources) && job.sources.length && !job.stopped ? core.sourceReport(finds) : null
+        const yields = core.searchYields(state.history, live)
+        return (profile && Array.isArray(profile.words) ? profile.words : []).slice(0, core.WATCH.ROTATION_MAX).map((w) => ({ ricerca: w, ...(yields[String(w).replace(/\s+/g, ' ').trim().toLowerCase()] || {}), riga: core.searchLineOf(w, yields[String(w).replace(/\s+/g, ' ').trim().toLowerCase()]).text }))
+      })(),
+      idee_di_ricerca: core.searchIdeasOf({ finds, waits: state.waits, likes: profile ? profile.likes : null, history: state.history, following: profile && Array.isArray(profile.words) ? profile.words : [] }),
       senza_scheda: finds.filter((f) => !f.card).length,
       in_attesa_della_scheda: waitingOf(finds).length,
       voti: {

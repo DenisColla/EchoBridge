@@ -550,8 +550,8 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
       neg = { ...neg, n: itClamp(neg.n + (page.says === 'open_to_offers' || page.says === 'clearing_out' ? 0.1 : 0) + (itFinite(page.ageDays) && page.ageDays >= 30 ? 0.05 : 0)) }
     }
     const about = ref.source !== 'market' ? `circa ${itEuro(ref.value)} (stima dell'AI)`
-      : ref.pieces > 1 ? `${itEuro(worth)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci${cut ? `, −${Math.round(cut * 100)}% per i difetti` : ''})`
-        : cut ? `${itEuro(worth)} (${ref.n} annunci uguali a ${itEuro(ref.value)}, −${Math.round(cut * 100)}% per i difetti)` : `${itEuro(worth)} (${ref.n} annunci uguali)`
+      : ref.pieces > 1 ? `${itEuro(worth)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci${cut ? `, −${Math.round(cut * 100)}% difetti` : ''})`
+        : cut ? `${itEuro(worth)} (${ref.n} annunci a ${itEuro(ref.value)}, −${Math.round(cut * 100)}% difetti)` : `${itEuro(worth)} (${ref.n} annunci uguali)`
     if (profit >= INTEREST.MIN_PROFIT) reasons.push(`Rivendendo a ${about} restano ${itEuro(profit)} (${margin.pct}%)`)
     else if (profit > 0) reasons.push(`Rivendendo a ${about} restano solo ${itEuro(profit)}`)
     else reasons.push(`Rivendendo a ${about} perdi ${itEuro(-profit)}`)
@@ -563,9 +563,6 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     unsure = 'riferimento'
     reasons.push('Non ho un valore di riferimento: non so dire se il prezzo è buono')
   }
-
-  // Said where it is read first: it is often the reason of a low price.
-  if (defects.length) reasons.splice(1, 0, `Difetti dichiarati: ${defects.slice(0, 2).join(', ')}`)
 
   let total = W.convenienza * c + W.domanda * d + W.qualita * q + W.trattabilita * neg.n + W.pertinenza * p + W.venditore * v
   // Without a good price the rest does not make an article worth buying to sell again.
@@ -593,6 +590,8 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const noDeal = !unsure && margin !== null && (target.buy === null || fixed || away || (neg.discount !== null && neg.discount > INTEREST.MAX_OFFER_DISCOUNT))
   if (away) reasons.splice(1, 0, `Venditore assente da ${Math.round(page.sellerDays)} giorni: può non spedire`)
   else if (fixed) reasons.splice(1, 0, 'Il venditore scrive che il prezzo non è trattabile')
+  // Said right after the price, before any other caution: it is often the reason of a low price.
+  if (defects.length) reasons.splice(1, 0, `Difetti dichiarati: ${defects.slice(0, 2).join(', ')}`)
   else if (seller && seller.id === 'expert') reasons.push(`Venditore solido (${page.reviews} recensioni)`)
   else if (seller && seller.id === 'quiet') reasons.push(`Venditore visto ${Math.round(page.sellerDays)} giorni fa`)
   if (page && !away && !fixed && (page.says === 'open_to_offers' || page.says === 'clearing_out') && neg.discount) reasons.push(page.says === 'clearing_out' ? 'Il venditore sta svuotando l\'armadio' : 'L\'annuncio invita a fare offerte')

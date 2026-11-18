@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   WATCH, cardsFromHtml, detectVintedChallenge, detectVintedSessionRefresh, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, parseVintedCatalog,
-  rankFinds, sourceReport, sourcesFor, toleranceFor, waitMatchOf,
+  rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport, sourcesFor, toleranceFor, waitMatchOf, yieldVerdictOf,
 } from '../src/core/index.js'
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
@@ -187,4 +187,71 @@ test('watch: a notification of Vinted\'s is matched to the article that waits', 
   assert.equal(waitMatchOf('', waits), null)
   // one common word is not a match
   assert.deepEqual(waitMatchOf('Fumetti in offerta questa settimana', waits), { all: true })
+})
+
+test('watch: a search that names only a kind of thing is said before it runs (1.21)', () => {
+  // The two searches of the diary of 18 November that brought nothing from 55 out of 151.
+  assert.equal(searchAdviceOf('dischi 10 kg').kind, 'generica')
+  assert.equal(searchAdviceOf('Maglia sotto giacca').kind, 'generica')
+  assert.equal(searchAdviceOf('libri').kind, 'generica')
+  assert.equal(searchAdviceOf('scarpe uomo 42 nere').kind, 'generica')
+  // A brand, an author, a model: nothing to say.
+  for (const fine of ['Will Eisner contratto con Dio', 'zerocalcare', "Levi's 511", 'lego star wars', 'iphone 12', 'ps5', 'Nintendo Switch OLED']) assert.equal(searchAdviceOf(fine), null, fine)
+  assert.equal(searchAdviceOf('corto maltese una ballata del mare salato prima edizione rizzoli').kind, 'lunga')
+  assert.equal(searchAdviceOf(''), null)
+  assert.equal(searchAdviceOf(null), null)
+})
+
+test('watch: what each followed search brought, over the jobs kept and the one running (1.21)', () => {
+  const history = [
+    { tipo: 'feed', fonti: ['dischi 10 kg', 'Will Eisner'], resa: [{ fonte: 'Will Eisner', articoli: 40, da_55: 4, da_70: 2 }, { fonte: 'dischi 10 kg', articoli: 80, da_55: 0, da_70: 0 }] },
+    { tipo: 'feed', resa: [{ fonte: 'home', articoli: 120, da_55: 9, da_70: 1 }] },
+    { tipo: 'hunt', cosa: 'levis 511', resa: [{ fonte: 'caccia', articoli: 30, da_55: 3, da_70: 0 }] },
+    { tipo: 'feed', resa: [{ fonte: 'will eisner', articoli: 30, da_55: 1, da_70: 0 }] },
+  ]
+  const y = searchYields(history, [{ fonte: 'Dischi 10 kg', articoli: 71, da_55: 0, da_70: 0 }, { fonte: 'hugo pratt', articoli: 10, da_55: 1, da_70: 0 }])
+  assert.deepEqual(y, {
+    'will eisner': { articoli: 70, da_55: 5, da_70: 2, lavori: 2 },
+    'dischi 10 kg': { articoli: 151, da_55: 0, da_70: 0, lavori: 2 },
+    'hugo pratt': { articoli: 10, da_55: 1, da_70: 0, lavori: 1 },
+  })
+  assert.equal(yieldVerdictOf(y['will eisner']), 'buona')
+  assert.equal(yieldVerdictOf(y['dischi 10 kg']), 'nulla')
+  assert.equal(yieldVerdictOf(y['hugo pratt']), null)
+  assert.equal(yieldVerdictOf({ articoli: 200, da_55: 3, da_70: 0 }), 'scarsa')
+  assert.equal(yieldVerdictOf({ articoli: 200, da_55: 3, da_70: 1 }), 'buona')
+  assert.equal(yieldVerdictOf(null), null)
+  assert.deepEqual(searchYields(null), {})
+
+  assert.deepEqual(searchLineOf('Will Eisner', y['will eisner']), { text: '5 da 55 su 70 letti (2 da 70): rende, tienila', tone: 'good', verdict: 'buona' })
+  const none = searchLineOf('dischi 10 kg', y['dischi 10 kg'])
+  assert.equal(none.tone, 'warn')
+  assert.match(none.text, /^0 da 55 su 151 letti: non rende\. Nomina solo un tipo di oggetto/)
+  assert.match(searchLineOf('zerocalcare', { articoli: 90, da_55: 0, da_70: 0 }).text, /non rende\. Cambiala, o stringila/)
+  assert.deepEqual(searchLineOf('hugo pratt', y['hugo pratt']), { text: '1 da 55 su 10 letti: ancora poco per dirlo', tone: 'neutral', verdict: null })
+  assert.deepEqual(searchLineOf('zerocalcare'), { text: 'Mai provata', tone: 'neutral', verdict: null })
+  assert.equal(searchLineOf('maglia').tone, 'warn')
+})
+
+test('watch: ideas of searches come from what he liked, and never repeat what he follows (1.21)', () => {
+  const find = (id, extra) => ({ id: String(id), title: `Articolo ${id}`, price: 10, ...extra })
+  const finds = [
+    find(1, { title: 'Contratto con Dio di Will Eisner', score: { total: 95 }, card: { brand: 'Will Eisner', model: 'Contratto con Dio', category: 'fumetti_manga' } }),
+    find(2, { score: { total: 60 }, vote: 1, card: { brand: 'Samsung', model: 'Galaxy S21', category: 'telefoni' } }),
+    find(3, { score: { total: 90 }, vote: -1, card: { brand: 'Hugo Pratt', model: '', category: 'fumetti_manga' } }),
+    find(4, { score: { total: 80 }, gone: 'venduto', card: { brand: 'Bonelli', model: '', category: 'fumetti_manga' } }),
+    find(5, { score: { total: 40 }, card: { brand: 'Zara', model: '', category: 'abbigliamento' } }),
+    find(6, { score: { total: 75 }, card: { brand: 'n.d.', model: '', category: 'altro' }, brand: '' }),
+    find(7, { rated: 80, score: { total: 80 }, brand: 'Bao Publishing' }),
+  ]
+  const history = [{ tipo: 'feed', resa: [{ fonte: 'lego star wars', articoli: 90, da_55: 8, da_70: 2 }, { fonte: 'maglia', articoli: 90, da_55: 0, da_70: 0 }] }]
+  const ideas = searchIdeasOf({ finds, history, likes: { 'brand:nike': 3, 'brand:zara': 1, 'cat:libri': 5 }, following: ['Will Eisner contratto con Dio'] })
+  assert.deepEqual(ideas.map((i) => i.label), ['lego star wars', 'Samsung Galaxy S21', 'Will Eisner', 'Bao Publishing', 'nike'])
+  assert.match(ideas[0].why, /ha già reso 8 da 55 su 90/)
+  assert.match(ideas[1].why, /il tuo pollice/)
+  // What a followed search already covers is not offered again; a kind of thing never is.
+  assert.deepEqual(searchIdeasOf({ finds, history, following: ['will eisner', 'LEGO', 'samsung'] }).map((i) => i.label), ['Bao Publishing'])
+  assert.deepEqual(searchIdeasOf({ finds: [find(1, { score: { total: 90 }, card: { brand: 'Libri', model: '', category: 'libri' } })] }), [])
+  assert.deepEqual(searchIdeasOf(), [])
+  assert.equal(searchIdeasOf({ finds, history, max: 2 }).length, 2)
 })

@@ -509,7 +509,7 @@ test('a declared defect is said in the reasons and lowers what the market says i
   assert.equal(marked.margin.resale, 30.8)
   assert.ok(marked.margin.profit < clean.margin.profit)
   assert.ok(marked.total < clean.total)
-  assert.match(marked.reasons[0], /30,80 € \(12 annunci uguali a 35 €, −12% per i difetti\)/)
+  assert.match(marked.reasons[0], /30,80 € \(12 annunci a 35 €, −12% difetti\)/)
   assert.equal(marked.reasons[1], 'Difetti dichiarati: sottolineature a penna nelle prime pagine')
   assert.ok(!clean.reasons.some((r) => /Difetti/.test(r)))
   // Never more than DEFECT_CUT_MAX, however many are listed.
