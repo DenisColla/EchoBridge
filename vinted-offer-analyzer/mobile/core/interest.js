@@ -87,6 +87,11 @@ export const INTEREST = Object.freeze({
    *  thought, the listings may be of another edition: the score stops at PROVISIONAL_CAP and says so (1.20.1). */
   THIN_MARKET: 8,
   DISPUTE_TIMES: 2,
+  /** A defect the seller declares (underlined pages, a stain, a missing piece) lowers what the thing sells for again
+   *  by this much of the market's value, each, up to DEFECT_CUT_MAX: the listings compared are mostly without it. An
+   *  estimate, not a measure (1.20.2: a book at 15 € against 35 € was underlined in pen, and the score did not say). */
+  DEFECT_CUT: 0.12,
+  DEFECT_CUT_MAX: 0.3,
   /** His scores move those of a category by this much at most, and count as if this many neutral ones came before. */
   CALIBRATION_MAX: 12,
   CALIBRATION_PRIOR: 2,
@@ -519,6 +524,10 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   // times what the same thing sells for), 'identita' (the AI did not understand what it is).
   let unsure = null
   const known = ref && itFinite(ref.value) && ref.value > 0 && itFinite(price) && price > 0
+  // What the seller declares as defects: the AI's own estimate has read them already, the market's listings have not.
+  const defects = card && !broken && Array.isArray(card.defects) ? card.defects : []
+  const cut = known && ref.source === 'market' && defects.length ? Math.min(INTEREST.DEFECT_CUT_MAX, INTEREST.DEFECT_CUT * defects.length) : 0
+  const worth = known ? itR2(ref.value * (1 - cut)) : null
   // What the same thing sells for at most: the middle of the market, or the top of the AI's range.
   const usual = !known ? null : ref.source === 'market' ? ref.median : card && itFinite(card.usedHigh) && card.usedHigh > 0 ? card.usedHigh : ref.value / INTEREST.AI_PRUDENCE
   if (known && price >= INTEREST.ODD_PRICE_MIN && itFinite(usual) && usual > 0 && price >= INTEREST.ODD_PRICE_TIMES * usual) {
@@ -529,19 +538,20 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     reasons.push(`Chiesto ${(times >= 10 ? Math.round(times) : Math.round(times * 10) / 10).toLocaleString('it-IT')} volte ${ref.source === 'market' ? `il prezzo di ${ref.n} annunci uguali` : 'la stima dell\'AI'} (${itEuro(usual)}): ${lot ? 'forse un\'edizione rara' : 'forse un lotto o un\'edizione particolare'}, da aprire`)
   } else if (known) {
     const cost = itR2(price + vintedBuyerFee(price) + shipping)
-    const profit = itR2(ref.value - cost)
-    const pct = profit / ref.value
-    margin = { resale: ref.value, cost, profit, pct: Math.round(pct * 100), required }
+    const profit = itR2(worth - cost)
+    const pct = profit / worth
+    margin = { resale: worth, cost, profit, pct: Math.round(pct * 100), required }
     c = convenienceOf(pct / (required / 100))
     if (profit < INTEREST.MIN_PROFIT) c = Math.min(c, 0.5)
-    target = { buy: buyPriceFor(ref.value, shipping, required), deal: buyPriceFor(ref.value, shipping, required * 1.3) }
+    target = { buy: buyPriceFor(worth, shipping, required), deal: buyPriceFor(worth, shipping, required * 1.3) }
     neg = negotiabilityOf(find, target.buy)
     // What the seller wrote, and a listing that has been there a month, move how likely an offer is to pass.
     if (page && neg.discount !== null && neg.discount > 0 && neg.discount <= INTEREST.MAX_OFFER_DISCOUNT) {
       neg = { ...neg, n: itClamp(neg.n + (page.says === 'open_to_offers' || page.says === 'clearing_out' ? 0.1 : 0) + (itFinite(page.ageDays) && page.ageDays >= 30 ? 0.05 : 0)) }
     }
     const about = ref.source !== 'market' ? `circa ${itEuro(ref.value)} (stima dell'AI)`
-      : ref.pieces > 1 ? `${itEuro(ref.value)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci)` : `${itEuro(ref.value)} (${ref.n} annunci uguali)`
+      : ref.pieces > 1 ? `${itEuro(worth)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci${cut ? `, −${Math.round(cut * 100)}% per i difetti` : ''})`
+        : cut ? `${itEuro(worth)} (${ref.n} annunci uguali a ${itEuro(ref.value)}, −${Math.round(cut * 100)}% per i difetti)` : `${itEuro(worth)} (${ref.n} annunci uguali)`
     if (profit >= INTEREST.MIN_PROFIT) reasons.push(`Rivendendo a ${about} restano ${itEuro(profit)} (${margin.pct}%)`)
     else if (profit > 0) reasons.push(`Rivendendo a ${about} restano solo ${itEuro(profit)}`)
     else reasons.push(`Rivendendo a ${about} perdi ${itEuro(-profit)}`)
@@ -553,6 +563,9 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     unsure = 'riferimento'
     reasons.push('Non ho un valore di riferimento: non so dire se il prezzo è buono')
   }
+
+  // Said where it is read first: it is often the reason of a low price.
+  if (defects.length) reasons.splice(1, 0, `Difetti dichiarati: ${defects.slice(0, 2).join(', ')}`)
 
   let total = W.convenienza * c + W.domanda * d + W.qualita * q + W.trattabilita * neg.n + W.pertinenza * p + W.venditore * v
   // Without a good price the rest does not make an article worth buying to sell again.

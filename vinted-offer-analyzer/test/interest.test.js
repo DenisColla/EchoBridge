@@ -497,3 +497,27 @@ test('interest: the AI is asked for the words that tell a product from its sibli
   assert.ok(system.includes('["ballata","salato"] e non ["corto","maltese"]'))
   assert.ok(system.includes('senza dire quale volume o modello'))
 })
+
+test('a declared defect is said in the reasons and lowers what the market says it sells for (1.20.2)', () => {
+  // The diary of 18 November: «Contratto con Dio» at 15 € against listings at 35 €; the description said it was
+  // underlined in pen on the first pages, and the score (95) did not.
+  const book = find(15, { title: 'Contratto con Dio di Will Eisner', favourites: 56 })
+  const many = { value: 35, median: 38, n: 12, source: 'market' }
+  const clean = interestScore(book, { card: card('fumetti_manga'), ref: many })
+  const marked = interestScore(book, { card: card('fumetti_manga', { defects: ['sottolineature a penna nelle prime pagine'] }), ref: many })
+  assert.equal(clean.margin.resale, 35)
+  assert.equal(marked.margin.resale, 30.8)
+  assert.ok(marked.margin.profit < clean.margin.profit)
+  assert.ok(marked.total < clean.total)
+  assert.match(marked.reasons[0], /30,80 € \(12 annunci uguali a 35 €, −12% per i difetti\)/)
+  assert.equal(marked.reasons[1], 'Difetti dichiarati: sottolineature a penna nelle prime pagine')
+  assert.ok(!clean.reasons.some((r) => /Difetti/.test(r)))
+  // Never more than DEFECT_CUT_MAX, however many are listed.
+  const worn = interestScore(book, { card: card('fumetti_manga', { defects: ['a', 'b', 'c', 'd'] }), ref: many })
+  assert.equal(worn.margin.resale, 24.5)
+  // The AI's own estimate has read the description already: said, not cut twice.
+  const guess = { value: 20, source: 'ai' }
+  const guessed = interestScore(book, { card: card('fumetti_manga', { defects: ['macchia in copertina'], usedLow: 18, usedHigh: 25 }), ref: guess })
+  assert.equal(guessed.margin.resale, 20)
+  assert.ok(guessed.reasons.includes('Difetti dichiarati: macchia in copertina'))
+})
