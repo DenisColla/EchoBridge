@@ -3,9 +3,12 @@ package expo.modules.vintedbridge
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.os.bundleOf
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.lang.ref.WeakReference
@@ -81,6 +84,23 @@ class VintedBridgeModule : Module() {
     Function("hideWatchStatus") {
       WatchAlarms.hideStatus(context)
       true
+    }
+
+    // 1.18.3: Vinted's «Session refresh» page opened in a browser with no screen until it has renewed the session
+    // (SessionRenewal.kt). Resolves with how it went; it never rejects.
+    AsyncFunction("renewSession") { url: String, timeoutMs: Double, promise: Promise ->
+      val app = appContext.reactContext?.applicationContext
+      if (app == null || !SessionRenewal.isVinted(url)) {
+        promise.resolve(mapOf("ok" to false, "outcome" to "errore", "error" to if (app == null) "no context" else "not a Vinted page"))
+      } else {
+        Handler(Looper.getMainLooper()).post {
+          try {
+            SessionRenewal.run(app, url, timeoutMs.toLong().coerceIn(5_000L, 90_000L)) { result -> promise.resolve(result) }
+          } catch (e: Throwable) {
+            promise.resolve(mapOf("ok" to false, "outcome" to "errore", "error" to (e.message ?: "errore")))
+          }
+        }
+      }
     }
 
     // Whether Android lets the app work without battery restrictions («Senza restrizioni»).

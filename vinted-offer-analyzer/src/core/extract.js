@@ -358,6 +358,17 @@ export function detectVintedChallenge(html) {
   return null
 }
 
+/**
+ * Vinted's «Session refresh» page (seen 17 November 2026): about two hours after the last visit every page of
+ * www.vinted.it is answered with this small one, whose script asks Vinted for a new session and then goes on to the
+ * page asked for. A plain download gets it for ever: who reads pages must have a browser open it (the in-app one,
+ * or the one with no screen of modules/vinted-bridge, SessionRenewal.kt). Not a check: nothing is asked of a person.
+ */
+export function detectVintedSessionRefresh(html) {
+  const src = String(html || '')
+  return /<title[^>]*>\s*Session refresh\s*<\/title>/i.test(src) || /\\?"pageId\\?"\s*:\s*\\?"session-refresh/.test(src)
+}
+
 /* ───────── mapping onto the analyzer ───────── */
 
 const DECORATION = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}]|\u{FE0F}|\u{200D}/gu

@@ -38,6 +38,15 @@ export const vintedBridge = {
   /** The notification that says a job is running, between one reading and the next. */
   showWatchStatus: (title, text) => (native && native.showWatchStatus ? safe(() => Boolean(native.showWatchStatus(String(title || ''), String(text || ''))), false) : false),
   hideWatchStatus: () => (native && native.hideWatchStatus ? safe(() => Boolean(native.hideWatchStatus()), false) : false),
+  /**
+   * 1.18.3: Vinted's own «Session refresh» page, opened in a browser with no screen until it has renewed the session
+   * (SessionRenewal.kt): what a plain download cannot do. → { ok, outcome, sawRefresh, pages, path, title, ms, error }
+   * (outcome: 'rinnovata' | 'non_serviva' | 'scaduta' | 'tempo' | 'rete' | 'occupato' | 'errore'), or null where
+   * there is no such browser (web, an APK without the module). Never rejects.
+   */
+  renewSession: (url, timeoutMs = 60_000) => (native && native.renewSession
+    ? Promise.resolve().then(() => native.renewSession(String(url), Number(timeoutMs))).catch((e) => ({ ok: false, outcome: 'errore', error: String((e && e.message) || e).slice(0, 120) }))
+    : Promise.resolve(null)),
   /** true / false, or null where it cannot be known (web, an APK without the module). */
   isBatteryUnrestricted: () => (native && native.isBatteryUnrestricted ? safe(() => Boolean(native.isBatteryUnrestricted()), null) : null),
   getSharedText: () => (native ? safe(() => native.getSharedText() || null, null) : null),

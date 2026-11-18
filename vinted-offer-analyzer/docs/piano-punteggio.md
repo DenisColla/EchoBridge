@@ -68,7 +68,9 @@ partenza porta solo i fatti stabili e le correzioni dell'utente.
 
 ## Catena a ogni lettura (dentro gli 8–12 minuti)
 
-1. Lettura della pagina (scaricata) e raccolta: un articolo per riga, con il primo e l'ultimo avvistamento.
+1. Lettura della pagina (scaricata) e raccolta: un articolo per riga, con il primo e l'ultimo avvistamento. Quando
+   Vinted risponde «Session refresh» (circa ogni due ore) la sua stessa pagina rinnova la sessione in un browser
+   senza schermo, poi la pagina viene scaricata di nuovo (1.18.3).
 2. Sveglia per la lettura successiva, prima di tutto il resto.
 3. Scheda dell'AI per gli articoli nuovi: lotti da 10, quattro chiamate affiancate, 40 articoli a lettura al massimo.
 4. Riferimento: nella caccia sono i risultati stessi della ricerca (quelli che l'AI dice essere il prodotto cercato);

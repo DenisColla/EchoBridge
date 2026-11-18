@@ -33,6 +33,10 @@ import { vintedBridge } from './vintedBridge.js'
  * judgement cut short never breaks the chain. Nothing in a reading waits on a timer of the app: with the app behind
  * they may not fire (http.js).
  *
+ * 1.18.3 (the night of 17 November: 43 readings out of 48 got Vinted's «Session refresh» page): when Vinted asks to
+ * renew the session its own page does it, in a browser with no screen (SessionRenewal.kt), and the reading goes on.
+ * A reading that read nothing is counted (`empty`, and `stale` in a row); after a few in a row the user is told.
+ *
  * 1.18.1: an article counts as asked only when the AI answered (no key, a key the phone did not let be read, no
  * network: asked again at the next occasion), and the judgement also runs with no reading (judgeNow): when a key is
  * saved, when the app comes back in front with articles still without their card, when the user asks.
@@ -52,6 +56,10 @@ const LOOKUPS_PER_TICK = 3
 const AI_BUDGET_USD = 0.6
 /** The judgement stops asking past this many milliseconds from the start of the reading (the task has two minutes). */
 const JUDGE_BUDGET_MS = 85_000
+/** How long Vinted's own page may take to renew the session (it waits a minute by itself when another renewal was cut). */
+const RENEW_TIMEOUT_MS = 75_000
+/** Readings in a row that read nothing before the user is told: two when Vinted asks to renew the session, else three. */
+const STALE_TOLD = { sessione: 2, other: 3 }
 /** The AI is asked only within this long from the start of the reading: a call may last a minute. */
 const ASK_BUDGET_MS = 50_000
 /** An article the AI answered about without giving a card is asked this many times in all. */
@@ -143,7 +151,8 @@ function showStatus() {
   if (!core.jobActive(job)) return
   const title = `${job.kind === 'hunt' ? 'Caccia' : 'Vetrina'} in corso${job.label ? ` · ${String(job.label).slice(0, 40)}` : ''}`
   const next = job.waiting ? ' · in pausa: apri l\'app' : job.nextAt ? ` · prossima verso le ${clockOf(job.nextAt)}` : ''
-  vintedBridge.showWatchStatus(title, `${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'} · ${state.finds.length} trovati${next} · fino alle ${clockOf(core.jobEndsAt(job))}`)
+  const empty = job.empty ? ` (${job.empty} a vuoto)` : ''
+  vintedBridge.showWatchStatus(title, `${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${empty} · ${state.finds.length} trovati${next} · fino alle ${clockOf(core.jobEndsAt(job))}`)
 }
 
 /** The app's own timer under the alarm: it reads only if the alarm has not, twenty seconds after its time. */
@@ -182,11 +191,11 @@ async function endJob(reason) {
     // The best is the highest score within the price, not the cheapest; what is not the product searched is left out.
     const best = ranked.find((f) => f.eligible && !(f.card && f.card.match === 'no'))
     if (best) await notify(`Caccia finita: ${best.title || 'il migliore'} a ${euro(best.price)}${voted(best)}`, 'Tocca per aprirlo: lo analizzo, poi cuore e offerta con un tocco.', best.url)
-    else await notify('Caccia finita', `Niente entro ${euro(job.maxPrice)} in ${job.reads || 0} letture.`)
+    else await notify('Caccia finita', `Niente entro ${euro(job.maxPrice)} in ${job.reads || 0} letture${job.empty ? ` (${job.empty} a vuoto)` : ''}.`)
   } else {
     const top = ranked.filter((f) => f.score && f.score.total >= 70)
     const first = top[0] || ranked[0]
-    await notify('Vetrina finita', `${ranked.length} articoli in ${job.reads || 0} letture, ${top.length} da comprare.${first ? ` Il primo: ${first.title || 'articolo'} a ${euro(first.price)}${voted(first)}.` : ''}`, first ? first.url : null)
+    await notify('Vetrina finita', `${ranked.length} articoli in ${job.reads || 0} letture${job.empty ? ` (${job.empty} a vuoto)` : ''}, ${top.length} da comprare.${first ? ` Il primo: ${first.title || 'articolo'} a ${euro(first.price)}${voted(first)}.` : ''}`, first ? first.url : null)
   }
 }
 
@@ -351,32 +360,58 @@ async function judgeNow(source = 'utente') {
   }
 }
 
-/**
- * One reading of a list page → { ok, via, cards } or { ok: false, via, reason }.
- * The page is downloaded as it is: lighter than a browser, and a search page's own data say more than its cards.
- * With the app in front, a download that gives no list is followed by the in-app browser.
- */
-async function readListPage(url, front) {
-  // The web build has no in-app browser: what a test hands over stands in for the page (cards, or a refusal).
+/** The page downloaded as it is and read → { ok, via, cards } or { ok: false, via, reason, … } (see readListPage). */
+async function downloadList(url) {
+  // The web build has no way to Vinted: what a test hands over stands in for the page (cards, or a refusal).
   const handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
   if (Array.isArray(handed)) return { ok: true, via: 'prova', cards: handed }
   if (handed && handed.reason) return { ok: false, via: 'browser', reason: handed.reason }
-  let got
   const dl = await fetchVintedListPage(url)
-  if (!dl.html) got = { ok: false, via: 'scaricata', reason: dl.reason || 'failed' }
-  else {
-    const data = core.parseVintedCatalog(dl.html).items
-    const marked = data.length ? [] : core.cardsFromHtml(dl.html)
-    if (data.length) got = { ok: true, via: 'scaricata', cards: data }
-    else if (marked.length) got = { ok: true, via: 'scaricata_html', cards: marked }
-    else {
-      // A page with no article: Vinted's check, an error, or a search with no result. What it calls itself helps to tell.
-      const challenge = dl.mitigated || Boolean(core.detectVintedChallenge(dl.html))
-      const title = (dl.html.match(/<title[^>]*>([^<]{0,80})/i) || [])[1] || null
-      got = { ok: false, via: 'scaricata', reason: challenge ? 'challenge' : dl.ok ? 'vuota' : 'http', stato: dl.status, caratteri: dl.html.length, titolo: title }
-    }
+  if (!dl.html) return { ok: false, via: 'scaricata', reason: dl.reason || 'failed' }
+  const data = core.parseVintedCatalog(dl.html).items
+  if (data.length) return { ok: true, via: 'scaricata', cards: data }
+  const marked = core.cardsFromHtml(dl.html)
+  if (marked.length) return { ok: true, via: 'scaricata_html', cards: marked }
+  // A page with no article: Vinted's check, its request to renew the session, an error, or a search with no result.
+  const challenge = dl.mitigated || Boolean(core.detectVintedChallenge(dl.html))
+  const title = (dl.html.match(/<title[^>]*>([^<]{0,80})/i) || [])[1] || null
+  const reason = challenge ? 'challenge' : core.detectVintedSessionRefresh(dl.html) ? 'sessione' : dl.ok ? 'vuota' : 'http'
+  return { ok: false, via: 'scaricata', reason, stato: dl.status, caratteri: dl.html.length, titolo: title }
+}
+
+/**
+ * Vinted's own renewal of the session (see SessionRenewal.kt): its «Session refresh» page opened in a browser with
+ * no screen until it has moved on. → what the diary keeps of it: { esito, ms, pagine, percorso, titolo, errore }.
+ */
+async function renewSession(url) {
+  const test = Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.__ovtRenew === 'function' ? window.__ovtRenew : null
+  let res
+  try { res = test ? await test(url) : await vintedBridge.renewSession(url, RENEW_TIMEOUT_MS) } catch (e) { res = { ok: false, outcome: 'errore', error: String((e && e.message) || e).slice(0, 120) } }
+  if (!res) return { ok: false, esito: 'non_disponibile' }
+  const kept = { ok: Boolean(res.ok), esito: res.outcome || (res.ok ? 'rinnovata' : 'errore') }
+  for (const [from, to] of [['ms', 'ms'], ['pages', 'pagine'], ['path', 'percorso'], ['title', 'titolo'], ['error', 'errore']]) if (res[from] !== undefined && res[from] !== null) kept[to] = res[from]
+  return kept
+}
+
+/**
+ * One reading of a list page → { ok, via, cards } or { ok: false, via, reason }.
+ * The page is downloaded as it is: lighter than a browser, and a search page's own data say more than its cards.
+ * When Vinted answers that the session is to be renewed (about every two hours), its own page does it in a browser
+ * with no screen, and the page is downloaded again. With the app in front, a download that gives no list is
+ * followed by the in-app browser, which renews the session by itself.
+ */
+async function readListPage(url, front) {
+  const test = Platform.OS === 'web' && typeof window !== 'undefined' && window.__ovtWatchCards !== undefined && window.__ovtWatchCards !== null
+  let got = await downloadList(url)
+  if (!got.ok && got.reason === 'sessione' && (test || !front || !browserReader)) {
+    const { ok, ...rinnovo } = await renewSession(url)
+    const first = got
+    if (ok) got = await downloadList(url)
+    got = { ...got, rinnovo }
+    // Renewed, and the page is still the request to renew: said as it is.
+    if (!got.ok && !got.titolo) got.titolo = first.titolo
   }
-  if (got.ok || !front || !browserReader) return got
+  if (got.ok || !front || !browserReader || test) return got
   let seen
   try { seen = await browserReader(url) } catch { seen = { ok: false, reason: 'failed' } }
   if (seen.ok) return { ok: true, via: 'browser', cards: seen.cards, diag: seen.diag || null }
@@ -396,7 +431,9 @@ async function tick(source = 'timer') {
   if (busySince && t0 - busySince < BUSY_STALE_MS) return 'occupato'
   // An alarm or a timer of a reading already done by the other: not before its time.
   const early = job.nextAt && t0 < job.nextAt - 5000
-  if (source !== 'avvio' && !(source === 'ritorno' && job.waiting) && (early || job.waiting)) return 'presto'
+  // Back in front after readings that read nothing: now, with the browser at hand (not more than once a minute).
+  const retry = source === 'ritorno' && (job.waiting || (job.stale && t0 - (job.lastReadAt || 0) > 60_000))
+  if (source !== 'avvio' && !retry && (early || job.waiting)) return 'presto'
   busySince = t0
   emit()
   const front = AppState.currentState === 'active'
@@ -412,7 +449,7 @@ async function tick(source = 'timer') {
       quando: new Date(now).toISOString(), innesco: source, ritardo_s: job.nextAt ? Math.round((t0 - job.nextAt) / 1000) : null, freddo: source === 'sveglia' ? t0 - BOOT_AT < 20_000 : undefined,
       sfondo: !front, via: res.via, ms: now - t0, esito: res.ok ? 'ok' : res.reason || 'failed', schede: cards ? cards.length : null,
     }
-    for (const key of ['scaricata', 'stato', 'caratteri', 'titolo', 'errore']) if (res[key] !== undefined && res[key] !== null) entry[key] = res[key]
+    for (const key of ['scaricata', 'stato', 'caratteri', 'titolo', 'errore', 'rinnovo']) if (res[key] !== undefined && res[key] !== null) entry[key] = res[key]
     if (res.diag) entry.pagina = { ...res.diag, sample: cards && cards.length ? undefined : res.diag.sample }
     const log = [...base.log, entry].slice(-LOG_MAX)
     if (!res.ok && res.reason === 'challenge') {
@@ -437,6 +474,23 @@ async function tick(source = 'timer') {
       entry.nuovi = merged.fresh.length
     }
     const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
+    // Readings that read nothing: how many in all, how many in a row, and why the last one did.
+    next.empty = (base.job.empty || 0) + (cards ? 0 : 1)
+    next.stale = cards ? 0 : (base.job.stale || 0) + 1
+    next.staleWhy = cards ? null : res.reason || 'failed'
+    // Vinted's own page gave the session up (its renewal failed): told once, the readings go on without the account.
+    if (res.rinnovo && res.rinnovo.esito === 'scaduta' && !next.sessionTold) {
+      next.sessionTold = true
+      await notify('Vinted ha chiuso la sessione', job.kind === 'hunt' ? 'La caccia prosegue lo stesso. Per le offerte rientra dalla scheda Vinted.' : 'La vetrina ora legge la home di tutti, non la tua. Rientra dalla scheda Vinted per riavere la tua.')
+    }
+    if (cards) next.staleTold = false
+    else if (!next.staleTold && next.stale >= (res.reason === 'sessione' ? STALE_TOLD.sessione : STALE_TOLD.other)) {
+      // Once, until a reading reads again: the app in front reads with its own browser.
+      next.staleTold = true
+      await notify(`${job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}: le letture non riescono`, res.reason === 'sessione'
+        ? 'Vinted chiede di rinnovare la sessione e da solo non ci sono riuscito. Apri l\'app: riprendo subito.'
+        : `Le ultime ${next.stale} letture non hanno letto nulla. Apri l'app: provo con il browser.`)
+    }
     if (job.kind === 'hunt' && cards && NO_AI.includes(base.job.ai)) {
       // Without an AI key there are no scores: an article far under the highest price is told at once, each once.
       for (const f of core.rankFinds(finds, job).filter((x) => x.exceptional && !next.told.includes(x.id)).slice(0, 2)) {
@@ -448,7 +502,8 @@ async function tick(source = 'timer') {
     // The next alarm first: whatever happens to the judgement, the chain of readings goes on.
     const active = core.jobActive(next)
     if (active) await schedule()
-    await runJudge(t0)
+    // With no page read the searches of the market would meet the same refusal: only the cards and the scores.
+    await runJudge(t0, { lookups: Boolean(cards) })
     if (!active) await endJob('fine')
     else showStatus()
     return res.ok ? 'letto' : 'non letto'
@@ -466,7 +521,10 @@ async function resume() {
   if (job && !job.stopped && !core.jobActive(job)) await endJob('fine')
   else if (core.jobActive(job)) {
     // A reading that is due judges too.
-    if (job.waiting || !job.nextAt || job.nextAt <= Date.now()) return tick('ritorno')
+    if (job.waiting || job.stale || !job.nextAt || job.nextAt <= Date.now()) {
+      const done = await tick('ritorno')
+      if (done !== 'presto') return done
+    }
     // The alarm may be gone (the phone was restarted, the app updated): asking again for the same moment costs nothing.
     vintedBridge.scheduleWatchAlarm(job.nextAt)
     armNet(job.nextAt)
@@ -544,7 +602,7 @@ export const watchEngine = {
     const alarm = vintedBridge.watchAlarmInfo()
     return {
       lavoro: job ? {
-        tipo: job.kind, avviato: iso(job.startedAt), ore: job.hours, letture: job.reads || 0, fermato: job.stopped || null, in_attesa: job.waiting || null,
+        tipo: job.kind, avviato: iso(job.startedAt), ore: job.hours, letture: job.reads || 0, a_vuoto: job.empty || 0, a_vuoto_di_fila: job.stale || 0, fermato: job.stopped || null, in_attesa: job.waiting || null,
         prezzo_massimo: job.maxPrice ?? null, prossima: iso(job.nextAt), sveglia: job.sveglia ?? null,
         ai: job.ai || null, ai_dettaglio: job.aiDetail || null, ai_costo_usd: job.aiCost || 0,
       } : null,

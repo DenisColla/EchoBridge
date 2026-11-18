@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { WATCH, cardsFromHtml, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, rankFinds, toleranceFor } from '../src/core/index.js'
+import { readFileSync } from 'node:fs'
+import {
+  WATCH, cardsFromHtml, detectVintedChallenge, detectVintedSessionRefresh, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, parseVintedCatalog,
+  rankFinds, toleranceFor,
+} from '../src/core/index.js'
+
+const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
 
 test('watch: the next reading comes after any minute and second between 8:00 and 12:00, drawn anew each time', () => {
   assert.equal(nextRefreshDelayMs(() => 0), 8 * 60 * 1000)
@@ -123,4 +129,21 @@ test('watch: the cards of a downloaded page, from its markup', () => {
   const finds = cards.map((c) => findFromCard(c))
   assert.deepEqual(finds.map((f) => [f.title, f.brand, f.size, f.price, f.favourites]), [['Seven sons - Robert Windom', null, null, 18, 11], ['Felpa "basic"', 'H&M', 'M', 30, 0]])
   assert.deepEqual(cardsFromHtml(''), [])
+})
+
+test('watch: Vinted\'s «Session refresh» page is told apart from a check and from a page of results', () => {
+  // The page a plain download got 43 times out of 48 in the night of 17 November 2026 (19 813 characters).
+  const refresh = fixture('vinted-session-refresh-2026-11.html')
+  assert.equal(detectVintedSessionRefresh(refresh), true)
+  // It asks nothing of a person: not a check. And it carries no listing.
+  assert.equal(detectVintedChallenge(refresh), null)
+  assert.deepEqual([parseVintedCatalog(refresh).items.length, parseVintedCatalog(refresh).catalog, cardsFromHtml(refresh).length], [0, false, 0])
+  const search = fixture('vinted-catalog-2026-10.html')
+  assert.equal(detectVintedSessionRefresh(search), false)
+  assert.equal(parseVintedCatalog(search).catalog, true)
+  assert.equal(detectVintedSessionRefresh(''), false)
+  assert.equal(detectVintedSessionRefresh('<html><head><title>Vinted | Tutta la seconda mano</title></head></html>'), false)
+  // The title alone, or the page's own name in its data, is enough.
+  assert.equal(detectVintedSessionRefresh('<title>Session refresh</title>'), true)
+  assert.equal(detectVintedSessionRefresh('self.__next_f.push([1,"17:[\\"$\\",\\"$L1c\\",null,{\\"pageId\\":\\"session-refresh\\"}]"])'), true)
 })

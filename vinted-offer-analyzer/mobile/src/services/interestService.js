@@ -115,8 +115,15 @@ export async function lookupReference(find, card, now = Date.now()) {
   else {
     const dl = await fetchVintedListPage(`${ORIGIN}/catalog?search_text=${encodeURIComponent(card.query)}`)
     if (!dl.html) return { ok: false, reason: dl.reason || 'failed' }
-    items = core.parseVintedCatalog(dl.html).items
-    if (!items.length && (dl.mitigated || core.detectVintedChallenge(dl.html))) return { ok: false, reason: 'challenge' }
+    const page = core.parseVintedCatalog(dl.html)
+    items = page.items
+    if (!items.length) {
+      if (dl.mitigated || core.detectVintedChallenge(dl.html)) return { ok: false, reason: 'challenge' }
+      // Vinted asks to renew the session: the next reading does it (watchEngine); nothing was learnt here.
+      if (core.detectVintedSessionRefresh(dl.html)) return { ok: false, reason: 'sessione' }
+      // Not a list of results at all: no value, and nothing to remember for a day.
+      if (!page.catalog) return { ok: true, ref: null, cached: false, seen: 0, same: 0 }
+    }
   }
   const prices = core.comparablesOf(items, card, find)
   const ref = core.marketReferenceOf(prices, { pieces: lot.pieces })

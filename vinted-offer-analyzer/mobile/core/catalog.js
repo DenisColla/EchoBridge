@@ -160,14 +160,17 @@ export function catalogCandidate(entry) {
 }
 
 /**
- * Parses a Vinted catalog search page. Returns { items, total } where `items` are candidates in page order
- * (duplicates removed) and `total` the number of entries the payload carried. Never throws.
+ * Parses a Vinted catalog search page. Returns { items, total, catalog } where `items` are candidates in page order
+ * (duplicates removed), `total` the number of entries the payload carried and `catalog` whether the page is a list
+ * of results at all (true for a search with no result, false for any other page). Never throws.
  */
 export function parseVintedCatalog(html) {
   const text = flightText(html) || String(html || '')
   const entries = []
   const marker = '"items":{"items":['
   let at = text.indexOf(marker)
+  // The page is a list of results, even an empty one (and not a page of another kind that has no listing).
+  const catalog = at >= 0 || text.includes('"productItem":')
   if (at >= 0) {
     const start = at + marker.length - 1
     const end = matchBracket(text, start)
@@ -209,5 +212,5 @@ export function parseVintedCatalog(html) {
     ids.add(c.id)
     items.push(c)
   }
-  return { items, total: entries.length }
+  return { items, total: entries.length, catalog }
 }

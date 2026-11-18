@@ -92,12 +92,16 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const provisional = finds.filter((f) => f.score && f.score.provisional).length
   const noCard = finds.filter((f) => !f.card).length
   const aiNote = job ? aiNoteOf(job) : null
+  // Readings in a row that read nothing, while the job runs: said as soon as there are two.
+  const staleNote = !running || !job.stale || job.stale < 2 ? null
+    : job.staleWhy === 'sessione' ? `Le ultime ${job.stale} letture non hanno letto nulla: Vinted chiede di rinnovare la sessione. Tieni l'app aperta un momento: la rinnovo con il browser.`
+      : `Le ultime ${job.stale} letture non hanno letto nulla (${job.staleWhy === 'network' || job.staleWhy === 'timeout' ? 'rete' : 'pagina senza articoli'}).`
   const status = !job ? null
     : running && job.waiting ? `In pausa · ${job.reads || 0} letture: Vinted ha risposto con un controllo mentre l'app era dietro. Riprendo da qui, con l'app aperta.`
-      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${auto.reading ? ' · leggo…' : nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
+      : running ? `In corso · ${job.reads || 0} ${job.reads === 1 ? 'lettura' : 'letture'}${job.empty ? ` (${job.empty} a vuoto)` : ''}${auto.reading ? ' · leggo…' : nextAt && nextAt > now ? ` · prossima tra ${countdown(nextAt - now)}` : ' · prossima a momenti'} · fino alle ${clock(jobEndsAt(job))}`
       : stopped === 'verifica' ? 'Fermata: Vinted ha chiesto una verifica. Aprila nella scheda Vinted, poi riavvia.'
         : stopped === 'utente' ? 'Fermata da te.'
-          : `Finita: ${job.reads || 0} letture.`
+          : `Finita: ${job.reads || 0} letture${job.empty ? `, ${job.empty} a vuoto` : ''}.`
 
   return (
     <View style={{ gap: space.md }}>
@@ -147,6 +151,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         <Card>
           <SectionLabel>{job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}{job.label ? ` · ${job.label}` : ''}</SectionLabel>
           <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
+          {staleNote ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{staleNote}</Body> : null}
           {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
           {auto.judging ? <Body small style={{ fontWeight: '600' }}>Chiedo le schede all'AI…</Body>
             : aiNote ? <Body small muted={!aiNote[1]} style={aiNote[1] ? { color: t.warn, fontWeight: '600' } : null}>{aiNote[0]}</Body> : null}
