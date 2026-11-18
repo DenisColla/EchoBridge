@@ -467,7 +467,7 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   await set({ ...now, job: next, finds, log, waits: waitsNext })
   for (const f of deals) {
     await notify(`${f.score.total >= 85 ? 'Affare' : 'Da comprare'} (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`,
-      `${f.score.reasons[0] || ''}.${f.score.provisional ? ' Valore stimato dall\'AI, non letto dal mercato.' : ''}${f.page ? '' : ' Annuncio non ancora letto.'} Tocca per aprirlo.`, f.url)
+      `${f.score.reasons[0] || ''}.${f.score.provisional ? ' Valore stimato dall\'AI, non letto dal mercato.' : ''}${f.score.disputed ? ' Pochi annunci di confronto: controlla l\'edizione.' : ''}${f.page ? '' : ' Annuncio non ancora letto.'} Tocca per aprirlo.`, f.url)
   }
   for (const w of waitsTell) await tellWait(w)
 }

@@ -83,6 +83,10 @@ export const INTEREST = Object.freeze({
    *  is told at once. (He may give his own score to any article shown.) */
   SHOW_MIN: 55,
   TELL_MIN: 70,
+  /** A market read from fewer listings than this is thin; if it is also worth more than DISPUTE_TIMES the most the AI
+   *  thought, the listings may be of another edition: the score stops at PROVISIONAL_CAP and says so (1.20.1). */
+  THIN_MARKET: 8,
+  DISPUTE_TIMES: 2,
   /** His scores move those of a category by this much at most, and count as if this many neutral ones came before. */
   CALIBRATION_MAX: 12,
   CALIBRATION_PRIOR: 2,
@@ -155,7 +159,8 @@ const INTEREST_SYSTEM = [
   'Sei un perito dell\'usato in Italia: valuti annunci di Vinted per chi compra per rivendere.',
   'Per ogni annuncio ricevi id, titolo, marca, taglia, condizioni dichiarate e prezzo. Compili una scheda per ciascuno, con lo stesso id.',
   'Identità: usa solo ciò che c\'è nel testo. categoria: una delle voci ammesse (un manga, un fumetto o una graphic novel sono "fumetti_manga" anche quando il titolo non lo dice). tipo: che cos\'è, in 1-3 parole (es. "smartphone", "cuffie over-ear", "graphic novel", "piumino"). marca, modello, variante (memoria, taglia, edizione, volume, colore): stringa vuota se non ci sono; non inventare modelli.',
-  'cerca: 2-5 parole per trovare lo stesso prodotto su Vinted, senza aggettivi né condizioni. parole: 1-3 parole minuscole che un annuncio dello stesso prodotto deve contenere (es. ["s25","ultra"], ["1000xm5"], ["persepolis"]).',
+  'cerca: 2-5 parole per trovare lo stesso prodotto su Vinted, senza aggettivi né condizioni. parole: 1-3 parole minuscole che un annuncio dello stesso prodotto deve contenere: quelle che lo distinguono dagli altri della stessa marca o serie (il titolo, il modello), mai il tipo di oggetto né il colore. Esempi: ["s25","ultra"], ["1000xm5"], ["persepolis"]; per «Corto Maltese. Una ballata del mare salato» ["ballata","salato"] e non ["corto","maltese"]; per «Maglione SuitSupply merino» ["suitsupply","merino"] e non ["maglione"].',
+  'Se il titolo nomina solo la serie, l\'autore o la marca senza dire quale volume o modello («Corto Maltese», «Fumetto», «Manubri»), il rischio è "non_identificato" e la fiducia bassa.',
   'difetti: difetti o mancanze dichiarati nel titolo (lista vuota se nessuno). pezzi: quanti articoli sono venduti insieme (1 se uno solo; "1-4", "vol. 1 2 3", "lotto di 5 libri", "serie completa" sono più pezzi: se il numero non è scritto, stimalo). peso_kg: il peso stimato del pacco in chili, per tutti i pezzi (0 se non sai stimarlo).',
   'Quando un annuncio porta anche la descrizione scritta dal venditore, vale più del titolo: dice quanti pezzi sono venduti, che cosa manca, i difetti, l\'edizione. Usala per pezzi, difetti, variante e prezzi.',
   'Prezzi in euro, dal tuo sapere sul mercato italiano, prudenti: nuovo = prezzo a cui si compra nuovo oggi; usato_min e usato_max = fascia a cui si vende tra privati NELLE CONDIZIONI DICHIARATE, per tutti i pezzi dell\'annuncio. Se non conosci il prodotto metti 0 e una fiducia bassa: è meglio 0 di un numero inventato.',
@@ -230,6 +235,13 @@ export function cleanInterestCards(value, items) {
 /* ───────── the reference: what the same product sells for ───────── */
 
 export const SELLER_AWAY_DAYS = SELLER_INACTIVE_DAYS
+
+/** «disco» and «dischi», «maglia» and «maglie»: one word, when two titles are compared (1.20.1). */
+const itStem = (w) => {
+  if (!/^[a-z]{4,}$/.test(w)) return w
+  const cut = w.replace(/[aeiou]+$/, '').replace(/h$/, '')
+  return cut.length >= 3 ? cut : w
+}
 
 const itBand = (condition) => (/nuovo/i.test(String(condition || '')) ? 'new' : /ottim|buon|discret|soddisfacent/i.test(String(condition || '')) ? 'used' : null)
 
@@ -306,8 +318,11 @@ export function comparablesOf(candidates, card, find) {
     if (!c || !itFinite(c.price) || c.price <= 0 || String(c.id) === String(find.id)) continue
     const said = itWords(`${c.title || ''} ${c.brand || ''}`)
     const joined = ` ${said.join(' ')} `
-    // «1000xm5» also matches «wh-1000xm5» written as one word, «s25» does not match «s25fe».
-    if (!must.every((w) => said.includes(w) || (w.length >= 5 && joined.includes(w)))) continue
+    const stems = new Set(said.map(itStem))
+    // «1000xm5» also matches «wh-1000xm5» written as one word, «s25» does not match «s25fe»; «disco» matches
+    // «dischi» but not «discoteca» (a word with no digit is found inside another only when digits follow it).
+    const glued = (w) => w.length >= 5 && (/\d/.test(w) ? joined.includes(w) : said.some((t) => t.startsWith(w) && /^\d+$/.test(t.slice(w.length))))
+    if (!must.every((w) => said.includes(w) || stems.has(itStem(w)) || glued(w))) continue
     if (!accessory && IT_ACCESSORY.some((w) => joined.includes(` ${w} `))) continue
     if (IT_BROKEN.test(String(c.title || ''))) continue
     let price = c.price
@@ -558,6 +573,10 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const fixed = Boolean(page && page.says === 'fixed_price' && neg.discount !== null && neg.discount > 0)
   // A seller not seen for two weeks may never answer nor ship: the money comes back, days later.
   const away = Boolean(seller && seller.id === 'inactive')
+  // A market of a few listings worth much more than the AI thought: they may be of another edition (1.20.1).
+  const most = card && itFinite(card.usedHigh) && card.usedHigh > 0 ? card.usedHigh : null
+  const disputed = Boolean(margin !== null && !unsure && ref.source === 'market' && itFinite(ref.n) && ref.n < INTEREST.THIN_MARKET && most !== null && ref.value > INTEREST.DISPUTE_TIMES * most)
+  if (disputed) reasons.splice(1, 0, `Solo ${ref.n} annunci di confronto, e l'AI stimava ${itEuro(card.usedLow > 0 ? card.usedLow : most)}–${itEuro(most)}: controlla che sia la stessa edizione`)
   const noDeal = !unsure && margin !== null && (target.buy === null || fixed || away || (neg.discount !== null && neg.discount > INTEREST.MAX_OFFER_DISCOUNT))
   if (away) reasons.splice(1, 0, `Venditore assente da ${Math.round(page.sellerDays)} giorni: può non spedire`)
   else if (fixed) reasons.splice(1, 0, 'Il venditore scrive che il prezzo non è trattabile')
@@ -567,7 +586,7 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const capped = (raw) => {
     let t = raw
     if (unsure || noDeal) t = Math.min(t, INTEREST.UNKNOWN_CAP)
-    else if (provisional) t = Math.min(t, INTEREST.PROVISIONAL_CAP)
+    else if (provisional || disputed) t = Math.min(t, INTEREST.PROVISIONAL_CAP)
     if (broken || match === 'no' || find.vote === -1) t = Math.min(t, INTEREST.REJECTED_CAP)
     return Math.round(itClamp(t, 0, 100))
   }
@@ -582,7 +601,7 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     total, base, shift: rated !== null ? 0 : total - base, rated: rated !== null,
     label: rated !== null ? labelOf(total) : unsure ? (total >= INTEREST.CHECK_MIN ? 'da verificare' : 'lascia') : labelOf(total), provisional, unsure,
     parts: { convenienza: itR2(c), domanda: itR2(d), qualita: itR2(q), trattabilita: itR2(neg.n), pertinenza: itR2(p), venditore: itR2(v) },
-    margin, target, shipping, reasons: reasons.slice(0, 4), read: Boolean(page), seller: seller ? seller.id : null,
+    margin, target, shipping, reasons: reasons.slice(0, 4), read: Boolean(page), seller: seller ? seller.id : null, disputed,
   }
 }
 

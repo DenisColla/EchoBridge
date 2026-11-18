@@ -456,3 +456,44 @@ test('interest: a search of the market is made only where it could change the ve
   assert.equal(ask('black Monday', 20, 0, c('fumetti_manga', 0, 0)), true)
   assert.equal(lookupCouldMatter({ id: '1', price: 10 }, null), false)
 })
+
+/* ───────── from the diary of «novità» (1.20.1, 18 November 2026) ───────── */
+
+test('interest: a few listings worth much more than the AI thought are not shouted as an «affare»', () => {
+  // «Contratto con Dio» at 15 €: six listings at 35 €, the AI (sure of itself) said 8-12 €. It was «affare» at 95.
+  const eisner = { id: '1', title: 'libro fumetto Contratto con Dio di Will Eisner', condition: 'Ottime', price: 15, favourites: 56 }
+  const c = card('fumetti_manga', { usedLow: 8, usedHigh: 12, weightKg: 0.5, confidence: 0.85 })
+  const s = interestScore(eisner, { card: c, ref: { value: 35, median: 38, n: 6, source: 'market' } })
+  assert.deepEqual([s.total, s.label, s.disputed, s.provisional], [70, 'da comprare', true, false])
+  assert.equal(s.reasons[1], "Solo 6 annunci di confronto, e l'AI stimava 8 €–12 €: controlla che sia la stessa edizione")
+  // many listings: the market is believed (the variant of 18 November: the AI said 8-15 €, 42 listings said 20 €)
+  const variant = interestScore({ id: '2', title: 'Chainsaw Man Christmas variant', condition: 'Nuovo con cartellino', price: 10, favourites: 3 }, { card: card('fumetti_manga', { usedLow: 8, usedHigh: 15, weightKg: 0.3 }), ref: { value: 20, median: 24, n: 42, source: 'market' } })
+  assert.equal(variant.disputed, false)
+  assert.ok(variant.total > 70, String(variant.total))
+  // few listings that agree with the AI: believed too (three volumes at 280 €, the AI said 150-220 €)
+  const trans = interestScore({ id: '3', title: 'Absolute Transmetropolitan Volume 1/2/3', condition: 'Nuovo senza cartellino', price: 150, favourites: 58 }, { card: card('fumetti_manga', { usedLow: 150, usedHigh: 220, pieces: 3, weightKg: 6 }), ref: { value: 280, median: 300, n: 3, source: 'market', unit: 93.34, pieces: 3 } })
+  assert.equal(trans.disputed, false)
+  assert.ok(trans.total > 70)
+  // with no estimate of the AI's there is nothing to dispute
+  assert.equal(interestScore(eisner, { card: card('fumetti_manga'), ref: { value: 35, median: 38, n: 6, source: 'market' } }).disputed, false)
+})
+
+test('interest: singular and plural are one word when listings are compared', () => {
+  const plate = { id: '1', title: 'Disco 5kg', condition: 'Buone', price: 8 }
+  const results = [cand(2, 'Dischi ghisa 5 kg Decathlon', 9), cand(3, 'disco in ghisa 5kg', 10), cand(4, 'DISCHI 5 KG coppia', 12), cand(5, 'Disco 10 kg', 20), cand(6, 'Discoteca anni 80 5 kg di vinili', 30)]
+  // the diary: «disco», «5 kg» found none of twelve results, all written «dischi»
+  assert.deepEqual(comparablesOf(results, card('sport', { words: ['disco', '5 kg'] }), plate), [9, 10, 12])
+  assert.deepEqual(comparablesOf([cand(2, 'Maglie termiche Quechua', 8), cand(3, 'maglia termica quechua M', 9), cand(4, 'Maglione Quechua', 15)], card('abbigliamento', { words: ['maglia', 'quechua'] }), { id: '1', title: 'Maglia termica', condition: 'Buone', price: 5 }), [8, 9])
+  // a word is found inside another only when digits follow it
+  assert.deepEqual(comparablesOf([cand(2, 'Playstation5 slim', 300), cand(3, 'Sambarose adidas', 40)], card('console_giochi', { words: ['playstation'] }), { id: '1', title: 'Playstation 5', condition: 'Ottime', price: 250 }), [300])
+  // short words and model names are compared as they are
+  assert.deepEqual(comparablesOf([cand(2, 'Samsung S25 Ultra', 500), cand(3, 'Samsung S25', 400)], card('telefoni', { words: ['s25', 'ultra'] }), { id: '1', title: 'S25 Ultra', condition: 'Ottime', price: 450 }), [500])
+})
+
+test('interest: the AI is asked for the words that tell a product from its siblings', () => {
+  const system = interestPrompt([]).system
+  assert.ok(system.includes('quelle che lo distinguono dagli altri della stessa marca o serie'))
+  assert.ok(system.includes('mai il tipo di oggetto né il colore'))
+  assert.ok(system.includes('["ballata","salato"] e non ["corto","maltese"]'))
+  assert.ok(system.includes('senza dire quale volume o modello'))
+})
