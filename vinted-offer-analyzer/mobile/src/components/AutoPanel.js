@@ -186,10 +186,13 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         <SectionLabel>Trovati{shown.length ? ` · ${shown.length}` : ''}{showAll ? '' : ` · da ${INTEREST.SHOW_MIN} in su`}</SectionLabel>
         {!ranked.length ? <Body small muted>Ancora niente. Avvia una caccia o la vetrina: qui compare quello che trovano da {INTEREST.SHOW_MIN} in su.</Body> : null}
         {ranked.length && !shown.length ? <Body small muted>Niente da {INTEREST.SHOW_MIN} in su, per ora: {weak === 1 ? 'l\'articolo letto sta' : `i ${weak} articoli letti stanno`} sotto, e non {weak === 1 ? 'vale' : 'valgono'} un'offerta.</Body> : null}
-        {shown.length ? <Body small muted>Dal voto più alto. Da {INTEREST.TELL_MIN} ti avviso subito; tra {INTEREST.SHOW_MIN} e {INTEREST.TELL_MIN - 1} c'è scritta l'offerta che lo rende da comprare. Da {INTEREST.RATE_MIN} puoi dare il tuo voto: sposta i prossimi della stessa categoria.</Body> : null}
+        {shown.length ? <Body small muted>Dal voto più alto. Da {INTEREST.TELL_MIN} ti avviso subito; tra {INTEREST.SHOW_MIN} e {INTEREST.TELL_MIN - 1} c'è scritta l'offerta che lo rende da comprare. Con «Dai voto», sotto i pollici, scrivi il voto che gli daresti tu: sposta i prossimi della stessa categoria.</Body> : null}
         {shown.map((f) => {
           const tone = f.score ? toneOf(t, SCORE_TONE[f.score.label] || 'neutral') : null
-          const canRate = Boolean(onRate) && f.score && (f.score.rated || f.score.total >= INTEREST.RATE_MIN)
+          // His own score: a button under the thumbs on every article that has a score (1.19.1: as a line of text
+          // under the best ones only, it was not seen as something to touch).
+          const canRate = Boolean(onRate) && Boolean(f.score)
+          const open = canRate && rating === f.id
           return (
             <View key={f.id} style={{ borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line }}>
             <View style={styles.find}>
@@ -223,17 +226,28 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
                     </Pressable>
                   </View>
                 ) : null}
+                {canRate ? (
+                  <Pressable
+                    onPress={() => setRating(open ? null : f.id)} accessibilityRole="button" hitSlop={6}
+                    accessibilityLabel={f.score.rated ? `Il tuo voto: ${f.score.total}. Cambia` : 'Dai il tuo voto'}
+                    style={({ pressed }) => [styles.rate, { borderColor: t.accent, backgroundColor: f.score.rated ? t.accent : open ? t.accentSoft : 'transparent', opacity: pressed ? 0.7 : 1 }]}
+                  >
+                    <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '700', color: f.score.rated ? t.onAccent : t.accentInk }}>{f.score.rated ? `Tuo: ${f.score.total}` : 'Dai voto'}</Text>
+                  </Pressable>
+                ) : null}
               </View>
             </View>
-            {canRate ? (
-              <View style={{ paddingBottom: space.sm, gap: space.xs }}>
-                <InlineAction label={f.score.rated ? `Il tuo voto: ${f.score.total} · cambia` : rating === f.id ? 'Che voto gli daresti?' : 'Dai il tuo voto'} tone={f.score.rated ? 'accent' : 'neutral'} onPress={() => setRating(rating === f.id ? null : f.id)} />
-                {rating === f.id ? (
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs }}>
-                    {RATING_STEPS.map((n) => <Chip key={n} compact label={String(n)} active={f.score.rated && f.score.total === n} onPress={() => { onRate(f.id, n); setRating(null) }} />)}
-                    {f.score.rated ? <Chip compact label="Togli" active={false} onPress={() => { onRate(f.id, null); setRating(null) }} /> : null}
-                  </View>
-                ) : null}
+            {open ? (
+              <View style={[styles.rating, { backgroundColor: t.bg, borderColor: t.line }]}>
+                <Text style={{ color: t.ink, fontWeight: '700', fontSize: 14 }}>Che voto gli daresti?</Text>
+                <Text style={{ color: t.ink2, fontSize: 12 }}>{f.score.rated ? `Il mio era ${f.score.base}. ` : `Il mio è ${f.score.total}. `}Tocca un numero: questo articolo lo prende, e i prossimi della stessa categoria si spostano un po'.</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs }}>
+                  {RATING_STEPS.map((n) => <Chip key={n} compact label={String(n)} active={Boolean(f.score.rated) && f.score.total === n} onPress={() => { onRate(f.id, n); setRating(null) }} />)}
+                </View>
+                <View style={{ flexDirection: 'row', gap: space.md }}>
+                  {f.score.rated ? <InlineAction label="Togli il mio voto" tone="danger" onPress={() => { onRate(f.id, null); setRating(null) }} /> : null}
+                  <InlineAction label="Chiudi" tone="neutral" onPress={() => setRating(null)} />
+                </View>
               </View>
             ) : null}
             </View>
@@ -262,4 +276,7 @@ const styles = StyleSheet.create({
   find: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm },
   score: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   thumb: { width: 30, height: 26, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  // As wide as the two thumbs above it.
+  rate: { width: 64, height: 28, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
+  rating: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: space.md, marginBottom: space.sm, gap: space.sm },
 })

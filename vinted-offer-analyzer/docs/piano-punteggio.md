@@ -52,7 +52,7 @@ Sopra la somma:
 
 - **«Da trattare» solo se un'offerta lo rende da comprare** (1.19.0): quando serve più del 40% di sconto, o non c'è
   un prezzo d'acquisto possibile, il voto resta sotto 55.
-- **Il voto dell'utente** (1.19.0): sugli articoli da 65 l'utente può scrivere il suo. Quell'articolo lo prende; la
+- **Il voto dell'utente** (1.19.0): su ogni articolo in lista l'utente può scrivere il suo (tasto «Dai voto»). Quell'articolo lo prende; la
   differenza dal voto del motore sposta i prossimi della stessa categoria (un terzo dopo un voto, circa il 70% dopo
   cinque concordi, mai più di 12 punti), sempre dentro i tetti qui sopra.
 

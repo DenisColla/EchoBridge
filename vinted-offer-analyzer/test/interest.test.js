@@ -300,8 +300,8 @@ test('interest: which searches of the market come first', () => {
 
 /* ───────── the user's own scores and what the list shows (1.19.0, his choices of 18 November 2026) ───────── */
 
-test('interest: the list shows from 55, tells from 70, and lets him score from 65', () => {
-  assert.deepEqual([INTEREST.SHOW_MIN, INTEREST.TELL_MIN, INTEREST.RATE_MIN], [55, 70, 65])
+test('interest: the list shows from 55 and tells from 70', () => {
+  assert.deepEqual([INTEREST.SHOW_MIN, INTEREST.TELL_MIN], [55, 70])
   // The labels he acts on start where the list starts and where he is told.
   assert.deepEqual(INTEREST.LABELS.map(([min]) => min), [85, 70, 55, 0])
 })

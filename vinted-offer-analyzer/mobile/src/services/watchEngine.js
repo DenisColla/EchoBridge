@@ -137,6 +137,9 @@ function load() {
         }
       }
       profile = await loadProfile()
+      // The scores as the app that reads them computes them: a new version's rules apply to the list saved by the
+      // one before, at once and with no request (1.19.1: an update left the old scores on screen).
+      try { state = { ...state, finds: rescored(state.finds, state.job) } } catch { /* the scores as they were saved */ }
       emit()
     }).catch(() => {})
   }

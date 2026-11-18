@@ -71,11 +71,10 @@ export const INTEREST = Object.freeze({
    *  a lot or a rare edition, and the loss the numbers would show is not a fact. */
   ODD_PRICE_TIMES: 2.5,
   ODD_PRICE_MIN: 15,
-  /** What the user decided on 18 November 2026: the list shows from SHOW_MIN up, an article from TELL_MIN up is
-   *  told at once, and he may give his own score to those from RATE_MIN up. */
+  /** What the user decided on 18 November 2026: the list shows from SHOW_MIN up, and an article from TELL_MIN up
+   *  is told at once. (He may give his own score to any article shown.) */
   SHOW_MIN: 55,
   TELL_MIN: 70,
-  RATE_MIN: 65,
   /** His scores move those of a category by this much at most, and count as if this many neutral ones came before. */
   CALIBRATION_MAX: 12,
   CALIBRATION_PRIOR: 2,
