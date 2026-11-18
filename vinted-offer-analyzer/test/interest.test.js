@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  INTEREST, aiReferenceOf, buyPriceFor, calibrationOf, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, lookupWorthOf, lotOf, marketReferenceOf,
-  pertinenceOf, rankByInterest, referenceAmong, requiredMarginFor, seriesPiecesOf,
+  INTEREST, aiReferenceOf, buyPriceFor, calibrationOf, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, listingFactsOf, lookupCouldMatter,
+  lookupWorthOf, lotOf, marketReferenceOf, parseVintedItemHtml, pertinenceOf, rankByInterest, referenceAmong, requiredMarginFor, seriesPiecesOf,
 } from '../src/core/index.js'
+import { readFileSync } from 'node:fs'
 
 const card = (category, extra = {}) => ({ category, kind: '', brand: '', model: '', variant: '', query: '', words: [], defects: [], pieces: 1, weightKg: 0, newPrice: 0, usedLow: 0, usedHigh: 0, confidence: 0.8, risks: [], match: null, ...extra })
 const market = (value) => ({ value, median: value * 1.15, n: 12, source: 'market' })
@@ -376,4 +377,82 @@ test('interest: the score he gives to an article is that article\'s score, and s
   const unknown = interestScore({ ...manga, rated: 80 }, { card: c, ref: null })
   assert.deepEqual([unknown.total, unknown.label, unknown.rated], [80, 'da comprare', true])
   assert.equal(interestScore({ ...manga, rated: mine.total }, { card: c, ref }).reasons[0], `Il tuo voto: ${mine.total}, come il mio`)
+})
+
+/* ───────── the listing's own page, and the searches worth making (1.20) ───────── */
+
+const itemPage = () => readFileSync(new URL('./fixtures/vinted-item-2026-10.html', import.meta.url), 'utf8')
+
+test('interest: what the page of a listing says is kept without the seller\'s name', () => {
+  const facts = listingFactsOf(parseVintedItemHtml(itemPage()))
+  assert.deepEqual(facts, {
+    price: 22, description: 'Prima edizione grande formato Coconino, 2 volumi', category: 'Libri e media Fumetti, manga e graphic novel',
+    ageDays: 21, sellerDays: 0.5833333333333334, reviews: 144, rating: 4.9, business: false, reserved: false, oldPrice: null, says: 'none',
+  })
+  assert.ok(!JSON.stringify(facts).match(/username|sellerPath|profilo/i))
+  // a page that carries no listing (Vinted's check, an error) gives nothing
+  assert.equal(listingFactsOf(parseVintedItemHtml('<html><title>Just a moment…</title></html>')), null)
+  assert.equal(listingFactsOf(null), null)
+  // what the seller wrote about offers is read from title and description
+  assert.equal(listingFactsOf({ title: 'Giacca', listPrice: 30, description: 'Prezzo non trattabile, no offerte' }).says, 'fixed_price')
+  assert.equal(listingFactsOf({ title: 'Giacca', listPrice: 30, description: 'Svuoto armadio, accetto offerte' }).says, 'clearing_out')
+  // contacts written in a description never travel on
+  assert.ok(!listingFactsOf({ title: 'Giacca', listPrice: 30, description: 'scrivimi al 3331234567 o a nome@esempio.it' }).description.match(/3331234567|esempio\.it/))
+})
+
+test('interest: the description of the page goes to the AI for the second card', () => {
+  const facts = listingFactsOf(parseVintedItemHtml(itemPage()))
+  const text = interestPrompt([{ id: '9', title: 'Charles Burns, Black Hole', condition: 'Ottime', price: 22, page: facts }, { id: '10', title: 'Altro', condition: 'Buone', price: 5 }]).text
+  assert.ok(text.includes('#9 | Charles Burns, Black Hole | marca: n.d. | taglia: n.d. | condizioni: Ottime | 22 € | descrizione: Prima edizione grande formato Coconino, 2 volumi'))
+  assert.ok(text.includes('#10 | Altro | marca: n.d. | taglia: n.d. | condizioni: Buone | 5 €\n'))
+  assert.ok(interestPrompt([]).system.includes('descrizione scritta dal venditore'))
+})
+
+test('interest: the seller, once the page is read — solid, away, a fixed price, open to offers', () => {
+  const hole = { id: '9', title: 'Charles Burns, Black Hole', condition: 'Ottime', price: 22, favourites: 4 }
+  const c = card('fumetti_manga', { weightKg: 1.5, pieces: 2 })
+  const ref = { value: 40, median: 46, n: 9, source: 'market' }
+  const page = listingFactsOf(parseVintedItemHtml(itemPage()))
+  const unread = interestScore(hole, { card: c, ref })
+  assert.deepEqual([unread.read, unread.seller, unread.parts.venditore], [false, null, 0.7])
+  // 144 reviews at 4.9, seen today: a solid seller, said so
+  const solid = interestScore({ ...hole, page }, { card: c, ref })
+  assert.deepEqual([solid.read, solid.seller, solid.parts.venditore, solid.label], [true, 'expert', 1, 'da comprare'])
+  assert.ok(solid.total > unread.total && solid.reasons.includes('Venditore solido (144 recensioni)'))
+  // not seen for twenty days: he may never ship — not listed, whatever the price
+  const away = interestScore({ ...hole, page: { ...page, sellerDays: 20 } }, { card: c, ref })
+  assert.deepEqual([away.label, away.seller, away.reasons[1]], ['lascia', 'inactive', 'Venditore assente da 20 giorni: può non spedire'])
+  assert.ok(away.total < INTEREST.SHOW_MIN)
+  // «prezzo non trattabile» where an offer would be needed: not «da trattare»
+  const dear = { ...hole, price: 26 }
+  const open = interestScore({ ...dear, page: { ...page, says: 'open_to_offers' } }, { card: c, ref })
+  const plain = interestScore({ ...dear, page: { ...page, says: 'none' } }, { card: c, ref })
+  const fixed = interestScore({ ...dear, page: { ...page, says: 'fixed_price' } }, { card: c, ref })
+  assert.equal(plain.label, 'da trattare')
+  assert.ok(open.parts.trattabilita > plain.parts.trattabilita && open.reasons.includes('L\'annuncio invita a fare offerte'))
+  assert.deepEqual([fixed.label, fixed.reasons[1]], ['lascia', 'Il venditore scrive che il prezzo non è trattabile'])
+  // a fixed price that is already a buy stays a buy
+  assert.equal(interestScore({ ...hole, page: { ...page, says: 'fixed_price' } }, { card: c, ref }).label, 'da comprare')
+})
+
+test('interest: a search of the market is made only where it could change the verdict', () => {
+  const ask = (title, price, favourites, c) => {
+    const f = { id: '1', title, condition: 'Ottime', price, favourites }
+    return lookupCouldMatter(f, c, interestScore(f, { card: c, ref: aiReferenceOf(c) }))
+  }
+  const c = (category, usedLow, usedHigh, extra = {}) => card(category, { usedLow, usedHigh, words: ['x'], ...extra })
+  // the day's own deal: the AI said 8-15 €, the market 20 €. It must still be searched.
+  assert.equal(ask('Chainsaw Man Christmas variant', 10, 3, c('fumetti_manga', 8, 15)), true)
+  assert.equal(ask('Zerocalcare un polpo alla gola', 6, 2, c('fumetti_manga', 6, 11)), true)
+  assert.equal(ask('Kettlebell 6 kg', 12, 26, c('sport', 8, 14, { weightKg: 6 })), true)
+  // a price the estimate does not explain: searched, to know what it is
+  assert.equal(ask("L'estate in cui Hikaru é morto", 46.8, 13, c('libri', 8, 10)), true)
+  // nothing to gain even at twice the estimate: not searched
+  assert.equal(ask('Qualcuno con cui correre', 4, 29, c('libri', 3, 5)), false)
+  assert.equal(ask('Kettlebel 12 kg', 50, 8, c('sport', 25, 30, { weightKg: 12 })), false)
+  assert.equal(ask('Tappeto imbottito gommato', 15, 0, c('casa', 8, 12, { weightKg: 3 })), false)
+  // with no estimate at all: only what is not a trifle
+  assert.equal(ask('Fumetto', 4, 0, c('fumetti_manga', 0, 0)), false)
+  assert.equal(ask('black Monday', 20, 0, c('fumetti_manga', 0, 0)), true)
+  assert.equal(lookupCouldMatter({ id: '1', price: 10 }, null), false)
 })

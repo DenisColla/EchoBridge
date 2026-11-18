@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { AppState, Platform } from 'react-native'
 import * as core from '../../core/index.js'
 import { scheduleReminderAt } from './notifications.js'
-import { askCards, loadProfile, lookupReference, saveProfile } from './interestService.js'
+import { askCards, loadProfile, lookupReference, readListing, saveProfile } from './interestService.js'
 import { onKeyChange } from './secrets.js'
 import { fetchVintedListPage } from './vinted.js'
 import { vintedBridge } from './vintedBridge.js'
@@ -33,6 +33,11 @@ import { vintedBridge } from './vintedBridge.js'
  * judgement cut short never breaks the chain. Nothing in a reading waits on a timer of the app: with the app behind
  * they may not fire (http.js).
  *
+ * 1.20: a «vetrina» may read, in turn, the newest listings of the user's own searches instead of the home
+ * (job.sources, one at each reading); what would reach the list is first read on its own page; an article may be
+ * put on a waiting list that outlives the job and is looked at again now and then, and when Vinted notifies a lower
+ * price; every finished job leaves its report by source.
+ *
  * 1.18.3 (the night of 17 November: 43 readings out of 48 got Vinted's «Session refresh» page): when Vinted asks to
  * renew the session its own page does it, in a browser with no screen (SessionRenewal.kt), and the reading goes on.
  * A reading that read nothing is counted (`empty`, and `stale` in a row); after a few in a row the user is told.
@@ -60,6 +65,16 @@ const JUDGE_BUDGET_MS = 85_000
 const RENEW_TIMEOUT_MS = 75_000
 /** Readings in a row that read nothing before the user is told: two when Vinted asks to renew the session, else three. */
 const STALE_TOLD = { sessione: 2, other: 3 }
+/** 1.20: pages of single listings read in one reading (what reaches the list is read before it is shown). */
+const PAGES_PER_TICK = 4
+/** After this many readings in a row in which Vinted let no listing's page be read, the job stops asking for them. */
+const PAGE_FAILS_MAX = 3
+/** The waiting list: how many articles, how many are looked at again in one reading, and how often each. */
+const WAITS_MAX = 30
+const WAITS_PER_TICK = 2
+const WAIT_RECHECK_MS = 3 * 3600 * 1000
+/** How many finished jobs keep their report by source. */
+const HISTORY_MAX = 30
 /** The AI is asked only within this long from the start of the reading: a call may last a minute. */
 const ASK_BUDGET_MS = 50_000
 /** An article the AI answered about without giving a card is asked this many times in all. */
@@ -72,7 +87,7 @@ const NO_AI = ['nokey', 'keyerror', 'auth']
  */
 const SAVED_V = 3
 
-let state = { mode: 'manual', job: null, finds: [], log: [], draft: null }
+let state = { mode: 'manual', job: null, finds: [], log: [], draft: null, waits: [], history: [], eventKeys: [] }
 let loading = null
 let busySince = 0
 let judgingSince = 0
@@ -102,7 +117,7 @@ function emit() {
   })
 }
 function persist() {
-  return AsyncStorage.setItem(AUTO_KEY, JSON.stringify({ v: SAVED_V, mode: state.mode, job: state.job, finds: state.finds, log: state.log.slice(-LOG_MAX) })).catch(() => {})
+  return AsyncStorage.setItem(AUTO_KEY, JSON.stringify({ v: SAVED_V, mode: state.mode, job: state.job, finds: state.finds, log: state.log.slice(-LOG_MAX), waits: state.waits, history: state.history.slice(-HISTORY_MAX), eventKeys: state.eventKeys.slice(-100) })).catch(() => {})
 }
 /** The new state, shown and saved; the promise ends when it is on disk (a background task must wait for it). */
 function set(next) {
@@ -119,6 +134,7 @@ function load() {
         state = {
           mode: ['manual', 'semi', 'auto'].includes(saved.mode) ? saved.mode : 'manual', job: saved.job || null,
           finds: Array.isArray(saved.finds) ? saved.finds : [], log: Array.isArray(saved.log) ? saved.log : [], draft: state.draft,
+          waits: Array.isArray(saved.waits) ? saved.waits : [], history: Array.isArray(saved.history) ? saved.history : [], eventKeys: Array.isArray(saved.eventKeys) ? saved.eventKeys : [],
         }
         // 1.18.0 counted a try of a card even when no key was there to ask with: those articles are asked again.
         const v = Number(saved.v) || 1
@@ -139,7 +155,7 @@ function load() {
       profile = await loadProfile()
       // The scores as the app that reads them computes them: a new version's rules apply to the list saved by the
       // one before, at once and with no request (1.19.1: an update left the old scores on screen).
-      try { state = { ...state, finds: rescored(state.finds, state.job) } } catch { /* the scores as they were saved */ }
+      try { state = { ...state, finds: rescored(state.finds, state.job), waits: rescoredWaits(state.waits) } } catch { /* the scores as they were saved */ }
       emit()
     }).catch(() => {})
   }
@@ -185,7 +201,12 @@ async function endJob(reason) {
   vintedBridge.cancelWatchAlarm()
   vintedBridge.hideWatchStatus()
   const job = { ...base.job, stopped: reason, stoppedAt: Date.now(), nextAt: null, waiting: null }
-  await set({ ...base, job })
+  // What this job read, by source: kept for the diary, to see over the days where reading pays.
+  const summary = {
+    quando: new Date(job.stoppedAt).toISOString(), tipo: job.kind, cosa: job.label || null, fonti: Array.isArray(job.sources) ? job.sources.map((x) => x.label) : undefined,
+    ore: Math.round(((job.stoppedAt - job.startedAt) / 3_600_000) * 10) / 10, letture: job.reads || 0, a_vuoto: job.empty || 0, ai_costo_usd: job.aiCost || 0, resa: core.sourceReport(base.finds),
+  }
+  await set({ ...base, job, history: [...base.history, summary].slice(-HISTORY_MAX) })
   if (reason === 'verifica') await notify('Ricerca fermata', 'Vinted chiede una verifica: aprila nella scheda Vinted, poi riavvia la ricerca.')
   if (reason !== 'fine') return
   const ranked = core.rankFinds(shownOf(state.finds), job.kind === 'hunt' ? job : null)
@@ -214,6 +235,27 @@ function rescored(finds, job) {
 }
 /** What the list shows: not what the user emptied away (it comes back only if its price goes down). */
 const shownOf = (finds) => finds.filter((f) => !Number.isFinite(f.hidden))
+/** The waiting list with its scores (1.20): the same formula, at the price each article has now. */
+function rescoredWaits(waits) {
+  const calibration = core.calibrationOf(profile ? profile.ratings : null)
+  return (Array.isArray(waits) ? waits : []).map((w) => ({ ...w, score: core.interestScore(w, { card: w.card || null, ref: w.ref || null, profile, calibration }) }))
+}
+/** A new price for an article that waits: kept with the one it had, looked at now. */
+const waitAt = (w, price, now) => (Number.isFinite(price) && price > 0 && Math.abs(price - w.price) > 0.004
+  ? { ...w, was: price < w.price ? (Number.isFinite(w.was) ? Math.max(w.was, w.price) : w.price) : w.was, price, checkedAt: now, due: false }
+  : { ...w, checkedAt: now, due: false })
+/** The articles that wait and are now worth buying, each told once a price: → [waits with `toldPrice`, those to tell]. */
+function waitsToTell(waits) {
+  const tell = []
+  const next = waits.map((w) => {
+    if (w.gone || !w.score || w.score.total < core.INTEREST.TELL_MIN || (Number.isFinite(w.toldPrice) && !(w.price < w.toldPrice - 0.004))) return w
+    tell.push(w)
+    return { ...w, toldPrice: w.price }
+  })
+  return [next, tell]
+}
+const tellWait = (w) => notify(`In attesa, ora da comprare (voto ${w.score.total}): ${w.title || 'articolo'} a ${euro(w.price)}`,
+  `${Number.isFinite(w.was) && w.was > w.price ? `Era a ${euro(w.was)}. ` : ''}${w.score.reasons[0] || ''}. Tocca per aprirlo.`, w.url)
 
 /**
  * The judgement: cards, references, scores, and the notification of an «affare». `t0`: when the reading started.
@@ -231,12 +273,31 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   // What the job says about the AI: as it was, unless the AI is asked now.
   let ai = job.ai || null
   let aiDetail = job.aiDetail || null
+  const target = job.kind === 'hunt' ? job.label || '' : ''
+  // 1.20: the searches of the market and the pages of the listings are asked without the user's session when Vinted
+  // answers that way, so that they leave no trace on the account. Tried once a job: if Vinted refuses (its check),
+  // nothing is done about it and they go on with the session, as before.
+  let anon = job.anon === true || job.anon === false ? job.anon : null
+  const asked = async (make) => {
+    if (anon === false) return make(false)
+    const res = await make(true)
+    // Only an answer of Vinted's says how it went: not what was remembered from a search of an hour ago.
+    if (anon !== null || res.cached) return res
+    if (res.ok) anon = true
+    else if (res.reason === 'challenge' || res.reason === 'sessione') {
+      anon = false
+      note.senza_account = false
+      return make(false)
+    }
+    if (anon) note.senza_account = true
+    return res
+  }
   // 1. The AI's cards for the articles that have none, the newest first.
   const waiting = waitingOf(list).sort((a, b) => b.lastSeen - a.lastSeen).slice(0, CARDS_PER_TICK)
   if (!waiting.length) ai = aiDetail = null
   else if (spent >= AI_BUDGET_USD) { ai = 'budget'; aiDetail = null }
   else if (Date.now() - t0 < ASK_BUDGET_MS) {
-    const got = await askCards(waiting, { target: job.kind === 'hunt' ? job.label || '' : '' })
+    const got = await askCards(waiting, { target })
     spent += got.costUsd
     note.schede = Object.keys(got.cards).length
     note.chieste = waiting.length
@@ -249,6 +310,8 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   }
   if (ai) note.ai = ai
   if (aiDetail) note.ai_dettaglio = aiDetail
+  const calibration = core.calibrationOf(profile ? profile.ratings : null)
+  const scoreOf = (f) => core.interestScore(f, { card: f.card || null, ref: f.ref || null, profile, match: job.kind === 'hunt' && f.card ? f.card.match : null, calibration })
   // 2. The reference.
   if (job.kind === 'hunt') {
     // The results of the hunt's own search are the market of what it looks for: no other request.
@@ -265,16 +328,16 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   } else {
     list = list.map((f) => (f.ref || !f.card ? f : { ...f, ref: core.aiReferenceOf(f.card) }))
     // A search of Vinted for the same product, three a reading, a day of memory each: first what is close to a buy,
-    // then what the AI's estimate explains worst, what many want and what costs most (core lookupWorthOf).
-    const promising = list
-      .filter((f) => f.card && !f.refTried && (!f.ref || f.ref.source !== 'market') && f.card.words.length && f.card.confidence >= 0.5 && !f.card.risks.includes('difettoso') && core.lotOf(f, f.card).comparable)
-      .map((f) => ({ f, worth: core.lookupWorthOf(f, core.interestScore(f, { card: f.card, ref: f.ref || null, profile })) }))
-      .sort((a, b) => b.worth - a.worth)
+    // then what the AI's estimate explains worst, what many want and what costs most (core lookupWorthOf) — and
+    // only where the search could change the verdict (1.20, core lookupCouldMatter): fewer requests, fewer traces.
+    const open = list.filter((f) => f.card && !f.refTried && !f.gone && (!f.ref || f.ref.source !== 'market') && f.card.words.length && f.card.confidence >= 0.5 && !f.card.risks.includes('difettoso') && core.lotOf(f, f.card).comparable)
+      .map((f) => ({ f, score: scoreOf(f) }))
+    const promising = open.filter(({ f, score }) => core.lookupCouldMatter(f, f.card, score)).map(({ f, score }) => ({ f, worth: core.lookupWorthOf(f, score) })).sort((a, b) => b.worth - a.worth)
     let searched = 0
     const looked = []
     for (const { f } of lookups ? promising : []) {
       if (searched >= LOOKUPS_PER_TICK || Date.now() - t0 > JUDGE_BUDGET_MS) break
-      const res = await lookupReference(f, f.card)
+      const res = await asked((anonymous) => lookupReference(f, f.card, { anonymous }))
       if (!res.ok) {
         note.mercato = res.reason
         // Vinted's check, or no network: no other search in this reading.
@@ -286,7 +349,81 @@ async function judge(t0, { lookups = true, source = null } = {}) {
       list = list.map((x) => (x.id === f.id ? { ...x, ref: res.ref || x.ref, refTried: true } : x))
     }
     if (lookups && promising.length) note.mercati = searched
+    if (lookups && open.length > promising.length) note.ricerche_evitate = open.length - promising.length
     if (looked.length) note.ricerche = looked
+  }
+  // 2b. The listing's own page, for what would reach the list (1.20): the description, its age, its seller. Only
+  // after a reading, a few at a time, the best first. A listing that is gone or reserved leaves the list.
+  let waits = state.waits
+  // Vinted may not let single listings be read this way (its check): after a few readings the job stops asking,
+  // and what is told is told without its page.
+  let pageFails = job.pageFails || 0
+  const pagesOff = pageFails >= PAGE_FAILS_MAX
+  if (lookups && !pagesOff) {
+    // Also where the price is one the estimate does not explain: the description says whether it is a lot.
+    const due = list.filter((f) => (f.card || f.ref) && !f.page && !f.gone && (f.pageTried || 0) < 2 && !Number.isFinite(f.hidden) && !Number.isFinite(f.rated))
+      .map((f) => ({ f, score: scoreOf(f) })).filter((x) => x.score.total >= core.INTEREST.SHOW_MIN || x.score.unsure === 'prezzo')
+      .sort((a, b) => Number(b.score.total >= core.INTEREST.SHOW_MIN) - Number(a.score.total >= core.INTEREST.SHOW_MIN) || b.score.total - a.score.total).slice(0, PAGES_PER_TICK)
+    const read = []
+    for (const { f } of due) {
+      if (Date.now() - t0 > JUDGE_BUDGET_MS) break
+      const res = await asked((anonymous) => readListing(f, { anonymous }))
+      if (!res.ok) {
+        note.pagine_stop = res.reason
+        // A page with no listing: the next. Vinted's check, the session, no network: no other page in this
+        // reading, and every article that asked for one has had its try — none waits for a page that does not come.
+        const tried = res.reason === 'vuota' ? [f.id] : due.map((x) => x.f.id).filter((id) => !read.includes(id))
+        list = list.map((x) => (tried.includes(x.id) ? { ...x, pageTried: (x.pageTried || 0) + 1 } : x))
+        if (res.reason !== 'vuota') break
+        continue
+      }
+      const at = Date.now()
+      list = list.map((x) => {
+        if (x.id !== f.id) return x
+        if (res.gone) return { ...x, gone: 'tolto', hidden: x.price }
+        const moved = Number.isFinite(res.facts.price) && Math.abs(res.facts.price - x.price) > 0.004
+        return {
+          ...x, page: { ...res.facts, at }, ...(res.facts.reserved ? { gone: 'riservato', hidden: x.price } : {}),
+          ...(moved ? { price: res.facts.price, was: res.facts.price < x.price ? (Number.isFinite(x.was) ? Math.max(x.was, x.price) : x.price) : x.was } : {}),
+        }
+      })
+      read.push(f.id)
+    }
+    if (due.length) note.pagine = read.length
+    if (read.length) pageFails = 0
+    else if (due.length && note.pagine_stop && note.pagine_stop !== 'vuota') pageFails += 1
+    // The second card, now that the seller's own words are known: how many pieces, what is missing, the defects.
+    const again = list.filter((f) => read.includes(f.id) && !f.gone && f.card && f.page && String(f.page.description || '').length >= 15)
+    if (again.length && spent < AI_BUDGET_USD && Date.now() - t0 < JUDGE_BUDGET_MS) {
+      const got = await askCards(again, { target })
+      spent += got.costUsd
+      note.seconde_schede = Object.keys(got.cards).length
+      list = list.map((f) => {
+        const card = got.cards[f.id]
+        if (!card) return f
+        const before = core.lotOf(f, f.card)
+        const next = { ...f, card: { ...card, deep: true } }
+        const after = core.lotOf(next, next.card)
+        // The description changed what it is (how many pieces, what to search): its value is read again.
+        if (before.pieces !== after.pieces || before.comparable !== after.comparable || String(f.card.query || '') !== String(card.query || '')) {
+          delete next.refTried
+          if (job.kind !== 'hunt') next.ref = core.aiReferenceOf(next.card)
+        }
+        return next
+      })
+    }
+    // The articles that wait (1.20): a couple are looked at again, those a notification of Vinted's pointed at first.
+    const stale = waits.filter((w) => !w.gone && (w.due || began - (w.checkedAt || 0) > WAIT_RECHECK_MS)).sort((a, b) => Number(Boolean(b.due)) - Number(Boolean(a.due)) || (a.checkedAt || 0) - (b.checkedAt || 0)).slice(0, WAITS_PER_TICK)
+    let looked = 0
+    for (const w of note.pagine_stop && note.pagine_stop !== 'vuota' ? [] : stale) {
+      if (Date.now() - t0 > JUDGE_BUDGET_MS) break
+      const res = await asked((anonymous) => readListing(w, { anonymous }))
+      if (!res.ok) { note.attese_stop = res.reason; break }
+      const at = Date.now()
+      waits = waits.map((x) => (x.id !== w.id ? x : res.gone || res.facts.reserved ? { ...x, gone: res.gone ? 'tolto' : 'riservato', checkedAt: at, due: false } : { ...waitAt(x, res.facts.price, at), page: { ...res.facts, at } }))
+      looked += 1
+    }
+    if (stale.length) note.attese_guardate = looked
   }
   // 3. The scores, on the state as it is now (the user may have voted or emptied the list meanwhile).
   const now = state
@@ -294,21 +431,31 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   const judged = new Map(list.map((f) => [f.id, f]))
   let finds = now.finds.map((f) => {
     const j = judged.get(f.id)
-    return j ? { ...f, card: j.card, cardTried: j.cardTried, ref: j.ref, refTried: j.refTried } : f
+    if (!j) return f
+    const next = { ...f, card: j.card, cardTried: j.cardTried, ref: j.ref, refTried: j.refTried, page: j.page, pageTried: j.pageTried, price: j.price, was: j.was }
+    if (j.gone) { next.gone = j.gone; next.hidden = j.hidden }
+    return next
   })
-  finds = rescored(finds, now.job)
+  finds = rescored(finds, now.job).map((f) => (f.score && f.score.seller === 'expert' && !f.solidSeller ? { ...f, solidSeller: true } : f))
+  // The waiting list as the user has it now, with what was just read of it.
+  const looked = new Map(waits.map((w) => [w.id, w]))
+  const [waitsNext, waitsTell] = waitsToTell(rescoredWaits(now.waits.map((w) => looked.get(w.id) || w)))
   note.con_voto = finds.filter((f) => f.score).length
   note.senza_scheda = finds.filter((f) => !f.card).length
   note.ms = Date.now() - began
   const told = now.job.told || []
   // From 70 up («da comprare», «affare») an article is told at once, each once (the user's choice of 18 November).
   // A value only the AI estimated is told when the market has nothing more to say: searched already, or a hunt
-  // (its market is its own results), or an article that cannot be searched; else its search comes first.
+  // (its market is its own results), or an article that cannot be searched; else its search comes first. And its
+  // own page is read first (1.20), or was tried: what is told has been looked at.
   const settled = (f) => !f.score.provisional || job.kind === 'hunt' || f.refTried || !f.card || !f.card.words.length || f.card.confidence < 0.5 || !core.lotOf(f, f.card).comparable
-  const deals = finds.filter((f) => f.score && f.score.total >= core.INTEREST.TELL_MIN && !f.score.rated && !Number.isFinite(f.hidden) && !told.includes(f.id) && settled(f)
+  const checked = (f) => pagesOff || Boolean(f.page) || (f.pageTried || 0) >= 1
+  const deals = finds.filter((f) => f.score && f.score.total >= core.INTEREST.TELL_MIN && !f.score.rated && !f.gone && !f.waiting && !Number.isFinite(f.hidden) && !told.includes(f.id) && settled(f) && checked(f)
     && !(job.kind === 'hunt' && Number.isFinite(job.maxPrice) && f.price > job.maxPrice * 1.15))
     .sort((a, b) => b.score.total - a.score.total).slice(0, 3)
   const next = { ...now.job, aiCost: Math.round(spent * 10000) / 10000, ai, aiDetail, told: [...told, ...deals.map((f) => f.id)] }
+  if (anon !== null) next.anon = anon
+  if (pageFails !== (now.job.pageFails || 0)) next.pageFails = pageFails
   const last = now.log[now.log.length - 1]
   const line = { quando: new Date().toISOString(), innesco: source, solo_giudizio: true, giudizio: note }
   // The same judgement with nothing new (no key yet, each time the app comes in front) keeps one line, counted.
@@ -317,11 +464,12 @@ async function judge(t0, { lookups = true, source = null } = {}) {
     : source ? [...now.log, line].slice(-LOG_MAX)
       : last ? [...now.log.slice(0, -1), { ...last, giudizio: note }] : now.log
   // Saved before anything else is waited for: nothing the user does meanwhile is written over.
-  await set({ ...now, job: next, finds, log })
+  await set({ ...now, job: next, finds, log, waits: waitsNext })
   for (const f of deals) {
     await notify(`${f.score.total >= 85 ? 'Affare' : 'Da comprare'} (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`,
-      `${f.score.reasons[0] || ''}.${f.score.provisional ? ' Valore stimato dall\'AI, non letto dal mercato.' : ''} Tocca per aprirlo.`, f.url)
+      `${f.score.reasons[0] || ''}.${f.score.provisional ? ' Valore stimato dall\'AI, non letto dal mercato.' : ''}${f.page ? '' : ' Annuncio non ancora letto.'} Tocca per aprirlo.`, f.url)
   }
+  for (const w of waitsTell) await tellWait(w)
 }
 
 /** One judgement at a time: the one of a reading and one asked with no reading wait for each other. Never throws. */
@@ -381,7 +529,11 @@ async function judgeNow(source = 'utente') {
 /** The page downloaded as it is and read → { ok, via, cards } or { ok: false, via, reason, … } (see readListPage). */
 async function downloadList(url) {
   // The web build has no way to Vinted: what a test hands over stands in for the page (cards, or a refusal).
-  const handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
+  let handed = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchCards : null
+  // A test of «novità» hands one page for each search: { 'the search': cards }.
+  const pages = Platform.OS === 'web' && typeof window !== 'undefined' ? window.__ovtWatchPages : null
+  const mine = pages ? Object.keys(pages).find((k) => url.includes(`search_text=${encodeURIComponent(k)}&`)) : null
+  if (mine) handed = pages[mine]
   if (Array.isArray(handed)) return { ok: true, via: 'prova', cards: handed }
   if (handed && handed.reason) return { ok: false, via: 'browser', reason: handed.reason }
   const dl = await fetchVintedListPage(url)
@@ -419,7 +571,7 @@ async function renewSession(url) {
  * followed by the in-app browser, which renews the session by itself.
  */
 async function readListPage(url, front) {
-  const test = Platform.OS === 'web' && typeof window !== 'undefined' && window.__ovtWatchCards !== undefined && window.__ovtWatchCards !== null
+  const test = Platform.OS === 'web' && typeof window !== 'undefined' && ((window.__ovtWatchCards !== undefined && window.__ovtWatchCards !== null) || Boolean(window.__ovtWatchPages))
   let got = await downloadList(url)
   if (!got.ok && got.reason === 'sessione' && (test || !front || !browserReader)) {
     const { ok, ...rinnovo } = await renewSession(url)
@@ -455,8 +607,10 @@ async function tick(source = 'timer') {
   busySince = t0
   emit()
   const front = AppState.currentState === 'active'
+  // «Novità»: one of the user's searches at each reading, in turn.
+  const src = Array.isArray(job.sources) && job.sources.length ? job.sources[(job.turn || 0) % job.sources.length] : null
   let res
-  try { res = await readListPage(job.url, front) } catch (e) { res = { ok: false, via: null, reason: 'failed', errore: String((e && e.message) || e).slice(0, 120) } }
+  try { res = await readListPage(src ? src.url : job.url, front) } catch (e) { res = { ok: false, via: null, reason: 'failed', errore: String((e && e.message) || e).slice(0, 120) } }
   busySince = 0
   try {
     const now = Date.now()
@@ -467,6 +621,7 @@ async function tick(source = 'timer') {
       quando: new Date(now).toISOString(), innesco: source, ritardo_s: job.nextAt ? Math.round((t0 - job.nextAt) / 1000) : null, freddo: source === 'sveglia' ? t0 - BOOT_AT < 20_000 : undefined,
       sfondo: !front, via: res.via, ms: now - t0, esito: res.ok ? 'ok' : res.reason || 'failed', schede: cards ? cards.length : null,
     }
+    if (src) entry.fonte = src.label
     for (const key of ['scaricata', 'stato', 'caratteri', 'titolo', 'errore', 'rinnovo']) if (res[key] !== undefined && res[key] !== null) entry[key] = res[key]
     if (res.diag) entry.pagina = { ...res.diag, sample: cards && cards.length ? undefined : res.diag.sample }
     const log = [...base.log, entry].slice(-LOG_MAX)
@@ -487,10 +642,12 @@ async function tick(source = 'timer') {
     }
     let { finds } = base
     if (cards) {
-      const merged = core.mergeFinds(base.finds, cards, { at: now, source: job.kind, origin: ORIGIN })
-      // What the user emptied away comes back only if it costs less than when he did.
+      // Of a search read in turn only the newest count: what is lower on the page was there before.
+      const taken = src ? cards.slice(0, core.WATCH.ROTATION_TAKE) : cards
+      const merged = core.mergeFinds(base.finds, taken, { at: now, source: job.kind, origin: ORIGIN, from: src ? src.label : job.kind === 'hunt' ? 'caccia' : 'home' })
+      // What the user emptied away comes back only if it costs less than when he did (not what is gone, nor what waits).
       finds = merged.finds.map((f) => {
-        if (!Number.isFinite(f.hidden) || !(f.price < f.hidden - 0.005)) return f
+        if (!Number.isFinite(f.hidden) || f.gone || f.waiting || !(f.price < f.hidden - 0.005)) return f
         const back = { ...f }
         delete back.hidden
         return back
@@ -498,6 +655,7 @@ async function tick(source = 'timer') {
       entry.nuovi = merged.fresh.length
     }
     const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
+    if (src) next.turn = ((base.job.turn || 0) + 1) % job.sources.length
     // Readings that read nothing: how many in all, how many in a row, and why the last one did.
     next.empty = (base.job.empty || 0) + (cards ? 0 : 1)
     next.stale = cards ? 0 : (base.job.stale || 0) + 1
@@ -526,6 +684,8 @@ async function tick(source = 'timer') {
     // The next alarm first: whatever happens to the judgement, the chain of readings goes on.
     const active = core.jobActive(next)
     if (active) await schedule()
+    // What Vinted notified while no screen of the app was there (a lower price of an article that waits).
+    try { await noteVintedEvents(vintedBridge.readEvents()) } catch { /* the next reading reads them */ }
     // With no page read the searches of the market would meet the same refusal: only the cards and the scores.
     await runJudge(t0, { lookups: Boolean(cards) })
     if (!active) await endJob('fine')
@@ -535,6 +695,69 @@ async function tick(source = 'timer') {
     // Whatever went wrong after the page was read, the chain of alarms must not break.
     try { await schedule() } catch { /* the app coming back in front takes it up again */ }
     return 'errore'
+  }
+}
+
+/**
+ * Vinted's own notifications (the queue of modules/vinted-bridge), for the articles that wait: one that names an
+ * article and a lower price moves its price at once; one that names it with no price, or speaks of a price without
+ * a name, marks it to be looked at at the next reading. Each notification is taken once. Returns how many touched.
+ */
+async function noteVintedEvents(events) {
+  await load()
+  if (!state.waits.length || !Array.isArray(events) || !events.length) return 0
+  const seen = new Set(state.eventKeys)
+  let waits = state.waits
+  let touched = 0
+  const at = Date.now()
+  for (const ev of events) {
+    if (!ev || typeof ev !== 'object') continue
+    const key = String(ev.key || `${ev.at}|${ev.title}`)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const hit = core.waitMatchOf(`${ev.title || ''} ${ev.bigText || ev.text || ''}`, waits.filter((w) => !w.gone))
+    if (!hit) continue
+    touched += 1
+    waits = waits.map((w) => {
+      if (w.gone || (!hit.all && w.id !== hit.id)) return w
+      return !hit.all && Number.isFinite(hit.price) && hit.price < w.price - 0.004 ? waitAt(w, hit.price, at) : { ...w, due: true }
+    })
+  }
+  if (seen.size === state.eventKeys.length && !touched) return 0
+  const [next, tell] = waitsToTell(rescoredWaits(waits))
+  await set({ ...state, waits: next, eventKeys: [...seen].slice(-100) })
+  for (const w of tell) await tellWait(w)
+  return touched
+}
+
+/**
+ * The waiting list looked at with no job running (the app has just come in front): a couple of its articles, those
+ * not seen for hours or pointed at by a notification. While a job runs its readings do this (judge).
+ */
+async function checkWaits() {
+  await load()
+  if (core.jobActive(state.job) || judgingNow) return 0
+  const began = Date.now()
+  const stale = state.waits.filter((w) => !w.gone && (w.due || began - (w.checkedAt || 0) > WAIT_RECHECK_MS)).sort((a, b) => Number(Boolean(b.due)) - Number(Boolean(a.due)) || (a.checkedAt || 0) - (b.checkedAt || 0)).slice(0, WAITS_PER_TICK)
+  if (!stale.length) return 0
+  judgingNow += 1
+  try {
+    const read = new Map()
+    for (const w of stale) {
+      const res = await readListing(w)
+      if (!res.ok) break
+      const at = Date.now()
+      read.set(w.id, res.gone || res.facts.reserved ? { ...w, gone: res.gone ? 'tolto' : 'riservato', checkedAt: at, due: false } : { ...waitAt(w, res.facts.price, at), page: { ...res.facts, at } })
+    }
+    if (!read.size) return 0
+    const [next, tell] = waitsToTell(rescoredWaits(state.waits.map((w) => read.get(w.id) || w)))
+    await set({ ...state, waits: next })
+    for (const w of tell) await tellWait(w)
+    return read.size
+  } catch {
+    return 0
+  } finally {
+    judgingNow -= 1
   }
 }
 
@@ -556,6 +779,8 @@ async function resume() {
   }
   // Articles still without their card (no key then, a key the phone did not let be read, no network): now, in front.
   if (job && waitingOf(state.finds).length) judgeNow('ritorno')
+  // With no job running, what waits is looked at here.
+  else if (state.waits.length) checkWaits()
   return null
 }
 
@@ -605,7 +830,7 @@ export const watchEngine = {
   async setProfile(next) {
     await load()
     profile = await saveProfile(next)
-    return set({ ...state, finds: rescored(state.finds, state.job) })
+    return set({ ...state, finds: rescored(state.finds, state.job), waits: rescoredWaits(state.waits) })
   },
   /** A thumb on a find (1, −1, or 0 to take it back): the article follows at once, its brand and category learn. */
   async vote(id, vote) {
@@ -644,6 +869,33 @@ export const watchEngine = {
     })
     return set({ ...state, finds: rescored(finds, state.job) })
   },
+  /**
+   * «In attesa» (1.20): a find the user wants to wait for. It leaves the list of finds and is kept apart, beyond the
+   * job that found it: looked at again now and then while a job runs, and at once when Vinted notifies a lower
+   * price (the user's heart on Vinted is what makes Vinted do so). Told when it reaches «da comprare».
+   */
+  async wait(id) {
+    await load()
+    const f = state.finds.find((x) => x.id === id)
+    if (!f) return null
+    const kept = { ...f }
+    for (const key of ['score', 'hidden', 'waiting', 'rated', 'vote', 'eligible', 'limit', 'tolerancePct', 'exceptional', 'dropped']) delete kept[key]
+    const waits = [{ ...kept, waitedAt: Date.now(), waitedPrice: f.price, checkedAt: f.page && f.page.at ? f.page.at : Date.now() }, ...state.waits.filter((w) => w.id !== id)].slice(0, WAITS_MAX)
+    return set({ ...state, waits: rescoredWaits(waits), finds: state.finds.map((x) => (x.id === id ? { ...x, waiting: true } : x)) })
+  },
+  async unwait(id) {
+    await load()
+    return set({
+      ...state, waits: state.waits.filter((w) => w.id !== id),
+      finds: state.finds.map((x) => {
+        if (x.id !== id || !x.waiting) return x
+        const back = { ...x }
+        delete back.waiting
+        return back
+      }),
+    })
+  },
+  noteVintedEvents,
   tick,
   resume,
   judgeNow,
@@ -656,6 +908,8 @@ export const watchEngine = {
       lavoro: job ? {
         tipo: job.kind, avviato: iso(job.startedAt), ore: job.hours, letture: job.reads || 0, a_vuoto: job.empty || 0, a_vuoto_di_fila: job.stale || 0, fermato: job.stopped || null, in_attesa: job.waiting || null,
         prezzo_massimo: job.maxPrice ?? null, prossima: iso(job.nextAt), sveglia: job.sveglia ?? null,
+        fonti: Array.isArray(job.sources) ? job.sources.map((x) => x.label) : undefined, senza_account: job.anon ?? null,
+        annunci: (job.pageFails || 0) >= PAGE_FAILS_MAX ? 'non leggibili: non li chiedo più' : (job.pageFails || 0) ? `non letti in ${job.pageFails} letture di fila` : 'letti',
         ai: job.ai || null, ai_dettaglio: job.aiDetail || null, ai_costo_usd: job.aiCost || 0,
       } : null,
       sveglie: alarm ? { esatte: alarm.exact, impostata_per: iso(alarm.scheduledAt), ultima_suonata: iso(alarm.firedAt), ultima_lettura_avviata: iso(alarm.tickAt), errore: alarm.error || null, errore_alle: iso(alarm.errorAt) } : null,
@@ -667,6 +921,14 @@ export const watchEngine = {
         const c = core.calibrationOf(profile ? profile.ratings : null)
         return { voti_tuoi: c.n, punti_in_generale: c.global, punti_per_categoria: c.byCategory }
       })(),
+      annunci_letti: finds.filter((f) => f.page).length,
+      non_in_vendita: finds.filter((f) => f.gone).length,
+      resa_per_fonte: core.sourceReport(finds),
+      lista_d_attesa: state.waits.map((w) => ({
+        titolo: w.title, prezzo: w.price, era: Number.isFinite(w.was) ? w.was : undefined, messo_a: w.waitedPrice, voto: w.score ? w.score.total : null,
+        da_comprare_a: w.score && w.score.target ? w.score.target.buy : null, guardato: iso(w.checkedAt), stato: w.gone || (w.due ? 'da guardare' : 'in attesa'),
+      })),
+      storico: state.history,
       senza_scheda: finds.filter((f) => !f.card).length,
       in_attesa_della_scheda: waitingOf(finds).length,
       voti: {
@@ -679,6 +941,7 @@ export const watchEngine = {
         etichetta: f.score ? f.score.label : null, provvisorio: f.score ? f.score.provisional : null,
         categoria: f.card ? f.card.category : null, pezzi: f.card ? core.lotOf(f, f.card).pieces : null, stima_ai: f.card ? [f.card.usedLow, f.card.usedHigh] : null, fiducia: f.card ? f.card.confidence : null,
         riferimento: f.ref ? { valore: f.ref.value, da: f.ref.source, annunci: f.ref.n } : null, motivi: f.score ? f.score.reasons : null,
+        fonte: f.from || undefined, annuncio_letto: Boolean(f.page), venditore: f.score ? f.score.seller || undefined : undefined, seconda_scheda: f.card && f.card.deep ? true : undefined,
       })),
       letture: log,
     }

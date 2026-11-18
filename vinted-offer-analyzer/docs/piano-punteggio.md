@@ -82,7 +82,9 @@ partenza porta solo i fatti stabili e le correzioni dell'utente.
 2. Sveglia per la lettura successiva, prima di tutto il resto.
 3. Scheda dell'AI per gli articoli nuovi: lotti da 10, quattro chiamate affiancate, 40 articoli a lettura al massimo.
 4. Riferimento: nella caccia sono i risultati stessi della ricerca (quelli che l'AI dice essere il prodotto cercato);
-   nella vetrina tre ricerche su Vinted a lettura per i promettenti e poi per i più cari, con memoria di un giorno.
+   nella vetrina tre ricerche su Vinted a lettura, solo dove possono cambiare il verdetto, con memoria di un giorno.
+4b. Lettura dell'annuncio (1.20) per ciò che arriva a 55 o ha un prezzo che la stima non spiega: descrizione, età,
+   venditore; seconda scheda dell'AI con la descrizione. Fino a 4 pagine a lettura.
 5. Voto e motivi di tutti; un «affare» con valore letto dal mercato viene notificato subito, una volta sola.
 6. A fine sessione: notifica con il primo della classifica; l'analisi completa dei primi dieci è ancora da fare.
 

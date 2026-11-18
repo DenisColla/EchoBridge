@@ -663,6 +663,20 @@ function Main() {
     startJob({ kind: 'hunt', url: sorted, label: draft ? draft.label : words, maxPrice, size, hours: core.WATCH.HUNT_HOURS })
   }
   const startFeed = () => startJob({ kind: 'feed', url: `${VINTED_ORIGIN}/`, label: 'la tua home', hours: core.WATCH.FEED_HOURS })
+  /** «Novità» (1.20): the user's own searches, read in turn from their newest listing. They are his interests too. */
+  const startNews = async (words) => {
+    const sources = core.sourcesFor(words, VINTED_ORIGIN)
+    if (!sources.length) { showToast('Scrivi almeno una ricerca da seguire.', 3000); return }
+    await watchEngine.setProfile({ words: sources.map((x) => x.label) })
+    startJob({ kind: 'feed', url: sources[0].url, sources, label: 'le tue ricerche', hours: core.WATCH.FEED_HOURS })
+  }
+  /** «In attesa»: kept apart and watched; the listing opens so that the user can leave his heart on Vinted. */
+  const waitFor = async (find) => {
+    await watchEngine.wait(find.id)
+    setTab('vinted')
+    if (vintedRef.current) vintedRef.current.open(find.url)
+    showToast('Messo in attesa. Tocca il cuore su Vinted: il venditore lo vede, e Vinted ti avvisa se il prezzo scende.', 6000)
+  }
   /** «Caccia da questa pagina» in the Vinted tab: a search page as it is, or the search of the article just analysed. */
   const huntFromPage = ({ url, type }) => {
     let draft = null
@@ -682,7 +696,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.19.1', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.20.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said
@@ -1806,6 +1820,9 @@ function Main() {
               onMode={(mode) => watchEngine.setMode(mode)}
               onStartHunt={startHunt}
               onStartFeed={startFeed}
+              onStartNews={startNews}
+              onWait={waitFor}
+              onUnwait={(id) => watchEngine.unwait(id)}
               onStop={() => watchEngine.stopJob()}
               onOpen={(url) => { setTab('vinted'); if (vintedRef.current) vintedRef.current.open(url) }}
               onClearFinds={() => watchEngine.clearFinds()}

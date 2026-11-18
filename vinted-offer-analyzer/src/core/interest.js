@@ -24,8 +24,15 @@
  * The user's own scores (1.19.0). On an article he may write the score he would give: that article takes it, and
  * the difference from the engine's own score moves the scores of the same category from then on (calibrationOf).
  *
+ * The listing's own page (1.20). What reaches the list is first read on its page: the description (lots, defects,
+ * what is missing — a second card by the AI), how long it has been there, when its seller was last seen and how he
+ * is reviewed (listingFactsOf, kept on the find as `page`). A seller away for two weeks is not listed: he may never
+ * ship. A search of the market is made only where it could change the verdict (lookupCouldMatter).
+ *
  *   interestPrompt(items, { target })       → the prompt of one batch of cards
  *   cleanInterestCards(value, items)        → { id: card }
+ *   listingFactsOf(extraction)              → what the listing's page says, to keep on the find (no seller's name)
+ *   lookupCouldMatter(find, card, score)    → whether a search of the market could change the verdict
  *   calibrationOf(ratings)                  → { n, global, byCategory }: how far his scores are from the engine's
  *   seriesPiecesOf(title)                   → how many volumes a title sells (1, n, or null: a lot of unknown size)
  *   lotOf(find, card)                       → { pieces, series, comparable }
@@ -37,6 +44,7 @@
  *   rankByInterest(finds)                   → best first
  */
 import { vintedBuyerFee } from './costs.js'
+import { SELLER_INACTIVE_DAYS, sellerProfileGuess, signalFromText } from './extract.js'
 import { scrubContacts } from './privacy.js'
 import { attributeConflict } from './search.js'
 
@@ -149,6 +157,7 @@ const INTEREST_SYSTEM = [
   'Identità: usa solo ciò che c\'è nel testo. categoria: una delle voci ammesse (un manga, un fumetto o una graphic novel sono "fumetti_manga" anche quando il titolo non lo dice). tipo: che cos\'è, in 1-3 parole (es. "smartphone", "cuffie over-ear", "graphic novel", "piumino"). marca, modello, variante (memoria, taglia, edizione, volume, colore): stringa vuota se non ci sono; non inventare modelli.',
   'cerca: 2-5 parole per trovare lo stesso prodotto su Vinted, senza aggettivi né condizioni. parole: 1-3 parole minuscole che un annuncio dello stesso prodotto deve contenere (es. ["s25","ultra"], ["1000xm5"], ["persepolis"]).',
   'difetti: difetti o mancanze dichiarati nel titolo (lista vuota se nessuno). pezzi: quanti articoli sono venduti insieme (1 se uno solo; "1-4", "vol. 1 2 3", "lotto di 5 libri", "serie completa" sono più pezzi: se il numero non è scritto, stimalo). peso_kg: il peso stimato del pacco in chili, per tutti i pezzi (0 se non sai stimarlo).',
+  'Quando un annuncio porta anche la descrizione scritta dal venditore, vale più del titolo: dice quanti pezzi sono venduti, che cosa manca, i difetti, l\'edizione. Usala per pezzi, difetti, variante e prezzi.',
   'Prezzi in euro, dal tuo sapere sul mercato italiano, prudenti: nuovo = prezzo a cui si compra nuovo oggi; usato_min e usato_max = fascia a cui si vende tra privati NELLE CONDIZIONI DICHIARATE, per tutti i pezzi dell\'annuncio. Se non conosci il prodotto metti 0 e una fiducia bassa: è meglio 0 di un numero inventato.',
   'fiducia: da 0 a 1, quanto sei sicuro dell\'identificazione e dei prezzi. rischi: "falso" se è un articolo di marca molto contraffatto a un prezzo sospetto, "difettoso", "incompleto", "ricambio_accessorio" se l\'annuncio è un accessorio o un ricambio e non il prodotto, "non_identificato" se dal testo non si capisce che cos\'è.',
   'corrisponde: solo quando ti è dato che cosa cerca l\'utente: "si" se l\'annuncio è proprio quel prodotto, "variante" se è lo stesso modello in un\'altra versione, "no" se è altro; "nd" quando non ti è dato che cosa cerca.',
@@ -157,7 +166,9 @@ const INTEREST_SYSTEM = [
 
 /** One batch of cards. `items`: finds ({ id, title, brand, size, condition, price }); `target`: what a hunt looks for. */
 export function interestPrompt(items, { target = '' } = {}) {
-  const line = (f) => `#${f.id} | ${scrubContacts(String(f.title || '').slice(0, 140))} | marca: ${f.brand || 'n.d.'} | taglia: ${f.size || 'n.d.'} | condizioni: ${f.condition || 'n.d.'} | ${itFinite(f.price) ? `${f.price} €` : 'prezzo n.d.'}`
+  // The description comes from the listing's page, when it was read: with it the card is the second, closer one.
+  const said = (f) => (f.page && f.page.description ? ` | descrizione: ${scrubContacts(String(f.page.description).slice(0, 400))}` : '')
+  const line = (f) => `#${f.id} | ${scrubContacts(String(f.title || '').slice(0, 140))} | marca: ${f.brand || 'n.d.'} | taglia: ${f.size || 'n.d.'} | condizioni: ${f.condition || 'n.d.'} | ${itFinite(f.price) ? `${f.price} €` : 'prezzo n.d.'}${said(f)}`
   return {
     system: INTEREST_SYSTEM,
     text: [
@@ -217,6 +228,8 @@ export function cleanInterestCards(value, items) {
 }
 
 /* ───────── the reference: what the same product sells for ───────── */
+
+export const SELLER_AWAY_DAYS = SELLER_INACTIVE_DAYS
 
 const itBand = (condition) => (/nuovo/i.test(String(condition || '')) ? 'new' : /ottim|buon|discret|soddisfacent/i.test(String(condition || '')) ? 'used' : null)
 
@@ -477,7 +490,10 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const price = find.price
   const { q, broken } = qualityOf(find, card)
   const d = demandOf(find)
-  const v = INTEREST.NEUTRAL
+  // The seller, once the listing's page was read: neutral until then.
+  const page = find.page && typeof find.page === 'object' ? find.page : null
+  const seller = page ? sellerProfileGuess({ lastSeenDays: itFinite(page.sellerDays) ? page.sellerDays : null, feedbackCount: itFinite(page.reviews) ? page.reviews : null, rating: itFinite(page.rating) ? page.rating : null }) : null
+  const v = !seller ? INTEREST.NEUTRAL : seller.id === 'expert' ? 1 : seller.id === 'inactive' ? 0.1 : seller.id === 'quiet' ? 0.4 : seller.id === 'new_seller' ? 0.5 : INTEREST.NEUTRAL
   const p = match ? (match === 'si' ? 1 : match === 'variante' ? 0.6 : 0.1) : pertinenceOf(find, card, profile)
   const reasons = []
   let c = 0.4
@@ -505,6 +521,10 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     if (profit < INTEREST.MIN_PROFIT) c = Math.min(c, 0.5)
     target = { buy: buyPriceFor(ref.value, shipping, required), deal: buyPriceFor(ref.value, shipping, required * 1.3) }
     neg = negotiabilityOf(find, target.buy)
+    // What the seller wrote, and a listing that has been there a month, move how likely an offer is to pass.
+    if (page && neg.discount !== null && neg.discount > 0 && neg.discount <= INTEREST.MAX_OFFER_DISCOUNT) {
+      neg = { ...neg, n: itClamp(neg.n + (page.says === 'open_to_offers' || page.says === 'clearing_out' ? 0.1 : 0) + (itFinite(page.ageDays) && page.ageDays >= 30 ? 0.05 : 0)) }
+    }
     const about = ref.source !== 'market' ? `circa ${itEuro(ref.value)} (stima dell'AI)`
       : ref.pieces > 1 ? `${itEuro(ref.value)} (${ref.pieces} pezzi a ${itEuro(ref.unit)}, da ${ref.n} annunci)` : `${itEuro(ref.value)} (${ref.n} annunci uguali)`
     if (profit >= INTEREST.MIN_PROFIT) reasons.push(`Rivendendo a ${about} restano ${itEuro(profit)} (${margin.pct}%)`)
@@ -534,7 +554,16 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const provisional = !ref || ref.source !== 'market'
   if (!unsure && risks.includes('non_identificato')) unsure = 'identita'
   // No offer Vinted allows makes it a buy (or nothing does): it is not «da trattare», whatever the rest says.
-  const noDeal = !unsure && margin !== null && (target.buy === null || (neg.discount !== null && neg.discount > INTEREST.MAX_OFFER_DISCOUNT))
+  // The seller writes that the price is fixed, and at that price it is not a buy: no offer will make it one.
+  const fixed = Boolean(page && page.says === 'fixed_price' && neg.discount !== null && neg.discount > 0)
+  // A seller not seen for two weeks may never answer nor ship: the money comes back, days later.
+  const away = Boolean(seller && seller.id === 'inactive')
+  const noDeal = !unsure && margin !== null && (target.buy === null || fixed || away || (neg.discount !== null && neg.discount > INTEREST.MAX_OFFER_DISCOUNT))
+  if (away) reasons.splice(1, 0, `Venditore assente da ${Math.round(page.sellerDays)} giorni: può non spedire`)
+  else if (fixed) reasons.splice(1, 0, 'Il venditore scrive che il prezzo non è trattabile')
+  else if (seller && seller.id === 'expert') reasons.push(`Venditore solido (${page.reviews} recensioni)`)
+  else if (seller && seller.id === 'quiet') reasons.push(`Venditore visto ${Math.round(page.sellerDays)} giorni fa`)
+  if (page && !away && !fixed && (page.says === 'open_to_offers' || page.says === 'clearing_out') && neg.discount) reasons.push(page.says === 'clearing_out' ? 'Il venditore sta svuotando l\'armadio' : 'L\'annuncio invita a fare offerte')
   const capped = (raw) => {
     let t = raw
     if (unsure || noDeal) t = Math.min(t, INTEREST.UNKNOWN_CAP)
@@ -553,8 +582,49 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
     total, base, shift: rated !== null ? 0 : total - base, rated: rated !== null,
     label: rated !== null ? labelOf(total) : unsure ? (total >= INTEREST.CHECK_MIN ? 'da verificare' : 'lascia') : labelOf(total), provisional, unsure,
     parts: { convenienza: itR2(c), domanda: itR2(d), qualita: itR2(q), trattabilita: itR2(neg.n), pertinenza: itR2(p), venditore: itR2(v) },
-    margin, target, shipping, reasons: reasons.slice(0, 4),
+    margin, target, shipping, reasons: reasons.slice(0, 4), read: Boolean(page), seller: seller ? seller.id : null,
   }
+}
+
+/* ───────── the listing's own page ───────── */
+
+/**
+ * What the page of a listing says, to keep on the find (`page`). `extraction`: parseVintedItemHtml(html). →
+ * { price, description, category, ageDays, sellerDays, reviews, rating, business, reserved, oldPrice, says } or null
+ * when the page carries no listing. Never the seller's name: only how long he has been away and how he is reviewed.
+ */
+export function listingFactsOf(extraction) {
+  const ex = extraction && typeof extraction === 'object' ? extraction : null
+  if (!ex || (!ex.title && !itFinite(ex.listPrice))) return null
+  const signals = ex.signals && typeof ex.signals === 'object' ? ex.signals : {}
+  const num = (x) => (itFinite(x) ? x : null)
+  return {
+    price: itFinite(ex.listPrice) && ex.listPrice > 0 ? ex.listPrice : null,
+    description: scrubContacts(String(ex.description || '')).replace(/\s+/g, ' ').trim().slice(0, 400),
+    category: String(ex.categoryText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    ageDays: num(ex.uploadedDays), sellerDays: num(ex.sellerLastSeenDays), reviews: num(ex.sellerFeedbackCount), rating: num(ex.sellerRating),
+    business: ex.sellerBusiness === true, reserved: signals.reserved === true, oldPrice: num(signals.oldPrice),
+    says: signalFromText(`${ex.title || ''} ${ex.description || ''}`).id,
+  }
+}
+
+/**
+ * Whether a search of the market could change what is said of an article (1.20): it could if the article would be
+ * worth an offer were it sold for twice the most the AI thinks, or if its price is one the estimate does not
+ * explain. A paperback at 4 € is not searched: the searches the app makes are few, and are made with the user's own
+ * session. With no estimate at all, only what is not a trifle.
+ */
+export function lookupCouldMatter(find, card, score = null) {
+  if (!card || !find || !itFinite(find.price)) return false
+  if (score && score.unsure === 'prezzo') return true
+  const most = itFinite(card.usedHigh) && card.usedHigh > 0 ? card.usedHigh : itFinite(card.usedLow) && card.usedLow > 0 ? card.usedLow : null
+  if (most === null) return find.price >= 10 || (itFinite(find.favourites) && find.favourites >= 10)
+  const plain = { ...find }
+  delete plain.rated
+  delete plain.vote
+  delete plain.page
+  const best = interestScore(plain, { card, ref: { value: most * 2, median: most * 2, n: INTEREST.MARKET_MIN, source: 'market' } })
+  return best.total >= INTEREST.SHOW_MIN || best.unsure === 'prezzo'
 }
 
 /* ───────── the user's own scores ───────── */

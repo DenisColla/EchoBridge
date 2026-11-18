@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   WATCH, cardsFromHtml, detectVintedChallenge, detectVintedSessionRefresh, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, parseVintedCatalog,
-  rankFinds, toleranceFor,
+  rankFinds, sourceReport, sourcesFor, toleranceFor, waitMatchOf,
 } from '../src/core/index.js'
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
@@ -146,4 +146,45 @@ test('watch: Vinted\'s «Session refresh» page is told apart from a check and f
   // The title alone, or the page's own name in its data, is enough.
   assert.equal(detectVintedSessionRefresh('<title>Session refresh</title>'), true)
   assert.equal(detectVintedSessionRefresh('self.__next_f.push([1,"17:[\\"$\\",\\"$L1c\\",null,{\\"pageId\\":\\"session-refresh\\"}]"])'), true)
+})
+
+test('watch: «novità» reads the user\'s own searches, newest first, six at most', () => {
+  const sources = sourcesFor(['Zerocalcare', '  chainsaw   man variant ', 'zerocalcare', 'x', '', null, 'Absolute DC', 'a1', 'b2', 'c3', 'd4'])
+  assert.deepEqual(sources.map((x) => x.label), ['Zerocalcare', 'chainsaw man variant', 'Absolute DC', 'a1', 'b2', 'c3'])
+  assert.equal(sources.length, WATCH.ROTATION_MAX)
+  assert.equal(sources[1].url, 'https://www.vinted.it/catalog?search_text=chainsaw%20man%20variant&order=newest_first')
+  assert.deepEqual(sourcesFor(null), [])
+  assert.equal(sourcesFor(['lego'], 'https://www.vinted.fr/')[0].url, 'https://www.vinted.fr/catalog?search_text=lego&order=newest_first')
+})
+
+test('watch: what is new keeps where it was read, and each source has its report', () => {
+  const card = (id, price, hearts) => ({ id, price: price.toFixed(2), text: `Art ${id}, condizioni: Ottime, ${price.toFixed(2)} €, ${(price * 1.05 + 0.7).toFixed(2)} € Include la commissione Vinted`, hearts, boost: id === 3 })
+  const a = mergeFinds([], [card(1, 10, 3), card(2, 20, 9)], { at: 1000, source: 'feed', from: 'zerocalcare' })
+  const b = mergeFinds(a.finds, [card(2, 20, 12), card(3, 5, 0)], { at: 2000, source: 'feed', from: 'home' })
+  assert.deepEqual(b.finds.map((f) => [f.id, f.from]).sort(), [['1', 'zerocalcare'], ['2', 'zerocalcare'], ['3', 'home']])
+  const scored = b.finds.map((f) => ({ ...f, score: { total: f.id === '1' ? 72 : f.id === '2' ? 58 : 90 }, gone: f.id === '3' ? 'tolto' : undefined }))
+  // what was gone when its page was read is not among what is worth a look, however good it was
+  assert.deepEqual(sourceReport(scored), [
+    { fonte: 'zerocalcare', articoli: 2, da_55: 2, da_70: 1, sponsorizzati: 0, cuori_mediani: 3, non_in_vendita: 0 },
+    { fonte: 'home', articoli: 1, da_55: 0, da_70: 0, sponsorizzati: 1, cuori_mediani: 0, non_in_vendita: 1 },
+  ])
+  // what was found before sources had a name is told by the kind of job
+  assert.deepEqual(sourceReport([{ id: '9', source: 'hunt', price: 5 }, { id: '8', source: 'feed', price: 5 }]).map((r) => r.fonte).sort(), ['caccia', 'home'])
+  assert.deepEqual(sourceReport(null), [])
+})
+
+test('watch: a notification of Vinted\'s is matched to the article that waits', () => {
+  const waits = [{ id: '1', title: 'Absolute Transmetropolitan Volume 1/2/3' }, { id: '2', title: 'Zerocalcare un polpo alla gola' }, { id: '3', title: 'Lotto fumetti Orfani (44 volumi)' }]
+  assert.deepEqual(waitMatchOf('Prezzo ridotto! Absolute Transmetropolitan Volume 1/2/3 ora costa 190,00 €', waits), { id: '1', price: 190 })
+  assert.deepEqual(waitMatchOf('Il venditore ti ha fatto un\'offerta per «Zerocalcare un polpo alla gola»: € 4,50', waits), { id: '2', price: 4.5 })
+  // the article named, no price: to be looked at
+  assert.deepEqual(waitMatchOf('Lotto fumetti Orfani (44 volumi): il venditore ha aggiornato l\'annuncio', waits), { id: '3', price: null })
+  // a price with no name: every article that waits is looked at
+  assert.deepEqual(waitMatchOf('Un articolo tra i tuoi preferiti è stato scontato', waits), { all: true })
+  // nothing of ours
+  assert.equal(waitMatchOf('Hai un nuovo messaggio da un utente', waits), null)
+  assert.equal(waitMatchOf('Il pacco è stato consegnato', waits), null)
+  assert.equal(waitMatchOf('', waits), null)
+  // one common word is not a match
+  assert.deepEqual(waitMatchOf('Fumetti in offerta questa settimana', waits), { all: true })
 })

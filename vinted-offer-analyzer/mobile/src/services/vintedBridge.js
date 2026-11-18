@@ -21,7 +21,8 @@ export const vintedBridge = {
   openAppSettings: () => (native ? safe(() => native.openAppSettings(), false) : false),
   /** The queue of Vinted's notifications, oldest first: [{ key, at, title, text, bigText, subText, channel, summary }]. */
   readEvents: () => {
-    if (!native) return []
+    // The web build has no notifications: a test hands some over.
+    if (!native) return Platform.OS === 'web' && typeof window !== 'undefined' && Array.isArray(window.__ovtVintedEvents) ? window.__ovtVintedEvents : []
     const raw = safe(() => native.readEvents(), '[]')
     const list = safe(() => JSON.parse(raw), [])
     return Array.isArray(list) ? list.filter((e) => e && typeof e === 'object') : []

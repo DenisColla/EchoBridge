@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { vintedBridge } from '../services/vintedBridge.js'
+import { watchEngine } from '../services/watchEngine.js'
 import { VINTED_KIND_LABEL, planVintedEvent, vintedEventKey } from '../services/vintedEvents.js'
 
 const KEY = 'offerta-vinted.vintedlog.v1'
@@ -45,6 +46,8 @@ export function useVintedBridge({ ready, itemsRef, setStatus, setSellerName = nu
       const on = vintedBridge.isEnabled()
       setEnabled(on)
       const events = vintedBridge.readEvents()
+      // The same notifications, before they are cleared from the queue, for the articles that wait (watchEngine).
+      watchEngine.noteVintedEvents(events).catch(() => {})
       const seen = new Set(stateRef.current.seen)
       const fresh = events.filter((e) => !seen.has(vintedEventKey(e)))
       if (!fresh.length) {

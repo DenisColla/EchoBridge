@@ -91,6 +91,9 @@ function saveRefs() {
   refs = Object.fromEntries(entries)
   return AsyncStorage.setItem(REFS_KEY, JSON.stringify(refs)).catch(() => {})
 }
+/** The results of a search, kept in memory for half an hour: several articles of one product ask for the same page. */
+const PAGE_TTL_MS = 30 * 60 * 1000
+const pages = new Map()
 const keyOf = (card, find, pieces) => `${(card.words || []).join('+') || card.query}|${card.variant || ''}|${find.band || ''}|${pieces}`.toLowerCase()
 
 /**
@@ -100,7 +103,7 @@ const keyOf = (card, find, pieces) => `${(card.words || []).join('+') || card.qu
  * → { ok: true, ref | null, cached, seen, same } (seen: results read, same: those that are the same product) or
  * { ok: false, reason } ('challenge', 'timeout', 'network', 'vuota').
  */
-export async function lookupReference(find, card, now = Date.now()) {
+export async function lookupReference(find, card, { now = Date.now(), anonymous = false } = {}) {
   if (!card || !card.query || !(card.words || []).length) return { ok: true, ref: null, cached: false }
   const lot = core.lotOf(find, card)
   if (!lot.comparable) return { ok: true, ref: null, cached: true }
@@ -111,9 +114,13 @@ export async function lookupReference(find, card, now = Date.now()) {
   // The web build has no way to Vinted: what a test hands over stands in for the search page.
   const handed = typeof window !== 'undefined' && window.__ovtMarketPages ? window.__ovtMarketPages[card.query] : null
   let items
-  if (handed) items = handed
+  const kept = pages.get(card.query)
+  // `shared`: no request was made for this answer (the page was read for another article a moment ago).
+  const shared = Boolean(kept && now - kept.at < PAGE_TTL_MS)
+  if (shared) items = kept.items
+  else if (handed) items = handed
   else {
-    const dl = await fetchVintedListPage(`${ORIGIN}/catalog?search_text=${encodeURIComponent(card.query)}`)
+    const dl = await fetchVintedListPage(`${ORIGIN}/catalog?search_text=${encodeURIComponent(card.query)}`, { anonymous })
     if (!dl.html) return { ok: false, reason: dl.reason || 'failed' }
     const page = core.parseVintedCatalog(dl.html)
     items = page.items
@@ -125,11 +132,15 @@ export async function lookupReference(find, card, now = Date.now()) {
       if (!page.catalog) return { ok: true, ref: null, cached: false, seen: 0, same: 0 }
     }
   }
+  if (!shared && items.length) {
+    pages.set(card.query, { at: now, items })
+    if (pages.size > 40) pages.delete(pages.keys().next().value)
+  }
   const prices = core.comparablesOf(items, card, find)
   const ref = core.marketReferenceOf(prices, { pieces: lot.pieces })
   all[key] = { ref, at: now, seen: items.length, same: prices.length }
   await saveRefs()
-  return { ok: true, ref, cached: false, seen: items.length, same: prices.length }
+  return { ok: true, ref, cached: shared, seen: items.length, same: prices.length }
 }
 
 /**
@@ -137,6 +148,29 @@ export async function lookupReference(find, card, now = Date.now()) {
  * (`likes`) and the scores he gave (`ratings`: [{ id, at, category, brand, system, user, price }], the last 300).
  * Emptying the list or starting a new search does not touch it.
  */
+/**
+ * The page of one listing, read for what the card of a list does not say (1.20): the description, how long it has
+ * been there, its seller's last visit and reviews (core listingFactsOf). → { ok: true, facts } · { ok: true, gone:
+ * true } when the listing is no longer there · { ok: false, reason } ('challenge', 'sessione', 'timeout', 'network',
+ * 'vuota', 'non_disponibile'). `anonymous`: without the user's session.
+ */
+export async function readListing(find, { anonymous = false } = {}) {
+  // The web build has no way to Vinted: a test hands the facts over ({ id: facts | null }), or there is no reading.
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    const handed = window.__ovtItemPages
+    if (!handed || handed[find.id] === undefined) return { ok: false, reason: 'non_disponibile' }
+    return handed[find.id] === null ? { ok: true, gone: true } : handed[find.id].reason ? { ok: false, reason: handed[find.id].reason } : { ok: true, facts: handed[find.id] }
+  }
+  if (!find || !find.url) return { ok: false, reason: 'vuota' }
+  const dl = await fetchVintedListPage(find.url, { anonymous })
+  if (!dl.html) return { ok: false, reason: dl.reason || 'failed' }
+  if (dl.status === 404 || dl.status === 410) return { ok: true, gone: true }
+  if (dl.mitigated || core.detectVintedChallenge(dl.html)) return { ok: false, reason: 'challenge' }
+  if (core.detectVintedSessionRefresh(dl.html)) return { ok: false, reason: 'sessione' }
+  const facts = core.listingFactsOf(core.parseVintedItemHtml(dl.html))
+  return facts ? { ok: true, facts } : { ok: false, reason: 'vuota' }
+}
+
 const EMPTY_PROFILE = { categories: [], words: [], sizes: [], likes: {}, ratings: [] }
 const RATINGS_MAX = 300
 const cleanRatings = (list) => (Array.isArray(list) ? list : [])

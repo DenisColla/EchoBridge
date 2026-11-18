@@ -32,6 +32,10 @@ export const WATCH = Object.freeze({
   /** Really good: two of the four signals let the price rise 10%, three or more 15% (the user's rule). */
   TOLERANCE_TWO: 10,
   TOLERANCE_THREE: 15,
+  /** «Novità» (1.20): how many of the user's searches are read in turn, and how many of the newest listings of
+   *  each page are kept at a reading (what is fresh is at the top; the rest was there before). */
+  ROTATION_MAX: 6,
+  ROTATION_TAKE: 40,
 })
 
 const wtR2 = (v) => Math.round(v * 100) / 100
@@ -44,6 +48,25 @@ export function nextRefreshDelayMs(random = Math.random) {
   const span = WATCH.REFRESH_MAX_S - WATCH.REFRESH_MIN_S + 1
   const r = Number(random())
   return (WATCH.REFRESH_MIN_S + Math.min(span - 1, Math.max(0, Math.floor((Number.isFinite(r) ? r : 0) * span)))) * 1000
+}
+
+/**
+ * The searches «novità» reads in turn, each from its newest listing: one for each of the user's words (brands,
+ * authors, phrases), the first ROTATION_MAX. → [{ label, url }]. What is new on Vinted shows first in a search by
+ * date, long before the home proposes it — if it ever does.
+ */
+export function sourcesFor(words, origin = 'https://www.vinted.it') {
+  const base = String(origin).replace(/\/+$/, '')
+  const seen = new Set()
+  const out = []
+  for (const raw of Array.isArray(words) ? words : []) {
+    const label = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+    if (label.length < 2 || seen.has(label.toLowerCase())) continue
+    seen.add(label.toLowerCase())
+    out.push({ label, url: `${base}/catalog?search_text=${encodeURIComponent(label)}&order=newest_first` })
+    if (out.length >= WATCH.ROTATION_MAX) break
+  }
+  return out
 }
 
 /**
@@ -132,8 +155,9 @@ export function findFromCard(card, origin = 'https://www.vinted.it') {
 /**
  * Adds the cards of one reading to what was found so far. One entry per article: when it was first and last seen,
  * how many times, and the price it had when first seen if it has dropped since (`was`). `fresh`: the ids new now.
+ * `from`: where this reading read (the home, one of the searches): kept on what is new, for the report by source.
  */
-export function mergeFinds(finds, cards, { at = Date.now(), source = 'read', origin = 'https://www.vinted.it' } = {}) {
+export function mergeFinds(finds, cards, { at = Date.now(), source = 'read', origin = 'https://www.vinted.it', from = null } = {}) {
   const byId = new Map((Array.isArray(finds) ? finds : []).filter((f) => f && f.id).map((f) => [String(f.id), f]))
   const fresh = []
   for (const card of Array.isArray(cards) ? cards : []) {
@@ -141,7 +165,7 @@ export function mergeFinds(finds, cards, { at = Date.now(), source = 'read', ori
     if (!found) continue
     const old = byId.get(found.id)
     if (!old) {
-      byId.set(found.id, { ...found, firstSeen: at, lastSeen: at, seen: 1, source, heartsAtFirst: found.favourites ?? null })
+      byId.set(found.id, { ...found, firstSeen: at, lastSeen: at, seen: 1, source, ...(from ? { from } : {}), heartsAtFirst: found.favourites ?? null })
       fresh.push(found.id)
       continue
     }
@@ -152,6 +176,55 @@ export function mergeFinds(finds, cards, { at = Date.now(), source = 'read', ori
   const kept = (f) => (f.score && wtFinite(f.score.total) ? f.score.total : 50)
   const all = [...byId.values()].sort((a, b) => b.lastSeen - a.lastSeen).slice(0, WATCH.MAX_FINDS * 2).sort((a, b) => kept(b) - kept(a) || b.lastSeen - a.lastSeen).slice(0, WATCH.MAX_FINDS)
   return { finds: all, fresh }
+}
+
+/**
+ * How each source did (1.20): [{ fonte, articoli, da_55, da_70, sponsorizzati, cuori_mediani, non_in_vendita }], the
+ * richest in articles from `showMin` first (those still on sale: what was gone when read is counted apart). To see where reading pays: the home, or which of the searches.
+ */
+export function sourceReport(finds, { showMin = 55, tellMin = 70 } = {}) {
+  const groups = new Map()
+  for (const f of Array.isArray(finds) ? finds : []) {
+    if (!f) continue
+    const key = f.from || (f.source === 'hunt' ? 'caccia' : f.source === 'feed' ? 'home' : f.source || 'altro')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(f)
+  }
+  const median = (values) => {
+    const sorted = values.filter(wtFinite).sort((a, b) => a - b)
+    return sorted.length ? sorted[Math.floor((sorted.length - 1) / 2)] : null
+  }
+  return [...groups.entries()].map(([fonte, rows]) => ({
+    fonte, articoli: rows.length,
+    da_55: rows.filter((f) => !f.gone && wtScore(f) >= showMin).length, da_70: rows.filter((f) => !f.gone && wtScore(f) >= tellMin).length,
+    sponsorizzati: rows.filter((f) => f.boost === true).length, cuori_mediani: median(rows.map((f) => f.favourites)),
+    non_in_vendita: rows.filter((f) => Boolean(f.gone)).length,
+  })).sort((a, b) => b.da_55 - a.da_55 || b.articoli - a.articoli)
+}
+
+/**
+ * Which article of the waiting list a notification of Vinted's speaks of (1.20). `text`: its title and body;
+ * `waits`: [{ id, title }]. → { id, price } when the text carries most of the words of one title (`price`: the
+ * amount in the text, or null) · { all: true } when it names none but speaks of a price or an offer · null.
+ */
+export function waitMatchOf(text, waits) {
+  const words = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter((w) => w.length >= 3)
+  const said = new Set(words(text))
+  if (!said.size) return null
+  let best = null
+  for (const w of Array.isArray(waits) ? waits : []) {
+    const title = [...new Set(words(w && w.title))].slice(0, 8)
+    if (!title.length) continue
+    const hits = title.filter((x) => said.has(x)).length
+    const share = hits / title.length
+    // Most of the title, and two words at least (one, when the title is one long word).
+    if (share < 0.6 || (hits < 2 && !(title.length === 1 && title[0].length >= 5))) continue
+    if (!best || share > best.share || (share === best.share && hits > best.hits)) best = { id: w.id, share, hits }
+  }
+  const amount = String(text || '').match(/(\d{1,5}(?:[.,]\d{1,2})?)\s*€/) || String(text || '').match(/€\s*(\d{1,5}(?:[.,]\d{1,2})?)/)
+  const price = amount ? Number(amount[1].replace(',', '.')) : null
+  if (best) return { id: best.id, price: Number.isFinite(price) && price > 0 ? price : null }
+  return /prezz|scont|ribass|ridott|offert/i.test(String(text || '')) ? { all: true } : null
 }
 
 /** When a job ends (ms), and whether it is still running. */

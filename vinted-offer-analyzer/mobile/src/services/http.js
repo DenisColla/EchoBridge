@@ -6,10 +6,13 @@
  * task would then never answer. XMLHttpRequest calls back straight from the network layer, and its `timeout` is
  * enforced there too.
  *
+ * `anonymous`: the request carries no cookie and keeps none (1.20): a page asked as anyone would, not as the
+ * user's account.
+ *
  * → { ok, status, text, header(name) } when the server answered (ok: 2xx), or
  *   { ok: false, status: 0, text: null, error: 'timeout' | 'network' | 'cancelled' }. Never throws.
  */
-export function xhrRequest({ method = 'GET', url, headers = {}, body = null, timeoutMs = 25_000, signal = null }) {
+export function xhrRequest({ method = 'GET', url, headers = {}, body = null, timeoutMs = 25_000, signal = null, anonymous = false }) {
   return new Promise((resolve) => {
     let settled = false
     let onAbort = null
@@ -26,6 +29,7 @@ export function xhrRequest({ method = 'GET', url, headers = {}, body = null, tim
       xhr.open(method, url, true)
       for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, String(value))
       xhr.timeout = timeoutMs
+      if (anonymous) xhr.withCredentials = false
       xhr.onload = () => finish({
         ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, text: typeof xhr.responseText === 'string' ? xhr.responseText : '',
         header: (name) => { try { return xhr.getResponseHeader(name) } catch { return null } },

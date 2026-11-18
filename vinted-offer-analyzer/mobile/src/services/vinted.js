@@ -57,10 +57,11 @@ export async function fetchVintedItemPage(link, { timeoutMs = 12_000 } = {}) {
  * Downloads a list page (a search, the home) with the app's own plain request: no browser identity is claimed, and
  * what comes back is handed over as it is. It uses xhrRequest, which answers with the app behind too (http.js).
  * Returns { ok, html, status, mitigated } (`mitigated`: Cloudflare says it answered with its check) or
- * { ok: false, html: null, reason: 'timeout' | 'network' }. Never throws.
+ * { ok: false, html: null, reason: 'timeout' | 'network' }. Never throws. `anonymous`: without the user's session
+ * (see http.js). The page of a single listing is downloaded the same way.
  */
-export async function fetchVintedListPage(url, { timeoutMs = 25_000 } = {}) {
-  const res = await xhrRequest({ url, headers: { Accept: 'text/html' }, timeoutMs })
+export async function fetchVintedListPage(url, { timeoutMs = 25_000, anonymous = false } = {}) {
+  const res = await xhrRequest({ url, headers: { Accept: 'text/html' }, timeoutMs, anonymous })
   if (res.text === null) return { ok: false, html: null, reason: res.error === 'timeout' ? 'timeout' : 'network' }
   return { ok: res.ok, html: res.text, status: res.status, mitigated: res.header('cf-mitigated') === 'challenge' }
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds } from '../../core/index.js'
+import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds, sourceReport } from '../../core/index.js'
 import { space, toneColors as toneOf, useTheme } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Chip, Collapsible, Field, InlineAction, SectionLabel } from './ui.js'
 
@@ -73,7 +73,7 @@ function aiNoteOf(job) {
 /** The scores the user may give with one touch. */
 const RATING_STEPS = [40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
 
-export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null, onJudge = null, onRate = null }) {
+export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null, onJudge = null, onRate = null, onStartNews = null, onWait = null, onUnwait = null }) {
   const t = useTheme()
   const { mode, job, finds, draft, profile } = auto
   const [words, setWords] = useState('')
@@ -93,7 +93,14 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   // put away stays away.
   const [showAll, setShowAll] = useState(false)
   const [rating, setRating] = useState(null)
-  const ranked = rankFinds(finds.filter((f) => !Number.isFinite(f.hidden)), job && job.kind === 'hunt' ? job : null)
+  const ranked = rankFinds(finds.filter((f) => !Number.isFinite(f.hidden) && !f.waiting), job && job.kind === 'hunt' ? job : null)
+  // «Novità»: the searches to follow are the user's own words (his interests), until he types others here.
+  const [newsEdit, setNewsEdit] = useState(null)
+  const newsText = newsEdit !== null ? newsEdit : profile && Array.isArray(profile.words) ? profile.words.join(', ') : ''
+  const newsList = listOf(newsText).slice(0, WATCH.ROTATION_MAX)
+  const waits = Array.isArray(auto.waits) ? auto.waits : []
+  // Where reading pays: how many of what each source brought are worth a look.
+  const report = sourceReport(finds).filter((r) => r.articoli > 0)
   const strong = ranked.filter((f) => f.score && f.score.total >= INTEREST.SHOW_MIN)
   const weak = ranked.length - strong.length
   const shown = (showAll ? ranked : strong).slice(0, 60)
@@ -141,6 +148,15 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
             <ButtonRow>
               <Button label={`Avvia la vetrina (${WATCH.FEED_HOURS} ore)`} small disabled={running || busy} onPress={onStartFeed} />
             </ButtonRow>
+            {onStartNews ? (
+              <View style={{ gap: space.sm }}>
+                <Body small muted>Oppure le novità: per {WATCH.FEED_HOURS} ore leggo le tue ricerche dal più recente, una per lettura e a rotazione. È lì che un annuncio compare appena pubblicato, prima che Vinted lo proponga nella home (se mai lo fa).</Body>
+                <Field label={`Ricerche da seguire (fino a ${WATCH.ROTATION_MAX}, separate da virgola)`} value={newsText} onChangeText={setNewsEdit} placeholder="es. zerocalcare, chainsaw man variant, absolute dc" autoCapitalize="none" />
+                <ButtonRow>
+                  <Button label={`Avvia le novità (${WATCH.FEED_HOURS} ore)`} variant="secondary" small disabled={!newsList.length || running || busy} onPress={() => onStartNews(newsList)} />
+                </ButtonRow>
+              </View>
+            ) : null}
           </View>
         ) : null}
         {mode !== 'manual' ? (
@@ -162,6 +178,10 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           <SectionLabel>{job.kind === 'hunt' ? 'Caccia' : 'Vetrina'}{job.label ? ` · ${job.label}` : ''}</SectionLabel>
           <Body small style={stopped === 'verifica' ? { color: t.warnInk || t.ink, fontWeight: '600' } : null}>{status}</Body>
           {staleNote ? <Body small style={{ color: t.warn, fontWeight: '600' }}>{staleNote}</Body> : null}
+          {Array.isArray(job.sources) && job.sources.length ? <Body small muted>Ricerche: {job.sources.map((x) => x.label).join(', ')}.</Body> : null}
+          {report.length ? (
+            <Body small muted>Resa: {report.slice(0, 6).map((r) => `${r.fonte} ${r.da_55} su ${r.articoli}${r.da_70 ? ` (${r.da_70} da ${INTEREST.TELL_MIN})` : ''}`).join(' · ')} da {INTEREST.SHOW_MIN} in su.</Body>
+          ) : null}
           {job.kind === 'hunt' && Number.isFinite(job.maxPrice) ? <Body small muted>Prezzo massimo {formatEuro(job.maxPrice)}.</Body> : null}
           {auto.judging ? <Body small style={{ fontWeight: '600' }}>Chiedo le schede all'AI…</Body>
             : aiNote ? <Body small muted={!aiNote[1]} style={aiNote[1] ? { color: t.warn, fontWeight: '600' } : null}>{aiNote[0]}</Body> : null}
@@ -235,6 +255,11 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
                     <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '700', color: f.score.rated ? t.onAccent : t.accentInk }}>{f.score.rated ? `Tuo: ${f.score.total}` : 'Dai voto'}</Text>
                   </Pressable>
                 ) : null}
+                {onWait && f.score && f.score.total >= INTEREST.SHOW_MIN && f.score.total < INTEREST.TELL_MIN ? (
+                  <Pressable onPress={() => onWait(f)} accessibilityRole="button" accessibilityLabel="Metti in attesa" hitSlop={6} style={({ pressed }) => [styles.rate, { borderColor: t.warn, opacity: pressed ? 0.7 : 1 }]}>
+                    <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '700', color: t.warn }}>In attesa</Text>
+                  </Pressable>
+                ) : null}
               </View>
             </View>
             {open ? (
@@ -257,6 +282,42 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
         {ranked.length ? <InlineAction label="Svuota i trovati" onPress={onClearFinds} /> : null}
         {ranked.length ? <Body small muted>Svuotare non cancella quello che hai insegnato: pollici e voti tuoi restano in memoria e valgono per le prossime ricerche.</Body> : null}
       </Card>
+
+      {waits.length ? (
+        <Card>
+          <SectionLabel>In attesa · {waits.length}</SectionLabel>
+          <Body small muted>Li riguardo ogni tanto mentre una ricerca è in corso, e subito quando Vinted notifica un prezzo più basso (serve il tuo cuore sull'annuncio). Ti avviso quando uno arriva a {INTEREST.TELL_MIN}.</Body>
+          {waits.map((w) => {
+            const tone = w.score ? toneOf(t, SCORE_TONE[w.score.label] || 'neutral') : null
+            const buy = w.score && w.score.target ? w.score.target.buy : null
+            return (
+              <View key={w.id} style={[styles.find, { borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line }]}>
+                {w.score ? (
+                  <View style={[styles.score, { backgroundColor: tone.bg }]}>
+                    <Text style={{ color: tone.fg, fontWeight: '800', fontSize: 16 }}>{w.score.total}</Text>
+                  </View>
+                ) : null}
+                <Pressable onPress={() => onOpen(w.url)} accessibilityRole="button" style={{ flex: 1, minWidth: 0 }}>
+                  <Text numberOfLines={1} style={{ color: t.ink, fontWeight: '600' }}>{w.title || 'Articolo'}</Text>
+                  <Text numberOfLines={2} style={{ color: w.gone ? t.warn : t.ink2, fontSize: 12 }}>
+                    {w.gone ? (w.gone === 'riservato' ? 'Riservato a un altro acquirente.' : 'Non è più in vendita.')
+                      : Number.isFinite(buy) && w.price > buy ? `Da comprare a ${formatEuro(buy)}: ti avviso se ci arriva.` : Number.isFinite(buy) ? 'È già al tuo prezzo.' : 'Ti avviso se il prezzo scende.'}
+                  </Text>
+                </Pressable>
+                <View style={{ alignItems: 'flex-end', gap: 2 }}>
+                  <Text style={{ color: t.ink, fontWeight: '700' }}>{formatEuro(w.price)}</Text>
+                  {Number.isFinite(w.was) && w.was > w.price ? <Text style={{ color: t.ink3, fontSize: 12, textDecorationLine: 'line-through' }}>{formatEuro(w.was)}</Text> : null}
+                  {onUnwait ? (
+                    <Pressable onPress={() => onUnwait(w.id)} accessibilityRole="button" accessibilityLabel="Togli dall'attesa" hitSlop={6} style={({ pressed }) => [styles.rate, { borderColor: t.line, opacity: pressed ? 0.7 : 1 }]}>
+                      <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '700', color: t.ink2 }}>Togli</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+            )
+          })}
+        </Card>
+      ) : null}
 
       {onProfile ? <InterestsCard key={profile ? 'loaded' : 'empty'} profile={profile} onSave={onProfile} /> : null}
 
