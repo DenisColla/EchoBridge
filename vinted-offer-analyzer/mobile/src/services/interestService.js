@@ -132,7 +132,17 @@ export async function lookupReference(find, card, now = Date.now()) {
   return { ok: true, ref, cached: false, seen: items.length, same: prices.length }
 }
 
-const EMPTY_PROFILE = { categories: [], words: [], sizes: [], likes: {} }
+/**
+ * What the app knows of the user, apart from any list of finds: the interests he wrote, what his thumbs taught
+ * (`likes`) and the scores he gave (`ratings`: [{ id, at, category, brand, system, user, price }], the last 300).
+ * Emptying the list or starting a new search does not touch it.
+ */
+const EMPTY_PROFILE = { categories: [], words: [], sizes: [], likes: {}, ratings: [] }
+const RATINGS_MAX = 300
+const cleanRatings = (list) => (Array.isArray(list) ? list : [])
+  .filter((r) => r && typeof r === 'object' && Number.isFinite(r.user) && Number.isFinite(r.system))
+  .map((r) => ({ id: String(r.id || ''), at: Number(r.at) || 0, category: core.INTEREST_CATEGORIES.includes(r.category) ? r.category : 'altro', brand: String(r.brand || '').slice(0, 40), system: r.system, user: r.user, price: Number.isFinite(r.price) ? r.price : null }))
+  .slice(-RATINGS_MAX)
 let profile = null
 export async function loadProfile() {
   if (profile) return profile
@@ -145,6 +155,7 @@ export async function loadProfile() {
           words: (Array.isArray(saved.words) ? saved.words : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 40),
           sizes: (Array.isArray(saved.sizes) ? saved.sizes : []).map((w) => String(w).trim()).filter(Boolean).slice(0, 12),
           likes: saved.likes && typeof saved.likes === 'object' ? saved.likes : {},
+          ratings: cleanRatings(saved.ratings),
         }
       : { ...EMPTY_PROFILE }
   } catch {
@@ -154,6 +165,7 @@ export async function loadProfile() {
 }
 export async function saveProfile(next) {
   profile = { ...EMPTY_PROFILE, ...(await loadProfile()), ...next }
+  profile.ratings = cleanRatings(profile.ratings)
   await AsyncStorage.setItem(PROFILE_KEY, JSON.stringify(profile)).catch(() => {})
   return profile
 }

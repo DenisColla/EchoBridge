@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  INTEREST, aiReferenceOf, buyPriceFor, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, lookupWorthOf, lotOf, marketReferenceOf,
+  INTEREST, aiReferenceOf, buyPriceFor, calibrationOf, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, lookupWorthOf, lotOf, marketReferenceOf,
   pertinenceOf, rankByInterest, referenceAmong, requiredMarginFor, seriesPiecesOf,
 } from '../src/core/index.js'
 
@@ -296,4 +296,84 @@ test('interest: which searches of the market come first', () => {
   const dear = worth(130, 7, { total: 35, unsure: null })
   const plain = worth(4, 0, { total: 35, unsure: null })
   assert.ok(near > odd && odd > wanted && wanted > dear && dear > plain, JSON.stringify([near, odd, wanted, dear, plain].map(Math.round)))
+})
+
+/* ───────── the user's own scores and what the list shows (1.19.0, his choices of 18 November 2026) ───────── */
+
+test('interest: the list shows from 55, tells from 70, and lets him score from 65', () => {
+  assert.deepEqual([INTEREST.SHOW_MIN, INTEREST.TELL_MIN, INTEREST.RATE_MIN], [55, 70, 65])
+  // The labels he acts on start where the list starts and where he is told.
+  assert.deepEqual(INTEREST.LABELS.map(([min]) => min), [85, 70, 55, 0])
+})
+
+test('interest: «da trattare» only when an offer Vinted allows makes it a buy', () => {
+  // The diary of 18 November: «Zerocalcare un polpo alla gola» at 6 €, 19 listings alike at 12 €: a buy only at
+  // 3 €, half the price, when Vinted lets an offer go down to 60%. It was «da trattare» at 61.
+  const polpo = interestScore({ id: '1', title: 'Zerocalcare un polpo alla gola', condition: 'Nuovo senza cartellino', price: 6, favourites: 2 }, { card: card('fumetti_manga', { weightKg: 0.4 }), ref: { value: 12, median: 14, n: 19, source: 'market' } })
+  assert.ok(polpo.reasons.some((r) => /sotto il minimo d'offerta/.test(r)))
+  assert.ok(polpo.total < INTEREST.SHOW_MIN, String(polpo.total))
+  assert.equal(polpo.label, 'lascia')
+  // A resale value too low for any buying price: the same.
+  const cheap = interestScore(find(3, { condition: 'Nuovo con cartellino', favourites: 50 }), { card: card('libri'), ref: market(7) })
+  assert.ok(cheap.total < INTEREST.SHOW_MIN && cheap.label === 'lascia')
+  // An offer within what Vinted allows keeps it «da trattare» (the same diary: 44 volumes at 60 €, worth 88 €).
+  const orfani = interestScore({ id: '2', title: 'Lotto fumetti Orfani (44 volumi)', condition: 'Ottime', price: 60, favourites: 1 }, { card: card('fumetti_manga', { pieces: 44, weightKg: 12 }), ref: { value: 88, median: 110, n: 13, source: 'market', unit: 2, pieces: 44 } })
+  assert.equal(orfani.label, 'da trattare')
+  assert.ok(orfani.reasons.some((r) => /Con un'offerta a 50,50 € \(−16%\) è da comprare/.test(r)), orfani.reasons.join(' | '))
+})
+
+test('interest: what his own scores teach — a third after one, most after five, never more than twelve points', () => {
+  assert.deepEqual(calibrationOf([]), { n: 0, global: 0, byCategory: {} })
+  assert.deepEqual(calibrationOf(null), { n: 0, global: 0, byCategory: {} })
+  const up = (n, category = 'fumetti_manga', by = 7) => Array.from({ length: n }, (_, i) => ({ id: String(i), category, system: 58, user: 58 + by }))
+  // one score of +7: its category moves by a third of it, the other categories hardly at all
+  assert.deepEqual(calibrationOf(up(1)), { n: 1, global: 0.2, byCategory: { fumetti_manga: 2.3 } })
+  // five alike: about 70% for the category, and the others begin to follow
+  assert.deepEqual(calibrationOf(up(5)), { n: 5, global: 3.2, byCategory: { fumetti_manga: 5 } })
+  // twenty: the category is almost there, and never past the limit however far he goes
+  assert.equal(calibrationOf(up(20)).byCategory.fumetti_manga, 6.4)
+  assert.equal(calibrationOf(up(20, 'sport', 40)).byCategory.sport, INTEREST.CALIBRATION_MAX)
+  assert.equal(calibrationOf(up(20, 'sport', -40)).byCategory.sport, -INTEREST.CALIBRATION_MAX)
+  // two categories that say the opposite stay apart, and the rest does not move
+  const both = calibrationOf([...up(4, 'fumetti_manga', 8), ...up(4, 'sport', -8)])
+  assert.deepEqual(both, { n: 8, global: 0, byCategory: { fumetti_manga: 5.3, sport: -5.3 } })
+  // the day's own case: one pair of shoes scored 14 under the engine does not move the headphones
+  const shoes = calibrationOf([{ category: 'sneakers', system: 89, user: 75 }])
+  assert.deepEqual(shoes, { n: 1, global: -0.5, byCategory: { sneakers: -4.7 } })
+  assert.equal(interestScore(find(100), { card: card('audio'), ref: market(150), calibration: shoes }).shift, 0)
+  // what is not a pair of scores is left out
+  assert.equal(calibrationOf([{ category: 'sport', system: 50 }, { category: 'sport', user: 'x', system: 50 }, null]).n, 0)
+})
+
+test('interest: his scores move the scores of the category, within what is known of the price', () => {
+  const calibration = { n: 5, global: 2, byCategory: { fumetti_manga: 6 } }
+  const manga = { id: '1', title: 'Manga', condition: 'Ottime', price: 60, favourites: 1 }
+  const c = card('fumetti_manga', { weightKg: 9 })
+  const ref = { value: 88, median: 110, n: 13, source: 'market' }
+  const plain = interestScore(manga, { card: c, ref })
+  const moved = interestScore(manga, { card: c, ref, calibration })
+  assert.deepEqual([moved.total - plain.total, moved.base, moved.shift, moved.rated], [6, plain.total, 6, false])
+  // a category he never scored takes what he says of everything
+  const other = interestScore(find(100), { card: card('audio'), ref: market(150), calibration })
+  assert.equal(other.total - other.base, 2)
+  // a value only the AI estimated still stops at 70, what cannot be judged under 55, a thumb down at 40
+  const good = find(80, { condition: 'Nuovo con cartellino', favourites: 30 })
+  const ai = aiReferenceOf(card('audio', { usedLow: 170, usedHigh: 200 }))
+  assert.equal(interestScore(good, { card: card('audio'), ref: ai, calibration: { n: 9, global: 12, byCategory: {} } }).total, 70)
+  assert.ok(interestScore(good, { card: card('audio'), ref: null, calibration: { n: 9, global: 12, byCategory: {} } }).total <= INTEREST.UNKNOWN_CAP)
+  assert.ok(interestScore({ ...good, vote: -1 }, { card: card('audio'), ref: market(200), calibration: { n: 9, global: 12, byCategory: {} } }).total <= INTEREST.REJECTED_CAP)
+})
+
+test('interest: the score he gives to an article is that article\'s score, and says what the engine\'s was', () => {
+  const manga = { id: '1', title: 'Manga', condition: 'Ottime', price: 60, favourites: 1 }
+  const c = card('fumetti_manga', { weightKg: 9 })
+  const ref = { value: 88, median: 110, n: 13, source: 'market' }
+  const mine = interestScore(manga, { card: c, ref })
+  const his = interestScore({ ...manga, rated: 72 }, { card: c, ref, calibration: { n: 3, global: 5, byCategory: {} } })
+  assert.deepEqual([his.total, his.rated, his.label, his.base, his.shift], [72, true, 'da comprare', mine.total, 0])
+  assert.equal(his.reasons[0], `Il tuo voto: 72 (il mio era ${mine.total})`)
+  // also on what the engine could not judge: his word is his
+  const unknown = interestScore({ ...manga, rated: 80 }, { card: c, ref: null })
+  assert.deepEqual([unknown.total, unknown.label, unknown.rated], [80, 'da comprare', true])
+  assert.equal(interestScore({ ...manga, rated: mine.total }, { card: c, ref }).reasons[0], `Il tuo voto: ${mine.total}, come il mio`)
 })

@@ -21,8 +21,12 @@
  * single volumes at 40 €). Volumes of a series (books, comics) are compared piece by piece: the reference of a lot is
  * the price of one piece times its pieces. A lot of anything else keeps the AI's estimate of the whole.
  *
+ * The user's own scores (1.19.0). On an article he may write the score he would give: that article takes it, and
+ * the difference from the engine's own score moves the scores of the same category from then on (calibrationOf).
+ *
  *   interestPrompt(items, { target })       → the prompt of one batch of cards
  *   cleanInterestCards(value, items)        → { id: card }
+ *   calibrationOf(ratings)                  → { n, global, byCategory }: how far his scores are from the engine's
  *   seriesPiecesOf(title)                   → how many volumes a title sells (1, n, or null: a lot of unknown size)
  *   lotOf(find, card)                       → { pieces, series, comparable }
  *   comparablesOf(candidates, card, find)   → the prices of one piece of the same product among the results of a search
@@ -67,6 +71,16 @@ export const INTEREST = Object.freeze({
    *  a lot or a rare edition, and the loss the numbers would show is not a fact. */
   ODD_PRICE_TIMES: 2.5,
   ODD_PRICE_MIN: 15,
+  /** What the user decided on 18 November 2026: the list shows from SHOW_MIN up, an article from TELL_MIN up is
+   *  told at once, and he may give his own score to those from RATE_MIN up. */
+  SHOW_MIN: 55,
+  TELL_MIN: 70,
+  RATE_MIN: 65,
+  /** His scores move those of a category by this much at most, and count as if this many neutral ones came before. */
+  CALIBRATION_MAX: 12,
+  CALIBRATION_PRIOR: 2,
+  /** From this many scores on, what he says of everything counts in full for the categories he never scored. */
+  CALIBRATION_WIDE: 6,
   /** Vinted lets an offer go down to 60% of the price. */
   MAX_OFFER_DISCOUNT: 0.4,
   LABELS: Object.freeze([[85, 'affare'], [70, 'da comprare'], [55, 'da trattare'], [0, 'lascia']]),
@@ -452,9 +466,11 @@ const labelOf = (total) => INTEREST.LABELS.find(([min]) => total >= min)[1]
  * The score of one article. `card`: the AI's card (null when there is none); `ref`: its reference (marketReferenceOf
  * or aiReferenceOf, null when there is none); `profile`: the user's interests; `match`: in a hunt, whether it is the
  * product searched ('si' | 'variante' | 'no'). In the result `unsure` says why the price could not be judged
- * ('riferimento' | 'prezzo' | 'identita'), or is null.
+ * ('riferimento' | 'prezzo' | 'identita'), or is null. `calibration` (calibrationOf): what the user's own scores
+ * taught. In the result `base` is the engine's score before that, and `rated` says the total is the score the user
+ * gave to this very article (`find.rated`).
  */
-export function interestScore(find, { card = null, ref = null, profile = null, match = null } = {}) {
+export function interestScore(find, { card = null, ref = null, profile = null, match = null, calibration = null } = {}) {
   const W = INTEREST.WEIGHTS
   const category = (card && card.category) || 'altro'
   const required = requiredMarginFor(category)
@@ -518,16 +534,66 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   if (itFinite(find.was) && find.was > price) reasons.push(`Calato da ${itEuro(find.was)}`)
   const provisional = !ref || ref.source !== 'market'
   if (!unsure && risks.includes('non_identificato')) unsure = 'identita'
-  if (unsure) total = Math.min(total, INTEREST.UNKNOWN_CAP)
-  else if (provisional) total = Math.min(total, INTEREST.PROVISIONAL_CAP)
-  if (broken || match === 'no' || find.vote === -1) total = Math.min(total, INTEREST.REJECTED_CAP)
-  total = Math.round(itClamp(total, 0, 100))
+  // No offer Vinted allows makes it a buy (or nothing does): it is not «da trattare», whatever the rest says.
+  const noDeal = !unsure && margin !== null && (target.buy === null || (neg.discount !== null && neg.discount > INTEREST.MAX_OFFER_DISCOUNT))
+  const capped = (raw) => {
+    let t = raw
+    if (unsure || noDeal) t = Math.min(t, INTEREST.UNKNOWN_CAP)
+    else if (provisional) t = Math.min(t, INTEREST.PROVISIONAL_CAP)
+    if (broken || match === 'no' || find.vote === -1) t = Math.min(t, INTEREST.REJECTED_CAP)
+    return Math.round(itClamp(t, 0, 100))
+  }
+  // The engine's own score, and the same moved by what the user's scores taught for this category.
+  const base = capped(total)
+  const rated = itFinite(find.rated) ? Math.round(itClamp(find.rated, 0, 100)) : null
+  // Whole points: half a point taught by a score on something else moves nothing.
+  total = rated !== null ? rated : capped(total + Math.round(calibrationFor(calibration, category)))
+  if (rated !== null) reasons.unshift(rated === base ? `Il tuo voto: ${rated}, come il mio` : `Il tuo voto: ${rated} (il mio era ${base})`)
   return {
-    // What cannot be judged is never «da trattare»: it is to be looked at, or left.
-    total, label: unsure ? (total >= INTEREST.CHECK_MIN ? 'da verificare' : 'lascia') : labelOf(total), provisional, unsure,
+    // What cannot be judged is never «da trattare»: it is to be looked at, or left. The user's own score is his.
+    total, base, shift: rated !== null ? 0 : total - base, rated: rated !== null,
+    label: rated !== null ? labelOf(total) : unsure ? (total >= INTEREST.CHECK_MIN ? 'da verificare' : 'lascia') : labelOf(total), provisional, unsure,
     parts: { convenienza: itR2(c), domanda: itR2(d), qualita: itR2(q), trattabilita: itR2(neg.n), pertinenza: itR2(p), venditore: itR2(v) },
     margin, target, shipping, reasons: reasons.slice(0, 4),
   }
+}
+
+/* ───────── the user's own scores ───────── */
+
+/**
+ * What the user's scores taught. `ratings`: [{ category, system, user }] — on an article of `category` the engine
+ * said `system` and he said `user`. → { n, global, byCategory: { category: points } }: how many points the scores
+ * move from now on.
+ * A category he scored moves by the mean of his differences there, pulled toward zero when they are few
+ * (CALIBRATION_PRIOR: one score moves a third of its difference, five alike about 70%). The categories he never
+ * scored move by `global`, the same mean over everything he scored, pulled harder and counted in full only from
+ * CALIBRATION_WIDE scores on: one score on a pair of shoes says little about headphones. Never more than
+ * CALIBRATION_MAX points.
+ */
+export function calibrationOf(ratings) {
+  const rows = (Array.isArray(ratings) ? ratings : []).filter((r) => r && itFinite(r.user) && itFinite(r.system))
+  const K = INTEREST.CALIBRATION_PRIOR
+  const M = INTEREST.CALIBRATION_MAX
+  const far = (r) => itClamp(r.user - r.system, -40, 40)
+  const round = (x) => Math.round(itClamp(x, -M, M) * 10) / 10
+  const global = rows.length ? (rows.reduce((sum, r) => sum + far(r), 0) / (rows.length + 2 * K)) * Math.min(1, rows.length / INTEREST.CALIBRATION_WIDE) : 0
+  const sums = {}
+  for (const r of rows) {
+    const c = typeof r.category === 'string' && r.category ? r.category : 'altro'
+    sums[c] = sums[c] || { sum: 0, n: 0 }
+    sums[c].sum += far(r)
+    sums[c].n += 1
+  }
+  const byCategory = {}
+  for (const [c, { sum, n }] of Object.entries(sums)) byCategory[c] = round(sum / (n + K))
+  return { n: rows.length, global: round(global), byCategory }
+}
+
+/** The points of `category` in a calibration: its own, or what he says of everything. */
+function calibrationFor(calibration, category) {
+  if (!calibration || typeof calibration !== 'object') return 0
+  const own = calibration.byCategory && calibration.byCategory[category]
+  return itFinite(own) ? own : itFinite(calibration.global) ? calibration.global : 0
 }
 
 /** Best first: the score, then the sure ones before the provisional, then the profit, then the newest. */

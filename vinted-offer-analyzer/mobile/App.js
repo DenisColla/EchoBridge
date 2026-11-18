@@ -682,7 +682,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.18.3', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.19.0', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said
@@ -1812,6 +1812,7 @@ function Main() {
               onVote={(id, vote) => watchEngine.vote(id, vote)}
               onProfile={(next) => watchEngine.setProfile(next)}
               onJudge={() => watchEngine.judgeNow('utente')}
+              onRate={(id, value) => watchEngine.rate(id, value)}
               onFeasibility={runFeasibility}
               onShareLog={shareWatchLog}
             />

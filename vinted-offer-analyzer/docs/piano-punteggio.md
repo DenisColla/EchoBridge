@@ -50,6 +50,14 @@ Sopra la somma:
   prezzo di un pezzo per i suoi pezzi; un lotto di altro tipo, o che non dice quanti pezzi, tiene la stima dell'AI.
 - **Marca molto contraffatta a prezzo sospetto**: 12 punti in meno e l'avviso di verificare.
 
+- **«Da trattare» solo se un'offerta lo rende da comprare** (1.19.0): quando serve più del 40% di sconto, o non c'è
+  un prezzo d'acquisto possibile, il voto resta sotto 55.
+- **Il voto dell'utente** (1.19.0): sugli articoli da 65 l'utente può scrivere il suo. Quell'articolo lo prende; la
+  differenza dal voto del motore sposta i prossimi della stessa categoria (un terzo dopo un voto, circa il 70% dopo
+  cinque concordi, mai più di 12 punti), sempre dentro i tetti qui sopra.
+
+Che cosa vede l'utente (scelte del 18 novembre): la lista mostra **da 55 in su**; da **70** arriva subito la notifica.
+
 Etichette: **85+ affare**, **70+ da comprare**, **55+ da trattare** (c'è scritto a quale offerta diventa da comprare),
 sotto **lascia**. Ogni articolo mostra voto, etichetta e i motivi. Gli articoli sotto i 10–15 € comprati da soli non
 arrivano a 70: lo dicono («vale in lotto»).
@@ -100,7 +108,8 @@ variante, altro). «Il migliore» è il voto più alto entro il massimo, non il 
    Altri mercati dell'usato (Subito, Wallapop), ricerca web per i primi e lista di partenza: *da fare*.
 4. **Caccia con punteggio** — corrispondenza, segnali del +10/15%, il migliore per voto: *nel codice (1.18.0)*.
    Analisi completa dei primi a fine ricerca e venditore solido: *da fare*.
-5. **Taratura** — pesi e soglie dagli esiti dell'utente: *da fare* (i margini vengono già dalle sue dieci scelte).
+5. **Taratura** — il voto dell'utente sposta i voti per categoria: *nel codice (1.19.0)*. Pesi e soglie dagli esiti
+   (acquisti, rivendite): *da fare*; ogni voto dato resta nel profilo con il voto del motore, per rifare i conti.
 
 ## Cosa esiste già nel motore e va riusato
 

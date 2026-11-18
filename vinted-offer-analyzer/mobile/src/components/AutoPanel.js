@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds } from '../../core/index.js'
+import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds } from '../../core/index.js'
 import { space, toneColors as toneOf, useTheme } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Chip, Collapsible, Field, InlineAction, SectionLabel } from './ui.js'
 
@@ -70,7 +70,10 @@ function aiNoteOf(job) {
   }
 }
 
-export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null, onJudge = null }) {
+/** The scores the user may give with one touch. */
+const RATING_STEPS = [40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+
+export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFeed, onStop, onOpen, onClearFinds, onFeasibility, onShareLog, busy = false, background = null, onBattery = null, onVote = null, onProfile = null, onJudge = null, onRate = null }) {
   const t = useTheme()
   const { mode, job, finds, draft, profile } = auto
   const [words, setWords] = useState('')
@@ -86,7 +89,14 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
 
   const maxPrice = parsePrice(maxText)
   const canHunt = Number.isFinite(maxPrice) && maxPrice > 0 && (Boolean(draft) || words.trim().length >= 2)
-  const shown = rankFinds(finds, job && job.kind === 'hunt' ? job : null).slice(0, 60)
+  // The list (the user's choice of 18 November): from 55 up only, best first; the rest on request. What «Svuota»
+  // put away stays away.
+  const [showAll, setShowAll] = useState(false)
+  const [rating, setRating] = useState(null)
+  const ranked = rankFinds(finds.filter((f) => !Number.isFinite(f.hidden)), job && job.kind === 'hunt' ? job : null)
+  const strong = ranked.filter((f) => f.score && f.score.total >= INTEREST.SHOW_MIN)
+  const weak = ranked.length - strong.length
+  const shown = (showAll ? ranked : strong).slice(0, 60)
   const stopped = job && job.stopped
   const scored = finds.filter((f) => f.score).length
   const provisional = finds.filter((f) => f.score && f.score.provisional).length
@@ -173,13 +183,16 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
       ) : null}
 
       <Card>
-        <SectionLabel>Trovati{shown.length ? ` · ${shown.length}` : ''}</SectionLabel>
-        {!shown.length ? <Body small muted>Ancora niente. Avvia una caccia o la vetrina: qui compare quello che trovano.</Body> : null}
-        {shown.length && scored ? <Body small muted>Dal voto più alto: 85 e oltre è un affare, da 70 è da comprare, da 55 vale un'offerta. «Provvisorio» finché il valore non è letto dal mercato.</Body> : null}
+        <SectionLabel>Trovati{shown.length ? ` · ${shown.length}` : ''}{showAll ? '' : ` · da ${INTEREST.SHOW_MIN} in su`}</SectionLabel>
+        {!ranked.length ? <Body small muted>Ancora niente. Avvia una caccia o la vetrina: qui compare quello che trovano da {INTEREST.SHOW_MIN} in su.</Body> : null}
+        {ranked.length && !shown.length ? <Body small muted>Niente da {INTEREST.SHOW_MIN} in su, per ora: {weak === 1 ? 'l\'articolo letto sta' : `i ${weak} articoli letti stanno`} sotto, e non {weak === 1 ? 'vale' : 'valgono'} un'offerta.</Body> : null}
+        {shown.length ? <Body small muted>Dal voto più alto. Da {INTEREST.TELL_MIN} ti avviso subito; tra {INTEREST.SHOW_MIN} e {INTEREST.TELL_MIN - 1} c'è scritta l'offerta che lo rende da comprare. Da {INTEREST.RATE_MIN} puoi dare il tuo voto: sposta i prossimi della stessa categoria.</Body> : null}
         {shown.map((f) => {
           const tone = f.score ? toneOf(t, SCORE_TONE[f.score.label] || 'neutral') : null
+          const canRate = Boolean(onRate) && f.score && (f.score.rated || f.score.total >= INTEREST.RATE_MIN)
           return (
-            <View key={f.id} style={[styles.find, { borderColor: t.line }]}>
+            <View key={f.id} style={{ borderTopWidth: StyleSheet.hairlineWidth, borderColor: t.line }}>
+            <View style={styles.find}>
               {f.score ? (
                 <View style={[styles.score, { backgroundColor: tone.bg }]}>
                   <Text style={{ color: tone.fg, fontWeight: '800', fontSize: 16 }}>{f.score.total}</Text>
@@ -188,7 +201,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
               <Pressable onPress={() => onOpen(f.url)} accessibilityRole="button" style={{ flex: 1, minWidth: 0 }}>
                 <Text numberOfLines={1} style={{ color: t.ink, fontWeight: '600' }}>{f.title || 'Articolo'}</Text>
                 <Text numberOfLines={1} style={{ color: t.ink3, fontSize: 12 }}>
-                  {[f.score ? `${f.score.label}${f.score.provisional && !f.score.unsure ? ' (provvisorio)' : ''}` : null, f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null].filter(Boolean).join(' · ')}
+                  {[f.score ? `${f.score.label}${f.score.rated ? ' (voto tuo)' : f.score.provisional && !f.score.unsure ? ' (provvisorio)' : ''}` : null, f.brand, f.size, f.condition, f.favourites > 0 ? `${f.favourites} ♥` : null, f.boost ? 'boost' : null].filter(Boolean).join(' · ')}
                 </Text>
                 {f.score && f.score.reasons.length ? <Text numberOfLines={3} style={{ color: t.ink2, fontSize: 12 }}>{f.score.reasons.slice(0, 2).join(' · ')}</Text> : null}
                 {f.exceptional || f.tolerancePct || f.eligible === false ? (
@@ -212,9 +225,23 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
                 ) : null}
               </View>
             </View>
+            {canRate ? (
+              <View style={{ paddingBottom: space.sm, gap: space.xs }}>
+                <InlineAction label={f.score.rated ? `Il tuo voto: ${f.score.total} · cambia` : rating === f.id ? 'Che voto gli daresti?' : 'Dai il tuo voto'} tone={f.score.rated ? 'accent' : 'neutral'} onPress={() => setRating(rating === f.id ? null : f.id)} />
+                {rating === f.id ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.xs }}>
+                    {RATING_STEPS.map((n) => <Chip key={n} compact label={String(n)} active={f.score.rated && f.score.total === n} onPress={() => { onRate(f.id, n); setRating(null) }} />)}
+                    {f.score.rated ? <Chip compact label="Togli" active={false} onPress={() => { onRate(f.id, null); setRating(null) }} /> : null}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+            </View>
           )
         })}
-        {shown.length ? <InlineAction label="Svuota i trovati" onPress={onClearFinds} /> : null}
+        {weak ? <InlineAction label={showAll ? `Mostra solo da ${INTEREST.SHOW_MIN} in su` : `Mostra anche ${weak === 1 ? 'quello' : `i ${weak}`} sotto ${INTEREST.SHOW_MIN}`} tone="neutral" onPress={() => setShowAll(!showAll)} /> : null}
+        {ranked.length ? <InlineAction label="Svuota i trovati" onPress={onClearFinds} /> : null}
+        {ranked.length ? <Body small muted>Svuotare non cancella quello che hai insegnato: pollici e voti tuoi restano in memoria e valgono per le prossime ricerche.</Body> : null}
       </Card>
 
       {onProfile ? <InterestsCard key={profile ? 'loaded' : 'empty'} profile={profile} onSave={onProfile} /> : null}
@@ -232,7 +259,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
 
 const styles = StyleSheet.create({
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: space.xs },
-  find: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm, borderTopWidth: StyleSheet.hairlineWidth },
+  find: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm },
   score: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   thumb: { width: 30, height: 26, borderRadius: 8, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
 })

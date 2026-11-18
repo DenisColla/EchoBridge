@@ -185,7 +185,7 @@ async function endJob(reason) {
   await set({ ...base, job })
   if (reason === 'verifica') await notify('Ricerca fermata', 'Vinted chiede una verifica: aprila nella scheda Vinted, poi riavvia la ricerca.')
   if (reason !== 'fine') return
-  const ranked = core.rankFinds(state.finds, job.kind === 'hunt' ? job : null)
+  const ranked = core.rankFinds(shownOf(state.finds), job.kind === 'hunt' ? job : null)
   const voted = (f) => (f.score ? ` · voto ${f.score.total}${f.score.provisional ? ' provvisorio' : ''}` : '')
   if (job.kind === 'hunt') {
     // The best is the highest score within the price, not the cheapest; what is not the product searched is left out.
@@ -199,10 +199,18 @@ async function endJob(reason) {
   }
 }
 
-/** The score of every find with what is known now (no request): after a thumb or a change of the interests. */
+/**
+ * The score of every find with what is known now (no request): after a thumb, a score of the user's or a change of
+ * the interests. What his scores taught (profile.ratings) moves the scores of each category.
+ */
 function rescored(finds, job) {
-  return finds.map((f) => (f.card || f.ref ? { ...f, score: core.interestScore(f, { card: f.card || null, ref: f.ref || null, profile, match: job && job.kind === 'hunt' && f.card ? f.card.match : null }) } : f))
+  const calibration = core.calibrationOf(profile ? profile.ratings : null)
+  return finds.map((f) => (f.card || f.ref || Number.isFinite(f.rated)
+    ? { ...f, score: core.interestScore(f, { card: f.card || null, ref: f.ref || null, profile, match: job && job.kind === 'hunt' && f.card ? f.card.match : null, calibration }) }
+    : f))
 }
+/** What the list shows: not what the user emptied away (it comes back only if its price goes down). */
+const shownOf = (finds) => finds.filter((f) => !Number.isFinite(f.hidden))
 
 /**
  * The judgement: cards, references, scores, and the notification of an «affare». `t0`: when the reading started.
@@ -290,9 +298,13 @@ async function judge(t0, { lookups = true, source = null } = {}) {
   note.senza_scheda = finds.filter((f) => !f.card).length
   note.ms = Date.now() - began
   const told = now.job.told || []
-  // An «affare» whose value was read from the market is told at once, each article once.
-  const deals = finds.filter((f) => f.score && f.score.total >= 85 && !f.score.provisional && !told.includes(f.id) && !(job.kind === 'hunt' && Number.isFinite(job.maxPrice) && f.price > job.maxPrice * 1.15))
-    .sort((a, b) => b.score.total - a.score.total).slice(0, 2)
+  // From 70 up («da comprare», «affare») an article is told at once, each once (the user's choice of 18 November).
+  // A value only the AI estimated is told when the market has nothing more to say: searched already, or a hunt
+  // (its market is its own results), or an article that cannot be searched; else its search comes first.
+  const settled = (f) => !f.score.provisional || job.kind === 'hunt' || f.refTried || !f.card || !f.card.words.length || f.card.confidence < 0.5 || !core.lotOf(f, f.card).comparable
+  const deals = finds.filter((f) => f.score && f.score.total >= core.INTEREST.TELL_MIN && !f.score.rated && !Number.isFinite(f.hidden) && !told.includes(f.id) && settled(f)
+    && !(job.kind === 'hunt' && Number.isFinite(job.maxPrice) && f.price > job.maxPrice * 1.15))
+    .sort((a, b) => b.score.total - a.score.total).slice(0, 3)
   const next = { ...now.job, aiCost: Math.round(spent * 10000) / 10000, ai, aiDetail, told: [...told, ...deals.map((f) => f.id)] }
   const last = now.log[now.log.length - 1]
   const line = { quando: new Date().toISOString(), innesco: source, solo_giudizio: true, giudizio: note }
@@ -303,7 +315,10 @@ async function judge(t0, { lookups = true, source = null } = {}) {
       : last ? [...now.log.slice(0, -1), { ...last, giudizio: note }] : now.log
   // Saved before anything else is waited for: nothing the user does meanwhile is written over.
   await set({ ...now, job: next, finds, log })
-  for (const f of deals) await notify(`Affare (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`, `${f.score.reasons[0] || ''}. Tocca per aprirlo.`, f.url)
+  for (const f of deals) {
+    await notify(`${f.score.total >= 85 ? 'Affare' : 'Da comprare'} (voto ${f.score.total}): ${f.title || 'articolo'} a ${euro(f.price)}`,
+      `${f.score.reasons[0] || ''}.${f.score.provisional ? ' Valore stimato dall\'AI, non letto dal mercato.' : ''} Tocca per aprirlo.`, f.url)
+  }
 }
 
 /** One judgement at a time: the one of a reading and one asked with no reading wait for each other. Never throws. */
@@ -470,7 +485,13 @@ async function tick(source = 'timer') {
     let { finds } = base
     if (cards) {
       const merged = core.mergeFinds(base.finds, cards, { at: now, source: job.kind, origin: ORIGIN })
-      finds = merged.finds
+      // What the user emptied away comes back only if it costs less than when he did.
+      finds = merged.finds.map((f) => {
+        if (!Number.isFinite(f.hidden) || !(f.price < f.hidden - 0.005)) return f
+        const back = { ...f }
+        delete back.hidden
+        return back
+      })
       entry.nuovi = merged.fresh.length
     }
     const next = { ...base.job, reads: (base.job.reads || 0) + 1, lastReadAt: now, told: base.job.told || [], waiting: null }
@@ -557,9 +578,15 @@ export const watchEngine = {
     await load()
     return set({ ...state, mode: 'semi', draft })
   },
+  /**
+   * «Svuota i trovati»: the list is emptied. While a job runs its articles are kept out of sight (with the price
+   * they had), so that the next reading does not bring them back; with no job running they are forgotten. What the
+   * thumbs and the user's scores taught is in the profile, and stays.
+   */
   async clearFinds() {
     await load()
-    return set({ ...state, finds: [] })
+    const running = core.jobActive(state.job)
+    return set({ ...state, finds: running ? state.finds.map((f) => (Number.isFinite(f.hidden) ? f : { ...f, hidden: f.price })) : [] })
   },
   /** A new job, with its own list and its own diary; its first reading happens at once. */
   async startJob(job) {
@@ -592,6 +619,28 @@ export const watchEngine = {
     const finds = state.finds.map((f) => (f.id === id ? { ...f, vote: vote || undefined } : f))
     return set({ ...state, finds: rescored(finds, state.job) })
   },
+  /**
+   * The score the user gives to a find (0–100, or null to take it back): the article takes it at once, and the
+   * difference from the engine's own score is kept in the profile, where it moves the scores of that category.
+   */
+  async rate(id, value) {
+    await load()
+    const target = state.finds.find((f) => f.id === id)
+    if (!target || !target.score) return null
+    const given = Number.isFinite(value) ? Math.round(Math.max(0, Math.min(100, value))) : null
+    const others = (profile && Array.isArray(profile.ratings) ? profile.ratings : []).filter((r) => r.id !== String(id))
+    const card = target.card || null
+    const mine = given === null ? [] : [{ id: String(id), at: Date.now(), category: (card && card.category) || 'altro', brand: (card && card.brand) || target.brand || '', system: Number.isFinite(target.score.base) ? target.score.base : target.score.total, user: given, price: target.price }]
+    profile = await saveProfile({ ratings: [...others, ...mine] })
+    const finds = state.finds.map((f) => {
+      if (f.id !== id) return f
+      const next = { ...f }
+      if (given === null) delete next.rated
+      else next.rated = given
+      return next
+    })
+    return set({ ...state, finds: rescored(finds, state.job) })
+  },
   tick,
   resume,
   judgeNow,
@@ -609,6 +658,12 @@ export const watchEngine = {
       sveglie: alarm ? { esatte: alarm.exact, impostata_per: iso(alarm.scheduledAt), ultima_suonata: iso(alarm.firedAt), ultima_lettura_avviata: iso(alarm.tickAt), errore: alarm.error || null, errore_alle: iso(alarm.errorAt) } : null,
       batteria_senza_restrizioni: vintedBridge.isBatteryUnrestricted(),
       trovati: finds.length,
+      nascosti_da_svuota: finds.filter((f) => Number.isFinite(f.hidden)).length,
+      da_55_in_su: shownOf(finds).filter((f) => f.score && f.score.total >= core.INTEREST.SHOW_MIN).length,
+      taratura: (() => {
+        const c = core.calibrationOf(profile ? profile.ratings : null)
+        return { voti_tuoi: c.n, punti_in_generale: c.global, punti_per_categoria: c.byCategory }
+      })(),
       senza_scheda: finds.filter((f) => !f.card).length,
       in_attesa_della_scheda: waitingOf(finds).length,
       voti: {
@@ -616,8 +671,9 @@ export const watchEngine = {
         affare: finds.filter((f) => f.score && f.score.total >= 85).length, da_comprare: finds.filter((f) => f.score && f.score.total >= 70 && f.score.total < 85).length,
         da_trattare: finds.filter((f) => f.score && f.score.total >= 55 && f.score.total < 70).length,
       },
-      primi: core.rankFinds(finds, job && job.kind === 'hunt' ? job : null).slice(0, 8).map((f) => ({
-        titolo: f.title, prezzo: f.price, voto: f.score ? f.score.total : null, etichetta: f.score ? f.score.label : null, provvisorio: f.score ? f.score.provisional : null,
+      primi: core.rankFinds(shownOf(finds), job && job.kind === 'hunt' ? job : null).slice(0, 8).map((f) => ({
+        titolo: f.title, prezzo: f.price, voto: f.score ? f.score.total : null, voto_del_motore: f.score && f.score.base !== f.score.total ? f.score.base : undefined, voto_tuo: Number.isFinite(f.rated) ? f.rated : undefined,
+        etichetta: f.score ? f.score.label : null, provvisorio: f.score ? f.score.provisional : null,
         categoria: f.card ? f.card.category : null, pezzi: f.card ? core.lotOf(f, f.card).pieces : null, stima_ai: f.card ? [f.card.usedLow, f.card.usedHigh] : null, fiducia: f.card ? f.card.confidence : null,
         riferimento: f.ref ? { valore: f.ref.value, da: f.ref.source, annunci: f.ref.n } : null, motivi: f.score ? f.score.reasons : null,
       })),
