@@ -696,7 +696,7 @@ function Main() {
   const runFeasibility = async () => {
     if (autoBusy) return
     setAutoBusy(true)
-    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.21.0', prove: [] }
+    const out = { quando: new Date().toISOString(), piattaforma: Platform.OS, versione: '1.21.1', prove: [] }
     const timed = async (prova, fn) => {
       const t = Date.now()
       let said

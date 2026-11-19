@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   WATCH, cardsFromHtml, detectVintedChallenge, detectVintedSessionRefresh, favouritesOfCard, findFromCard, jobActive, jobEndsAt, mergeFinds, nextRefreshDelayMs, parseVintedCatalog,
-  rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport, sourcesFor, toleranceFor, waitMatchOf, yieldVerdictOf,
+  homeYield, rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport, sourcesFor, toleranceFor, waitMatchOf, yieldVerdictOf,
 } from '../src/core/index.js'
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
@@ -254,4 +254,20 @@ test('watch: ideas of searches come from what he liked, and never repeat what he
   assert.deepEqual(searchIdeasOf({ finds: [find(1, { score: { total: 90 }, card: { brand: 'Libri', model: '', category: 'libri' } })] }), [])
   assert.deepEqual(searchIdeasOf(), [])
   assert.equal(searchIdeasOf({ finds, history, max: 2 }).length, 2)
+})
+
+test('watch: a comic suggests its author, and the home has its own count (1.21.1)', () => {
+  // The diary of 19 November: three comics from 90, no brand on any, and the ideas were a pair of earphones and a shop.
+  const comic = (id, title, total, author) => ({ id: String(id), title, price: 10, score: { total }, card: { brand: '', author, model: title, category: 'fumetti_manga' } })
+  const ideas = searchIdeasOf({ finds: [comic(1, 'Extremity', 90, 'Daniel Warren Johnson'), comic(2, 'Corpicino', 70, 'Tuono Pettinato'), comic(3, 'Vermis 2', 97, ''), comic(4, 'Polina', 40, 'Bastien Vivès')], following: ['Will Eisner contratto con Dio'] })
+  assert.deepEqual(ideas.map((i) => i.label), ['Daniel Warren Johnson', 'Tuono Pettinato'])
+  const history = [
+    { tipo: 'feed', resa: [{ fonte: 'Will Eisner', articoli: 64, da_55: 2, da_70: 2 }] },
+    { tipo: 'feed', resa: [{ fonte: 'home', articoli: 64, da_55: 2, da_70: 1 }] },
+    { tipo: 'feed', resa: [{ fonte: 'home', articoli: 100, da_55: 6, da_70: 4 }] },
+  ]
+  assert.deepEqual(homeYield(history), { articoli: 164, da_55: 8, da_70: 5, lavori: 2 })
+  assert.deepEqual(homeYield(history, [{ fonte: 'home', articoli: 10, da_55: 1, da_70: 0 }]), { articoli: 174, da_55: 9, da_70: 5, lavori: 3 })
+  assert.equal(homeYield([{ tipo: 'feed', resa: [{ fonte: 'zerocalcare', articoli: 5, da_55: 0, da_70: 0 }] }]), null)
+  assert.equal(homeYield(null), null)
 })

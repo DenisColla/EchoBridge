@@ -92,6 +92,8 @@ export const INTEREST = Object.freeze({
    *  estimate, not a measure (1.20.2: a book at 15 € against 35 € was underlined in pen, and the score did not say). */
   DEFECT_CUT: 0.12,
   DEFECT_CUT_MAX: 0.3,
+  /** One the seller calls slight («lieve piega», «riga sottile») cuts less (1.21.1: two of them took 24% off a book). */
+  DEFECT_CUT_LIGHT: 0.05,
   /** His scores move those of a category by this much at most, and count as if this many neutral ones came before. */
   CALIBRATION_MAX: 12,
   CALIBRATION_PRIOR: 2,
@@ -119,6 +121,8 @@ const itWords = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[
   // «12kg» and «12 kg» are the same two words.
   .replace(/(\d)(kg|gr|g|cm|mm|ml|cl|lt|l|gb|tb|mah)\b/g, '$1 $2').split(/[^a-z0-9]+/).filter(Boolean)
 const itEuro = (v) => `${(Math.round(v * 100) / 100).toLocaleString('it-IT', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 })} €`
+/** A defect said to be slight. */
+const IT_LIGHT = /\b(liev[ei]|lievemente|legger[oaie]|leggermente|piccol[oaie]|piccolissim[oaie]|minim[oaie]|sottil[ei]|appena|quasi invisibil[ei]|impercettibil[ei])\b/i
 const IT_BROKEN = /\b(rott[oaie]|non funziona\w*|difett\w+|per ricambi|da riparare|guast[oaie]|crep[ao]t?\w*|scheggiat\w+|schermo rotto|non si accende)\b/i
 const IT_ACCESSORY = ['cover', 'custodia', 'pellicola', 'cavo', 'caricatore', 'ricambio', 'ricambi', 'adesivo', 'skin', 'cinturino', 'scatola vuota', 'solo scatola', 'vetro temperato']
 const IT_LOT = /\b(lotto|stock|bundle|set di \d+|\d+ pezzi|\d+ libri|\d+ volumi)\b/i
@@ -137,6 +141,7 @@ export const INTEREST_SCHEMA = {
           categoria: { type: 'string', enum: INTEREST_CATEGORIES },
           tipo: { type: 'string' },
           marca: { type: 'string' },
+          autore: { type: 'string' },
           modello: { type: 'string' },
           variante: { type: 'string' },
           cerca: { type: 'string' },
@@ -151,7 +156,7 @@ export const INTEREST_SCHEMA = {
           rischi: { type: 'array', items: { type: 'string', enum: INTEREST_RISKS } },
           corrisponde: { type: 'string', enum: ['si', 'variante', 'no', 'nd'] },
         },
-        required: ['id', 'categoria', 'tipo', 'marca', 'modello', 'variante', 'cerca', 'parole', 'difetti', 'pezzi', 'peso_kg', 'nuovo', 'usato_min', 'usato_max', 'fiducia', 'rischi', 'corrisponde'],
+        required: ['id', 'categoria', 'tipo', 'marca', 'autore', 'modello', 'variante', 'cerca', 'parole', 'difetti', 'pezzi', 'peso_kg', 'nuovo', 'usato_min', 'usato_max', 'fiducia', 'rischi', 'corrisponde'],
         additionalProperties: false,
       },
     },
@@ -164,6 +169,7 @@ const INTEREST_SYSTEM = [
   'Sei un perito dell\'usato in Italia: valuti annunci di Vinted per chi compra per rivendere.',
   'Per ogni annuncio ricevi id, titolo, marca, taglia, condizioni dichiarate e prezzo. Compili una scheda per ciascuno, con lo stesso id.',
   'Identità: usa solo ciò che c\'è nel testo. categoria: una delle voci ammesse (un manga, un fumetto o una graphic novel sono "fumetti_manga" anche quando il titolo non lo dice). tipo: che cos\'è, in 1-3 parole (es. "smartphone", "cuffie over-ear", "graphic novel", "piumino"). marca, modello, variante (memoria, taglia, edizione, volume, colore): stringa vuota se non ci sono; non inventare modelli.',
+  'autore: per libri, fumetti e manga, l\'autore principale (nome e cognome) se è scritto nell\'annuncio o se lo conosci con certezza; stringa vuota in ogni altro caso e per le altre categorie.',
   'cerca: 2-5 parole per trovare lo stesso prodotto su Vinted, senza aggettivi né condizioni. parole: 1-3 parole minuscole che un annuncio dello stesso prodotto deve contenere: quelle che lo distinguono dagli altri della stessa marca o serie (il titolo, il modello), mai il tipo di oggetto né il colore. Esempi: ["s25","ultra"], ["1000xm5"], ["persepolis"]; per «Corto Maltese. Una ballata del mare salato» ["ballata","salato"] e non ["corto","maltese"]; per «Maglione SuitSupply merino» ["suitsupply","merino"] e non ["maglione"].',
   'Se il titolo nomina solo la serie, l\'autore o la marca senza dire quale volume o modello («Corto Maltese», «Fumetto», «Manubri»), il rischio è "non_identificato" e la fiducia bassa.',
   'difetti: difetti o mancanze dichiarati nel titolo (lista vuota se nessuno). pezzi: quanti articoli sono venduti insieme (1 se uno solo; "1-4", "vol. 1 2 3", "lotto di 5 libri", "serie completa" sono più pezzi: se il numero non è scritto, stimalo). peso_kg: il peso stimato del pacco in chili, per tutti i pezzi (0 se non sai stimarlo).',
@@ -223,9 +229,9 @@ export function cleanInterestCards(value, items) {
     const match = itText(raw.corrisponde, 12).toLowerCase().replace('sì', 'si')
     out[id] = {
       category: INTEREST_CATEGORIES.includes(raw.categoria) ? raw.categoria : 'altro',
-      kind: itText(raw.tipo, 40), brand: itText(raw.marca, 40), model: itText(raw.modello, 60), variant: itText(raw.variante, 40),
+      kind: itText(raw.tipo, 40), brand: itText(raw.marca, 40), author: itText(raw.autore, 40), model: itText(raw.modello, 60), variant: itText(raw.variante, 40),
       query: itText(raw.cerca, 60), words: itList(raw.parole).map((w) => itWords(w).join(' ')).filter(Boolean).slice(0, 3),
-      defects: itList(raw.difetti).map((d) => itText(d, 40)).filter(Boolean).slice(0, 4),
+      defects: itList(raw.difetti).map((d) => itText(d, 60)).filter(Boolean).slice(0, 4),
       pieces: pieces > 1 && pieces < 200 ? pieces : 1,
       weightKg: itFinite(weight) && weight > 0 && weight < 100 ? itR2(weight) : 0,
       newPrice: itMoney(raw.nuovo), usedLow: lo && hi ? Math.min(lo, hi) : lo || hi, usedHigh: lo && hi ? Math.max(lo, hi) : hi || lo,
@@ -526,7 +532,7 @@ export function interestScore(find, { card = null, ref = null, profile = null, m
   const known = ref && itFinite(ref.value) && ref.value > 0 && itFinite(price) && price > 0
   // What the seller declares as defects: the AI's own estimate has read them already, the market's listings have not.
   const defects = card && !broken && Array.isArray(card.defects) ? card.defects : []
-  const cut = known && ref.source === 'market' && defects.length ? Math.min(INTEREST.DEFECT_CUT_MAX, INTEREST.DEFECT_CUT * defects.length) : 0
+  const cut = known && ref.source === 'market' && defects.length ? itR2(Math.min(INTEREST.DEFECT_CUT_MAX, defects.reduce((sum, d) => sum + (IT_LIGHT.test(d) ? INTEREST.DEFECT_CUT_LIGHT : INTEREST.DEFECT_CUT), 0))) : 0
   const worth = known ? itR2(ref.value * (1 - cut)) : null
   // What the same thing sells for at most: the middle of the market, or the top of the AI's range.
   const usual = !known ? null : ref.source === 'market' ? ref.median : card && itFinite(card.usedHigh) && card.usedHigh > 0 ? card.usedHigh : ref.value / INTEREST.AI_PRUDENCE

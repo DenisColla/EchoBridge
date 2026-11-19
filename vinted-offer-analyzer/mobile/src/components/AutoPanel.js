@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport } from '../../core/index.js'
+import { INTEREST, INTEREST_CATEGORIES, INTEREST_CATEGORY_LABELS, WATCH, formatEuro, jobActive, jobEndsAt, parsePrice, homeYield, rankFinds, searchAdviceOf, searchIdeasOf, searchLineOf, searchYields, sourceReport } from '../../core/index.js'
 import { space, toneColors as toneOf, useTheme } from '../theme.js'
 import { Body, Button, ButtonRow, Card, Chip, Collapsible, Field, InlineAction, SectionLabel } from './ui.js'
 
@@ -151,6 +151,10 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
   const report = sourceReport(finds).filter((r) => r.articoli > 0)
   const news = isNews(job)
   const yields = searchYields(auto.history, news && !job.stopped ? report : null)
+  // The same count for the home, and for the searches all together: to see which of the two pays.
+  const home = homeYield(auto.history, job && job.kind === 'feed' && !news && !job.stopped ? report : null)
+  const allSearches = Object.values(yields).reduce((sum, y) => ({ articoli: sum.articoli + y.articoli, da_55: sum.da_55 + y.da_55, da_70: sum.da_70 + y.da_70 }), { articoli: 0, da_55: 0, da_70: 0 })
+  const tally = (y) => `${y.da_55} da ${INTEREST.SHOW_MIN} su ${y.articoli} letti${y.da_70 ? ` (${y.da_70} da ${INTEREST.TELL_MIN})` : ''}`
   const lineOf = (label) => searchLineOf(label, yields[keyOf(label)], { showMin: INTEREST.SHOW_MIN, tellMin: INTEREST.TELL_MIN })
   const ideas = searchIdeasOf({ finds, waits, likes: profile ? profile.likes : null, history: auto.history, following: searches, tellMin: INTEREST.TELL_MIN })
   const others = report.filter((r) => !news || !job.sources.some((x) => keyOf(x.label) === keyOf(r.fonte)))
@@ -226,6 +230,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           {what === 'news' ? (
             <View style={{ gap: space.sm }}>
               <Body small muted>Per {WATCH.FEED_HOURS} ore leggo le tue ricerche dal più recente, una per volta: un annuncio lo vedi appena pubblicato.</Body>
+              {home && home.articoli && allSearches.articoli ? <Body small muted>Finora le ricerche: {tally(allSearches)}. La home: {tally(home)}.</Body> : null}
               {followed.map((label) => <SearchRow key={label} label={label} line={lineOf(label)} onRemove={() => change(searches.filter((w) => w !== label))} />)}
               {searches.length > followed.length ? <Body small muted>Seguo le prime {WATCH.ROTATION_MAX}: le altre {searches.length - followed.length} contano solo come interessi.</Body> : null}
               {!followed.length ? <Body small muted>Rende una marca, un autore o un modello: «zerocalcare», «lego star wars», «nintendo switch oled». Un tipo di oggetto («maglia», «dischi») no: non ha un prezzo di rivendita con cui confrontare.</Body> : null}
@@ -267,6 +272,7 @@ export function AutoPanel({ auto, nextAt = null, onMode, onStartHunt, onStartFee
           {what === 'home' ? (
             <View style={{ gap: space.sm }}>
               <Body small muted>Per {WATCH.FEED_HOURS} ore rileggo la tua home di Vinted: a ogni lettura una decina di articoli scelti da Vinted per te.</Body>
+              {home && home.articoli ? <Body small muted>Finora la home: {tally(home)}{allSearches.articoli ? `. Le ricerche: ${tally(allSearches)}` : ''}.</Body> : null}
               <ButtonRow>
                 <Button label={`Avvia per ${WATCH.FEED_HOURS} ore`} small disabled={busy} onPress={onStartFeed} />
               </ButtonRow>

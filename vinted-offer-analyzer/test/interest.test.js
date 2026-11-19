@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  INTEREST, aiReferenceOf, buyPriceFor, calibrationOf, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, listingFactsOf, lookupCouldMatter,
+  INTEREST, INTEREST_SCHEMA, aiReferenceOf, buyPriceFor, calibrationOf, cleanInterestCards, comparablesOf, interestPrompt, interestScore, learnFromVote, listingFactsOf, lookupCouldMatter,
   lookupWorthOf, lotOf, marketReferenceOf, parseVintedItemHtml, pertinenceOf, rankByInterest, referenceAmong, requiredMarginFor, seriesPiecesOf,
 } from '../src/core/index.js'
 import { readFileSync } from 'node:fs'
@@ -520,4 +520,19 @@ test('a declared defect is said in the reasons and lowers what the market says i
   const guessed = interestScore(book, { card: card('fumetti_manga', { defects: ['macchia in copertina'], usedLow: 18, usedHigh: 25 }), ref: guess })
   assert.equal(guessed.margin.resale, 20)
   assert.ok(guessed.reasons.includes('Difetti dichiarati: macchia in copertina'))
+})
+
+test('a defect the seller calls slight cuts less, and the author is kept on the card (1.21.1)', () => {
+  // The diary of 19 November: «Corpicino» at 15 € against 5 listings at 70 €, with two slight defects: −24%.
+  const book = find(15, { title: 'Corpicino - Tuono Pettinato' })
+  const ref = { value: 70, median: 70, n: 12, source: 'market' }
+  const slight = interestScore(book, { card: card('fumetti_manga', { defects: ["lieve piega sull'angolo sinistro in basso", 'riga sottile sul retro della copertina'] }), ref })
+  assert.equal(slight.margin.resale, 63)
+  assert.match(slight.reasons[0], /63 € \(12 annunci a 70 €, −10% difetti\)/)
+  const mixed = interestScore(book, { card: card('fumetti_manga', { defects: ['sottolineature a penna', 'piccola macchia'] }), ref })
+  assert.equal(mixed.margin.resale, 58.1)
+  const cards = cleanInterestCards({ items: [{ id: '1', categoria: 'fumetti_manga', tipo: 'graphic novel', marca: '', autore: ' Tuono  Pettinato ', modello: 'Corpicino', variante: '', cerca: 'corpicino tuono pettinato', parole: ['corpicino'], difetti: ["lieve piega sull'angolo sinistro in basso, vicino al dorso"], pezzi: 1, peso_kg: 0.5, nuovo: 16, usato_min: 8, usato_max: 13, fiducia: 0.7, rischi: [], corrisponde: 'nd' }] }, [{ id: '1' }])
+  assert.equal(cards['1'].author, 'Tuono Pettinato')
+  assert.equal(cards['1'].defects[0], "lieve piega sull'angolo sinistro in basso, vicino al dorso")
+  assert.ok(INTEREST_SCHEMA.properties.items.items.required.includes('autore'))
 })

@@ -947,7 +947,7 @@ export const watchEngine = {
         etichetta: f.score ? f.score.label : null, provvisorio: f.score ? f.score.provisional : null,
         categoria: f.card ? f.card.category : null, pezzi: f.card ? core.lotOf(f, f.card).pieces : null, stima_ai: f.card ? [f.card.usedLow, f.card.usedHigh] : null, fiducia: f.card ? f.card.confidence : null,
         riferimento: f.ref ? { valore: f.ref.value, da: f.ref.source, annunci: f.ref.n } : null, motivi: f.score ? f.score.reasons : null,
-        fonte: f.from || undefined, annuncio_letto: Boolean(f.page), venditore: f.score ? f.score.seller || undefined : undefined, seconda_scheda: f.card && f.card.deep ? true : undefined, difetti: f.card && f.card.defects && f.card.defects.length ? f.card.defects : undefined,
+        fonte: f.from || undefined, annuncio_letto: Boolean(f.page), venditore: f.score ? f.score.seller || undefined : undefined, seconda_scheda: f.card && f.card.deep ? true : undefined, difetti: f.card && f.card.defects && f.card.defects.length ? f.card.defects : undefined, autore: f.card && f.card.author ? f.card.author : undefined,
       })),
       letture: log,
     }

@@ -326,6 +326,26 @@ export function searchYields(history, live = null) {
   return out
 }
 
+/**
+ * What the home brought over the same jobs: { articoli, da_55, da_70, lavori }, or null when it was never read. To
+ * compare with the searches followed: for some users Vinted's own choice pays more than their words.
+ */
+export function homeYield(history, live = null) {
+  const out = { articoli: 0, da_55: 0, da_70: 0, lavori: 0 }
+  const add = (rows) => {
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (!r || wtKey(r.fonte) !== 'home') continue
+      out.articoli += wtFinite(r.articoli) ? r.articoli : 0
+      out.da_55 += wtFinite(r.da_55) ? r.da_55 : 0
+      out.da_70 += wtFinite(r.da_70) ? r.da_70 : 0
+      out.lavori += 1
+    }
+  }
+  for (const h of Array.isArray(history) ? history : []) if (h) add(h.resa)
+  add(live)
+  return out.lavori ? out : null
+}
+
 /** A search's yield in a word: 'buona' | 'scarsa' | 'nulla', or null when too little was read to say. */
 export function yieldVerdictOf(y) {
   if (!y || !wtFinite(y.articoli) || y.articoli < SEARCHES.YIELD_MIN) return null
@@ -354,7 +374,7 @@ const WT_BY_MODEL = ['telefoni', 'console_giochi', 'audio', 'informatica', 'elet
 /**
  * Searches worth following that the user does not follow yet: [{ label, why }], the first `max`.
  * - one that paid in a past job and is not followed any more;
- * - the brand (the author, for books and comics) of what he liked: a thumb up, a score of his own or of the engine
+ * - the author (books, comics) or the brand of what he liked: a thumb up, a score of his own or of the engine
  *   from `tellMin`. Where a brand alone is too wide (phones, clothes) the model goes with it;
  * - a brand that took two thumbs up more than down.
  * Nothing that names only a kind of thing, and nothing that a followed search already covers.
@@ -379,7 +399,9 @@ export function searchIdeasOf({ finds = [], waits = [], likes = null, history = 
     .sort((a, b) => Number(b.vote === 1) - Number(a.vote === 1) || wtScore(b) - wtScore(a))
   for (const f of liked) {
     const card = f.card || {}
-    const brand = String(card.brand || f.brand || '').trim()
+    // For a book or a comic the name to follow is its author's (1.21.1: with the brand alone, three comics from 90
+    // suggested nothing).
+    const brand = String(card.author || card.brand || f.brand || '').trim()
     if (!brand) continue
     const model = String(card.model || '').trim()
     const title = String(f.title || '').slice(0, 30)
