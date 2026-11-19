@@ -1,0 +1,143 @@
+package expo.modules.vintedbridge
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.core.os.bundleOf
+import expo.modules.kotlin.Promise
+import expo.modules.kotlin.modules.Module
+import expo.modules.kotlin.modules.ModuleDefinition
+import java.lang.ref.WeakReference
+
+/**
+ * JS bridge: whether the notification access is granted, the settings screen that grants it, the queue of Vinted's
+ * notifications, and the text shared into the app from Vinted's «Condividi».
+ */
+class VintedBridgeModule : Module() {
+  private var lastSharedKey: String? = null
+
+  private val context: Context
+    get() = requireNotNull(appContext.reactContext) { "React context lost" }
+
+  private fun sharedTextOf(intent: Intent?): String? {
+    if (intent == null || intent.action != Intent.ACTION_SEND) return null
+    val type = intent.type ?: return null
+    if (!type.startsWith("text/")) return null
+    return intent.getStringExtra(Intent.EXTRA_TEXT)
+  }
+
+  override fun definition() = ModuleDefinition {
+    Name("VintedBridge")
+
+    Events("onVintedNotification", "onSharedText")
+
+    Function("isListenerEnabled") {
+      val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: ""
+      val mine = ComponentName(context, VintedNotificationService::class.java)
+      flat.split(":").any { ComponentName.unflattenFromString(it) == mine }
+    }
+
+    Function("openListenerSettings") {
+      val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      context.startActivity(intent)
+      true
+    }
+
+    Function("openAppSettings") {
+      val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + context.packageName)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      context.startActivity(intent)
+      true
+    }
+
+    Function("readEvents") {
+      VintedNotificationService.readQueue(context)
+    }
+
+    Function("clearEvents") { upTo: Double ->
+      VintedNotificationService.clearQueue(context, upTo)
+      true
+    }
+
+    // 1.17: the readings of a hunt are started by Android's alarm clock (WatchAlarms.kt). Every call answers instead
+    // of failing.
+    Function("scheduleWatchAlarm") { atMs: Double ->
+      WatchAlarms.schedule(context, atMs.toLong())
+    }
+
+    Function("cancelWatchAlarm") {
+      WatchAlarms.cancel(context)
+      true
+    }
+
+    Function("watchAlarmInfo") {
+      WatchAlarms.info(context)
+    }
+
+    Function("showWatchStatus") { title: String, text: String ->
+      WatchAlarms.showStatus(context, title, text)
+    }
+
+    Function("hideWatchStatus") {
+      WatchAlarms.hideStatus(context)
+      true
+    }
+
+    // 1.18.3: Vinted's «Session refresh» page opened in a browser with no screen until it has renewed the session
+    // (SessionRenewal.kt). Resolves with how it went; it never rejects.
+    AsyncFunction("renewSession") { url: String, timeoutMs: Double, promise: Promise ->
+      val app = appContext.reactContext?.applicationContext
+      if (app == null || !SessionRenewal.isVinted(url)) {
+        promise.resolve(mapOf("ok" to false, "outcome" to "errore", "error" to if (app == null) "no context" else "not a Vinted page"))
+      } else {
+        Handler(Looper.getMainLooper()).post {
+          try {
+            SessionRenewal.run(app, url, timeoutMs.toLong().coerceIn(5_000L, 90_000L)) { result -> promise.resolve(result) }
+          } catch (e: Throwable) {
+            promise.resolve(mapOf("ok" to false, "outcome" to "errore", "error" to (e.message ?: "errore")))
+          }
+        }
+      }
+    }
+
+    // Whether Android lets the app work without battery restrictions («Senza restrizioni»).
+    Function("isBatteryUnrestricted") {
+      try {
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
+      } catch (e: Throwable) {
+        false
+      }
+    }
+
+    // The text of a «Condividi» that opened the app, once: the same intent is not handed out twice.
+    Function("getSharedText") {
+      val intent = appContext.currentActivity?.intent
+      val text = sharedTextOf(intent)
+      val key = if (text != null) text + "|" + (intent?.getLongExtra("ovt_seen", 0L) ?: 0L) + "|" + System.identityHashCode(intent) else null
+      if (text == null || key == lastSharedKey) null else {
+        lastSharedKey = key
+        text
+      }
+    }
+
+    OnNewIntent { intent ->
+      val text = sharedTextOf(intent)
+      if (text != null) {
+        lastSharedKey = text + "|0|" + System.identityHashCode(intent)
+        sendEvent("onSharedText", bundleOf("text" to text))
+      }
+    }
+
+    OnStartObserving("onVintedNotification") {
+      val weak = WeakReference(this@VintedBridgeModule)
+      VintedNotificationService.onEvent = { json -> weak.get()?.sendEvent("onVintedNotification", bundleOf("event" to json)) }
+    }
+
+    OnStopObserving("onVintedNotification") {
+      VintedNotificationService.onEvent = null
+    }
+  }
+}

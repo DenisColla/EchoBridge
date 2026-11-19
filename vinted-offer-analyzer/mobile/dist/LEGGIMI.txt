@@ -1,0 +1,2 @@
+OffertaVintedTiming-arm64.apk: APK gia' compilato (solo arm64, i telefoni degli ultimi anni). Copialo sul telefono e aprilo.
+OffertaVintedTiming.apk: versione universale (tutte le architetture) prodotta da start.bat.

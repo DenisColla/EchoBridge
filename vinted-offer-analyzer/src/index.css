@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Layout: mobile-first single column, two columns from lg. Colours live in src/theme.js as Tailwind classes. */
+@theme {
+  --font-sans: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

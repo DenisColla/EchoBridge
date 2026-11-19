@@ -1,0 +1,41 @@
+{
+  "_note": "RECONSTRUCTED fixture (not a captured page): shape from open-source parsers of 2025-2026 (fredy, subito-cli, mcp-server-subito, RSS-Bridge) and a real hades ad of 2024-11; values partly real, partly invented. Replace with a capture from the phone when available.",
+  "props": { "pageProps": { "pageName": "listing", "initialState": { "items": {
+    "total": 4,
+    "list": [
+      { "item": { "kind": "AdItem", "urn": "id:ad:d54c9dfd-3564-4754-a83b-f84df9fdb650:list:577096643", "type": { "key": "s", "value": "In vendita" },
+        "category": { "id": "44", "label": "Console e Videogiochi", "friendlyName": "videogiochi" },
+        "subject": "Mario Kart 8 Deluxe Nintendo Switch", "body": "Vendo cartuccia gioco originale Mario kart 8 Deluxe per Nintendo Switch. Sprovvista di scatola.",
+        "date": "2024-11-07 21:29:10",
+        "images": [{ "cdnBaseUrl": "https://images.sbito.it/api/v1/sbt-ads-images-pro/images/29/2966833a-ec9c-4384-977f-80dbbddd51ee" }],
+        "features": {
+          "/price": { "uri": "/price", "values": [{ "key": "30", "value": "30 €" }] },
+          "/item_condition": { "uri": "/item_condition", "values": [{ "key": "40", "value": "Buono - usato ma ben conservato" }] },
+          "/item_shippable": { "uri": "/item_shippable", "values": [{ "key": "1", "value": "Sì" }] },
+          "/item_shipping_type": { "uri": "/item_shipping_type", "values": [{ "key": "0", "value": "Spedizione con TuttoSubito" }] },
+          "/item_shipping_cost_tuttosubito": { "uri": "/item_shipping_cost_tuttosubito", "values": [{ "key": "5,99", "value": "5,99 €" }] }
+        },
+        "advertiser": { "userId": "5546708", "name": "", "company": false, "type": 0 },
+        "geo": { "region": { "value": "Campania" }, "city": { "value": "Caserta", "shortName": "CE" }, "town": { "value": "Aversa" } },
+        "urls": { "default": "https://www.subito.it/videogiochi/mario-kart-8-deluxe-nintendo-switch-caserta-577096643.htm" } } },
+      { "item": { "kind": "BannerItem", "subject": "Promo" } },
+      { "item": { "kind": "AdItem", "urn": "id:ad:aaaa:list:600000001", "type": { "key": "s" }, "subject": "Mario Kart 8 Deluxe Switch &amp; custodia",
+        "body": "Come nuovo", "date": "2026-10-10 18:02:00", "images": [{ "cdnBaseUrl": "https://images.sbito.it/api/v1/sbt-ads-images-pro/images/11/abcd" }],
+        "features": { "/price": { "values": [{ "key": "25", "value": "25 €" }] }, "/item_condition": { "values": [{ "key": "20", "value": "Come nuovo - perfetto o ricondizionato" }] }, "/item_shippable": { "values": [{ "key": "0", "value": "No" }] } },
+        "advertiser": { "userId": "1", "company": true }, "geo": { "city": { "shortName": "MI" }, "town": { "value": "Milano" } },
+        "urls": { "default": "https://www.subito.it/videogiochi/mario-kart-8-deluxe-switch-milano-600000001.htm" } } }
+    ],
+    "originalList": [
+      { "kind": "AdItem", "urn": "id:ad:d54c9dfd-3564-4754-a83b-f84df9fdb650:list:577096643", "subject": "Mario Kart 8 Deluxe Nintendo Switch", "urls": { "default": "https://www.subito.it/videogiochi/mario-kart-8-deluxe-nintendo-switch-caserta-577096643.htm" } },
+      { "kind": "AdItem", "urn": "id:ad:bbbb:list:600000002", "type": { "key": "s" }, "subject": "Mario Kart 8 venduto", "body": "",
+        "images": [{ "cdnBaseUrl": "https://images.sbito.it/api/v1/sbt-ads-images-pro/images/22/efgh" }],
+        "features": { "/price": { "values": [{ "key": "20" }] }, "/transaction_status": { "values": [{ "key": "SOLD", "value": "SOLD" }] } },
+        "urls": { "default": "https://www.subito.it/videogiochi/mario-kart-8-venduto-roma-600000002.htm" } }
+    ],
+    "galleryList": [
+      { "kind": "AdItem", "urn": "id:ad:cccc:list:600000003", "type": { "key": "s" }, "subject": "Mario Kart 8 Deluxe (prezzo trattabile)", "body": "Trattabile",
+        "images": [], "features": {}, "urls": { "default": "https://www.subito.it/videogiochi/mario-kart-8-deluxe-torino-600000003.htm" } },
+      { "kind": "AdItem", "urn": "id:ad:dddd:list:600000004", "subject": "Link esterno", "urls": { "default": "https://evil.example/x.htm" } }
+    ]
+  } } } }
+}

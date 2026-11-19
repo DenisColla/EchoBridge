@@ -1,0 +1,13 @@
+node_modules/
+/android/
+/ios/
+.expo/
+.export-check/
+dist/*.apk
+!dist/OffertaVintedTiming-arm64.apk
+!dist/VintedCaccia-arm64.apk
+*.log
+.DS_Store
+.web-check/
+modules/*/android/build/
+modules/*/android/.gradle/
