@@ -58,7 +58,11 @@ else
   log "Building web app (posaviva/web)"
   (
     cd "$WEB"
-    npm ci --no-audit --no-fund || { warn "npm ci failed (no/old lockfile?), falling back to npm install"; npm install --no-audit --no-fund; }
+    if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+      npm ci --no-audit --no-fund || { warn "npm ci failed, falling back to npm install"; npm install --no-audit --no-fund; }
+    else
+      npm install --no-audit --no-fund
+    fi
     npm run build
   )
 fi
@@ -109,12 +113,17 @@ mkdir -p "$(dirname "$APK_OUT")"
 cp -f "$APK_SRC" "$APK_OUT"
 
 log "apksigner verify"
-"$BT/apksigner" verify --verbose --print-certs "$APK_OUT" \
-  | grep -E '^Verifie[sd]|^Verified using|Signer #1 certificate (DN|SHA-256)|^WARNING' || true
+# --min-sdk-version 24 makes apksigner check the v2 block as well: with the APK's own
+# minSdk 30 it would only exercise v3 and report v2 as "false" although it is present.
+if ! VERIFY_OUT="$("$BT/apksigner" verify --verbose --print-certs --min-sdk-version 24 "$APK_OUT" 2>&1)"; then
+  echo "$VERIFY_OUT" >&2
+  die "apksigner verify FAILED for $APK_OUT"
+fi
+echo "$VERIFY_OUT" | grep -E '^Verifies|^Verified using v[1-4] |Signer #1 certificate (DN|SHA-256)|^WARNING' || true
 
 log "aapt2 dump badging"
 "$BT/aapt2" dump badging "$APK_OUT" \
-  | grep -E "^(package|sdkVersion|targetSdkVersion|application-label:|uses-permission|launchable-activity|uses-gl-es|densities)" || true
+  | grep -E "^ *(package|minSdkVersion|targetSdkVersion|application-label:|uses-permission|launchable-activity|uses-gl-es|densities)" || true
 
 log "Done: $APK_OUT ($(du -h "$APK_OUT" | cut -f1))"
 echo "    Install/update on a USB-connected phone:  adb install -r \"$APK_OUT\""
