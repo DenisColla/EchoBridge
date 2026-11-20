@@ -29,7 +29,9 @@ async function boot() {
   shell.app = app;
   app.shell = shell;
 
-  new THREE.TextureLoader().load('./assets/eye.png', (t) => { t.colorSpace = THREE.SRGBColorSpace; materials.setTexture('eye', t); app.invalidate(); });
+  const texLoader = new THREE.TextureLoader();
+  texLoader.load('./assets/eye.png', (t) => { t.colorSpace = THREE.SRGBColorSpace; materials.setTexture('eye', t); app.invalidate(); });
+  texLoader.load('./assets/skin.png', (t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; materials.setTexture('skinDetail', t); app.invalidate(); });
 
   app.registerModule('body', createBodyModule(app, shell));
 

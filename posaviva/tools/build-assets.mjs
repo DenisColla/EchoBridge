@@ -362,3 +362,160 @@ const bin = Buffer.concat(chunks);
 fs.writeFileSync(path.join(OUT, 'human.bin'), bin);
 fs.writeFileSync(path.join(OUT, 'human.json'), JSON.stringify(meta));
 console.log(`human.bin ${(bin.length / 1e6).toFixed(2)} MB, human.json ${(JSON.stringify(meta).length / 1e3).toFixed(1)} KB`);
+
+// ---------------------------------------------------------------- skin detail texture
+// A near-white multiplicative albedo map (multiplied by the chosen skin color):
+// lips, nails, lighter palms/soles, slight redness on ears/nose/knees/elbows and
+// low-frequency mottling. Masks are computed per vertex in 3D, then rasterized
+// in UV space. Written to skin.png (sRGB).
+import zlib from 'node:zlib';
+{
+  const SIZE = 1024;
+  const P = toM(evalShape(PRESETS[1].p)); // neutral-ish female, meters, MH centered
+  const nv = NV;
+  // per-vertex masks
+  const lip = new Float32Array(nv), nail = new Float32Array(nv), palm = new Float32Array(nv), red = new Float32Array(nv);
+  const mag = (rel) => { const d = new Float64Array(nv * 3); addTarget(d, rel, 1); const m = new Float32Array(nv); let mx = 0; for (let i = 0; i < nv; i++) { m[i] = Math.hypot(d[i * 3], d[i * 3 + 1], d[i * 3 + 2]); mx = Math.max(mx, m[i]); } for (let i = 0; i < nv; i++) m[i] /= mx || 1; return m; };
+  const ever = mag('expression/units/caucasian/mouth-eversion.target');
+  const prot = mag('expression/units/caucasian/mouth-protusion.target');
+  for (let i = 0; i < nv; i++) lip[i] = Math.min(1, Math.max(0, (Math.max(ever[i] * 1.25, prot[i] * 0.95) - 0.38) / 0.35));
+  // vertex normals of the neutral shape (body faces)
+  const N = new Float32Array(nv * 3);
+  for (let f = 0; f < faceG.length; f++) {
+    if (faceG[f] !== 0) continue;
+    const q = faceV.slice(f * 4, f * 4 + 4).filter((v) => v !== 0xffff);
+    const [a, b, c] = q;
+    const ux = P[b * 3] - P[a * 3], uy = P[b * 3 + 1] - P[a * 3 + 1], uz = P[b * 3 + 2] - P[a * 3 + 2];
+    const vx = P[c * 3] - P[a * 3], vy = P[c * 3 + 1] - P[a * 3 + 1], vz = P[c * 3 + 2] - P[a * 3 + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const v of q) { N[v * 3] += nx; N[v * 3 + 1] += ny; N[v * 3 + 2] += nz; }
+  }
+  for (let i = 0; i < nv; i++) { const l = Math.hypot(N[i * 3], N[i * 3 + 1], N[i * 3 + 2]) || 1; N[i * 3] /= l; N[i * 3 + 1] /= l; N[i * 3 + 2] /= l; }
+  // joints from the skeleton definition (mean of joint vertices)
+  const jpos = (name) => { const l = skel.joints[name]; const p = [0, 0, 0]; for (const v of l) { p[0] += P[v * 3]; p[1] += P[v * 3 + 1]; p[2] += P[v * 3 + 2]; } return p.map((x) => x / l.length); };
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const norm = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const bw = (i, bone) => { let w = 0; for (let k = 0; k < 4; k++) if (skinIndex[i * 4 + k] === boneIndex.get(bone)) w += skinWeight[i * 4 + k]; return w; };
+  for (const s of SIDE) {
+    // palm normal from wrist -> middle finger base and index -> pinky base
+    const w0 = jpos(`wrist.${s}____head`), m0 = jpos(`finger3-1.${s}____head`), i0 = jpos(`finger2-1.${s}____head`), p0 = jpos(`finger5-1.${s}____head`);
+    let palmN = norm(cross(sub(m0, w0), sub(p0, i0)));
+    // orient: palm faces the body side/forward in A-pose -> decide by majority of hand normals later (store both signs)
+    const sideSign = s === 'L' ? 1 : -1;
+    if (dot(palmN, [sideSign, 0, 0]) > 0) palmN = palmN.map((x) => -x); // palm points toward the body (inward) in A-pose
+    for (let f = 1; f <= 5; f++) {
+      const tip = jpos(`finger${f}-3.${s}____tail`), base = jpos(`finger${f}-3.${s}____head`);
+      const dir = norm(sub(tip, base));
+      const len = Math.hypot(...sub(tip, base));
+      for (let i = 0; i < nv; i++) {
+        if (bw(i, `finger${f}-3.${s}`) < 0.5) continue;
+        const rel = sub([P[i * 3], P[i * 3 + 1], P[i * 3 + 2]], base);
+        const t = dot(rel, dir) / len;
+        const n = [N[i * 3], N[i * 3 + 1], N[i * 3 + 2]];
+        // dorsal side = opposite to the palm normal (thumb: use its own plane, so relax the threshold)
+        const d = -dot(n, palmN);
+        const m = Math.min(1, Math.max(0, (t - 0.38) / 0.18)) * Math.min(1, Math.max(0, (d - (f === 1 ? 0.0 : 0.35)) / 0.3));
+        nail[i] = Math.max(nail[i], m);
+      }
+    }
+    for (let i = 0; i < nv; i++) {
+      let hw = bw(i, `wrist.${s}`) + bw(i, `metacarpal1.${s}`) + bw(i, `metacarpal2.${s}`) + bw(i, `metacarpal3.${s}`) + bw(i, `metacarpal4.${s}`);
+      for (let f = 1; f <= 5; f++) for (let j = 1; j <= 3; j++) hw += bw(i, `finger${f}-${j}.${s}`);
+      if (hw > 0.3) { const d = dot([N[i * 3], N[i * 3 + 1], N[i * 3 + 2]], palmN); palm[i] = Math.max(palm[i], Math.min(1, Math.max(0, (d - 0.2) / 0.4)) * Math.min(1, hw)); }
+      const fw = bw(i, `foot.${s}`) + bw(i, `toe1-1.${s}`);
+      if (fw > 0.3 && N[i * 3 + 1] < -0.6) palm[i] = Math.max(palm[i], Math.min(1, fw));
+      // knees / elbows redness
+      const knee = jpos(`lowerleg01.${s}____head`), elbow = jpos(`lowerarm01.${s}____head`);
+      const pi = [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]];
+      const dk = Math.hypot(...sub(pi, knee)), de = Math.hypot(...sub(pi, elbow));
+      red[i] = Math.max(red[i], Math.max(0, 1 - dk / 0.07) * 0.6 * Math.max(0, N[i * 3 + 2]), Math.max(0, 1 - de / 0.05) * 0.4);
+    }
+  }
+  // ears & nose tip & cheeks (head region, by position relative to head joint)
+  const headJ = jpos('head____head');
+  for (let i = 0; i < nv; i++) {
+    if (bw(i, 'head') < 0.5) continue;
+    const x = P[i * 3], y = P[i * 3 + 1] - headJ[1], z = P[i * 3 + 2] - headJ[2];
+    const ear = Math.max(0, 1 - Math.max(0, 0.068 - Math.abs(x)) / 0.012) * (Math.abs(x) > 0.06 ? 1 : 0);
+    const cheek = Math.max(0, 1 - Math.hypot(Math.abs(x) - 0.042, y - 0.07, z - 0.09) / 0.03);
+    const nose = Math.max(0, 1 - Math.hypot(x, y - 0.085, z - 0.135) / 0.022);
+    red[i] = Math.max(red[i], ear * 0.55, cheek * 0.45, nose * 0.4);
+  }
+  // simple 3D value noise for mottling
+  const hash = (x, y, z) => { let h = (x * 374761393 + y * 668265263 + z * 2147483647) | 0; h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
+  const vnoise = (x, y, z) => {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), xf = x - xi, yf = y - yi, zf = z - zi;
+    const s = (t) => t * t * (3 - 2 * t); const u = s(xf), v = s(yf), w = s(zf);
+    let r = 0;
+    for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) for (let dz = 0; dz < 2; dz++)
+      r += hash(xi + dx, yi + dy, zi + dz) * (dx ? u : 1 - u) * (dy ? v : 1 - v) * (dz ? w : 1 - w);
+    return r;
+  };
+  // rasterize body faces in UV space
+  const img = new Float32Array(SIZE * SIZE * 3), cov = new Uint8Array(SIZE * SIZE);
+  const tri = (ra, rb, rc) => {
+    const ua = rvUV[ra * 2] * SIZE, va = (1 - rvUV[ra * 2 + 1]) * SIZE, ub = rvUV[rb * 2] * SIZE, vb = (1 - rvUV[rb * 2 + 1]) * SIZE, uc = rvUV[rc * 2] * SIZE, vc = (1 - rvUV[rc * 2 + 1]) * SIZE;
+    const minX = Math.max(0, Math.floor(Math.min(ua, ub, uc)) - 1), maxX = Math.min(SIZE - 1, Math.ceil(Math.max(ua, ub, uc)) + 1);
+    const minY = Math.max(0, Math.floor(Math.min(va, vb, vc)) - 1), maxY = Math.min(SIZE - 1, Math.ceil(Math.max(va, vb, vc)) + 1);
+    const den = (vb - vc) * (ua - uc) + (uc - ub) * (va - vc);
+    if (Math.abs(den) < 1e-9) return;
+    const A = rv2v[ra], B = rv2v[rb], Cc = rv2v[rc];
+    for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+      const px = x + 0.5, py = y + 0.5;
+      const l1 = ((vb - vc) * (px - uc) + (uc - ub) * (py - vc)) / den, l2 = ((vc - va) * (px - uc) + (ua - uc) * (py - vc)) / den, l3 = 1 - l1 - l2;
+      if (l1 < -0.02 || l2 < -0.02 || l3 < -0.02) continue;
+      const I = (k) => [A, B, Cc].reduce((s, v, j) => s + [l1, l2, l3][j] * k[v], 0);
+      const X = l1 * P[A * 3] + l2 * P[B * 3] + l3 * P[Cc * 3], Y = l1 * P[A * 3 + 1] + l2 * P[B * 3 + 1] + l3 * P[Cc * 3 + 1], Z = l1 * P[A * 3 + 2] + l2 * P[B * 3 + 2] + l3 * P[Cc * 3 + 2];
+      const lipM = I(lip), nailM = I(nail), palmM = I(palm), redM = I(red);
+      const n1 = vnoise(X * 18, Y * 18, Z * 18), n2 = vnoise(X * 70 + 11, Y * 70, Z * 70);
+      let r = 0.93, g = 0.93, b = 0.93;
+      const mott = (n1 - 0.5) * 0.05 + (n2 - 0.5) * 0.025;
+      r += mott; g += mott * 1.1; b += mott * 1.1;
+      // redness
+      g -= redM * 0.06; b -= redM * 0.06;
+      // palms & soles lighter, slightly less saturated
+      r += palmM * 0.06; g += palmM * 0.065; b += palmM * 0.07;
+      // nails: lighter pink with a pale tip
+      r = r * (1 - nailM) + nailM * 1.0; g = g * (1 - nailM) + nailM * 0.9; b = b * (1 - nailM) + nailM * 0.9;
+      // lips: deeper rose
+      const lm = lipM * 0.62; r = r * (1 - lm) + lm * 0.86; g = g * (1 - lm) + lm * 0.66; b = b * (1 - lm) + lm * 0.68;
+      const o = (y * SIZE + x);
+      img[o * 3] = r; img[o * 3 + 1] = g; img[o * 3 + 2] = b; cov[o] = 1;
+    }
+  };
+  for (let f = 0; f < faceG.length; f++) {
+    if (faceG[f] !== 0) continue;
+    const r = faceRV.slice(f * 4, f * 4 + 4);
+    tri(r[0], r[1], r[2]); if (r[3] !== 0xffff) tri(r[0], r[2], r[3]);
+  }
+  // dilate 4 px to hide UV seams
+  for (let it = 0; it < 4; it++) {
+    const add = [];
+    for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
+      const o = y * SIZE + x; if (cov[o]) continue;
+      let s = [0, 0, 0], n = 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= SIZE || yy >= SIZE) continue; const q = yy * SIZE + xx; if (cov[q] === 1) { s[0] += img[q * 3]; s[1] += img[q * 3 + 1]; s[2] += img[q * 3 + 2]; n++; } }
+      if (n) add.push([o, s.map((v) => v / n)]);
+    }
+    for (const [o, c] of add) { img[o * 3] = c[0]; img[o * 3 + 1] = c[1]; img[o * 3 + 2] = c[2]; cov[o] = 2; }
+    for (const [o] of add) cov[o] = 1;
+  }
+  // fill the rest with base value, encode PNG (8-bit sRGB values, already perceptual)
+  const raw = Buffer.alloc(SIZE * (SIZE * 3 + 1));
+  for (let y = 0; y < SIZE; y++) {
+    raw[y * (SIZE * 3 + 1)] = 0;
+    for (let x = 0; x < SIZE; x++) {
+      const o = y * SIZE + x, p = y * (SIZE * 3 + 1) + 1 + x * 3;
+      for (let k = 0; k < 3; k++) raw[p + k] = Math.round(Math.min(1, Math.max(0, cov[o] ? img[o * 3 + k] : 0.93)) * 255);
+    }
+  }
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(SIZE, 0); ihdr.writeUInt32BE(SIZE, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
+  fs.writeFileSync(path.join(OUT, 'skin.png'), png);
+  console.log(`skin.png ${(png.length / 1e3).toFixed(0)} KB`);
+}
