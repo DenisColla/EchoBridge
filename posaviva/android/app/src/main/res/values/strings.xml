@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">PosaViva</string>
+    <string name="share_image_title">Condividi immagine</string>
+    <string name="file_chooser_title">Scegli un file</string>
+    <string name="no_app_to_share">Nessuna app disponibile per la condivisione</string>
+    <string name="no_file_picker">Nessuna app disponibile per scegliere i file</string>
+    <string name="share_failed">Impossibile condividere l\'immagine</string>
+</resources>

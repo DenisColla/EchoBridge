@@ -1,0 +1,4 @@
+// AGP 8.13.x is the newest line that runs on Gradle 8.14.x (AGP 9 needs Gradle 9).
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+}
