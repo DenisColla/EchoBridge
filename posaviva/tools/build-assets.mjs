@@ -422,7 +422,7 @@ meta.skin = { index: emit(skinIndex), weight: { ...emit(Uint16Array.from(skinWei
     refs: emit(Uint16Array.from(refs)), weights: emit(Float32Array.from(wts)), offsets: emit(Float32Array.from(offs)),
     side: emit(side), rv2v: emit(Uint16Array.from(e2v)), uv: emit(Float32Array.from(eUV)), index: emit(Uint16Array.from(eIdx)),
   };
-  fs.copyFileSync(path.join(DATA, 'eyes/materials/brown_eye.png'), path.join(OUT, 'eye.png'));
+  writeEyeTexture(path.join(DATA, 'eyes/materials/brown_eye.png'), path.join(OUT, 'eye.png'), 256);
   console.log(`eyes: ${nEye} verts, ${eIdx.length / 3} tris`);
 }
 
@@ -587,4 +587,54 @@ import zlib from 'node:zlib';
   const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
   fs.writeFileSync(path.join(OUT, 'skin.png'), png);
   console.log(`skin.png ${(png.length / 1e3).toFixed(0)} KB`);
+}
+
+// ---------------------------------------------------------------- PNG helpers
+// Minimal PNG reader (8-bit RGBA/RGB, non-interlaced) and RGBA writer, used to
+// downsample the stock eye texture (only shown until the face module builds its
+// procedural texture) while keeping the transparent cornea.
+function readPNG(file) {
+  const b = fs.readFileSync(file);
+  let o = 8, w = 0, h = 0, ct = 0, idat = [];
+  while (o < b.length) {
+    const len = b.readUInt32BE(o), type = b.toString('ascii', o + 4, o + 8), data = b.subarray(o + 8, o + 8 + len);
+    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); if (data[8] !== 8 || data[12] !== 0) throw new Error('unsupported PNG'); ct = data[9]; }
+    else if (type === 'IDAT') idat.push(data);
+    o += 12 + len;
+  }
+  const bpp = ct === 6 ? 4 : ct === 2 ? 3 : (() => { throw new Error('unsupported PNG color type ' + ct); })();
+  const raw = zlib.inflateSync(Buffer.concat(idat)), stride = w * bpp, out = new Uint8Array(w * h * 4);
+  let prev = new Uint8Array(stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)), cur = new Uint8Array(stride);
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? cur[x - bpp] : 0, up = prev[x], c = x >= bpp ? prev[x - bpp] : 0;
+      let v = line[x];
+      if (f === 1) v += a; else if (f === 2) v += up; else if (f === 3) v += (a + up) >> 1;
+      else if (f === 4) { const p = a + up - c, pa = Math.abs(p - a), pb = Math.abs(p - up), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? up : c; }
+      cur[x] = v & 255;
+    }
+    for (let x = 0; x < w; x++) for (let k = 0; k < 4; k++) out[(y * w + x) * 4 + k] = k < bpp ? cur[x * bpp + k] : 255;
+    prev = cur;
+  }
+  return { w, h, data: out };
+}
+function writePNG(file, w, h, rgba) {
+  const raw = Buffer.alloc(h * (w * 4 + 1));
+  for (let y = 0; y < h; y++) { raw[y * (w * 4 + 1)] = 0; Buffer.from(rgba.buffer, rgba.byteOffset + y * w * 4, w * 4).copy(raw, y * (w * 4 + 1) + 1); }
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (bb) => { let c = 0xffffffff; for (const x of bb) c = crcT[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+  const ih = Buffer.alloc(13); ih.writeUInt32BE(w, 0); ih.writeUInt32BE(h, 4); ih[8] = 8; ih[9] = 6;
+  fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ih), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]));
+}
+function writeEyeTexture(src, dst, size) {
+  const im = readPNG(src), f = im.w / size, out = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const acc = [0, 0, 0, 0];
+    for (let j = 0; j < f; j++) for (let i = 0; i < f; i++) { const o = ((y * f + j) * im.w + x * f + i) * 4; for (let k = 0; k < 4; k++) acc[k] += im.data[o + k]; }
+    for (let k = 0; k < 4; k++) out[(y * size + x) * 4 + k] = Math.round(acc[k] / (f * f));
+  }
+  writePNG(dst, size, size, out);
+  console.log(`eye.png ${size}x${size}`);
 }

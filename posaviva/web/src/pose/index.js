@@ -193,10 +193,8 @@ export function create(app, shell) {
    * finger gets selected (props and other handlers keep their priority).
    */
   ctx.routeTap = (e) => {
-    const ev = { ndc: app.pointerToNDC(e), event: e, x: e.clientX, y: e.clientY };
-    const hs = app._tapHandlers; // App internals: same order as its own tap router
-    if (Array.isArray(hs) && hs.length) { for (const h of hs) if (h.fn(ev)) return; }
-    else onTap(ev);
+    if (app.routeTap) { app.routeTap(e); return; }
+    onTap({ ndc: app.pointerToNDC(e), event: e, x: e.clientX, y: e.clientY });
   };
 
   // ---------------------------------------------------------------- highlight & UI sync

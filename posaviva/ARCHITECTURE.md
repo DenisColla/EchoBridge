@@ -329,3 +329,35 @@ Listens to app.clothing.manager 'built' {character} so long hair drapes over reb
 - `deserializeScene(obj, {fromHistory})`; `app.history.restoring`.
 - Module hook `provideInitialScene()` (io restores the autosave before the default character is created).
 - `app.renderNow()` falls back to a plain render if `app.renderOverride` throws.
+
+## Integration notes (QA rounds)
+
+### Core
+- `app.routeTap(event)` runs the tap handlers (gizmos pass a press released without dragging through it); taps are timed with event timestamps.
+- `app.contextLost`, app events `contextlost` / `contextrestored`; `app.holdRendering(on)`.
+- The frame loop sleeps after ~45 idle frames and wakes on `invalidate()`, canvas input or a 500 ms heartbeat that runs render hooks: call `app.invalidate()` or return true from a render hook whenever something visible changes. Render hooks, after-render hooks and module hooks are isolated with try/catch.
+- `model.normalTopology`, `model.expressionRegion`, `model.expressionVersion`. human.bin format v2: slider deltas skip the unused tights/skirt/hair proxy vertices. The body `uv`/`skinIndex`/`skinWeight` BufferAttributes are shared by all characters (never modify them per character); the body index is Uint16.
+- `ch.dropToGround()` keeps the skin `groundClearance` above the floor and makes attachments tagged `userData.groundContact` (shoes) touch the floor.
+
+### Pose
+- `POSE_PRESETS[i].seat` (m above the floor: 0.45 chair poses, 0.65 stool). `applyPoseObject(ch, pose, {seat, collide})`: seat fits the buttocks to that height with standing feet planted by leg IK; collide pushes arms out of torso/head/legs. `applyPosePreset` passes `seat` and `collide:true`.
+- `poses.js` accepts raw bone keys such as `'upperarm01.R': [x,y,z]` (local Euler ZXY). Thumbnail cache key `posaviva.pose.thumbs.v2`.
+- A press on a gizmo handle released without dragging is routed as a tap; undo/redo keep the selected part; the Sposta turn knob moves to a visible spot when the sheet would hide it.
+
+### Clothing & hair
+- `app.clothing.outerOffsets(ch)` -> Float32Array(body vertex count): outer garment surface height (m, along the rest normal) over each rest body vertex, 0 where uncovered, null before the first build. Used by the hair colliders, refreshed on the clothing `built` event.
+- Shoe meshes carry `userData.groundContact = true`; clothing sets `ch.setGroundClearance()` from the outsole.
+
+### Render & face
+- Material kind `brows` (shaded like hair, never inked). Kind `eye` accepts `spec.cornea:true` (additive glossy cornea shell) and `spec.iris=[u0,v0,u1,v1,irisR,pupilR]`. Face attachment `face:cornea` (SkinnedMesh sharing ch.eyeMesh attributes, `userData.faceModule='cornea'`, not pickable).
+- Ink rules: hair and beards are contour/overlap only; semi-transparent `hair` shells (opacity < 0.95) are never inked and become a grey tone in `lines`; materials with `userData.pvNoInk` are skipped by the G-buffer. `render/materials.js` exports `inkLinePx`.
+- The face module rewrites jaw-moving expression units at startup (`face/mouth.js`) so the tongue follows the jaw.
+
+### Scene & io
+- `guides.drawOnCapture(canvas, {crop})`; `drawTo` options `{camera, area, markers, mask, frameBorder}`; `guides.info.area` (exported image or panel frame in on-screen CSS px, following the UI view offset). Framing transitions refit `app.modules.ui.viewOffset` when they end. Export setting `exportGuides` (io).
+
+### UI
+- In multi-tool groups the sub-tabs live in the header row. CSS var `--pv-toast-bottom` is set by the shell. `kit.swatches` accepts `onInput` (live) besides `onChange` (commit). Slider double-tap resets on release. Android back with nothing open shows "Premi di nuovo Indietro per uscire" and exits on a second back within 2 s. Splash styles are inline in index.html. The bottom sheet has no backdrop blur (cost while posing).
+
+### Android bridge (final)
+`window.__onAndroidBack` (set by the shell); CSS vars `--safe-top/right/bottom/left` and `--gesture-left/right` (system back-gesture zones in CSS px, 0 with 3-button navigation); `window.__onInsets({top,right,bottom,left,gestureLeft,gestureRight})`.

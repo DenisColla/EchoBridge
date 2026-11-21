@@ -200,6 +200,13 @@ export class App extends THREE.EventDispatcher {
   /** Android back handler stack: fn() -> true if handled (e.g. exit a mode). */
   pushBackHandler(fn) { this._backHandlers.push(fn); return () => { const i = this._backHandlers.indexOf(fn); if (i >= 0) this._backHandlers.splice(i, 1); }; }
 
+  /** Runs the tap handlers for a pointer event (used by the router and by gizmos passing a press through). */
+  routeTap(e) {
+    const ndc = this.pointerToNDC(e);
+    for (const h of this._tapHandlers) if (h.fn({ ndc, event: e, x: e.clientX, y: e.clientY })) return true;
+    return false;
+  }
+
   _setupTapRouter() {
     const c = this.canvas;
     let down = null;
@@ -207,15 +214,15 @@ export class App extends THREE.EventDispatcher {
     c.addEventListener('pointerdown', (e) => {
       pointers.add(e.pointerId);
       if (down && pointers.size > 1) { down.multi = true; return; }
-      down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId, multi: false };
+      down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false };
     });
     const up = (e) => {
       if (!down || e.pointerId !== down.id) return;
       const d = down; down = null;
       if (d.multi || e.type === 'pointercancel') return;
-      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || performance.now() - d.t > 450) return;
-      const ndc = this.pointerToNDC(e);
-      for (const h of this._tapHandlers) if (h.fn({ ndc, event: e, x: e.clientX, y: e.clientY })) break;
+      // event timestamps: a long frame between down and up must not swallow the tap
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 450) return;
+      this.routeTap(e);
     };
     c.addEventListener('pointerup', up);
     c.addEventListener('pointercancel', up);

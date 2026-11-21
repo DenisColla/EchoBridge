@@ -531,11 +531,24 @@ export class Character extends THREE.EventDispatcher {
       _v1.set(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]).applyMatrix4(M);
       if (_v1.y < minY) minY = _v1.y;
     }
-    // floor = the character's own placement height (it may stand on a raised spot); shoes add clearance
-    const groundY = this.root.getWorldPosition(_v2).y + this.groundClearance * this.root.scale.y;
-    // move root offset in rig space along world up
+    const s = this.root.scale.y || 1;
+    // the skin keeps `groundClearance` above the floor (shoe soles); attachments tagged
+    // userData.groundContact (shoes) must touch the floor themselves
+    let lowest = minY - this.groundClearance * s;
+    for (const mesh of this.attachments) {
+      if (!mesh.userData.groundContact || !mesh.visible || !mesh.isSkinnedMesh) continue;
+      const g = mesh.geometry, pos = g.attributes.position;
+      const tmp = this._contactTmp && this._contactTmp.length >= pos.array.length ? this._contactTmp : (this._contactTmp = new Float32Array(pos.array.length));
+      this.skinPositions(pos.array, g.attributes.skinIndex.array, g.attributes.skinWeight.array, tmp, pos.count);
+      for (let i = 0; i < pos.count; i++) {
+        _v1.set(tmp[i * 3], tmp[i * 3 + 1], tmp[i * 3 + 2]).applyMatrix4(M);
+        if (_v1.y < lowest) lowest = _v1.y;
+      }
+    }
+    // floor = the character's own placement height (it may stand on a raised spot)
+    const floorY = this.root.getWorldPosition(_v2).y;
     const upLocal = _v3.set(0, 1, 0).applyQuaternion(this.root.getWorldQuaternion(_q1).invert());
-    this.rootOffset.addScaledVector(upLocal, -(minY - groundY) / this.root.scale.y);
+    this.rootOffset.addScaledVector(upLocal, -(lowest - floorY) / s);
     this.applyPose();
   }
 
