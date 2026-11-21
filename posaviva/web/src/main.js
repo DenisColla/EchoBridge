@@ -20,6 +20,7 @@ const MODULES = [
   ['clothing', () => import('./clothing/index.js')],
   ['hair', () => import('./hair/index.js')],
   ['props', () => import('./props/index.js')],
+  ['focus', () => import('./focus/index.js')],
 ];
 
 async function boot() {

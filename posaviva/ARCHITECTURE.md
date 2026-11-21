@@ -371,3 +371,8 @@ Listens to app.clothing.manager 'built' {character} so long hair drapes over reb
 - Scene/io: camera state stores the view aspect; `app.sceneTools.camera.refitForAspect(oldAspect)`, `subjectInView(tol)`; the subject is framed at `ready` when no camera was restored and reframed on orientation flips. `io/viewOffset.update()` computes `target` synchronously (public). New characters are spaced by their widths and named "Donna 1", "Uomo 2"…
 - Core: `ch.dropToGround()` uses shoe soles (and ignores foot/toe skin) when shoes are worn.
 - Empty state class `.pv-body-empty` is shared by all character panels.
+
+### Quick close-ups (`web/src/focus/`)
+- Lens button next to the selected body part (`.pv-focus-lens`) and a fixed "Zoom rapido" button (bottom-right of the free view) with a menu: Corpo intero, Testa, Mano sx/dx, Piede sx/dx, Parte selezionata.
+- While in a close-up the orbit target follows the part (stored in the pivot bone's frame); "Torna alla vista" or Android back restores the view from before the first close-up. Nothing is committed.
+- API: `app.modules.focus.focus(ch, id)` with id `'body' | 'head' | 'hand.L' | 'hand.R' | 'foot.L' | 'foot.R' | <pose control id>`, `.exit()`, `.active`. Helpers in `pose/focus.js`: `focusControl`, `focusFoot`, `boneRegion`, `worldPoints`.

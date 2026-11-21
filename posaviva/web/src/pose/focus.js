@@ -38,7 +38,7 @@ function regions(model) {
 }
 
 /** World positions (packed xyz) of body vertices of a character (current pose). */
-function worldPoints(ch, verts, step = 2) {
+export function worldPoints(ch, verts, step = 2) {
   ch.root.updateWorldMatrix(true, true);
   const P = ch.getSkinnedPositions(), M = ch.rig.matrixWorld;
   const out = new Float32Array(Math.ceil(verts.length / step) * 3);
@@ -247,3 +247,56 @@ export function focusHand(app, shell, ch, side, { fill = side === 'both' ? 0.8 :
   return focusPoints(app, shell, pts, { dir, fill });
 }
 
+
+// ---------------------------------------------------------------- generic parts
+const _boneRegions = new WeakMap(); // model -> Map(key -> Int32Array of body vertices)
+/** Body vertices whose dominant bone is one of `bones` (cached per model). */
+export function boneRegion(model, bones) {
+  let cache = _boneRegions.get(model);
+  if (!cache) _boneRegions.set(model, (cache = new Map()));
+  const key = [...bones].sort().join('|');
+  let r = cache.get(key);
+  if (r) return r;
+  const want = new Set([...bones].map((n) => model.boneIndex.get(n)).filter((i) => i !== undefined));
+  const SI = model.skinIndex, SW = model.skinWeight, out = [];
+  for (const v of model.groupVertices[0]) {
+    let best = -1, bw = 0;
+    for (let k = 0; k < 4; k++) if (SW[v * 4 + k] > bw) { bw = SW[v * 4 + k]; best = SI[v * 4 + k]; }
+    if (want.has(best)) out.push(v);
+  }
+  r = Int32Array.from(out);
+  cache.set(key, r);
+  return r;
+}
+
+/** "Inquadra il piede": foot + toes of `side` fill ~45% of the free view. */
+export function focusFoot(app, shell, ch, side, { fill = 0.45 } = {}) {
+  if (!ch || !ch.root.visible) return false;
+  const bones = ['foot', 'toe1-1', 'toe2-1', 'toe3-1', 'toe4-1', 'toe5-1'].map((b) => `${b}.${side}`);
+  const pts = worldPoints(ch, boneRegion(ch.model, bones), 1);
+  // look at the foot slightly from above and from the outside, keeping the current side of the camera
+  const dir = new THREE.Vector3().subVectors(app.camera.position, app.controls.target);
+  dir.y = Math.max(dir.y, 0.35 * Math.hypot(dir.x, dir.z));
+  dir.normalize();
+  return focusPoints(app, shell, pts, { dir, fill });
+}
+
+/**
+ * Frames any pose control (app.posing.controls entry): its own bones, plus the
+ * fingers for a hand, the toes for a foot and the face for the head. `fill` by size.
+ */
+export function focusControl(app, shell, ch, control) {
+  if (!ch || !ch.root.visible || !control) return false;
+  if (control.baseId === 'head' || control.baseId === 'neck') return focusHead(app, shell, ch, control.baseId === 'neck' ? { fill: 0.45 } : {});
+  if (control.region === 'hand' && control.side) return focusHand(app, shell, ch, control.side);
+  if ((control.baseId === 'foot' || control.baseId === 'toes') && control.side) return focusFoot(app, shell, ch, control.side);
+  let bones = control.own;
+  // a single phalanx alone is too small to read: frame the whole finger
+  if (control.region === 'finger' && control.side) {
+    const f = control.finger;
+    bones = [1, 2, 3].map((j) => `finger${f}-${j}.${control.side}`);
+  }
+  const pts = worldPoints(ch, boneRegion(ch.model, bones), 1);
+  const fill = control.size === 's' ? 0.32 : control.size === 'm' ? 0.42 : 0.55;
+  return focusPoints(app, shell, pts, { fill });
+}
