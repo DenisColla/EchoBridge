@@ -21,6 +21,9 @@ const MODULES = [
   ['hair', () => import('./hair/index.js')],
   ['props', () => import('./props/index.js')],
   ['focus', () => import('./focus/index.js')],
+  ['buildings', () => import('./buildings/index.js')],
+  ['city', () => import('./city/index.js')],
+  ['animals', () => import('./animals/index.js')],
 ];
 
 async function boot() {

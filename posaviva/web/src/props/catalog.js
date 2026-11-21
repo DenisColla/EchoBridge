@@ -419,6 +419,29 @@ export const PROP_TYPES = [
 
 export const TYPE_BY_ID = new Map(PROP_TYPES.map((t) => [t.id, t]));
 
+// ---------------------------------------------------------------------------- extension point
+// Other modules (buildings, city, interiors…) add their own prop types and
+// categories at runtime. A type follows the PROP_TYPES contract: {id, label, cat,
+// color, params, build(params) -> {role: BufferGeometry[]}, resizable?, hand?};
+// `sub` (optional) groups items inside a category, `tags` help the search.
+// Roles not in ROLES fall back to 'main'; modules may add roles (registerPropRoles).
+const _typeListeners = new Set();
+export function registerPropTypes(types = [], categories = []) {
+  for (const c of categories) if (!CATEGORIES.some((x) => x.id === c.id)) CATEGORIES.push(c);
+  for (const t of types) {
+    if (!t?.id || TYPE_BY_ID.has(t.id)) continue;
+    t.params ||= [];
+    PROP_TYPES.push(t);
+    TYPE_BY_ID.set(t.id, t);
+  }
+  for (const fn of _typeListeners) { try { fn(); } catch (e) { console.error(e); } }
+}
+/** Material roles: {name: (color) => materialSpec}. Existing roles are not overwritten. */
+export function registerPropRoles(roles = {}) {
+  for (const [k, fn] of Object.entries(roles)) if (!ROLES[k]) ROLES[k] = fn;
+}
+export function onPropTypesChanged(fn) { _typeListeners.add(fn); return () => _typeListeners.delete(fn); }
+
 /** Default parameter object of a type. */
 export function defaultParams(type) {
   const o = {};

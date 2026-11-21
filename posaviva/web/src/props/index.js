@@ -17,7 +17,7 @@ import { ThumbRenderer } from './thumbs.js';
 import { registerPropsTool } from './panel.js';
 import { haptic } from '../ui/kit.js';
 
-export { PROP_TYPES, CATEGORIES } from './catalog.js';
+export { PROP_TYPES, CATEGORIES, registerPropTypes, registerPropRoles, onPropTypesChanged } from './catalog.js';
 
 export function create(app, shell) {
   const manager = new PropManager(app);
