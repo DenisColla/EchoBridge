@@ -39,6 +39,8 @@ async function boot() {
   const texLoader = new THREE.TextureLoader();
   texLoader.load('./assets/eye.png', (t) => { t.colorSpace = THREE.SRGBColorSpace; materials.setTexture('eye', t); app.invalidate(); });
   texLoader.load('./assets/skin.png', (t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; materials.setTexture('skinDetail', t); app.invalidate(); });
+  // anatomical relief (muscles, bony landmarks) as a tangent-space normal map in body UV space (optional asset)
+  texLoader.load('./assets/skin_normal.png', (t) => { t.colorSpace = THREE.NoColorSpace; t.anisotropy = 4; materials.setTexture('skinNormal', t); app.invalidate(); }, undefined, () => {});
 
   app.registerModule('body', createBodyModule(app, shell));
 
