@@ -46,6 +46,7 @@ async function boot() {
   }
 
   // ---- initial scene (a module may replace it, e.g. by restoring the autosave) ----
+  for (const m of Object.values(app.modules)) { try { if (m.provideInitialScene?.()) break; } catch (e) { console.error('[PosaViva] initial scene failed', e); } }
   if (!app.characters.length) {
     const ch = app.addCharacter({ preset: 'f_normal' });
     app.select(ch);

@@ -87,6 +87,8 @@ export function worldBounds(app, box) {
     characterBounds(ch, _box, 0.15);
     box.union(_box);
   }
+  // props held in a hand live under wrist bones: include them explicitly
+  for (const p of app.props?.props || []) if (p.hold && p.root?.visible && p.worldBox) box.union(p.worldBox(_box));
   for (const child of app.world.children) {
     if (chars.has(child) || !child.visible || child.userData.noBounds) continue;
     _box.setFromObject(child, false);

@@ -148,7 +148,7 @@ export function create(app, shell) {
     return minY;
   }
   /** the character's own floor: its placement height (on the ground or on a raised spot) */
-  const floorOf = (ch) => ch.root.getWorldPosition(new THREE.Vector3()).y;
+  const floorOf = (ch) => ch.root.getWorldPosition(new THREE.Vector3()).y + (ch.groundClearance || 0) * ch.root.scale.y;
   function isGrounded(ch) { return Math.abs(lowestY(ch) - floorOf(ch)) < 0.02 * ch.root.scale.y; }
   /** moves the root offset so the lowest body point rests on the character's floor */
   function settle(ch) {

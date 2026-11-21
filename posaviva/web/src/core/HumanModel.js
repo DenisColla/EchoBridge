@@ -58,6 +58,15 @@ export class HumanModel {
     });
   }
 
+  /**
+   * Registers an extra expression unit (e.g. a one-sided mouth unit derived by a module).
+   * sparse = {idx:Uint16Array|Uint32Array, val:Int16Array|Float32Array (xyz per idx), scale}
+   */
+  addExpressionUnit(name, sparse) {
+    this.expressions[name] = sparse;
+    if (!this.expressionUnits.includes(name)) this.expressionUnits.push(name);
+  }
+
   _sparse(ref) {
     return { idx: this.view(ref.idx), val: this.view(ref.val), count: ref.count, scale: this.meta.quantization };
   }

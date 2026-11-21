@@ -10,7 +10,7 @@
 // Per-character state: ch.data.clothing = {items:[{id, color, fit, wrinkles}]}.
 // Scene state: {wrinkles} (global "Pieghe" intensity).
 import { ClothingManager } from './manager.js';
-import { GARMENTS, CATEGORIES, STYLES, OUTFITS, defaultOutfit } from './catalog.js';
+import { GARMENTS, CATEGORIES, STYLES, OUTFITS, defaultOutfit, GARMENT_BY_ID } from './catalog.js';
 import { buildPanel } from './panel.js';
 
 export function create(app, shell) {
@@ -28,6 +28,13 @@ export function create(app, shell) {
     whenIdle: () => mgr.whenIdle(),
   };
   app.clothing = api;
+
+  // shoes lift the body by their outsole thickness so soles rest on the floor
+  mgr.addEventListener('change', ({ character: ch }) => {
+    let lift = 0;
+    for (const it of mgr.items(ch) || []) { const d = GARMENT_BY_ID.get(it.id); if (d?.sole) lift = Math.max(lift, d.sole.below || 0); }
+    ch.setGroundClearance?.(lift);
+  });
 
   shell.registerTool({
     id: 'clothes', group: 'look', label: 'Vestiti', icon: 'shirt', order: 30, title: 'Vestiti',

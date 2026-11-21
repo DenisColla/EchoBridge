@@ -86,7 +86,7 @@ export function create(app, shell) {
     try { scenes.pristine = app.serialize(); } catch { scenes.pristine = null; }
     // the render module owns quality when present; otherwise apply our own cap
     if (!app.modules.render && settings.get('quality')) S.applyQuality(ctx, settings.get('quality'));
-    const restored = scenes.restoreAutosave();
+    const restored = earlyRestored || scenes.restoreAutosave();
     if (restored) console.info('[PosaViva] autosave restored');
     else scenes.markClean();
     const forceTour = /[?&]tour=1\b/.test(location.search);
@@ -98,7 +98,13 @@ export function create(app, shell) {
 
   // ---- per-character listeners (chip / list refresh on preset or skin changes)
   const listeners = new WeakMap();
+  let earlyRestored = false;
   const mod = {
+    /** main.js asks modules for the initial scene before creating the default character */
+    provideInitialScene() {
+      earlyRestored = scenes.restoreAutosave();
+      return earlyRestored;
+    },
     // public API
     scenes, exporter, settings, thumbs, viewOffset, people, actions,
     openPeople: (o) => people.open(o),

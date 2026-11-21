@@ -494,7 +494,7 @@ export function applyPoseObject(ch, pose, opts = {}) {
   }
   if (ground) {
     updateBonesSilently(ch);
-    const parentY = ch.root.parent ? ch.root.parent.getWorldPosition(_v).y : 0;
+    const parentY = ch.root.getWorldPosition(_v).y + (ch.groundClearance || 0) * ch.root.scale.y;
     const drop = parentY + air * s * ch.root.scale.y - lowestBodyY(ch);
     _up.set(0, 1, 0).applyQuaternion(ch.root.getWorldQuaternion(_wq).invert());
     ch.rootOffset.addScaledVector(_up, drop / (ch.root.scale.y || 1));

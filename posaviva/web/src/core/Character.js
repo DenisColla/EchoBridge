@@ -34,6 +34,10 @@ export class Character extends THREE.EventDispatcher {
     this.appearance = { ...DEFAULT_APPEARANCE };
     /** free-form per-module state (outfit, hair, face …) serialized with the character */
     this.data = {};
+    /** per draw-group material spec overrides for the body (index -> spec), e.g. face module hides group 1 */
+    this.bodySpecOverrides = {};
+    /** extra height (m) added under the feet, e.g. shoe soles (set by the clothing module) */
+    this.groundClearance = 0;
 
     const NV = model.vertexCount;
     this.shapePositions = new Float32Array(NV * 3); // preset+sliders (no expression), rig space, grounded
@@ -122,12 +126,14 @@ export class Character extends THREE.EventDispatcher {
   }
 
   _applyMaterials() {
-    materials.apply(this.body, [
+    const specs = [
       { kind: 'skin', color: this.appearance.skin, lips: this.appearance.lips },
       { kind: 'lashes', color: '#1a1410' },
       { kind: 'teeth', color: '#efe9dc' },
       { kind: 'tongue', color: '#b4545a' },
-    ]);
+    ];
+    for (const [i, sp] of Object.entries(this.bodySpecOverrides || {})) if (sp) specs[i] = sp;
+    materials.apply(this.body, specs);
     if (this.eyeMesh) materials.apply(this.eyeMesh, { kind: 'eye', color: this.appearance.eyes });
   }
 
@@ -267,7 +273,10 @@ export class Character extends THREE.EventDispatcher {
   _applyExpressionMorphs() {
     const R = this.restPositions;
     R.set(this.shapePositions);
-    for (const [k, w] of Object.entries(this.expression)) HumanModel.addSparse(R, this.model.expressions[k], w);
+    for (const [k, w] of Object.entries(this.expression)) {
+      const d = this.model.expressions[k];
+      if (d) HumanModel.addSparse(R, d, w);
+    }
     this._computeNormals();
     this._uploadBody();
     this._skinnedDirty = true;
@@ -338,12 +347,28 @@ export class Character extends THREE.EventDispatcher {
     for (let i = 0; i < NB; i++) {
       const bone = this.bones[i];
       bone.position.copy(this.restLocalPos[i]);
-      if (i === 0) bone.position.add(this.rootOffset);
+      if (i === 0) { bone.position.add(this.rootOffset); bone.position.y += this.groundClearance; }
       bone.quaternion.copy(this.restLocalQuat[i]).multiply(this.poseQuat[i]);
     }
     this.rig.updateMatrixWorld(true);
     this._skinnedDirty = true;
     this.dispatchEvent({ type: 'pose' });
+  }
+
+  /** Raise the whole body (e.g. shoe sole thickness) without rebuilding the shape. */
+  setGroundClearance(m) {
+    if (Math.abs(m - this.groundClearance) < 1e-6) return;
+    this.groundClearance = m;
+    this.applyPose();
+  }
+
+  /** Move/rotate the character on the ground. Fires 'placement'. */
+  setPlacement({ position, rotationY } = {}) {
+    if (position) Array.isArray(position) ? this.root.position.fromArray(position) : this.root.position.copy(position);
+    if (rotationY !== undefined) this.root.rotation.y = rotationY;
+    this.root.updateMatrixWorld(true);
+    this._skinnedDirty = true;
+    this.dispatchEvent({ type: 'placement' });
   }
 
   /** Set pose rotation of a bone (rest-local frame). */
@@ -456,7 +481,8 @@ export class Character extends THREE.EventDispatcher {
       _v1.set(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]).applyMatrix4(M);
       if (_v1.y < minY) minY = _v1.y;
     }
-    const groundY = this.root.parent ? this.root.parent.getWorldPosition(_v2).y : 0;
+    // floor = the character's own placement height (it may stand on a raised spot); shoes add clearance
+    const groundY = this.root.getWorldPosition(_v2).y + this.groundClearance * this.root.scale.y;
     // move root offset in rig space along world up
     const upLocal = _v3.set(0, 1, 0).applyQuaternion(this.root.getWorldQuaternion(_q1).invert());
     this.rootOffset.addScaledVector(upLocal, -(minY - groundY) / this.root.scale.y);
@@ -511,10 +537,9 @@ export class Character extends THREE.EventDispatcher {
       this.root.rotation.y = j.placement.rotationY || 0;
       this.root.scale.setScalar(j.placement.scale || 1);
     }
-    if (JSON.stringify(this.appearance) !== appKey || !this._fromJSONOnce) this._applyMaterials();
-    if (JSON.stringify([this.presetId, this.sliders]) !== shapeKey || !this._fromJSONOnce) this.rebuildShape();
+    if (JSON.stringify(this.appearance) !== appKey) { this._applyMaterials(); this.dispatchEvent({ type: 'appearance' }); }
+    if (JSON.stringify([this.presetId, this.sliders]) !== shapeKey) this.rebuildShape();
     else if (JSON.stringify(this.expression) !== exprKey) { this._applyExpressionMorphs(); this.dispatchEvent({ type: 'expression' }); }
-    this._fromJSONOnce = true;
     if (j.pose) this.setPose(j.pose);
   }
 

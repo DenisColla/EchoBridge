@@ -19,7 +19,7 @@ export class App extends THREE.EventDispatcher {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance', preserveDrawingBuffer: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
@@ -84,7 +84,8 @@ export class App extends THREE.EventDispatcher {
     /** a module may replace the final render call (e.g. post-processing) */
     this.renderOverride = null;
     this._needsRender = true;
-    this._clock = new THREE.Clock();
+    this._timer = new THREE.Timer();
+    this._timer.connect?.(document);
     this.history = new History(this);
     this.raycaster = new THREE.Raycaster();
     this._tapHandlers = [];
@@ -218,7 +219,8 @@ export class App extends THREE.EventDispatcher {
     const incoming = json.characters || [];
     const ids = new Set(incoming.map((c) => c.id));
     for (const ch of [...this.characters]) if (!ids.has(ch.id)) this.removeCharacter(ch);
-    for (const [name, m] of Object.entries(this.modules)) if (json.scene?.[name] !== undefined) m.deserializeScene?.(json.scene[name]);
+    const sceneOpts = { fromHistory: this.history.restoring };
+    for (const [name, m] of Object.entries(this.modules)) if (json.scene?.[name] !== undefined) m.deserializeScene?.(json.scene[name], sceneOpts);
     const order = [];
     for (const cj of incoming) {
       let ch = this.characters.find((c) => c.id === cj.id);
@@ -252,7 +254,8 @@ export class App extends THREE.EventDispatcher {
   }
 
   _frame() {
-    const dt = Math.min(this._clock.getDelta(), 0.1);
+    this._timer.update();
+    const dt = Math.min(this._timer.getDelta(), 0.1);
     let keep = this.controls.update(dt) || false;
     for (const fn of this._renderHooks) keep = fn(dt) || keep;
     if (!this._needsRender && !keep) return;
@@ -262,8 +265,14 @@ export class App extends THREE.EventDispatcher {
   }
 
   renderNow() {
-    if (this.renderOverride) this.renderOverride(this.renderer, this.scene, this.camera);
-    else this.renderer.render(this.scene, this.camera);
+    if (this.renderOverride) {
+      try { this.renderOverride(this.renderer, this.scene, this.camera); return; }
+      catch (e) {
+        // a broken post-processing override must never blank the viewport
+        if (!this._overrideErrorLogged) { console.error('[PosaViva] renderOverride failed, falling back', e); this._overrideErrorLogged = true; }
+      }
+    }
+    this.renderer.render(this.scene, this.camera);
   }
 
   /** Raycast helper: NDC from a pointer event relative to the canvas. */
@@ -287,6 +296,8 @@ class History {
     this.lastLabel = label;
     this._emit();
   }
+  /** true while undo/redo is restoring a snapshot */
+  get restoring() { return this._restoring; }
   get canUndo() { return this.index > 0; }
   get canRedo() { return this.index < this.stack.length - 1; }
   undo() { if (this.canUndo) this._restore(--this.index); }
