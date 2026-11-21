@@ -6,7 +6,7 @@
 //
 // Families add their own list with registerFamily(id, {controls, labels}).
 
-const AX = {
+export const AX = {
   // head-like (pointing forward): +X raw = down
   pitchFwd: { k: 'x', label: 'Su / giù', sign: -1 },
   turn: { k: 'y', label: 'Gira a sinistra / destra', sign: 1 },
@@ -20,13 +20,13 @@ const AX = {
   tailSide: { k: 'y', label: 'A sinistra / destra', sign: -1 },
 };
 
-const ax = (base, min, max) => ({ ...AX[base], min, max });
+export const ax = (base, min, max) => ({ ...AX[base], min, max });
 
-function limb(side, id, label, bones, swing, spread = [-25, 35], twist = [-30, 30]) {
+export function limb(side, id, label, bones, swing, spread = [-25, 35], twist = [-30, 30]) {
   return { id: id + side, label, bones: bones.map((b) => b + side), side, axes: [ax('swing', swing[0], swing[1]), ax('spread', spread[0], spread[1]), ax('twist', twist[0], twist[1])], mirror: id + (side === '.L' ? '.R' : '.L') };
 }
 
-function quadrupedControls(entry, labels = {}) {
+export function quadrupedControls(entry, labels = {}) {
   const has = (n) => entry.bones.some((b) => b.name === n);
   const tails = entry.bones.filter((b) => /^tail\d+$/.test(b.name)).map((b) => b.name);
   const trunk = entry.bones.filter((b) => /^trunk\d+$/.test(b.name)).map((b) => b.name);
@@ -78,7 +78,7 @@ export function controlsFor(entry) {
   const fam = FAMILIES.get(entry.family) || FAMILIES.get('quadruped');
   const list = fam.controls(entry);
   const byBone = new Map();
-  for (const c of list) for (const b of c.bones) byBone.set(b, c);
+  for (const c of list) for (const b of c.all || c.bones) if (!byBone.has(b) || c.bones.includes(b)) byBone.set(b, c);
   entry._controls = { list, byId: new Map(list.map((c) => [c.id, c])), byBone };
   return entry._controls;
 }

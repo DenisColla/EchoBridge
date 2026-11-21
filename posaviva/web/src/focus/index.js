@@ -38,7 +38,7 @@ export function create(app, shell) {
     const c = part && controlsOf()?.get(part);
     if (ch && c) start(ch, () => focusControl(app, shell, ch, c), c.pivot);
   });
-  back.addEventListener('click', (e) => { e.stopPropagation(); exit(true); });
+  back.addEventListener('click', (e) => { e.stopPropagation(); if (savedAnimalView && !focus) exitAnimal(); else exit(true); });
   fab.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(); });
   document.addEventListener('pointerdown', (e) => { if (menuOpen && !wrap.contains(e.target)) toggleMenu(false); }, true);
 
@@ -66,15 +66,45 @@ export function create(app, shell) {
       { id: 'foot.R', label: 'Piede destro', icon: 'foot' },
     ];
     if (part && !items.some((i) => i.id === part.id)) items.push({ id: part.id, label: part.full || part.label || 'Parte selezionata', icon: 'zoom', sel: true });
+    // a selected animal: whole animal, its head and its selected part
+    const an = app.animals?.selected;
+    if (an && app.modules.animals?.focus) {
+      items.push({ id: 'animal:body', label: `${an.name || 'Animale'} intero`, icon: 'paw', animal: true });
+      items.push({ id: 'animal:head', label: 'Testa animale', icon: 'paw', animal: true });
+      if (app.animals.part && !['body', 'head'].includes(app.animals.part)) items.push({ id: 'animal:' + app.animals.part, label: 'Parte animale selezionata', icon: 'zoom', animal: true, sel: true });
+    }
     for (const it of items) {
       const ic = icon(it.icon, 20);
       if (it.flip) ic.style.transform = 'scaleX(-1)';
       const b = h('button', { type: 'button', class: 'pv-focus-item' + (it.sel ? ' sel' : ''), role: 'menuitem' }, ic, h('span', {}, it.label));
-      if (!ch) b.disabled = true;
-      b.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(false); go(ch, it.id); });
+      if (!ch && !it.animal) b.disabled = true;
+      b.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(false); if (it.animal) goAnimal(it.id.slice(7)); else go(ch, it.id); });
       menu.appendChild(b);
     }
-    if (!ch) menu.appendChild(h('div', { class: 'pv-focus-empty' }, 'Nessun personaggio in scena'));
+    if (!ch && !an) menu.appendChild(h('div', { class: 'pv-focus-empty' }, 'Nessun personaggio in scena'));
+  }
+
+  /** Close-up on the selected animal (the animals module frames it; we keep the way back). */
+  function goAnimal(part) {
+    const an = app.animals?.selected;
+    if (!an) return;
+    haptic(10);
+    const saved = focus?.saved || savedAnimalView || currentView();
+    clear();
+    app.modules.animals.focus(an, part);
+    savedAnimalView = saved;
+    back.classList.add('show');
+    popBack ||= app.pushBackHandler(() => { exitAnimal(); return true; });
+  }
+  let savedAnimalView = null;
+  function exitAnimal() {
+    const saved = savedAnimalView;
+    savedAnimalView = null;
+    back.classList.remove('show');
+    if (popBack) { popBack(); popBack = null; }
+    const r = rig();
+    if (saved && r?.applyView) r.applyView(saved, { animate: true, commit: null });
+    app.invalidate();
   }
 
   /** Close-up on a menu entry for character ch. */
@@ -108,7 +138,8 @@ export function create(app, shell) {
   function start(ch, doFocus, boneName) {
     const bone = ch.boneByName.get(boneName);
     if (!bone) return;
-    const saved = focus?.saved || currentView(); // keep the view from before the FIRST close-up
+    const saved = focus?.saved || savedAnimalView || currentView(); // keep the view from before the FIRST close-up
+    savedAnimalView = null;
     if (!doFocus()) return;
     focus = { ch, bone, local: new THREE.Vector3(), last: null, saved, settle: 2 };
     back.classList.add('show');

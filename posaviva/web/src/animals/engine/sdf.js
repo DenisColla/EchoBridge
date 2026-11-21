@@ -68,7 +68,7 @@ let _uid = 0;
 function base(o, kind) {
   return {
     kind, id: _uid++, op: o.op || 'add', k: o.k ?? 0.01, bones: o.bones || [], part: o.part || 'body',
-    mat: o.mat || 'fur', noise: o.noise || null, weight: o.weight ?? 1, tag: o.tag || null, side: o.side || 0,
+    mat: o.mat || 'fur', noise: o.noise || null, weight: o.weight ?? 1, tag: o.tag || null, side: o.side || 0, carve: o.carve ?? null,
     min: [0, 0, 0], max: [0, 0, 0],
   };
 }

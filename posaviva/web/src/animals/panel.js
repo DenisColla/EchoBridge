@@ -11,9 +11,13 @@ export const GROUPS = [
   { id: 'fattoria', label: 'Fattoria' },
   { id: 'selvatici', label: 'Selvatici' },
   { id: 'esotici', label: 'Esotici' },
+  { id: 'uccelli', label: 'Uccelli' },
+  { id: 'marini', label: 'Marini' },
+  { id: 'rettili', label: 'Rettili' },
+  { id: 'fantasy', label: 'Fantasy' },
 ];
 
-const PART_ORDER = ['head', 'neck', 'jaw', 'ear', 'back', 'body', 'tail', 'trunk', 'shoulder', 'arm', 'forearm', 'wrist', 'fpaw', 'thigh', 'shin', 'hock', 'hpaw'];
+const PART_ORDER = ['head', 'neck', 'jaw', 'tongue', 'ear', 'crest', 'back', 'body', 'front', 'mid', 'tail', 'tailtip', 'fluke', 'trunk', 'wings', 'wing', 'wingtip', 'fin', 'pelvic', 'dorsal', 'shoulder', 'arm', 'forearm', 'wrist', 'fpaw', 'thigh', 'shin', 'hock', 'hpaw', 'toes'];
 
 export function registerAnimalsTool(app, shell, ctx) {
   const { manager, thumbs, applyPreset, focus } = ctx;
@@ -144,7 +148,7 @@ export function registerAnimalsTool(app, shell, ctx) {
     const poseRow = h('div', { class: 'pv-row pv-an-actions' },
       button({ label: 'Specchia', icon: 'mirror', small: true, onClick: () => { a.mirrorPose(); a.dropToGround(); app.commit('specchia posa'); } }),
       button({ label: 'Azzera', icon: 'reset', small: true, onClick: () => { a.resetPose(); a.dropToGround(); a.lastPreset = 'stand'; poseChips.setValue('stand'); app.commit('azzera posa'); } }),
-      button({ label: 'A terra', icon: 'ground', small: true, onClick: () => { a.dropToGround(); app.commit('animale a terra'); } }),
+      button({ label: 'A terra', icon: 'ground', small: true, onClick: () => { a.root.position.y = 0; a.dropToGround(); refreshValues(); app.commit('animale a terra'); } }),
     );
     body.appendChild(section('Pose pronte', [poseChips, poseRow]));
 
@@ -179,7 +183,7 @@ export function registerAnimalsTool(app, shell, ctx) {
     age._get = () => Math.round(a.age * 100);
     sliders.push(size, age);
     const hgt = h('div', { class: 'pv-an-note pv-an-height' });
-    const updH = () => { hgt.textContent = `Altezza al garrese circa ${(a.entry.height * a.size * ageScales(a.age).body).toFixed(2)} m`; };
+    const updH = () => { hgt.textContent = `${a.entry.heightLabel || 'Altezza al garrese circa'} ${(a.entry.height * a.size * ageScales(a.age).body).toFixed(2)} m`; };
     updH();
     size.input.addEventListener('input', updH); age.input.addEventListener('input', updH);
     body.appendChild(section('Mantello e taglia', [palChips, h('div', { class: 'pv-row pv-an-custom' }, h('span', {}, 'Colore libero'), sw), size, age, hgt]));
@@ -189,7 +193,13 @@ export function registerAnimalsTool(app, shell, ctx) {
       onInput: (v) => { a.root.rotation.y = (v * Math.PI) / 180; a.root.updateMatrixWorld(true); app.invalidate(); }, onChange: () => app.commit('ruota animale') });
     rot._get = () => Math.round(deg(wrapA(a.root.rotation.y)));
     sliders.push(rot);
-    body.appendChild(section('Posizione', [h('div', { class: 'pv-an-note' }, 'Trascina l’animale per spostarlo; usa l’anello arancione per girarlo.'), rot]));
+    // height above the floor: birds on a perch, flying or swimming animals, a cat on a wall
+    const lift = slider({ label: 'Altezza da terra', min: 0, max: 600, step: 1, value: Math.round(a.root.position.y * 100), format: (v) => (v / 100).toFixed(2) + ' m',
+      defaultValue: 0,
+      onInput: (v) => { a.root.position.y = v / 100; a.root.updateMatrixWorld(true); app.invalidate(); }, onChange: () => { manager.dispatchEvent({ type: 'change', animal: a, what: 'placement' }); app.commit('altezza animale'); } });
+    lift._get = () => Math.round(a.root.position.y * 100);
+    sliders.push(lift);
+    body.appendChild(section('Posizione', [h('div', { class: 'pv-an-note' }, 'Trascina l’animale per spostarlo; usa l’anello arancione per girarlo.'), rot, lift]));
   }
 
   // ------------------------------------------------------------ parts + sliders
@@ -207,8 +217,8 @@ export function registerAnimalsTool(app, shell, ctx) {
     const box = h('div', { class: 'pv-an-partbox' });
     box.appendChild(h('div', { class: 'pv-an-partname' }, ctrl.label));
     for (const ax of ctrl.axes) {
-      const s = slider({ label: ax.label, min: ax.min, max: ax.max, step: 1, value: Math.round(a.getAxis(ctrl, ax)), format: (v) => Math.round(v) + '°',
-        defaultValue: 0,
+      const s = slider({ label: ax.label, min: ax.min, max: ax.max, step: 1, value: Math.round(a.getAxis(ctrl, ax)), format: (v) => Math.round(v) + (ax.unit || '°'),
+        defaultValue: ax.k === 'blend' ? (ax.invert ? ax.max : ax.min) : 0,
         onInput: (v) => a.setAxis(ctrl, ax, v), onChange: () => app.commit('posa ' + ctrl.label.toLowerCase()) });
       s._get = () => a.getAxis(ctrl, ax);
       s._part = true;

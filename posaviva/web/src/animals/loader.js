@@ -58,13 +58,16 @@ function decode(entry, buf) {
   const pos = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) pos[i * 3 + k] = min[k] + (u16[i * 3 + k] / 65535) * size[k];
   // box-mapped UVs for the fur detail map (1 unit = 1 m; the material scales it)
+  // chart 3 = explicit sheets (feathers) with their own 0..1 UVs (optional 'uv' section)
   const uv = new Float32Array(n * 2);
+  const uvq = L.uv ? new Uint16Array(buf, L.uv[0], L.uv[1]) : null;
+  const scale = entry.fur?.scale || 10;
   for (let i = 0; i < n; i++) {
     const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2], c = chart[i];
+    if (c === 3 && uvq) { uv[i * 2] = uvq[i * 2] / 65535; uv[i * 2 + 1] = uvq[i * 2 + 1] / 65535; continue; }
     if (c === 0) { uv[i * 2] = z; uv[i * 2 + 1] = y; } else if (c === 1) { uv[i * 2] = x; uv[i * 2 + 1] = z; } else { uv[i * 2] = x; uv[i * 2 + 1] = y; }
+    uv[i * 2] *= scale; uv[i * 2 + 1] *= scale;
   }
-  const scale = entry.fur?.scale || 10;
-  for (let i = 0; i < uv.length; i++) uv[i] *= scale;
   const attrs = {
     position: new THREE.BufferAttribute(pos, 3),
     normal: new THREE.BufferAttribute(nrm, 3, true),

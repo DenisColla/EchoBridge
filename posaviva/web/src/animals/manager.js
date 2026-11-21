@@ -32,7 +32,7 @@ export class AnimalManager extends THREE.EventDispatcher {
     const a = new Animal(data, opts);
     if (!opts.position) this._placeNew(a, opts.near);
     this._attach(a);
-    if (!opts.pose) a.dropToGround();
+    if (!opts.pose && !(a.entry.defaultPose && this.applyPreset?.(a, a.entry.defaultPose))) a.dropToGround();
     if (opts.select !== false) this.select(a);
     return a;
   }

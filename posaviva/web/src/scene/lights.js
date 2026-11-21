@@ -617,6 +617,19 @@ export class LightRig extends THREE.EventDispatcher {
   _refreshBounds() {
     if (!worldBounds(this.app, this._worldBox)) this._worldBox.set(_v.set(-0.6, 0, -0.4), _v2.set(0.6, 1.9, 0.4));
     const wb = this._worldBox, fb = this._fitBox;
+    // big sets (buildings, streets, forests): keep the shadow map focused around the
+    // characters so their shadows stay crisp; far scenery still casts within ~25 m
+    const chars = this.app.characters.filter((c) => c.root.visible);
+    if (chars.length) {
+      let cx = 0, cz = 0;
+      for (const c of chars) { cx += c.root.position.x; cz += c.root.position.z; }
+      cx /= chars.length; cz /= chars.length;
+      const R = 25;
+      wb.min.x = Math.max(wb.min.x, cx - R); wb.max.x = Math.min(wb.max.x, cx + R);
+      wb.min.z = Math.max(wb.min.z, cz - R); wb.max.z = Math.min(wb.max.z, cz + R);
+      wb.max.y = Math.min(wb.max.y, 40);
+      if (wb.isEmpty()) wb.set(_v.set(cx - 0.6, 0, cz - 0.4), _v2.set(cx + 0.6, 1.9, cz + 0.4));
+    }
     // hysteresis: refit only when something leaves the fitted box or it became much too large
     const tooBig = (fb.max.x - fb.min.x) - (wb.max.x - wb.min.x) > 0.9 || (fb.max.y - fb.min.y) - (wb.max.y - wb.min.y) > 0.9 || (fb.max.z - fb.min.z) - (wb.max.z - wb.min.z) > 0.9;
     if (fb.containsBox(wb) && !tooBig) return false;

@@ -295,6 +295,19 @@ function feet(c, sx, S) {
         if (F.claws !== false) B.cone([tp[0], oy + r * 0.32, tp[2] + r * 0.22], [tp[0], oy + r * 0.06, tp[2] + r * 0.46], r * 0.085 * (F.clawK || 1), r * 0.02, { bones: [bones[0]], part: 'claw', mat: 'keratin', k: r * 0.05 });
       }
       B.ell([c0[0], oy + r * 0.1, c0[2] - r * 0.15], [r * 0.48, r * 0.16, r * 0.42], { bones, part: 'paw', mat: 'pad', k: r * 0.12 });
+    } else if (F.type === 'talon') { // raptor foot (griffin): scaly toes spread on the ground, hooked talons
+      const r = 0.035 * H * fs;
+      const c0 = [base[0], r * 0.9, base[2]];
+      B.ell(c0, [r * 1.1, r * 0.9, r * 1.2], { bones, part: 'toe', mat: 'scale', k: r * 0.5 });
+      const toes = [[-0.5, 1.0], [0, 1.15], [0.5, 1.0], [Math.PI, 0.75]];
+      for (const [a, k] of toes) {
+        const d = [Math.sin(a) * sx, 0, Math.cos(a)];
+        const tp = [c0[0] + d[0] * r * 2.6 * k, r * 0.5, c0[2] + d[2] * r * 2.6 * k];
+        B.cone([c0[0], r * 0.7, c0[2]], tp, r * 0.42, r * 0.3, { bones: [bones[0]], part: 'toe', mat: 'scale', k: r * 0.25 });
+        const c2 = [tp[0] + d[0] * r * 0.9, r * 0.45, tp[2] + d[2] * r * 0.9], c3 = [tp[0] + d[0] * r * 1.3, r * 0.05, tp[2] + d[2] * r * 1.3];
+        B.loft([{ p: [tp[0], r * 0.6, tp[2]], w: r * 0.22, ht: r * 0.3, hb: r * 0.25 }, { p: c2, w: r * 0.15, ht: r * 0.2, hb: r * 0.16 }, { p: c3, w: r * 0.04, ht: r * 0.05, hb: r * 0.04 }], { bones: [bones[0]], part: 'claw', mat: 'keratin', k: r * 0.1, caps: [0.6, 0.6] });
+      }
+      B.box([c0[0], -0.05 * H, c0[2]], [r * 6, 0.05 * H, r * 6], 0.002, { op: 'sub', k: r * 0.1 });
     } else if (F.type === 'plantigrade') { // bear: long sole on the ground, strong claws
       const r = 0.06 * H * fs;
       const len = V.dist([up[0], 0, up[2]], [toe[0], 0, toe[2]]) * 0.5 + r;

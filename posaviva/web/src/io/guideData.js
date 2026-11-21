@@ -133,19 +133,19 @@ export const TOPICS = [
 
   {
     id: 'animali', chapter: 'personaggi', icon: 'paw', title: 'Aggiungere e posare animali',
-    summary: 'Cani, gatti, cavalli, animali selvatici: pose pronte, parti, mantello',
-    keywords: 'animali animale cane gatto cavallo mucca maiale pecora capra cervo orso elefante giraffa gorilla canguro domestici fattoria selvatici esotici zampe coda mantello taglia cucciolo',
+    summary: '39 animali: domestici, selvatici, uccelli, marini, rettili e fantasy; pose pronte, parti, mantello',
+    keywords: 'animali animale cane gatto cavallo mucca maiale pecora capra cervo orso elefante giraffa gorilla canguro domestici fattoria selvatici esotici zampe coda mantello taglia cucciolo uccelli corvo aquila gufo pappagallo gallina marini squalo delfino rettili serpente coccodrillo tartaruga fantasy drago unicorno grifone pegaso ali',
     where: ['Personaggi', 'Animali'],
     when: (e) => e.tool('animals'),
     steps: [
-      'Apri **Personaggi** › **Animali** e scegli un gruppo: **Domestici**, **Fattoria**, **Selvatici**, **Esotici** (o **Tutti**).',
+      'Apri **Personaggi** › **Animali** e scegli un gruppo: **Domestici**, **Fattoria**, **Selvatici**, **Esotici**, **Uccelli**, **Marini**, **Rettili**, **Fantasy** (o **Tutti**).',
       'Tocca un animale: compare accanto al personaggio.',
       'In **Pose pronte** scegli una posa (per esempio In piedi, Cammina, Seduto, Sdraiato, Dorme); **Specchia**, **Azzera** e **A terra** la completano.',
       'Per posarlo a mano tocca una parte sull\'animale (testa, zampe, coda…) o sceglila in **Parti del corpo**, poi regola i cursori; **Azzera parte** la riporta a riposo.',
       '**Mantello e taglia**: colori del manto, **Colore libero**, **Taglia** ed **Età** (da cucciolo ad adulto). **Bocca aperta** apre il muso.',
       'Trascina l\'animale per spostarlo; l\'anello arancione, o il cursore **Rotazione**, lo gira. In alto: [zoom] inquadra, [copy] duplica, [trash] elimina.',
     ],
-    tips: ['Tocca un animale nella vista per riaprire le sue impostazioni.'],
+    tips: ['Tocca un animale nella vista per riaprire le sue impostazioni.', 'Uccelli e draghi: i cursori **Apertura** aprono ali e coda; **Altezza da terra** li solleva (in volo, appollaiati o in acqua per squali e delfini).', 'Con un animale selezionato, il pulsante di **zoom rapido** offre anche l\'animale intero e la sua testa.'],
     go: { tool: 'animals' }, context: ['animals'], related: ['personaggi', 'zoom-rapido'],
   },
 

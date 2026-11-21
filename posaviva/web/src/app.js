@@ -34,7 +34,7 @@ export class App extends THREE.EventDispatcher {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#2a2c33');
 
-    this.camera = new THREE.PerspectiveCamera(35, 1, 0.05, 200);
+    this.camera = new THREE.PerspectiveCamera(35, 1, 0.05, 3000);
     this.camera.filmGauge = 35;
     this.camera.setFocalLength(50);
     this.camera.position.set(0.0, 1.35, 4.2);
@@ -45,7 +45,7 @@ export class App extends THREE.EventDispatcher {
     this.controls.dampingFactor = 0.12;
     this.controls.screenSpacePanning = true;
     this.controls.minDistance = 0.15;
-    this.controls.maxDistance = 40;
+    this.controls.maxDistance = 600; // whole streets and skyscrapers can be framed
     this.controls.addEventListener('change', () => this.invalidate());
     this.controls.update();
 
@@ -66,7 +66,7 @@ export class App extends THREE.EventDispatcher {
     this.world = new THREE.Group(); // characters & props live here
     this.world.name = 'world';
     this.scene.add(this.world);
-    const ground = new THREE.Mesh(new THREE.CircleGeometry(30, 64).rotateX(-Math.PI / 2), undefined);
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(1500, 96).rotateX(-Math.PI / 2), undefined);
     ground.name = 'ground';
     ground.receiveShadow = true;
     ground.userData.isGround = true;
@@ -372,12 +372,21 @@ export class App extends THREE.EventDispatcher {
     this.invalidate();
   }
 
+  /** Near plane follows the orbit distance: close-ups of a hand and whole streets both keep depth precision. */
+  _fitClipPlanes() {
+    const cam = this.camera;
+    const d = cam.position.distanceTo(this.controls.target);
+    const near = Math.min(1.5, Math.max(0.02, d * 0.006));
+    if (Math.abs(near - cam.near) / cam.near > 0.15) { cam.near = near; cam.updateProjectionMatrix(); this._needsRender = true; }
+  }
+
   _frame() {
     if (this._held) return;
     this._timer.update();
     const dt = Math.min(this._timer.getDelta(), 0.1);
     let keep = this.controls.update(dt) || false;
     keep = this._runHooks(dt) || keep;
+    this._fitClipPlanes();
     if (!this._needsRender && !keep) {
       if (++this._idleFrames >= IDLE_STOP_FRAMES) this._stopLoop();
       return;

@@ -16,7 +16,10 @@ import { fileURLToPath } from 'node:url';
 import { Field, V } from '../web/src/animals/engine/sdf.js';
 import { meshField } from '../web/src/animals/engine/mesher.js';
 import { simplify } from '../web/src/animals/engine/simplify.js';
-import { bake } from '../web/src/animals/engine/bake.js';
+import { bake, REGIONS } from '../web/src/animals/engine/bake.js';
+import { bakeSheets, mergeSheets } from '../web/src/animals/engine/cards.js';
+import { FAMILY_POSES, posesFor, resolvePose } from '../web/src/animals/poses.js';
+import '../web/src/animals/families/index.js';
 import { pack } from '../web/src/animals/engine/format.js';
 import { renderViews, writePNG, poseBones, skin, eulerDegToQuat } from '../web/src/animals/engine/raster.js';
 import { SPECIES } from '../web/src/animals/species/index.js';
@@ -27,9 +30,12 @@ const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf(name); if (i < 0) return def; const v = args[i + 1]; args.splice(i, 2); return v; };
 const flag = (name) => { const i = args.indexOf(name); if (i < 0) return false; args.splice(i, 1); return true; };
 const previewDir = opt('--preview', null);
+const resForced = args.includes('--res');
 const RES = +opt('--res', 380);
 const dry = flag('--dry');
 const posesArg = opt('--poses', null);
+const palArg = opt('--pal', null); // preview palette: index or 'debug' (light grey coat, coloured regions)
+const onlyPose = opt('--pose', null); // with --poses family: render only this pose
 const ids = args.length ? args : SPECIES.map((s) => s.id);
 const VERSION = 1;
 
@@ -48,7 +54,7 @@ for (const id of ids) {
   B.finalize();
   const field = new Field(B.prims);
   const size = field.max.map((v, k) => v - field.min[k]);
-  const h = Math.max(...size) / (sp.res || RES);
+  const h = Math.max(...size) / (resForced ? RES : sp.res || RES);
   const mesh = meshField(field, h);
   // keep more triangles where comic artists look first: head, ears, feet
   const focus = [];
@@ -61,19 +67,23 @@ for (const id of ids) {
     for (const f of focus) { const d = V.dist(p, f.c); if (d < f.r) weights[i] = Math.max(weights[i], 1 + (f.w - 1) * Math.min(1, (f.r - d) / (f.r * 0.3))); }
   }
   const simp = simplify(mesh.positions, mesh.indices, sp.tris || 22000, { weights });
-  const baked = bake(simp, field, B.bones, {
-    blend: sp.blend ?? lm.H * 0.08, h, aoScale: lm.H * 0.022,
-    coat: (v) => {
-      const m = sp.coat(v, lm);
-      if (sp.skinFn) { const w = sp.skinFn(v, lm); if (w > (m.regionW || 0)) { m.region = 'skin'; m.regionW = w; } }
-      return m;
-    },
-  });
-  // ---- origin on the floor at the footprint centre
+  const coatFn = (v) => {
+    const m = sp.coat(v, lm);
+    if (sp.skinFn) { const w = sp.skinFn(v, lm); if (w > (m.regionW || 0)) { m.region = 'skin'; m.regionW = w; } }
+    return m;
+  };
+  let baked = bake(simp, field, B.bones, { blend: sp.blend ?? lm.H * 0.08, h, aoScale: lm.H * 0.022, coat: coatFn });
+  // explicit sheets (feathers, membranes) appended to the body
+  if (B.sheets.length) baked = mergeSheets(baked, bakeSheets(B.sheets, field, B.bones, { aoScale: lm.H * 0.022, coat: coatFn }), REGIONS);
+  // ---- origin on the floor at the footprint centre (no feet: centre of the body)
   const feet = B.bones.filter((b) => /^(fingers|toes)\.[LR]$/.test(b.name));
   let cx = 0, cz = 0;
   for (const b of feet) { cx += b.head[0]; cz += b.head[2]; }
   cx /= feet.length || 1; cz /= feet.length || 1;
+  if (!feet.length || sp.origin) {
+    const o = sp.origin || [(field.min[0] + field.max[0]) / 2, 0, (field.min[2] + field.max[2]) / 2];
+    cx = o[0]; cz = o[2];
+  }
   let minY = Infinity;
   for (let i = 1; i < baked.positions.length; i += 3) minY = Math.min(minY, baked.positions[i]);
   const T = [-cx, -minY, -cz];
@@ -97,12 +107,14 @@ for (const id of ids) {
     bounds: { min: r4a(mn), max: r4a(mx) },
     height: r4(lm.H), fur: sp.fur, iris: sp.iris || '#4a3020', pupil: sp.pupil || 'round', teethColor: sp.teethColor || '#e9e2d0',
     palettes: sp.palettes, limits: sp.limits || null, poses: sp.poses || null, labels: sp.labels || null,
+    blends: Object.keys(B.blends).length ? roundBlends(B.blends) : null, defaultPose: sp.defaultPose || null, heightLabel: sp.heightLabel || null,
   };
   if (!dry) updateManifest(entry);
   console.log(`${id}: grid ${mesh.stats.grid.join('x')} h=${(h * 1000).toFixed(1)}mm, surface nets ${mesh.stats.tris} tris (${mesh.stats.ms} ms), -> ${packed.tris} tris / ${packed.verts} verts, ${(packed.buffer.byteLength / 1024).toFixed(0)} KB, diffusion ${baked.stats.diffusionIters} it, ${Date.now() - t0} ms`);
 
   if (previewDir) {
-    const pal = sp.palettes[0].colors;
+    const DEBUG_PAL = { base: '#b8b4ae', under: '#d8d4ce', pattern: '#8a8680', points: '#706c68', extra: '#e8e0d0', keratin: '#d0a040', scale: '#c08060', mouth: '#a03030', skin: '#e0a0a0', eyelid: '#404040', nose: '#303030', pad: '#504840' };
+    const pal = palArg === 'debug' ? DEBUG_PAL : sp.palettes[+(palArg || 0)]?.colors || sp.palettes[0].colors;
     const views = [{ yaw: 90, pitch: 5 }, { yaw: 35, pitch: 15 }, { yaw: 0, pitch: 5 }, { yaw: 180, pitch: 30 }];
     const spheres = eyes.map((e) => ({ c: e.pos, r: e.r, color: [40, 28, 20] }));
     const rest = renderViews(baked, pal, { P: baked.positions, N: baked.normals, views, tw: 520, th: 400, spheres });
@@ -110,10 +122,21 @@ for (const id of ids) {
     // head close-up
     const head = B.bones.find((b) => b.name === 'head');
     if (head) {
-      const hv = renderViews(baked, pal, { P: baked.positions, N: baked.normals, views: [{ yaw: 90, pitch: 0 }, { yaw: 30, pitch: 10 }], tw: 420, th: 420, fit: lm.HL * 0.8 || lm.H * 0.3, center: head.tail, spheres });
+      const hv = renderViews(baked, pal, { P: baked.positions, N: baked.normals, views: [{ yaw: 90, pitch: 0 }, { yaw: 30, pitch: 10 }], tw: 420, th: 420, fit: lm.headFit || lm.HL * 0.8 || lm.H * 0.3, center: lm.headCenter ? mv(lm.headCenter) : head.tail, spheres });
       writePNG(path.join(previewDir, `${id}-head.png`), hv.W, hv.H, hv.img);
     }
-    if (posesArg) {
+    if (posesArg === 'family') { // every ready pose of the family (resolved like the app: blends, absolute angles)
+      const views2 = [{ yaw: 90, pitch: 5 }, { yaw: 35, pitch: 20 }, { yaw: 0, pitch: 8 }];
+      for (const p of posesFor(entry).filter((x) => !onlyPose || x.id === onlyPose)) {
+        const eul = resolvePose(entry, p);
+        const q = {};
+        for (const [bn, e] of Object.entries(eul)) q[bn] = eulerDegToQuat(e);
+        const posed = poseBones(B.bones, q);
+        const sk = skin(baked, B.bones, posed);
+        const img = renderViews(baked, pal, { P: sk.P, N: sk.N, views: views2, cols: 3, tw: 400, th: 340 });
+        writePNG(path.join(previewDir, `${id}-pose-${p.id}.png`), img.W, img.H, img.img);
+      }
+    } else if (posesArg) {
       const poses = JSON.parse(fs.readFileSync(posesArg, 'utf8'));
       for (const [pname, pose] of Object.entries(poses)) {
         const q = {};
@@ -126,6 +149,13 @@ for (const id of ids) {
     }
   }
 }
+
+function roundBlends(b) {
+  const out = {};
+  for (const [id, bones] of Object.entries(b)) { out[id] = {}; for (const [bn, e] of Object.entries(bones)) out[id][bn] = e.map((x) => Math.round(x * 100) / 100); }
+  return out;
+}
+void FAMILY_POSES;
 
 /** Read-modify-write of the manifest under a lock file (several builds may run in parallel). */
 function updateManifest(entry) {

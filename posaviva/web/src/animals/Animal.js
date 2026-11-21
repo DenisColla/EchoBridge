@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { materials } from '../render/materials.js';
 import { coatColors } from './coatColor.js';
-import { furNormalMap, eyeTexture } from './textures.js';
+import { furNormalMap, eyeTexture, quillNormalMap } from './textures.js';
 import { controlsFor } from './controls.js';
 
 let _seq = 0;
@@ -36,6 +36,10 @@ const REGION_SPECS = {
   pad: () => ({ kind: 'prop', color: '#ffffff', vertexColors: true, roughness: 0.7, normalMap: furNormalMap('wrinkle'), normalScale: 0.5 }),
   skin: (f) => ({ kind: 'prop', color: '#ffffff', vertexColors: true, roughness: 0.62, normalMap: furNormalMap('wrinkle'), normalScale: 0.35 }),
   eyelid: () => ({ kind: 'prop', color: '#ffffff', vertexColors: true, roughness: 0.4 }),
+  // explicit feather sheets (wings, tails): per-feather UVs with a quill / barbs normal map
+  feather: (f) => ({ kind: 'prop', color: '#ffffff', vertexColors: true, roughness: f.featherRoughness ?? 0.72, sheen: f.featherSheen ?? 0.3, normalMap: quillNormalMap(), normalScale: 0.55 }),
+  // scaly skin (bird legs and feet, reptiles' bellies)
+  scale: () => ({ kind: 'prop', color: '#ffffff', vertexColors: true, roughness: 0.55, normalMap: furNormalMap('scales'), normalScale: 0.45 }),
 };
 
 export class Animal extends THREE.EventDispatcher {
@@ -221,36 +225,90 @@ export class Animal extends THREE.EventDispatcher {
   boneEuler(name) { const b = this.boneByName.get(name); return b ? _e.setFromQuaternion(b.quaternion, 'XYZ').toArray().slice(0, 3).map((r) => r / D2R) : [0, 0, 0]; }
   setBoneEuler(name, deg) { const b = this.boneByName.get(name); if (b) b.quaternion.setFromEuler(_e.set(deg[0] * D2R, deg[1] * D2R, deg[2] * D2R, 'XYZ')); }
 
-  /** Display value (degrees) of a control axis. */
+  /**
+   * Display value of a control axis. Besides the plain axes (one Euler
+   * component spread over the control's bones, or over axis.bones) a family
+   * may use:
+   *   axis.drive = [[bone, 'x'|'y'|'z', factor], ...]  coupled bones (display v -> v * factor)
+   *   axis.k = 'blend', axis.blend = [blendId...]      0..max = identity .. the species'
+   *     stored target rotations (entry.blends[id], e.g. a folded wing); axis.invert flips it
+   */
   getAxis(ctrl, axis) {
+    if (axis.k === 'blend') return this._getBlend(axis);
+    if (axis.drive) {
+      const [b, c, f] = axis.drive[0];
+      return this.boneEuler(b)['xyz'.indexOf(c)] / (f || 1);
+    }
     const i = 'xyz'.indexOf(axis.k);
     let sum = 0;
-    for (const n of ctrl.bones) sum += this.boneEuler(n)[i];
+    for (const n of axis.bones || ctrl.bones) sum += this.boneEuler(n)[i];
     return sum * axis.sign * (axis.sided && ctrl.side === '.R' ? -1 : 1);
   }
 
   /** Sets a control axis (display degrees, clamped to its range); spreads chains evenly. */
   setAxis(ctrl, axis, deg, notify = true) {
     const v = Math.max(axis.min, Math.min(axis.max, deg));
+    if (axis.k === 'blend') { this._setBlend(axis, v); this._poseChanged(notify); return v; }
+    if (axis.drive) {
+      for (const [b, c, f] of axis.drive) {
+        const e = this.boneEuler(b);
+        e['xyz'.indexOf(c)] = v * (f || 1);
+        this.setBoneEuler(b, e);
+      }
+      this._poseChanged(notify);
+      return v;
+    }
     const raw = v * axis.sign * (axis.sided && ctrl.side === '.R' ? -1 : 1);
     const i = 'xyz'.indexOf(axis.k);
-    for (const n of ctrl.bones) {
+    const bones = axis.bones || ctrl.bones;
+    for (const n of bones) {
       const e = this.boneEuler(n);
-      e[i] = raw / ctrl.bones.length;
+      e[i] = raw / bones.length;
       this.setBoneEuler(n, e);
     }
     this._poseChanged(notify);
     return v;
   }
 
-  resetControl(ctrl) { for (const n of ctrl.bones) this.boneByName.get(n)?.quaternion.identity(); this._poseChanged(); }
+  /** Target rotations of a stored blend (entry.blends[id]) as quaternions (cached on the entry). */
+  blendTargets(id) {
+    const cache = this.entry._blendQ || (this.entry._blendQ = {});
+    if (cache[id]) return cache[id];
+    const m = new Map();
+    for (const [bn, e] of Object.entries(this.entry.blends?.[id] || {})) {
+      if (this.boneByName.has(bn)) m.set(bn, new THREE.Quaternion().setFromEuler(new THREE.Euler(e[0] * D2R, e[1] * D2R, e[2] * D2R, 'XYZ')));
+    }
+    cache[id] = m;
+    return m;
+  }
+
+  _getBlend(axis) {
+    const m = this.blendTargets(axis.blend[0]);
+    let best = null, ang = 0;
+    for (const [bn, q] of m) { const a = 2 * Math.acos(Math.min(1, Math.abs(q.w))); if (a > ang) { ang = a; best = bn; } }
+    if (!best || ang < 1e-4) return axis.invert ? axis.max : axis.min;
+    const qt = m.get(best), q = this.boneByName.get(best).quaternion;
+    const sw = q.w < 0 ? -1 : 1, st = qt.w < 0 ? -1 : 1;
+    const a = 2 * Math.acos(Math.min(1, Math.abs(q.w)));
+    const align = (q.x * sw) * (qt.x * st) + (q.y * sw) * (qt.y * st) + (q.z * sw) * (qt.z * st);
+    const t = Math.max(0, Math.min(1, (align >= 0 ? a : -a) / ang));
+    return (axis.invert ? 1 - t : t) * axis.max;
+  }
+
+  _setBlend(axis, v) {
+    const t = axis.invert ? 1 - v / axis.max : v / axis.max;
+    for (const id of axis.blend) for (const [bn, qt] of this.blendTargets(id)) this.boneByName.get(bn).quaternion.identity().slerp(qt, t);
+  }
+
+  resetControl(ctrl) { for (const n of ctrl.all || ctrl.bones) this.boneByName.get(n)?.quaternion.identity(); this._poseChanged(); }
 
   /** Copies a control's rotation to its mirror control (q -> (x,-y,-z,w)). */
   mirrorControl(ctrl) {
     const other = ctrl.mirror && this.controls.byId.get(ctrl.mirror);
     if (!other) return;
-    ctrl.bones.forEach((n, i) => {
-      const a = this.boneByName.get(n), b = this.boneByName.get(other.bones[i]);
+    const mine = ctrl.all || ctrl.bones, theirs = other.all || other.bones;
+    mine.forEach((n, i) => {
+      const a = this.boneByName.get(n), b = this.boneByName.get(theirs[i]);
       if (a && b) b.quaternion.set(a.quaternion.x, -a.quaternion.y, -a.quaternion.z, a.quaternion.w);
     });
     this._poseChanged();

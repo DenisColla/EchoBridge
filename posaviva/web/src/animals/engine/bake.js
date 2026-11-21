@@ -3,7 +3,8 @@
 // regions, coat masks, ambient occlusion from the field and the box-mapping
 // charts used for the fur normal map.
 
-const REGIONS = ['fur', 'keratin', 'nose', 'mouth', 'pad', 'skin', 'eyelid'];
+// 'feather' = explicit feather sheets (engine/cards.js), 'scale' = scaly skin (bird legs, reptiles)
+const REGIONS = ['fur', 'keratin', 'nose', 'mouth', 'pad', 'skin', 'eyelid', 'feather', 'scale'];
 export const REGION_IDS = Object.fromEntries(REGIONS.map((r, i) => [r, i]));
 export { REGIONS };
 
@@ -186,7 +187,7 @@ export function bake(mesh, field, bones, opts) {
         const bx = Math.max(p.min[0] - x, 0, x - p.max[0]), by = Math.max(p.min[1] - y, 0, y - p.max[1]), bz = Math.max(p.min[2] - z, 0, z - p.max[2]);
         if (Math.sqrt(bx * bx + by * by + bz * bz) > p.k + 2 * h) continue;
         const dd = -field.primDist(p, x, y, z); // >= ~0 on the carved wall
-        const w = 1 - Math.abs(dd) / (0.6 * p.k + 1.2 * h);
+        const w = 1 - Math.abs(dd) / (p.carve ?? (0.6 * p.k + 1.2 * h)); // carve: width of the painted wall band (m)
         if (w <= 0) continue;
         const o = v * REGIONS.length;
         for (let r = 0; r < REGIONS.length; r++) regionW[o + r] *= (1 - w);

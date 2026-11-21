@@ -16,7 +16,15 @@ export class Builder {
     this.prims = [];
     this.eyes = [];
     this.teeth = [];
+    this.sheets = []; // explicit thin parts (feathers, membranes): engine/cards.js
+    this.blends = {}; // stored target rotations: {id: {bone: [x, y, z] degrees}} (folded wing, closed tail fan)
   }
+
+  /** Explicit sheet (closed thin slab from a grid of points, own skin weights): see engine/cards.js. */
+  sheet(desc) { this.sheets.push(desc); return desc; }
+
+  /** Stores (merges) the target rotations of a blend (Euler XYZ degrees per bone). */
+  blend(id, bones) { this.blends[id] = { ...(this.blends[id] || {}), ...bones }; }
 
   /** Adds a bone. head/tail: [x, y, z]. */
   bone(name, parent, head, tail) {

@@ -66,7 +66,7 @@ export class AnimalHighlight {
     if (!animal || !ctrl) return;
     this.animal = animal;
     const d = animal.data;
-    const want = new Set(ctrl.bones.map((n) => animal.boneIndex.get(n)));
+    const want = new Set((ctrl.all || ctrl.bones).map((n) => animal.boneIndex.get(n)));
     const hi = new Float32Array(d.count);
     for (let v = 0; v < d.count; v++) {
       let s = 0;

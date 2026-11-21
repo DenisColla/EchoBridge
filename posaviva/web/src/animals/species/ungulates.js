@@ -10,7 +10,7 @@ const furBristle = { type: 'bristle', scale: 9, normalScale: 0.45, roughness: 0.
 const skinPig = { type: 'smooth', scale: 12, normalScale: 0.15, roughness: 0.6, sheen: 0.2 };
 
 // ------------------------------------------------------------------ equids
-const HORSE = {
+export const HORSE = {
   H: 1.6,
   torso: [[-0.56, 0.88, 0.62, 0.07], [-0.47, 0.99, 0.56, 0.15], [-0.34, 1.0, 0.55, 0.185], [-0.18, 0.975, 0.53, 0.19], [0.0, 0.975, 0.52, 0.2], [0.18, 1.0, 0.53, 0.195], [0.32, 1.025, 0.56, 0.175], [0.44, 0.93, 0.6, 0.15], [0.54, 0.79, 0.64, 0.09]],
   hip: [0.11, 0.84, -0.36], knee: [0.125, 0.6, -0.22], hock: [0.085, 0.37, -0.48], hpaw: [0.08, 0.12, -0.43],
@@ -32,7 +32,7 @@ const HORSE = {
   thighD: 1.15, scapW: 1.2,
 };
 
-const horseExtras = (maneOpts) => (B, c) => { crestMane(c, maneOpts); forelock(B, c, maneOpts); };
+export const horseExtras = (maneOpts) => (B, c) => { crestMane(c, maneOpts); forelock(B, c, maneOpts); };
 function forelock(B, c, o) {
   if (o.upright) return;
   const { hp, HL } = c;

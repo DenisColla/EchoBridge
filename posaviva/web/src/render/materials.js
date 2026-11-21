@@ -587,6 +587,12 @@ class MaterialLibrary extends THREE.EventDispatcher {
 }
 
 // ---------------------------------------------------------------- style factories
+/** Optional glow (lit windows, lamps, vehicle lights): spec.emissive / emissiveIntensity / emissiveMap. */
+function emissiveOf(s) {
+  if (!s.emissive && !s.emissiveMap) return {};
+  return { emissive: new THREE.Color(s.emissive || '#ffffff'), emissiveIntensity: s.emissiveIntensity ?? 1, emissiveMap: s.emissiveMap || null };
+}
+
 const defaultFactories = {
   /** Flattering PBR: wrapped-diffuse skin with warm sheen, fabric sheen, glossy eyes. */
   realistic(s) {
@@ -641,7 +647,7 @@ const defaultFactories = {
       case 'ground':
         return new THREE.MeshStandardMaterial({ ...c, color, map: s.map || null, ...normals(s), roughness: s.roughness ?? 0.95, metalness: s.metalness ?? 0 });
       default: { // prop & unknown kinds (upholstery etc. may ask for sheen)
-        const o = { ...c, color, map: s.map || null, ...normals(s), roughness: s.roughness ?? 0.7, metalness: s.metalness ?? 0 };
+        const o = { ...c, color, map: s.map || null, ...normals(s), ...emissiveOf(s), roughness: s.roughness ?? 0.7, metalness: s.metalness ?? 0 };
         return s.sheen ? new THREE.MeshPhysicalMaterial({ ...o, sheen: s.sheen, sheenRoughness: 0.7, sheenColor: color.clone().lerp(new THREE.Color('#ffffff'), 0.3) }) : new THREE.MeshStandardMaterial(o);
       }
     }
@@ -690,7 +696,7 @@ const defaultFactories = {
     }
     if (s.kind === 'tongue') color.multiplyScalar(MOUTH_CAVITY);
     return toonHook(new THREE.MeshToonMaterial({
-      ...c, color, ...normals(s),
+      ...c, color, ...normals(s), ...emissiveOf(s),
       map: s.map || null, // garment prints, hair cards, prop textures
       side: sideOf(s.side, s.kind === 'lashes' ? THREE.DoubleSide : THREE.FrontSide),
     }), TOON_BASE);

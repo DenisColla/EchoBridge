@@ -187,3 +187,54 @@ export function eyeTexture(pupil = 'round', irisFrac = 0.86) {
   eyeCache.set(key, t);
   return t;
 }
+
+let quillTex = null;
+
+/**
+ * Normal map of one feather laid out on its own 0..1 UVs (explicit feather
+ * sheets): u across the vanes (0 trailing edge, 0.5 shaft, 1 leading edge),
+ * v from the root (0) to the tip (1). Raised shaft, barbs slanting toward the
+ * tip, a few splits in the vanes.
+ */
+export function quillNormalMap() {
+  if (quillTex) return quillTex;
+  const W = 128, H = 256;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const g = cv.getContext('2d', { willReadFrequently: true });
+  const r = rng(4242);
+  const nz = periodicNoise(16, 5);
+  const splits = [];
+  for (let i = 0; i < 7; i++) splits.push({ side: r() < 0.5 ? -1 : 1, v: 0.25 + r() * 0.7, w: 0.004 + r() * 0.006 });
+  const hgt = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const u = (x + 0.5) / W, v = 1 - (y + 0.5) / H; // canvas top = tip (flipY)
+    const du = u - 0.5, a = Math.abs(du), side = du < 0 ? -1 : 1;
+    const shaftW = 0.035 * (1 - 0.75 * v) + 0.006;
+    const shaft = a < shaftW ? Math.sqrt(1 - (a / shaftW) ** 2) * 1.4 : 0;
+    // barbs: lines slanting toward the tip, phase along v minus the distance from the shaft
+    const ph = (v - a * 0.75) * 70 + nz(u * 8, v * 16) * 0.8;
+    let barb = 0.5 + 0.5 * Math.sin(ph * Math.PI * 2);
+    barb = barb * barb * 0.32;
+    let split = 0;
+    for (const s of splits) if (s.side === side) { const d = Math.abs(v - a * 0.75 - s.v + 0.2); if (d < s.w) split -= 0.45 * (1 - d / s.w) * Math.min(1, a * 8); }
+    const edge = -0.25 * Math.max(0, a - 0.44) / 0.06;
+    hgt[y * W + x] = shaft + (a < shaftW ? 0 : barb + split) + edge;
+  }
+  const out = g.createImageData(W, H);
+  const k = 3.2;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const hx = hgt[y * W + Math.min(W - 1, x + 1)] - hgt[y * W + Math.max(0, x - 1)];
+    const hy = hgt[Math.min(H - 1, y + 1) * W + x] - hgt[Math.max(0, y - 1) * W + x];
+    let nx = -hx * k, ny = hy * k, nzz = 1;
+    const l = Math.hypot(nx, ny, nzz);
+    const o = (y * W + x) * 4;
+    out.data[o] = (nx / l * 0.5 + 0.5) * 255; out.data[o + 1] = (ny / l * 0.5 + 0.5) * 255; out.data[o + 2] = (nzz / l * 0.5 + 0.5) * 255; out.data[o + 3] = 255;
+  }
+  g.putImageData(out, 0, 0);
+  quillTex = new THREE.CanvasTexture(cv);
+  quillTex.colorSpace = THREE.NoColorSpace;
+  quillTex.anisotropy = 4;
+  quillTex.name = 'pv-animal-quill';
+  return quillTex;
+}

@@ -80,7 +80,7 @@ const QUAD = [
     'upperarm.L': { a: 62 }, 'forearm.L': { a: -24 }, 'hand.L': { a: -96 }, 'fingers.L': { a: -60 },
     'upperarm.R': { a: 40 }, 'forearm.R': { a: -42 }, 'hand.R': { a: -104 }, 'fingers.R': { a: -70 },
     neck1: [20, 0, 0], neck2: [6, 0, 0], head: [12, 0, 0], tail1: [24, 0, 0], tail2: [10, 0, 0], jaw: [10, 0, 0], 'ear*': [-30, 0, 0],
-  }, { only: ['cavallo', 'zebra'] }),
+  }, { only: ['cavallo', 'zebra', 'unicorno', 'pegaso'] }),
 ];
 
 // ------------------------------------------------------------------ primates (knuckle-walking stance at rest)
@@ -169,6 +169,48 @@ const ROO = [
 
 export const FAMILY_POSES = { quadruped: QUAD, primate: PRIM, macropod: ROO };
 
+/** Ready poses of a family added outside this file (families/*.js). */
+export function registerPoses(family, list) { FAMILY_POSES[family] = list; }
+
+// ------------------------------------------------------------------ rotation helpers (no three.js: also used at build time)
+const D2R = Math.PI / 180;
+export function eulerToQuat(e) { // degrees, intrinsic XYZ like THREE.Euler 'XYZ'
+  const [a, b, c] = e.map((d) => (d * D2R) / 2);
+  const c1 = Math.cos(a), c2 = Math.cos(b), c3 = Math.cos(c), s1 = Math.sin(a), s2 = Math.sin(b), s3 = Math.sin(c);
+  return [s1 * c2 * c3 + c1 * s2 * s3, c1 * s2 * c3 - s1 * c2 * s3, c1 * c2 * s3 + s1 * s2 * c3, c1 * c2 * c3 - s1 * s2 * s3];
+}
+export function quatToEuler(q) { // -> degrees XYZ (THREE.Euler.setFromRotationMatrix 'XYZ')
+  const [x, y, z, w] = q;
+  const m11 = 1 - 2 * (y * y + z * z), m12 = 2 * (x * y - z * w), m13 = 2 * (x * z + y * w);
+  const m22 = 1 - 2 * (x * x + z * z), m23 = 2 * (y * z - x * w), m32 = 2 * (y * z + x * w), m33 = 1 - 2 * (x * x + y * y);
+  const yy = Math.asin(Math.max(-1, Math.min(1, m13)));
+  let xx, zz;
+  if (Math.abs(m13) < 0.9999999) { xx = Math.atan2(-m23, m33); zz = Math.atan2(-m12, m11); } else { xx = Math.atan2(m32, m22); zz = 0; }
+  return [xx / D2R, yy / D2R, zz / D2R];
+}
+/** Rotation from the identity toward q at t (shortest arc). */
+export function quatPow(q, t) {
+  let [x, y, z, w] = q;
+  if (w < 0) { x = -x; y = -y; z = -z; w = -w; }
+  const half = Math.acos(Math.min(1, w)), s = Math.sin(half);
+  if (s < 1e-9) return [0, 0, 0, 1];
+  const k = Math.sin(half * t) / s;
+  return [x * k, y * k, z * k, Math.cos(half * t)];
+}
+
+/** Bone Euler angles of the stored blends of a pose ({'wingFold*': 1, tailFan: 0.5}). */
+function blendBones(entry, blend) {
+  const out = {};
+  if (!blend || !entry.blends) return out;
+  for (const [k, t] of Object.entries(blend)) {
+    const ids = k.endsWith('*') ? [k.slice(0, -1) + '.L', k.slice(0, -1) + '.R'] : [k];
+    for (const id of ids) {
+      for (const [bn, e] of Object.entries(entry.blends[id] || {})) out[bn] = t >= 1 ? e : quatToEuler(quatPow(eulerToQuat(e), t));
+    }
+  }
+  return out;
+}
+
 /** Expands '*' keys: left as given, right mirrored. Returns {bone: [x, y, z]}. */
 export function expandPose(bones) {
   const out = {};
@@ -202,7 +244,8 @@ export function posesFor(entry) {
 export function resolvePose(entry, def) {
   const bones = entry.bones;
   const byName = new Map(bones.map((b, i) => [b.name, i]));
-  const ex = expandPose(def.bones || def);
+  // def.compute(entry) -> {bone: [x, y, z]}: poses that depend on the species' bone lengths (snake coils)
+  const ex = { ...blendBones(entry, def.blend), ...(def.compute ? def.compute(entry) : {}), ...expandPose(def.bones || def) };
   const out = {};
   const accX = new Float64Array(bones.length); // accumulated X rotation of the ancestors + self
   for (let i = 0; i < bones.length; i++) {

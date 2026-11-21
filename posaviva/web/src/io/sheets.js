@@ -366,6 +366,8 @@ export function openInfo(ctx) {
     section('Crediti', [
       h('p', { class: 'pv-io-credit' }, h('b', {}, 'Modello umano: MakeHuman. '), 'Mesh di base, target delle forme, scheletro ed occhi provengono dal progetto MakeHuman (makehumancommunity.org) e sono rilasciati con licenza ', h('b', {}, 'CC0 1.0'), ' (pubblico dominio). Grazie alla comunità MakeHuman!'),
       h('p', { class: 'pv-io-credit' }, h('b', {}, 'Motore 3D: three.js '), '(licenza MIT).'),
+      h('p', { class: 'pv-io-credit' }, h('b', {}, 'Oggetti, piante e rocce realistici: Poly Haven. '), 'Modelli 3D di polyhaven.com con licenza ', h('b', {}, 'CC0'), ' (pubblico dominio); elenco completo degli autori in assets/props/CREDITS.txt e assets/city/CREDITS.txt.'),
+      h('p', { class: 'pv-io-credit' }, h('b', {}, 'Animali, edifici, veicoli e strade '), 'sono generati dal codice di PosaViva.'),
       h('p', { class: 'pv-io-credit muted' }, 'Il codice di PosaViva è originale: non include codice del programma MakeHuman.'),
       dev ? h('p', { class: 'pv-io-credit muted' }, `Dispositivo: ${dev}`) : null,
     ]),

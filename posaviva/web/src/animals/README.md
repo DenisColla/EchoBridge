@@ -1,6 +1,6 @@
 # Animali (poseable animals)
 
-Scene objects with a skeleton (not `Character`s): 24 species built at build time
+Scene objects with a skeleton (not `Character`s): 39 species built at build time
 from procedural, anatomically proportioned body descriptions, posed with
 sliders, ready poses, mirror, mouth, size and age, persisted with the scene.
 
@@ -41,6 +41,43 @@ Build: `node tools/build-animals.mjs [ids…] [--preview <dir>] [--res 300]`.
 Several builds may run in parallel (the manifest is updated under a lock).
 About 25–80 s per species; 24 species ≈ 13.6 MB of assets.
 
+## Families after the quadrupeds (birds, marine, reptiles, fantasy)
+
+```
+species/rot.js        rotation helpers (in-plane angles, frame mappings, Euler <-> quaternion)
+species/bird.js       bird archetype + featherWing() + featherTail() + featherSheet()
+species/birds.js      corvo piccione aquila gufo pappagallo gallina (parametric mkBird, crow units)
+species/marine.js     squalo delfino (spine chain, fins, teeth rows)
+species/serpent.js    serpente (22-bone chain rooted mid-body, 4 coat patterns in separate masks)
+species/reptiles.js   coccodrillo tartaruga (quadruped archetype, sprawling legs / shell)
+species/fantasy.js    drago (membraneWing) unicorno grifone pegaso (featherWing on quadrupeds)
+engine/cards.js       explicit sheets: thin closed slabs with own skin weights + 0..1 UVs (feathers, membranes)
+families/*.js         runtime + build: registerFamily (controls) and registerPoses (ready poses)
+                      bird marine serpent reptile winged
+```
+
+- **Sheets** (`B.sheet({grid, up, part, mat, fi})`): feathers and membranes are
+  not part of the signed distance body; each grid point carries its own
+  weights, thickness and UV. They are baked (`bakeSheets`: coat masks, AO from
+  the body field) and appended (`mergeSheets`) before packing. Region
+  `feather` uses the quill normal map on the per-feather UVs (`uv` section of
+  the binary, chart 3); region `scale` is scaly skin (bird legs).
+- **Blends** (`B.blend(id, {bone: euler})` -> manifest `blends`): stored target
+  rotations, e.g. `wingFold.L/.R` (every flight feather has its own bone and
+  turns about the wing normal so the wing folds properly, the arm folds in its
+  plane) and `tailFan`. Poses use `blend: {'wingFold*': 1}`; control axes use
+  `{k: 'blend', blend: [ids], invert, unit: '%'}`.
+- **Control extensions** (Animal.getAxis / setAxis, all optional):
+  `axis.drive = [[bone, 'x'|'y'|'z', factor]]` (coupled bones, e.g. both wings
+  flap), `axis.bones` (own bones), `ctrl.all` (bones highlighted / picked /
+  mirrored / reset with the control: the feathers of a wing).
+- **Poses**: `def.blend`, `def.compute(entry)` (snake coils from the bone
+  lengths), family lists via `registerPoses(family, list)`.
+- **Entry fields**: `defaultPose` (applied when added: birds start with folded
+  wings, marine animals swimming), `heightLabel`, `limits.rigidBack`
+  (tortoise), species `origin` (no feet: snake / fish).
+- Build options: `--preview <dir> --poses family [--pose id] [--pal debug|i] [--res n] [--dry]`.
+
 ## Coordinates and skeleton
 
 Meters, Y up, the animal faces **+Z**, its LEFT side is **+X** (`*.L` bones).
@@ -67,7 +104,7 @@ A species (see `species/*.js`) is a plain object:
 ```js
 {
   id: 'cane_medio', label: 'Cane medio', sub: 'Labrador',
-  group: 'domestici' | 'fattoria' | 'selvatici' | 'esotici',
+  group: 'domestici' | 'fattoria' | 'selvatici' | 'esotici' | 'uccelli' | 'marini' | 'rettili' | 'fantasy',
   family: 'quadruped' | 'primate' | 'macropod' | <your family>,  // poses + controls
   gait: 'digitigrade' | 'unguligrade' | 'plantigrade' | …,         // per-gait pose overrides
   tris: 22000,                     // decimation target

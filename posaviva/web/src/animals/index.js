@@ -21,6 +21,7 @@ import { AnimalThumbs } from './thumbs.js';
 import { registerAnimalsTool } from './panel.js';
 import { posesFor, resolvePose } from './poses.js';
 import { haptic } from '../ui/kit.js';
+import './families/index.js'; // birds, marine animals, reptiles, fantasy creatures (controls + ready poses)
 
 export { registerFamily } from './controls.js';
 export { FAMILY_POSES } from './poses.js';
@@ -59,7 +60,7 @@ export function create(app, shell) {
     const ctrl = part && part !== 'body' ? a.controls.byId.get(part) : null;
     _box.makeEmpty();
     if (ctrl) {
-      for (const n of ctrl.bones) { _box.expandByPoint(a.bonePoint(n, 0)); _box.expandByPoint(a.bonePoint(n, 1)); }
+      for (const n of ctrl.all || ctrl.bones) { _box.expandByPoint(a.bonePoint(n, 0)); _box.expandByPoint(a.bonePoint(n, 1)); }
       _box.expandByScalar(Math.max(0.05 * a.root.scale.y, _box.getSize(_v).length() * 0.25));
     } else a.worldBox(_box);
     if (withCharacter) {
@@ -122,6 +123,7 @@ export function create(app, shell) {
     if (vis < 0.6) focus(a, 'body');
   }
 
+  manager.applyPreset = applyPreset; // species with a default pose (birds: wings folded) start in it
   registerAnimalsTool(app, shell, { manager, thumbs, applyPreset, focus });
 
   // ---- tap: select an animal and the touched body part (characters in front win)

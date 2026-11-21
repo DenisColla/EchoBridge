@@ -2,7 +2,7 @@
 // when nothing is selected, editor of the selected prop otherwise. A chip
 // strip on top lists the props in the scene for quick selection.
 import { h, section, slider, segmented, button, swatches, toggle, toast, haptic, icon, chips, confirmDialog } from '../ui/kit.js';
-import { PROP_COLORS, TINT_COLORS } from './catalog.js';
+import { PROP_COLORS, TINT_COLORS, CATEGORIES } from './catalog.js';
 import { SIDE_LABEL } from './manager.js';
 import { buildLibrary } from './library.js';
 
@@ -30,14 +30,17 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         add.addEventListener('click', () => manager.select(null));
         strip.appendChild(add);
         const counts = {};
-        for (const p of manager.props) {
+        // buildings / exteriors live in their own tools (ownTool categories): not listed here
+        const own = new Set(CATEGORIES.filter((c) => c.ownTool).map((c) => c.id));
+        const listed = manager.props.filter((p) => !own.has(p.type.cat));
+        for (const p of listed) {
           counts[p.type.id] = (counts[p.type.id] || 0) + 1;
-          const n = manager.props.filter((q) => q.type.id === p.type.id).length > 1 ? ` ${counts[p.type.id]}` : '';
+          const n = listed.filter((q) => q.type.id === p.type.id).length > 1 ? ` ${counts[p.type.id]}` : '';
           const c = h('button', { type: 'button', class: 'pv-chip' + (p === manager.selected ? ' active' : '') }, p.hold ? icon('hand', 16) : null, p.label + n);
           c.addEventListener('click', () => manager.select(p));
           strip.appendChild(c);
         }
-        strip.style.display = manager.props.length ? '' : 'none';
+        strip.style.display = listed.length ? '' : 'none';
       }
 
       // ------------------------------------------------------------ catalog

@@ -7,6 +7,7 @@
 //   extra  Uint8  x4  region id, region weight, fur shade, ambient occlusion
 //   skin   Uint8  x4  bone indices
 //   weight Uint8  x4  bone weights (sum 255)
+//   uv     Uint16 x2  (optional) 0..1 UVs of the explicit sheets (chart 3: feathers)
 //   index  Uint16|Uint32 x3 triangles, sorted by material region (manifest.groups)
 // Every section starts on a 4-byte boundary.
 
@@ -26,7 +27,9 @@ export function pack(b) {
   for (let i = 0; i < nv * 3; i++) nrm[i] = Math.max(-127, Math.min(127, Math.round(b.normals[i] * 127)));
   const big = nv > 65535;
   const index = big ? Uint32Array.from(b.indices) : Uint16Array.from(b.indices);
-  const parts = { pos, nrm, chart: b.chart, mask: b.masks, extra: b.extra, skin: b.skinIndex, weight: b.skinWeight, index };
+  const parts = { pos, nrm, chart: b.chart, mask: b.masks, extra: b.extra, skin: b.skinIndex, weight: b.skinWeight };
+  if (b.uv) { const uv = new Uint16Array(nv * 2); for (let i = 0; i < nv * 2; i++) uv[i] = Math.round(Math.max(0, Math.min(1, b.uv[i])) * 65535); parts.uv = uv; }
+  parts.index = index;
   const layout = {};
   let off = 0;
   const chunks = [];

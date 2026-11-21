@@ -6,8 +6,8 @@
 // mouth, pad, skin, eyelid, iris}. Missing entries fall back to sensible
 // defaults; `shadeAmp` scales the fur value variation (0..1).
 
-export const REGION_KEYS = ['fur', 'keratin', 'nose', 'mouth', 'pad', 'skin', 'eyelid'];
-const DEF = { base: '#8a6a4a', under: null, pattern: '#2a2018', points: '#2a2018', extra: '#f0ece4', keratin: '#3a3430', nose: '#2b2523', mouth: '#7a3b3b', pad: '#2b2624', skin: '#6b5850', eyelid: '#2b2523' };
+export const REGION_KEYS = ['fur', 'keratin', 'nose', 'mouth', 'pad', 'skin', 'eyelid', 'feather', 'scale'];
+const DEF = { base: '#8a6a4a', under: null, pattern: '#2a2018', points: '#2a2018', extra: '#f0ece4', keratin: '#3a3430', nose: '#2b2523', mouth: '#7a3b3b', pad: '#2b2624', skin: '#6b5850', eyelid: '#2b2523', scale: '#6e6258' };
 
 export function hexToLin(hex) {
   const n = parseInt(hex.slice(1), 16);
@@ -25,7 +25,7 @@ export function compilePalette(pal) {
   if (!p.under) p.under = p.base;
   const out = {};
   for (const k of ['base', 'under', 'pattern', 'points', 'extra']) out[k] = hexToLin(p[k]);
-  out.regions = REGION_KEYS.map((r) => (r === 'fur' ? null : hexToLin(p[r] || DEF[r])));
+  out.regions = REGION_KEYS.map((r) => (r === 'fur' || r === 'feather' ? null : hexToLin(p[r] || DEF[r])));
   out.shadeAmp = pal.shadeAmp ?? 0.35;
   out.aoAmp = pal.aoAmp ?? 0.85;
   return out;
