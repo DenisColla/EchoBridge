@@ -11,7 +11,16 @@ export function registerGuidesTool(app, shell, guides) {
       let visible = false;
       const set = (patch) => guides.set(patch);
 
-      const show = toggle({ label: 'Mostra guide', value: true, onChange: (v) => set({ visible: v }) });
+      // turning the guides on with nothing to draw (Prospettiva 'Nessuna', no horizon,
+      // thirds or panel frame) would show nothing: start from 2 points + horizon
+      const show = toggle({
+        label: 'Mostra guide', value: guides.state.visible,
+        onChange: (v) => {
+          const s = guides.state;
+          if (v && !(s.mode > 0 || s.horizon || s.thirds || s.frame)) set({ visible: true, mode: 2, horizon: true });
+          else set({ visible: v });
+        },
+      });
       const mode = segmented({
         options: [{ value: 0, label: 'Nessuna' }, { value: 1, label: '1 punto' }, { value: 2, label: '2 punti' }, { value: 3, label: '3 punti' }], value: 0,
         onChange: (v) => set({ mode: +v, visible: true, horizon: guides.state.horizon || +v > 0 }),

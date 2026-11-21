@@ -37,3 +37,41 @@ export function strandTexture() {
   tex.name = 'pv-hair-strands';
   return tex;
 }
+
+let stub = null;
+/** Stubble tile (UV metres / STUBBLE_TILE): white, alpha = soft follicle dots over a faint base. */
+export const STUBBLE_TILE = 0.014;
+export function stubbleTexture() {
+  if (stub) return stub;
+  const S = 128, N = 14; // ~1 mm between follicles
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  const img = g.createImageData(S, S);
+  const A = new Float32Array(S * S).fill(0.3);
+  const rnd = rng(0x57abb1e);
+  const cell = S / N;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    if (rnd() < 0.12) continue; // a few gaps
+    const cx = (i + 0.2 + 0.6 * rnd()) * cell, cy = (j + 0.2 + 0.6 * rnd()) * cell;
+    // short slanted stroke: a stretched dot, mostly pointing down
+    const r = cell * (0.22 + 0.14 * rnd()), ang = Math.PI / 2 + (rnd() - 0.5) * 0.9, el = 1.6 + rnd();
+    const ca = Math.cos(ang), sa = Math.sin(ang), a = 0.8 + 0.2 * rnd();
+    const ext = Math.ceil(r * el + 2);
+    for (let y = Math.floor(cy - ext); y <= Math.ceil(cy + ext); y++) for (let x = Math.floor(cx - ext); x <= Math.ceil(cx + ext); x++) {
+      const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+      const u = (dx * ca + dy * sa) / el, v = -dx * sa + dy * ca;
+      const d = Math.sqrt(u * u + v * v) / r;
+      if (d >= 1) continue;
+      const k = ((y % S) + S) % S * S + ((x % S) + S) % S;
+      A[k] = Math.max(A[k], 0.3 + (a - 0.3) * (1 - d * d));
+    }
+  }
+  for (let k = 0; k < S * S; k++) { const o = k * 4; img.data[o] = img.data[o + 1] = img.data[o + 2] = 255; img.data[o + 3] = Math.round(A[k] * 255); }
+  g.putImageData(img, 0, 0);
+  stub = new THREE.CanvasTexture(cv);
+  stub.wrapS = stub.wrapT = THREE.RepeatWrapping;
+  stub.anisotropy = 4;
+  stub.name = 'pv-stubble';
+  return stub;
+}

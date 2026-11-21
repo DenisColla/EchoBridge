@@ -25,6 +25,8 @@ const SETTLE_EPS = 0.00025;
 const MAX_ITERS = 120;
 /** solver time per frame while settling (ms) */
 const FRAME_BUDGET_MS = 1.5;
+/** staged (re)builds: another stage starts only while below this per frame (ms) */
+const STEP_BUDGET_MS = 6;
 
 export class HairRig {
   /**
@@ -89,13 +91,46 @@ export class HairRig {
     const key = this.shapeVersion * 1000 + this.clothVersion;
     if (this._analysedKey === key && this.frame) return false;
     const ch = this.ch;
-    if (this._analysedShape !== this.shapeVersion || !this.frame) {
-      this.frame = headFrame(ch);
-      this.map.build(ch.model, ch.shapePositions, this.frame);
-      this._analysedShape = this.shapeVersion;
-    }
+    if (this._analysedShape !== this.shapeVersion || !this.frame) this._analyseHead();
     this.colliders = new BodyColliders(ch, this.frame, this.garments(), this.ctl.app.clothing?.outerOffsets?.(ch) || null);
     this._analysedKey = key;
+    return true;
+  }
+
+  /** Head landmarks and the radial head map of the current body shape. */
+  _analyseHead() {
+    const ch = this.ch;
+    const frame = headFrame(ch);
+    // most body sliders (weight, waist, legs, hips...) move the head without
+    // reshaping it: the radial head map around frame.c is then still valid
+    if (this.frame && this._sameHead(frame)) { this.map.c.x = frame.c.x; this.map.c.y = frame.c.y; this.map.c.z = frame.c.z; this.stats.mapReused = (this.stats.mapReused || 0) + 1; }
+    else { this.map.build(ch.model, ch.shapePositions, frame); this._headSignature(frame); }
+    this.frame = frame;
+    this._analysedShape = this.shapeVersion;
+  }
+
+  /** Stores the head surface the map was built from: vertices above the map's cut, relative to frame.c. */
+  _headSignature(frame) {
+    const ch = this.ch, P = ch.shapePositions, V = ch.model.groupVertices[0];
+    const cut = frame.chin.y - 0.05 * frame.s;
+    const idx = [];
+    for (let i = 0; i < V.length; i += 3) if (P[V[i] * 3 + 1] > cut) idx.push(V[i]);
+    const rel = new Float32Array(idx.length * 3);
+    idx.forEach((v, k) => { rel[k * 3] = P[v * 3] - frame.c.x; rel[k * 3 + 1] = P[v * 3 + 1] - frame.c.y; rel[k * 3 + 2] = P[v * 3 + 2] - frame.c.z; });
+    this._headSig = { idx: Int32Array.from(idx), rel, rot: ch.restGlobal[frame.headBone].elements.slice(0, 11), s: frame.s };
+  }
+
+  /** True when the head surface only moved rigidly (< 1 mm change around frame.c, same rest rotation). */
+  _sameHead(frame) {
+    const sig = this._headSig, ch = this.ch, P = ch.shapePositions;
+    if (!sig || Math.abs(sig.s - frame.s) > 1e-4) return false;
+    const R = ch.restGlobal[frame.headBone].elements;
+    for (let k = 0; k < 11; k++) if (k !== 3 && k !== 7 && Math.abs(R[k] - sig.rot[k]) > 1e-3) return false;
+    const { idx, rel } = sig, cx = frame.c.x, cy = frame.c.y, cz = frame.c.z;
+    for (let k = 0; k < idx.length; k++) {
+      const v = idx[k] * 3;
+      if (Math.abs(P[v] - cx - rel[k * 3]) > 0.001 || Math.abs(P[v + 1] - cy - rel[k * 3 + 1]) > 0.001 || Math.abs(P[v + 2] - cz - rel[k * 3 + 2]) > 0.001) return false;
+    }
     return true;
   }
 
@@ -137,27 +172,57 @@ export class HairRig {
   /** Key of everything that changes the geometry (not the colour). */
   geometryKey(st) { return `${st.style}|${st.length.toFixed(3)}|${st.volume.toFixed(3)}|${st.parting}|${st.bangs ? 1 : 0}`; }
 
-  /** Builds (or rebuilds) the hair for the current state. */
+  /** Builds (or rebuilds) the hair for the current state, in one go. */
   build() {
+    this._job = null;
+    const g = this._buildSteps();
+    let r = g.next();
+    while (!r.done) r = g.next();
+  }
+
+  /**
+   * The build as a generator: head analysis, strand growth, the rest settle and the
+   * clump bindings, geometry. update() runs it over several frames within a time
+   * budget (a long style used to cost one ~150 ms frame); the old mesh stays until
+   * the new one replaces it.
+   */
+  *_buildSteps() {
     const t0 = performance.now();
     const ch = this.ch, st = ch.data.hair;
-    this._dropMesh();
-    this.built = this.geometryKey(st);
-    this.builtShape = this.shapeVersion;
+    const key = this.geometryKey(st), shape = this.shapeVersion;
     const recipe = RECIPES[st.style];
-    if (!recipe || st.style === 'nessuno') { this.stats.build = performance.now() - t0; return; }
+    if (!recipe || st.style === 'nessuno') {
+      this._dropMesh();
+      this.built = key; this.builtShape = shape;
+      this.stats.build = performance.now() - t0;
+      return;
+    }
     const T = this.stats.t = {};
-    let tt = performance.now();
-    const lap = (k) => { const n = performance.now(); T[k] = +(n - tt).toFixed(1); tt = n; };
+    let tt = performance.now(), work = 0;
+    const lap = (k) => { const n = performance.now(); T[k] = +((T[k] || 0) + n - tt).toFixed(1); work += n - tt; tt = n; };
+    const pause = () => { tt = performance.now(); };
     // head analysis and colliders only depend on the body shape: reuse them across style changes
+    // (the head map and the colliders are separate stages)
+    if (this._analysedShape !== this.shapeVersion || !this.frame) { this._analyseHead(); lap('analysis'); yield 'head'; pause(); }
     if (!this._analyse()) this.colliders.update(true);
-    const frame = this.frame;
+    const frame = this.frame, colliders = this.colliders;
     lap('analysis');
-    const b = new HairBuilder({ ch, model: ch.model, frame, map: this.map, colliders: this.colliders, seed: hashStr(st.style) ^ 0x5bd1 }, st);
+    yield 'analysis'; pause();
+    // rest-pose colliders while growing (another rig step may have posed them)
+    colliders.update(true);
+    const b = new HairBuilder({ ch, model: ch.model, frame, map: this.map, colliders, seed: hashStr(st.style) ^ 0x5bd1 }, st);
     recipe(b, STYLE_BY_ID.get(st.style));
     lap('recipe');
-    const res = b.finish();
+    yield 'recipe'; pause();
+    const fin = b.finishSteps();
+    let r = fin.next();
+    while (!r.done) { lap('dynamics'); yield 'dynamics'; pause(); colliders.update(true); r = fin.next(); }
+    const res = r.value;
     lap('dynamics');
+    // swap: the new hair replaces the old one
+    this._dropMesh();
+    this.built = key;
+    this.builtShape = shape;
     const hg = new HairGeometry(res.strands, res.patch, res.solids, frame.headBone);
     this.hg = hg;
     this.capOffset = res.capOffset;
@@ -170,10 +235,12 @@ export class HairRig {
     lap('geometry');
     if (res.dyn) {
       this.dyn = res.dyn;
-      this.solver = new GuideSolver(res.dyn.rest, res.dyn.guides, this.map, this.colliders, res.dyn.lengths);
+      this.solver = new GuideSolver(res.dyn.rest, res.dyn.guides, this.map, colliders, res.dyn.lengths);
       this._frames = null;
       this._lastG = null; this._movedG = null; this._firstSolveDone = false;
-      this._buf = new Float32Array(Math.max(...res.dyn.binds.map((x) => x.K)) * 3);
+      let maxK = 0;
+      for (const x of res.dyn.binds) if (x.K > maxK) maxK = x.K;
+      this._buf = new Float32Array(maxK * 3);
       this.poseDirty = true;
       this._forceSolve = true;
     }
@@ -187,9 +254,20 @@ export class HairRig {
     mesh.userData.headRest = ch.restGlobal[frame.headBone].clone();
     this.mesh = mesh;
     this.ctl.applyMaterial(this);
-    this.stats.build = performance.now() - t0;
+    this.stats.build = work + performance.now() - tt;
+    this.stats.wall = performance.now() - t0;
     this.stats.vertices = hg.vertexCount;
     this.stats.strands = list.length;
+  }
+
+  /** Advances the staged build: stages run while less than STEP_BUDGET_MS were used this frame. */
+  _advanceJob() {
+    const t0 = performance.now();
+    do {
+      let r;
+      try { r = this._job.gen.next(); } catch (e) { console.error('[hair] build failed', e); this._job = null; this.built = this.geometryKey(this.ch.data.hair); this.builtShape = this.shapeVersion; return; }
+      if (r.done) { this._job = null; this._lastBuildAt = performance.now(); return; }
+    } while (performance.now() - t0 < STEP_BUDGET_MS);
   }
 
   _fitCap() {
@@ -206,14 +284,21 @@ export class HairRig {
   update(now) {
     const ch = this.ch, st = ch.data.hair;
     if (!st) return false;
-    // shape changes: rebuild debounced (sliders fire every frame while dragging)
-    if (this.builtShape !== this.shapeVersion && now - this.shapeTime > 160) { this.build(); this.ctl.app.invalidate(); return !!this.solver; }
-    if (this.built !== this.geometryKey(st)) {
-      // throttled while a slider is being dragged (builds take tens of ms)
-      if (now - (this._lastBuildAt || 0) < 90) return true;
-      this.build();
-      this._lastBuildAt = performance.now();
+    // a staged build in flight: continue it, or restart when what it builds is out of date
+    if (this._job && (this._job.key !== this.geometryKey(st) || this._job.shape !== this.shapeVersion)) { this._job = null; this.poseDirty = true; }
+    if (!this._job) {
+      // shape changes: rebuild debounced (sliders fire every frame while dragging)
+      const shapeDue = this.builtShape !== this.shapeVersion && now - this.shapeTime > 160;
+      // style edits: throttled while a slider is being dragged
+      const styleDue = this.built !== this.geometryKey(st) && now - (this._lastBuildAt || 0) >= 90;
+      if (shapeDue || (styleDue && this.builtShape === this.shapeVersion)) this._job = { gen: this._buildSteps(), key: this.geometryKey(st), shape: this.shapeVersion };
+      else if (this.built !== this.geometryKey(st)) return true;
+    }
+    if (this._job) {
+      this._advanceJob();
       this.ctl.app.invalidate();
+      // the old hair waits (rigidly on the head) until the new one replaces it
+      if (this._job) return true;
     }
     if (this.builtShape === this.shapeVersion && this._syncBeard()) this.ctl.app.invalidate();
     if (this.exprDirty) {
@@ -230,7 +315,12 @@ export class HairRig {
       }
     }
     if (!this.solver) return false;
+    // an interrupted rebuild already analysed a newer body shape: the old hair waits for its
+    // replacement (it rides the head rigidly) instead of colliding with the new head map
+    if (this._analysedShape !== this.builtShape) return true;
     const solver = this.solver;
+    // an interrupted rebuild may have replaced the colliders: the running solver uses the current ones
+    if (solver.col !== this.colliders) { solver.col = this.colliders; this.poseDirty = true; }
     if (this.poseDirty) {
       this.poseDirty = false;
       this.colliders.update(false);

@@ -299,7 +299,7 @@ export const GARMENTS = [
     parts: [
       {
         mask: (k) => [
-          k.above('hem', k.y(1.45)),
+          k.above('hem', k.y(1.6)),
           k.neckline('neck', { front: 0.12, back: 0.08, width: k.bi.neckRadius + 0.03, shape: 'scoop' }),
           k.armhole('armholeL', 'L', { inset: 0.05, drop: 0.025, rx: 0.05, ry: 0.08 }),
           k.armhole('armholeR', 'R', { inset: 0.05, drop: 0.025, rx: 0.05, ry: 0.08 }),
@@ -308,10 +308,12 @@ export const GARMENTS = [
         edges: { hem: { type: 'none' }, default: { type: 'hem', r: 0.0018 } },
         fit: { thickness: 0.002, ease: [0.001, 0.012], loose: [0.0, 0.3], slope: [1.4, 0.6], bridge: 20 },
         wrinkle: { k: 0.7, wl: 0.055 },
+        // under the skirt the bodice stays (almost) flat: the skirt rests on it
+        foldFade: [1.75, 2.2, 0.12],
       },
       {
         kind: 'skirt',
-        skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.02, ease: 0.004 + fit * 0.01, flare: 0.08 + fit * 0.2, taper: 0.0, drape: { count: 9, amp: 0.016 + fit * 0.01 }, loose: 0.35, band: 0.0, segs: 96 }),
+        skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.02, ease: 0.004 + fit * 0.01, flare: 0.08 + fit * 0.2, taper: 0.0, drape: { count: 9, amp: 0.016 + fit * 0.01 }, loose: 0.35, band: 0.0, segs: 96, hug: 0.09, onSurf: true }),
         edges: { waist: { type: 'none' }, default: { type: 'hem', r: 0.0022 } },
         wrinkle: { k: 0.7, wl: 0.075 },
       },

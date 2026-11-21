@@ -8,7 +8,7 @@
 // Skin weights come from the body vertices under each ring point, blended
 // towards the pelvis and smoothed around the ring the lower they are, so the
 // fabric stretches between the legs instead of tearing when they spread.
-import { buildEdges, buildAdjacency, boundaryLoops, hull2, hullRadius } from './mesh.js';
+import { buildEdges, buildAdjacency, boundaryLoops, hull2, hullRadius, len2, len3 } from './mesh.js';
 import { foldProfile, smoothstep } from './build.js';
 import { noise3 } from './wrinkles.js';
 import { PART, NPART } from './body.js';
@@ -29,6 +29,13 @@ export function buildSkirtDraft(ctx, def, spec) {
   const ys = new Float32Array(rings);
   for (let k = 0; k < rings; k++) ys[k] = yTop - (yTop - yHem) * (k / (rings - 1));
   const t = spec.thickness ?? 0.0025, ease = spec.ease ?? 0.006;
+  // hug: over its top `hug` meters the skirt rests on the outer surface of the layer
+  // below (ctx.surf: no room for that layer's folds, small ease) and blends to the
+  // full clearance lower down. The skirt of a dress sits on its bodice at the waist
+  // instead of standing off it by the bodice's fold room (a visible ledge).
+  const hug = spec.hug > 0 && ctx.surf ? spec.hug : 0, hugEase = spec.hugEase ?? 0.0012;
+  // onSurf: clear the layers below by their surface only (their folds are faded out under the skirt)
+  const onSurf = !!(spec.onSurf && ctx.surf);
   // ---- body cross sections (torso + legs, no arms / hands)
   const slab = 0.012;
   const ringPts = Array.from({ length: rings }, () => []);
@@ -46,7 +53,13 @@ export function buildSkirtDraft(ctx, def, spec) {
       if (Math.abs(ys[k] - y) > slab) continue;
       const cz = bi.cz(ys[k]);
       const x = P[v * 3], z = P[v * 3 + 2] - cz;
-      const r = Math.hypot(x, z) || 1e-6, ex = (occ ? Math.max(0, occ[v]) : 0) + t + ease;
+      const r = Math.sqrt(x * x + z * z) || 1e-6;
+      const below = onSurf ? Math.max(0, ctx.surf[v]) : occ ? Math.max(0, occ[v]) : 0;
+      let ex = below + t + ease;
+      if (hug) {
+        const f = smoothstep(0, 1, (yTop - ys[k]) / hug);
+        if (f < 1) ex = (Math.max(0, ctx.surf[v]) + t * 0.5 + hugEase) * (1 - f) + ex * f;
+      }
       ringPts[k].push(x * (r + ex) / r, z * (r + ex) / r);
       ringSrc[k].push(v);
     }
@@ -66,7 +79,7 @@ export function buildSkirtDraft(ctx, def, spec) {
     for (let q = 0; q < pts.length / 2; q++) {
       const th = Math.atan2(-pts[q * 2], pts[q * 2 + 1]);
       const j = ((Math.round(((th + PI) / (2 * PI)) * segs) % segs) + segs) % segs;
-      const rr = Math.hypot(pts[q * 2], pts[q * 2 + 1]);
+      const rr = len2(pts[q * 2], pts[q * 2 + 1]);
       const score = env[k * segs + j] - rr;
       if (score < best[j]) { best[j] = score; src[k * segs + j] = ringSrc[k][q]; }
     }
@@ -212,7 +225,7 @@ export function skirtOccupancy(draft, bi, topo, occ) {
     const cz = bi.cz(y), x = P[v * 3], z = P[v * 3 + 2] - cz;
     const th = Math.atan2(-x, z);
     const k = Math.min(rings - 1, Math.round((y1 - y) / dy)), j = ((Math.round(((th + PI) / (2 * PI)) * segs) % segs) + segs) % segs;
-    const gap = R[k * segs + j] - Math.hypot(x, z);
+    const gap = R[k * segs + j] - len2(x, z);
     if (gap > 0 && gap < 0.06 && gap > occ[v]) occ[v] = gap;
   }
 }
@@ -266,9 +279,9 @@ export function ribbon(bi, topo, ctrl, opts = {}) {
     let tx = C[b * 3] - C[a * 3], ty = C[b * 3 + 1] - C[a * 3 + 1], tz = C[b * 3 + 2] - C[a * 3 + 2];
     const nx = NN[i * 3], ny = NN[i * 3 + 1], nz = NN[i * 3 + 2];
     let sx = ty * nz - tz * ny, sy = tz * nx - tx * nz, sz = tx * ny - ty * nx;
-    const sl = Math.hypot(sx, sy, sz) || 1;
+    const sl = len3(sx, sy, sz) || 1;
     sx /= sl; sy /= sl; sz /= sl;
-    if (i > 0) arc += Math.hypot(C[i * 3] - C[(i - 1) * 3], C[i * 3 + 1] - C[(i - 1) * 3 + 1], C[i * 3 + 2] - C[(i - 1) * 3 + 2]);
+    if (i > 0) arc += len3(C[i * 3] - C[(i - 1) * 3], C[i * 3 + 1] - C[(i - 1) * 3 + 1], C[i * 3 + 2] - C[(i - 1) * 3 + 2]);
     for (const [k, h] of [[-1, 0], [1, 0], [1, 1], [-1, 1]]) {
       const lift = h ? 0.0012 : 0;
       pos.push(C[i * 3] + sx * k * width * 0.5 + nx * lift, C[i * 3 + 1] + sy * k * width * 0.5 + ny * lift, C[i * 3 + 2] + sz * k * width * 0.5 + nz * lift);

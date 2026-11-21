@@ -6,7 +6,7 @@
 //                 and toes but never sinks into the body
 //   smoothWeights skin weight diffusion for loose parts (no tearing)
 import { LIMB_REGIONS, PART, NPART } from './body.js';
-import { hull2, hullRadius } from './mesh.js';
+import { hull2, hullRadius, len2, len3 } from './mesh.js';
 
 const NTH = 36; // angular bins of the hang grid
 const DS = 0.015; // axial bin size (m)
@@ -153,7 +153,7 @@ export function bridgeSmooth(c, iterations, opts = {}) {
   // edge-length weights: metric (not topological) smoothing, so dense vertex
   // clusters (nipples, navel) follow the surrounding surface
   const W = new Float32Array(adj.adj.length);
-  for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; W[j] = Math.hypot(P0[u * 3] - P0[i * 3], P0[u * 3 + 1] - P0[i * 3 + 1], P0[u * 3 + 2] - P0[i * 3 + 2]) + 1e-5; }
+  for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; W[j] = len3(P0[u * 3] - P0[i * 3], P0[u * 3 + 1] - P0[i * 3 + 1], P0[u * 3 + 2] - P0[i * 3 + 2]) + 1e-5; }
   for (let it = 0; it < iterations; it++) {
     for (let i = 0; i < n; i++) {
       const o = i * 3;
@@ -190,7 +190,7 @@ export function metricSmooth(c, iterations) {
   const { n, P0, N0, off, G, adj, bnd } = c;
   if (iterations <= 0) return;
   const W = new Float32Array(adj.adj.length);
-  for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; W[j] = Math.hypot(P0[u * 3] - P0[i * 3], P0[u * 3 + 1] - P0[i * 3 + 1], P0[u * 3 + 2] - P0[i * 3 + 2]) + 1e-5; }
+  for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; W[j] = len3(P0[u * 3] - P0[i * 3], P0[u * 3 + 1] - P0[i * 3 + 1], P0[u * 3 + 2] - P0[i * 3 + 2]) + 1e-5; }
   const tmp = new Float32Array(n * 3);
   for (let it = 0; it < iterations; it++) {
     for (let i = 0; i < n; i++) {
@@ -319,7 +319,7 @@ function footHull(c, bi, amount) {
       const h = hull2(pts);
       if (h.length < 3) continue;
       for (const k of list) {
-        const du = uu[k] - cu, dv = vv[k] - cv, r = Math.hypot(du, dv);
+        const du = uu[k] - cu, dv = vv[k] - cv, r = len2(du, dv);
         if (r < 1e-5) continue;
         const rh = hullRadius(h, du / r, dv / r);
         if (rh <= r) continue;

@@ -230,7 +230,6 @@ export class LightRig extends THREE.EventDispatcher {
     /** environment (IBL) intensity chosen by the render style, scaled by the ambient level */
     this._envBase = null;
     this._envLast = NaN;
-    app.addEventListener('renderstyle', () => this._syncEnv());
     this._setupInput();
   }
 
@@ -423,25 +422,15 @@ export class LightRig extends THREE.EventDispatcher {
     if (a.ground) this.hemi.groundColor.set(a.ground);
     else this.hemi.groundColor.copy(this.hemi.color).multiplyScalar(0.18).add(_v.set(0.05, 0.04, 0.035));
     this.hemi.intensity = a.intensity;
-    this._syncEnv();
   }
 
   /**
-   * The render style adds image-based fill (scene.environment) on top of the
-   * hemisphere ambient. Unscaled, it lifts every shadow by the same amount and
-   * flattens low-key setups (Rembrandt, horror, night). Its intensity follows
-   * the rig's ambient level instead: the style's value is the base (re-read
-   * whenever the render module writes a new one, see the 'renderstyle' event).
+   * Image-based fill scale. The render module applies style env x envScale
+   * (render/index.js applyEnv), so low-key setups (Rembrandt, horror, night)
+   * are not flattened by a constant environment light.
    */
-  _syncEnv() {
-    const sc = this.app.scene;
-    if (!sc.environment) { this._envBase = null; return; }
-    const cur = sc.environmentIntensity;
-    if (this._envBase === null || Math.abs(cur - this._envLast) > 1e-6) this._envBase = cur;
-    const k = Math.max(0, Math.min(ENV_MAX_SCALE, (this.state.ambient.intensity ?? ENV_REF_AMBIENT) / ENV_REF_AMBIENT));
-    const v = this._envBase * k;
-    this._envLast = v;
-    if (sc.environmentIntensity !== v) { sc.environmentIntensity = v; this.app.invalidate(); }
+  get envScale() {
+    return Math.max(0, Math.min(ENV_MAX_SCALE, (this.state.ambient.intensity ?? ENV_REF_AMBIENT) / ENV_REF_AMBIENT));
   }
 
   _disposeEntry(id) {

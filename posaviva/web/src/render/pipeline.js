@@ -169,8 +169,12 @@ export class RenderPipeline {
     let e = this._pp.get(mesh);
     if (!e || e.src !== src) {
       if (e) (Array.isArray(e.out) ? e.out : [e.out]).forEach((m) => m.dispose());
-      const id = e ? e.id : this._allocId(this.materials.kindOf(mesh));
-      const mk = (m) => makePrepassMaterial(m, id);
+      // keep the id of a mesh whose materials were swapped (style change), unless the
+      // per-group id layout of a shoe no longer matches its material array
+      const perGroup = Array.isArray(src) && !!mesh.userData.groundContact;
+      const keep = e && (Array.isArray(e.id) ? perGroup && e.id.length === src.length : !perGroup);
+      const id = keep ? e.id : this._allocId(this.materials.kindOf(mesh), mesh);
+      const mk = (m, i = 0) => makePrepassMaterial(m, Array.isArray(id) ? id[i % id.length] : id);
       e = { src, id, out: Array.isArray(src) ? src.map(mk) : mk(src) };
       this._pp.set(mesh, e);
     }
@@ -183,10 +187,18 @@ export class RenderPipeline {
    *   96..127  folds    — also curvature "valley" lines (garment wrinkles, geometric or normal-mapped)
    *   128..254 contour  — outlines and overlaps only: eyeballs (the concave iris must not draw
    *                       lines) and hair (creases between strand cards only make short,
-   *                       flickering dashes; clump overlaps are still inked)
+   *                       flickering dashes; clump overlaps are still inked), and shoes
+   *                       (userData.groundContact): their faceted toe boxes only drew specks;
+   *                       each material group (upper, trim, sole) gets its own id, so the
+   *                       sole / upper seams are still inked as boundaries.
+   * Returns an array of ids (one per material group) for multi-material shoes.
    */
-  _allocId(kind) {
+  _allocId(kind, mesh = null) {
     const c = this._ids;
+    if (mesh?.userData.groundContact) {
+      const n = Array.isArray(mesh.material) ? mesh.material.length : 0;
+      return n ? Array.from({ length: n }, () => 128 + (c.contour++ % 127)) : 128 + (c.contour++ % 127);
+    }
     if (kind === 'eye' || kind === 'hair') return 128 + (c.contour++ % 127);
     if (kind === 'cloth') return 96 + (c.folds++ % 32);
     return 1 + (c.regular++ % 95);
@@ -288,8 +300,10 @@ export class RenderPipeline {
     const angle = THREE.MathUtils.lerp(75, 18, o.crease) * THREE.MathUtils.DEG2RAD;
     u.creaseCos.value = o.crease > 0.001 ? Math.cos(angle) : -2;
     u.nStep.value = Math.max(1, Math.min(3, Math.round(pxScale)));
-    // valley (fold) curvature threshold in 1/m: 0..1 slider -> fold radius ~0.6 cm .. 5 cm
-    u.valleyK.value = o.crease > 0.001 ? THREE.MathUtils.lerp(170, 20, o.crease) : -1;
+    // valley (fold) curvature threshold in 1/m, garments only (ids 96..127): 0..1 slider ->
+    // fold radius ~1.4 cm .. 8 cm. Garment folds (wavelength 5.5-8 cm, depth 0.8-2.5 cm on a
+    // ~1 cm mesh) peak around 40-60 1/m: the default 0.45 (~44 1/m) inks the clear ones.
+    u.valleyK.value = o.crease > 0.001 ? THREE.MathUtils.lerp(70, 12, o.crease) : -1;
     // world size of one pixel (at distance 1 in perspective): from the projection matrix,
     // so zoom, view offsets (UI panel framing) and capture aspects are all accounted for
     u.pxWorld.value = 2 / camera.projectionMatrix.elements[5] / set.h;

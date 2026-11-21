@@ -18,4 +18,3 @@
 .pv-clothes .pv-clothes-outfits { display: flex; flex-wrap: wrap; gap: 8px; }
 .pv-clothes .pv-clothes-outfit { min-height: 42px; }
 .pv-clothes .pv-clothes-actions { justify-content: flex-end; margin-top: 4px; }
-.pv-clothes .pv-clothes-empty { color: var(--muted); padding: 16px 4px; text-align: center; }

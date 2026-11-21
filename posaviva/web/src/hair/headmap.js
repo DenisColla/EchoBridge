@@ -10,7 +10,7 @@
 //   - the hull hair is combed over (strands are pushed to r + layer offset)
 //   - the head collider of the hair solver (cheap point-outside test)
 // The longitude seam (phi = +-pi) points straight down through the neck.
-import { clamp } from './util.js';
+import { clamp, len3 } from './util.js';
 
 const TAU = Math.PI * 2;
 
@@ -80,7 +80,7 @@ export class HeadMap {
         const v = vs[k] * 3;
         const x = P[v] - c.x, y = P[v + 1] - c.y, z = P[v + 2] - c.z;
         px[k] = P[v]; py[k] = P[v + 1]; pz[k] = P[v + 2];
-        const l = Math.hypot(x, y, z) || 1e-9;
+        const l = len3(x, y, z) || 1e-9;
         fu[k] = ((Math.atan2(-z, y) + Math.PI) / TAU) * nu - 0.5;
         fv[k] = ((Math.asin(clamp(x / l, -1, 1)) + Math.PI / 2) / Math.PI) * nv - 0.5;
         // vertex splat (thin triangles may miss every cell centre)
@@ -103,7 +103,7 @@ export class HeadMap {
           const x = b0 * px[0] + b1 * px[1] + b2 * px[2] - c.x;
           const y = b0 * py[0] + b1 * py[1] + b2 * py[2] - c.y;
           const z = b0 * pz[0] + b1 * pz[1] + b2 * pz[2] - c.z;
-          const r = Math.hypot(x, y, z);
+          const r = len3(x, y, z);
           const cell = j * nu + (((i % nu) + nu) % nu);
           if (r > raw[cell]) raw[cell] = r;
         }
@@ -149,7 +149,7 @@ export class HeadMap {
         const ux = a[0] - b[0], uy = a[1] - b[1], uz = a[2] - b[2], vx = c[0] - d[0], vy = c[1] - d[1], vz = c[2] - d[2];
         let x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
         if (x * u[0] + y * u[1] + z * u[2] < 0) { x = -x; y = -y; z = -z; }
-        const l = Math.hypot(x, y, z);
+        const l = len3(x, y, z);
         if (l > 1e-12) { nx = x / l; ny = y / l; nz = z / l; }
       }
       nrm[q] = nx; nrm[q + 1] = ny; nrm[q + 2] = nz;
@@ -162,7 +162,7 @@ export class HeadMap {
    */
   sample(dx, dy, dz, n) {
     const { nu, nv, hull, nrm } = this;
-    const l = Math.hypot(dx, dy, dz) || 1e-9;
+    const l = len3(dx, dy, dz) || 1e-9;
     const fu = ((Math.atan2(-dz, dy) + Math.PI) / TAU) * nu - 0.5;
     let fv = ((Math.asin(dx / l > 1 ? 1 : dx / l < -1 ? -1 : dx / l) + Math.PI / 2) / Math.PI) * nv - 0.5;
     if (fv < 0) fv = 0; else if (fv > nv - 1) fv = nv - 1;
@@ -171,9 +171,12 @@ export class HeadMap {
     const ia = ((i0 % nu) + nu) % nu, ib = (ia + 1) % nu;
     const c00 = j0 * nu + ia, c10 = j0 * nu + ib, c01 = (j0 + 1) * nu + ia, c11 = (j0 + 1) * nu + ib;
     const w00 = (1 - tu) * (1 - tv), w10 = tu * (1 - tv), w01 = (1 - tu) * tv, w11 = tu * tv;
-    let nx = 0, ny = 0, nz = 0;
-    for (const [c, w] of [[c00, w00], [c10, w10], [c01, w01], [c11, w11]]) { nx += nrm[c * 3] * w; ny += nrm[c * 3 + 1] * w; nz += nrm[c * 3 + 2] * w; }
-    const nl = Math.hypot(nx, ny, nz) || 1;
+    // unrolled (no per-call arrays: this runs for every collider test of every hair point)
+    const a = c00 * 3, b = c10 * 3, c = c01 * 3, d = c11 * 3;
+    const nx = nrm[a] * w00 + nrm[b] * w10 + nrm[c] * w01 + nrm[d] * w11;
+    const ny = nrm[a + 1] * w00 + nrm[b + 1] * w10 + nrm[c + 1] * w01 + nrm[d + 1] * w11;
+    const nz = nrm[a + 2] * w00 + nrm[b + 2] * w10 + nrm[c + 2] * w01 + nrm[d + 2] * w11;
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
     n[0] = nx / nl; n[1] = ny / nl; n[2] = nz / nl;
     return this.radius(dx, dy, dz);
   }
@@ -225,7 +228,7 @@ export class HeadMap {
   /** Hull radius along the direction (dx,dy,dz) from c (any length). 0 = no surface there. */
   radius(dx, dy, dz, map = this.hull) {
     const { nu, nv } = this;
-    const l = Math.hypot(dx, dy, dz) || 1e-9;
+    const l = len3(dx, dy, dz) || 1e-9;
     let fu = ((Math.atan2(-dz, dy) + Math.PI) / TAU) * nu - 0.5;
     let fv = ((Math.asin(dx / l > 1 ? 1 : dx / l < -1 ? -1 : dx / l) + Math.PI / 2) / Math.PI) * nv - 0.5;
     if (fv < 0) fv = 0; else if (fv > nv - 1) fv = nv - 1;
@@ -252,12 +255,12 @@ export class HeadMap {
     // tangent basis
     const ax = Math.abs(u[0]) < 0.9 ? 1 : 0, ay = 1 - ax;
     let t1x = ay * u[2] - 0 * u[1], t1y = 0 * u[0] - ax * u[2], t1z = ax * u[1] - ay * u[0];
-    let l = Math.hypot(t1x, t1y, t1z); t1x /= l; t1y /= l; t1z /= l;
+    let l = len3(t1x, t1y, t1z); t1x /= l; t1y /= l; t1z /= l;
     const t2x = u[1] * t1z - u[2] * t1y, t2y = u[2] * t1x - u[0] * t1z, t2z = u[0] * t1y - u[1] * t1x;
     const e = 0.04;
     const S = (sa, sb, o) => {
       const dx = u[0] + (t1x * sa + t2x * sb) * e, dy = u[1] + (t1y * sa + t2y * sb) * e, dz = u[2] + (t1z * sa + t2z * sb) * e;
-      const ll = Math.hypot(dx, dy, dz), r = this.radius(dx, dy, dz);
+      const ll = len3(dx, dy, dz), r = this.radius(dx, dy, dz);
       o[0] = dx / ll * r; o[1] = dy / ll * r; o[2] = dz / ll * r;
     };
     const a = _a, b = _b, cc = _c, d = _d;
@@ -266,7 +269,7 @@ export class HeadMap {
     const vx = cc[0] - d[0], vy = cc[1] - d[1], vz = cc[2] - d[2];
     let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
     if (nx * u[0] + ny * u[1] + nz * u[2] < 0) { nx = -nx; ny = -ny; nz = -nz; }
-    l = Math.hypot(nx, ny, nz);
+    l = len3(nx, ny, nz);
     if (l < 1e-12) { out[0] = u[0]; out[1] = u[1]; out[2] = u[2]; return out; }
     out[0] = nx / l; out[1] = ny / l; out[2] = nz / l;
     return out;

@@ -8,7 +8,7 @@
 // tube and optional solid parts (puffs, hair ties); writeStrand() re-extrudes
 // one tube from any centre line (rest or simulated) without allocating.
 import * as THREE from 'three';
-import { smoothstep, clamp } from './util.js';
+import { smoothstep, clamp, len2, len3 } from './util.js';
 
 export const DETAIL_NONE = 0, DETAIL_WAVE = 1, DETAIL_CURL = 2;
 
@@ -62,9 +62,9 @@ function ringTable(S, flat, bias) {
     const a = (j / S) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
     // gradient of the ellipse (x/w)^2 + (y/(flat w))^2 ~ (ca * flat, sa), normalised, + bias * N
     let gb = ca * flat, gn = sa;
-    const gl = Math.hypot(gb, gn) || 1;
+    const gl = len2(gb, gn) || 1;
     gb /= gl; gn = gn / gl + bias;
-    const l = Math.hypot(gb, gn) || 1;
+    const l = len2(gb, gn) || 1;
     R[j * 4] = ca; R[j * 4 + 1] = sa; R[j * 4 + 2] = gb / l; R[j * 4 + 3] = gn / l;
   }
   _rings.set(key, R);
@@ -91,7 +91,7 @@ function tangents(P, M, T) {
   for (let m = 0; m < M; m++) {
     const a = Math.max(0, m - 1), b = Math.min(M - 1, m + 1);
     let x = P[b * 3] - P[a * 3], y = P[b * 3 + 1] - P[a * 3 + 1], z = P[b * 3 + 2] - P[a * 3 + 2];
-    const l = Math.hypot(x, y, z);
+    const l = len3(x, y, z);
     if (l < 1e-9) { if (m) { x = T[m * 3 - 3]; y = T[m * 3 - 2]; z = T[m * 3 - 1]; } else { x = 0; y = -1; z = 0; } }
     else { x /= l; y /= l; z /= l; }
     T[m * 3] = x; T[m * 3 + 1] = y; T[m * 3 + 2] = z;
@@ -118,8 +118,8 @@ function frames(P, T, M, N, B, axisFrame, fixed) {
     const tx = T[o], ty = T[o + 1], tz = T[o + 2];
     const d = ox * tx + oy * ty + oz * tz;
     ox -= d * tx; oy -= d * ty; oz -= d * tz;
-    let l = Math.hypot(ox, oy, oz);
-    if (l < 1e-6) { ox = px; oy = py; oz = pz; const d2 = ox * tx + oy * ty + oz * tz; ox -= d2 * tx; oy -= d2 * ty; oz -= d2 * tz; l = Math.hypot(ox, oy, oz) || 1; }
+    let l = len3(ox, oy, oz);
+    if (l < 1e-6) { ox = px; oy = py; oz = pz; const d2 = ox * tx + oy * ty + oz * tz; ox -= d2 * tx; oy -= d2 * ty; oz -= d2 * tz; l = len3(ox, oy, oz) || 1; }
     ox /= l; oy /= l; oz /= l;
     if (m && ox * px + oy * py + oz * pz < -0.2 && fixed) { ox = -ox; oy = -oy; oz = -oz; }
     N[o] = ox; N[o + 1] = oy; N[o + 2] = oz;
@@ -237,7 +237,7 @@ export class HairGeometry {
     resample(src, so, K, P, M);
     // arc length
     A[0] = 0;
-    for (let m = 1; m < M; m++) A[m] = A[m - 1] + Math.hypot(P[m * 3] - P[m * 3 - 3], P[m * 3 + 1] - P[m * 3 - 2], P[m * 3 + 2] - P[m * 3 - 1]);
+    for (let m = 1; m < M; m++) A[m] = A[m - 1] + len3(P[m * 3] - P[m * 3 - 3], P[m * 3 + 1] - P[m * 3 - 2], P[m * 3 + 2] - P[m * 3 - 1]);
     const len = A[M - 1] || 1e-6;
     const fixed = s.axis || null;
     const det = s.detail;

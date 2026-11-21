@@ -12,7 +12,7 @@
 //   torso      T: 0 crotch, 1 hip joint, 2 waist, 3 bust/chest, 4 shoulder joint, 5 neck base
 // Vertices that are not part of a limb get a = l = -0.3 (blended by the
 // limb skin weight so the fields stay continuous across the armpit / groin).
-import { buildEdges, buildAdjacency } from './mesh.js';
+import { buildEdges, buildAdjacency, len2, len3 } from './mesh.js';
 
 export const PART = { torso: 0, neck: 1, head: 2, armL: 3, handL: 4, armR: 5, handR: 6, legL: 7, footL: 8, legR: 9, footR: 10 };
 export const NPART = 11;
@@ -148,7 +148,7 @@ class LimbFrame {
     this.J.set(joints);
     for (let s = 0; s < 3; s++) {
       let dx = this.J[s * 3 + 3] - this.J[s * 3], dy = this.J[s * 3 + 4] - this.J[s * 3 + 1], dz = this.J[s * 3 + 5] - this.J[s * 3 + 2];
-      const l = Math.hypot(dx, dy, dz) || 1e-4;
+      const l = len3(dx, dy, dz) || 1e-4;
       dx /= l; dy /= l; dz /= l;
       this.L[s] = l; this.D[s * 3] = dx; this.D[s * 3 + 1] = dy; this.D[s * 3 + 2] = dz;
       // reference: arms -> world up, legs -> outer side (lateral); extremity of legs (foot) -> up
@@ -156,8 +156,8 @@ class LimbFrame {
       if (s === 2 && lateral[1] === 0) { rx = 0; ry = 1; rz = 0; }
       const d = rx * dx + ry * dy + rz * dz;
       rx -= d * dx; ry -= d * dy; rz -= d * dz;
-      let rl = Math.hypot(rx, ry, rz);
-      if (rl < 1e-3) { rx = 0; ry = 0; rz = 1; const d2 = rz * dz; rx -= d2 * dx; ry -= d2 * dy; rz -= d2 * dz; rl = Math.hypot(rx, ry, rz) || 1; }
+      let rl = len3(rx, ry, rz);
+      if (rl < 1e-3) { rx = 0; ry = 0; rz = 1; const d2 = rz * dz; rx -= d2 * dx; ry -= d2 * dy; rz -= d2 * dz; rl = len3(rx, ry, rz) || 1; }
       rx /= rl; ry /= rl; rz /= rl;
       this.R[s * 3] = rx; this.R[s * 3 + 1] = ry; this.R[s * 3 + 2] = rz;
       this.Q[s * 3] = dy * rz - dz * ry; this.Q[s * 3 + 1] = dz * rx - dx * rz; this.Q[s * 3 + 2] = dx * ry - dy * rx;
@@ -186,7 +186,7 @@ class LimbFrame {
     const t = this.proj(s, x, y, z) * this.L[s];
     const ax = this.J[o] + this.D[o] * t, ay = this.J[o + 1] + this.D[o + 1] * t, az = this.J[o + 2] + this.D[o + 2] * t;
     let rx = x - ax, ry = y - ay, rz = z - az;
-    const r = Math.hypot(rx, ry, rz) || 1e-6;
+    const r = len3(rx, ry, rz) || 1e-6;
     rx /= r; ry /= r; rz /= r;
     out[0] = Math.atan2(rx * this.Q[o] + ry * this.Q[o + 1] + rz * this.Q[o + 2], rx * this.R[o] + ry * this.R[o + 1] + rz * this.R[o + 2]);
     out[1] = r; out[2] = ax; out[3] = ay; out[4] = az; out[5] = rx; out[6] = ry; out[7] = rz; out[8] = s;
@@ -271,7 +271,7 @@ export class BodyInfo {
       const ux = P[c] - P[a], uy = P[c + 1] - P[a + 1], uz = P[c + 2] - P[a + 2];
       const vx = P[d] - P[b], vy = P[d + 1] - P[b + 1], vz = P[d + 2] - P[b + 2];
       let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      const l = Math.hypot(nx, ny, nz) || 1;
+      const l = len3(nx, ny, nz) || 1;
       fn[f * 3] = nx / l; fn[f * 3 + 1] = ny / l; fn[f * 3 + 2] = nz / l;
     }
     const out = this.clearance || (this.clearance = new Float32Array(nv));
@@ -310,6 +310,12 @@ export class BodyInfo {
     }
   }
 
+  /** Drops build-time caches (smoothed base surfaces, edge weights): rebuilt on demand. */
+  releaseCaches() {
+    this._bases?.clear();
+    this._edgeW = null;
+  }
+
   /** Unit normals of the body quads (rest shape), refreshed by update(). */
   faceNormals() { return this._fn; }
 
@@ -328,7 +334,7 @@ export class BodyInfo {
     if (this._bases.size > 8) this._bases.clear();
     const topo = this.topo, nv = topo.nv, P = this.P, { off, adj } = topo.adj;
     const W = this._edgeW || (this._edgeW = new Float32Array(adj.length));
-    for (let v = 0; v < nv; v++) for (let j = off[v]; j < off[v + 1]; j++) { const u = adj[j]; W[j] = Math.hypot(P[u * 3] - P[v * 3], P[u * 3 + 1] - P[v * 3 + 1], P[u * 3 + 2] - P[v * 3 + 2]) + 1e-5; }
+    for (let v = 0; v < nv; v++) for (let j = off[v]; j < off[v + 1]; j++) { const u = adj[j]; W[j] = len3(P[u * 3] - P[v * 3], P[u * 3 + 1] - P[v * 3 + 1], P[u * 3 + 2] - P[v * 3 + 2]) + 1e-5; }
     let L = P.slice(0, nv * 3), tmp = new Float32Array(nv * 3);
     for (let it = 0; it < iterations * 2; it++) {
       const k = it & 1 ? -0.53 : 0.5;
@@ -433,7 +439,7 @@ export class BodyInfo {
       if (topo.partW[v * NPART + PART.neck] < 0.5) continue;
       const y = P[v * 3 + 1];
       if (Math.abs(y - neck[1] - 0.02) > 0.02) continue;
-      r += Math.hypot(P[v * 3], P[v * 3 + 2] - neck[2]); n++;
+      r += len2(P[v * 3], P[v * 3 + 2] - neck[2]); n++;
     }
     return n ? r / n : 0.055;
   }
@@ -459,7 +465,7 @@ export class BodyInfo {
   torsoCyl(x, y, z, out) {
     const cz = this.cz(y);
     let rx = x, rz = z - cz;
-    const r = Math.hypot(rx, rz) || 1e-6;
+    const r = len2(rx, rz) || 1e-6;
     rx /= r; rz /= r;
     out[0] = Math.atan2(-rx, rz); out[1] = r;
     out[2] = 0; out[3] = y; out[4] = cz;

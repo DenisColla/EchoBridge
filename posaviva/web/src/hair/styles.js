@@ -2,7 +2,7 @@
 // and grows clumps / caps / special parts with style-specific flow fields.
 // Directions are unit vectors from the head centre: +X = character's left,
 // +Y up, +Z front. Lengths are meters on the f_normal head (scaled per head).
-import { smoothstep, lerp, rotate3, DEG } from './util.js';
+import { smoothstep, lerp, rotate3, DEG, len2, len3 } from './util.js';
 import { DETAIL_WAVE, DETAIL_CURL } from './strands.js';
 import { elevation } from './scalp.js';
 
@@ -37,10 +37,14 @@ const W_CROWN = [0.06, 0.74, -0.67]; // natural whorl (crown, back-top)
 /** Comb direction radiating from the crown whorl, "away from the part" on the top front. */
 function partFlow(b, u, xp, out, opts = {}) {
   const wp = smoothstep(-0.5, -0.05, u[2]) * smoothstep(0.3, 0.58, u[1]);
-  const side = u[0] - xp >= 0 ? 1 : -1;
+  // at the front hairline the hair right beside the part falls forward instead of
+  // parting sideways: a sideways V there opened a square notch of bare forehead
+  // between the swept clumps (seen from the front and in 3/4 views)
+  const fc = smoothstep(0.5, 0.78, u[2]) * (1 - smoothstep(0.01, 0.085, Math.abs(u[0] - xp)));
+  const side = (u[0] - xp >= 0 ? 1 : -1) * (1 - 0.82 * fc);
   const w = opts.whorl || W_CROWN;
   let rx = u[0] - w[0], ry = u[1] - w[1], rz = u[2] - w[2];
-  const rl = Math.hypot(rx, ry, rz) || 1;
+  const rl = len3(rx, ry, rz) || 1;
   // the whorl only rules close to the crown; elsewhere hair is combed down (and back on the back half)
   const near = Math.exp(-(rl * rl) / 0.1) * 0.9 * (1 - wp);
   rx /= rl; ry /= rl; rz /= rl;
@@ -76,7 +80,7 @@ function tipsUnder(b, amount) {
       const t = k / (K - 1), w = Math.pow(smoothstep(0.72, 1, t), 1.6) * amount * s;
       if (!w) continue;
       let dx = c[0] - pts[k * 3], dz = c[2] - 0.012 * s - pts[k * 3 + 2];
-      const l = Math.hypot(dx, dz) || 1;
+      const l = len2(dx, dz) || 1;
       pts[k * 3] += (dx / l) * w; pts[k * 3 + 2] += (dz / l) * w; pts[k * 3 + 1] += w * 0.35;
     }
   };
@@ -137,7 +141,7 @@ export const RECIPES = {
       flow: (p, u, t, out, r) => {
         const w = W_CROWN;
         b.tan(out, u, u[0] - w[0], u[1] - w[1] - 0.15, u[2] - w[2] + 0.45 * smoothstep(0.2, 0.7, u[2]));
-        const l = Math.hypot(out[0], out[1], out[2]) || 1;
+        const l = len3(out[0], out[1], out[2]) || 1;
         out[0] /= l; out[1] /= l; out[2] /= l;
         return rotate3(out, u, (r.r2 - 0.5) * 1.5);
       },

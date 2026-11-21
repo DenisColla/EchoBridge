@@ -35,6 +35,16 @@ const noiseGen = new ImprovedNoise();
 export const noise3 = (x, y, z) => noiseGen.noise(x, y, z) * 1.6;
 
 const SQ2 = Math.SQRT1_2;
+
+/** Scratch Float32Arrays shared by every garment runtime (grown on demand; never kept across calls). */
+const _scratch = [];
+export function scratch(slot, n) {
+  let a = _scratch[slot];
+  if (!a || a.length < n) a = _scratch[slot] = new Float32Array(Math.ceil(n * 1.25));
+  return a;
+}
+/** fold fields are stored as Int16 (x 1/PROF_Q): fields lie in about [-1, 1] */
+const PROF_Q = 8192;
 /** fold field centre: crests rise by (1 - bias), valleys sink by bias (x amplitude) */
 export const FOLD_BIAS = 0.5;
 /** compression where folds start / where they reach full depth (fraction of the length) */
@@ -57,9 +67,12 @@ export class WrinklePart {
     this.skinW = c.skin.w;
     this.adj = c.adj;
     this.nf = src.nf;
-    this.pIdx = src.parents.idx;
+    // compact copies: coarse indices fit 16 bits, the fold fields 16-bit fixed point
+    this.pIdx = this.n < 65536 ? Uint16Array.from(src.parents.idx) : src.parents.idx;
     this.pW = src.parents.w;
-    this.prof = src.profiles; // nf*4, already centered (field - bias)
+    const pf = src.profiles; // nf*4, already centered (field - bias)
+    this.prof = new Int16Array(pf.length);
+    for (let i = 0; i < pf.length; i++) this.prof[i] = Math.max(-32767, Math.min(32767, Math.round(pf[i] * PROF_Q)));
     this.amp = src.amp;
     this.room = src.room;
     this.stat = src.stat;
@@ -67,9 +80,6 @@ export class WrinklePart {
     this.kt = src.kt ?? 0.35;
     this.spread = src.spread ?? 4;
     this.bias = src.bias ?? FOLD_BIAS;
-    this.Q = new Float32Array(this.n * 3);
-    this.A = new Float32Array(this.n * 4); // per coarse vertex direction amplitudes
-    this.A2 = new Float32Array(this.n * 4);
     this.disp = new Float32Array(this.nf);
     this.active = false; // any dynamic fold currently applied
     // bones influencing this part: their skin matrices are compared every
@@ -104,9 +114,9 @@ export class WrinklePart {
     return moved;
   }
 
-  /** Linear blend skinning of the coarse rest surface with precomputed matrices. */
-  _skin(M) {
-    const { n, G, skinIdx, skinW, Q } = this;
+  /** Linear blend skinning of the coarse rest surface with precomputed matrices -> Q. */
+  _skin(M, Q) {
+    const { n, G, skinIdx, skinW } = this;
     for (let i = 0; i < n; i++) {
       const x = G[i * 3], y = G[i * 3 + 1], z = G[i * 3 + 2];
       let ox = 0, oy = 0, oz = 0;
@@ -148,13 +158,13 @@ export class WrinklePart {
     // pose with straightened elbows (see referenceSkin): the A-pose elbows are
     // ~40 deg flexed, a sleeve built there would show no folds when sitting
     // with bent arms and pulled ones on a straight arm.
-    if (refM) { this._skin(refM); this._tensors(this.Q, this.Crest, null); } else this._tensors(G, this.Crest, null);
+    if (refM) { const Q = scratch(2, n * 3); this._skin(refM, Q); this._tensors(Q, this.Crest, null); } else this._tensors(G, this.Crest, null);
   }
 
   /** Laplacian smoothing of the per-vertex strain tensors (in place). */
   _smoothTensor(C, passes) {
     const { n, adj } = this;
-    const T = this._Ct || (this._Ct = new Float32Array(n * 3));
+    const T = scratch(6, n * 3);
     for (let p = 0; p < passes; p++) {
       for (let i = 0; i < n; i++) {
         let a = 0, b = 0, c = 0;
@@ -165,7 +175,7 @@ export class WrinklePart {
         const h = 0.5 / d;
         T[o] = C[o] * 0.5 + a * h; T[o + 1] = C[o + 1] * 0.5 + b * h; T[o + 2] = C[o + 2] * 0.5 + c * h;
       }
-      C.set(T);
+      C.set(T.subarray(0, n * 3));
     }
   }
 
@@ -196,11 +206,11 @@ export class WrinklePart {
    * k: global x garment intensity. Returns true when the displacement changed.
    */
   update(ch, k, M = ch.updateSkinMatrices()) {
-    const { n, nf, A, A2, adj } = this;
+    const { n, nf, adj } = this;
     if (!this._bonesMoved(M) && this._k === k) return false;
-    this._skin(M);
-    const C = this._C || (this._C = new Float32Array(n * 3));
-    this._tensors(this.Q, C, this.Crest);
+    const Q = scratch(2, n * 3), A = scratch(3, n * 4), A2 = scratch(4, n * 4), C = scratch(5, n * 3);
+    this._skin(M, Q);
+    this._tensors(Q, C, this.Crest);
     // the strain of a skinned mesh is noisy at the vertex scale: smoothing the
     // tensor (not the amplitudes) gives coherent fold directions, hence long ridges
     this._smoothTensor(C, 2);
@@ -257,7 +267,7 @@ export class WrinklePart {
         a0 += w * AF[p]; a1 += w * AF[p + 1]; a2 += w * AF[p + 2]; a3 += w * AF[p + 3];
       }
       const ai = amp[i] * k;
-      let d = stat[i] * k + ai * (a0 * prof[o4] + a1 * prof[o4 + 1] + a2 * prof[o4 + 2] + a3 * prof[o4 + 3]);
+      let d = stat[i] * k + ai * (1 / PROF_Q) * (a0 * prof[o4] + a1 * prof[o4 + 1] + a2 * prof[o4 + 2] + a3 * prof[o4 + 3]);
       // the fabric cannot fold into the body: where the inward room is smaller
       // than the valleys, the whole fold pattern rises (it buckles outwards)
       // instead of being flattened against the body

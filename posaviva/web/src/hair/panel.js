@@ -1,7 +1,7 @@
 // "Capelli" tool: hairstyle, colour, length / volume / parting / bangs, facial hair.
 // Edits ch.data.hair of the selected character; the rig picks the change up on
 // the next frame (geometry rebuilds are throttled while a slider is dragged).
-import { h, section, slider, segmented, cardGrid, swatches, toggle, haptic } from '../ui/kit.js';
+import { h, section, slider, segmented, cardGrid, swatches, toggle, haptic, button, icon } from '../ui/kit.js';
 import { STYLES, STYLE_BY_ID } from './styles.js';
 import { NATURAL_COLORS, COMIC_COLORS, BEARDS } from './state.js';
 import { styleIconURL, beardIconURL } from './icons.js';
@@ -33,21 +33,20 @@ export function buildHairPanel(el, app, ctl) {
   });
 
   const natural = swatches({ colors: NATURAL_COLORS.map((c) => c.hex), value: null, allowCustom: false, onChange: (hex) => setColor(hex) });
-  const comic = swatches({ colors: COMIC_COLORS.map((c) => c.hex), value: null, allowCustom: true, onChange: (hex) => setColor(hex, true) });
+  // custom picker: live preview while it moves (onInput), one undo step on release (onChange)
+  const comic = swatches({ colors: COMIC_COLORS.map((c) => c.hex), value: null, allowCustom: true, onInput: (hex) => preview(hex), onChange: (hex) => setColor(hex) });
   // tooltips with Italian colour names
   [...natural.children].forEach((b, i) => { b.title = NATURAL_COLORS[i].label; b.setAttribute('aria-label', NATURAL_COLORS[i].label); });
   [...comic.children].forEach((b, i) => { if (COMIC_COLORS[i]) { b.title = COMIC_COLORS[i].label; b.setAttribute('aria-label', COMIC_COLORS[i].label); } else { b.title = 'Colore personalizzato'; b.setAttribute('aria-label', 'Colore personalizzato'); } });
   const colorName = h('span', { class: 'pv-hair-color-name' });
 
-  let commitT = 0;
-  function setColor(hex, custom = false) {
-    if (!ch) return;
+  function preview(hex) {
+    if (!ch) return false;
     ctl.setColor(ch, hex);
     showColor(hex);
-    // the custom picker fires continuously: one undo step when it settles
-    clearTimeout(commitT);
-    commitT = setTimeout(() => app.commit('colore capelli'), custom ? 450 : 0);
+    return true;
   }
+  function setColor(hex) { if (preview(hex)) app.commit('colore capelli'); }
 
   const lengthS = slider({
     label: 'Lunghezza', min: 0, max: 1, step: 0.01, value: 0.5, defaultValue: 0.5,
@@ -81,7 +80,13 @@ export function buildHairPanel(el, app, ctl) {
     },
   });
 
-  const empty = h('div', { class: 'pv-hair-empty' }, 'Seleziona un personaggio per cambiarne i capelli.');
+  // same empty state as the other character panels (Corpo, Posa, Viso, Mani, Vestiti)
+  const shell = app.shell;
+  const empty = h('div', { class: 'pv-body-empty pv-hair-empty' },
+    icon('user', 30),
+    h('strong', {}, 'Nessun personaggio selezionato'),
+    h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
+    button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => { if (app.modules.ui?.openPeople) app.modules.ui.openPeople(); else shell?.openTool('people'); } }));
   const adjust = section('Regolazioni', [lengthS, volumeS, partRow, bangsT]);
   const body = h('div', { class: 'pv-hair-panel' },
     section('Acconciatura', [styleGrid]),

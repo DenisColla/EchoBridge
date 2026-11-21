@@ -8,6 +8,9 @@ export const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 export const DEG = Math.PI / 180;
+/** Vector lengths without Math.hypot (V8 allocates an arguments array per multi-argument hypot call). */
+export const len2 = (x, y) => Math.sqrt(x * x + y * y);
+export const len3 = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
 
 /** Deterministic PRNG (mulberry32). Returns () => [0, 1). */
 export function rng(seed) {
@@ -44,7 +47,7 @@ export function table(t, x) {
 // ---------------------------------------------------------------- vec3 on arrays
 /** out = normalize(v) for a 3-array; returns length. */
 export function norm3(v) {
-  const l = Math.hypot(v[0], v[1], v[2]);
+  const l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
   if (l > 1e-12) { v[0] /= l; v[1] /= l; v[2] /= l; }
   return l;
 }

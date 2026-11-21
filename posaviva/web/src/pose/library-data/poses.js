@@ -266,9 +266,10 @@ export const POSE_DEFS = [
     'thigh.LR': [76, -4, 2], 'knee.LR': -66, 'foot.LR': [-10, 0, 0],
   },
   { id: 'sit_relaxed', label: 'Sedia rilassata', cat: 'sit', seat: 0.45,
+    touch: { L: [11080, 0.03], R: [4536, 0.025] }, // both hands resting on the thighs
     root: [14, 0, 0],
     spine: [-12, 0, 0], neck: [-6, 0, 0], head: [-4, 8, 6],
-    'arm.L': [6, 20, 30], 'fore.L': [-20, 10, 0], 'arm.R': [-10, 10, 34], 'fore.R': [-30, 20, 0], 'hand.LR': 'relaxed',
+    'arm.L': [6, 20, 30], 'fore.L': [-20, 10, 0], 'arm.R': [-14, 14, 34], 'fore.R': [-20, 26, 0], 'wrist.R': [0, 0, 6], 'hand.LR': 'relaxed',
     'thigh.L': [53, -14, 8], 'knee.L': -30, 'foot.L': [6, 0, 0],
     'thigh.R': [62, -8, 4], 'knee.R': -56, 'foot.R': [-6, 0, 0],
   },

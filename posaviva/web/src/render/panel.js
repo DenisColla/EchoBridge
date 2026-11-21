@@ -119,7 +119,9 @@ export function buildStylePanel(el, ctx) {
   const crease = slider({ label: 'Linee interne (pieghe)', min: 0, max: 1, step: 0.01, value: S().crease, defaultValue: 0.45,
     format: (v) => (v < 0.005 ? 'off' : Math.round(v * 100) + '%'),
     onInput: (v) => ctx.set({ crease: v }), onChange: () => ctx.app.commit('linee interne') });
-  const inkColor = swatches({ colors: INK_COLORS, value: S().inkColor, onChange: (c) => ctx.set({ inkColor: c }, { commit: 'colore china' }) });
+  // custom pickers: live preview while the picker moves, one undo step when it is released
+  const inkColor = swatches({ colors: INK_COLORS, value: S().inkColor,
+    onInput: (c) => ctx.set({ inkColor: c }), onChange: (c) => ctx.set({ inkColor: c }, { commit: 'colore china' }) });
   const inkBody = h('div', {}, inkWidth, crease, h('div', { class: 'pv-slider-head' }, h('span', { class: 'pv-slider-label' }, 'Colore china')), inkColor);
   const inkSec = section('Contorni', [inkToggle, inkBody]);
 
@@ -132,9 +134,13 @@ export function buildStylePanel(el, ctx) {
       ctx.set({ bg: { ...p.bg } }, { commit: 'sfondo' });
     },
   });
-  const bgSolid = swatches({ colors: SOLID_BG, value: null, onChange: (c) => ctx.set({ bg: { type: 'solid', color: c } }, { commit: 'sfondo' }) });
-  const bgTop = swatches({ colors: [], value: S().bg.top, onChange: (c) => ctx.set({ bg: { type: 'gradient', top: c } }, { commit: 'sfondo' }) });
-  const bgBottom = swatches({ colors: [], value: S().bg.bottom, onChange: (c) => ctx.set({ bg: { type: 'gradient', bottom: c } }, { commit: 'sfondo' }) });
+  const bgPicker = (patch) => ({
+    onInput: (c) => ctx.set({ bg: patch(c) }),
+    onChange: (c) => ctx.set({ bg: patch(c) }, { commit: 'sfondo' }),
+  });
+  const bgSolid = swatches({ colors: SOLID_BG, value: null, ...bgPicker((c) => ({ type: 'solid', color: c })) });
+  const bgTop = swatches({ colors: [], value: S().bg.top, ...bgPicker((c) => ({ type: 'gradient', top: c })) });
+  const bgBottom = swatches({ colors: [], value: S().bg.bottom, ...bgPicker((c) => ({ type: 'gradient', bottom: c })) });
   const gradRow = h('div', { class: 'pv-row', style: { marginTop: '10px' } },
     h('div', { class: 'pv-row', style: { flex: '0 1 auto', gap: '8px' } }, h('span', { class: 'pv-slider-label' }, 'Alto'), bgTop),
     h('div', { class: 'pv-row', style: { flex: '0 1 auto', gap: '8px' } }, h('span', { class: 'pv-slider-label' }, 'Basso'), bgBottom));

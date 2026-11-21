@@ -8,7 +8,7 @@
 // to a new shape or expression is a cheap re-interpolation (fit()). The
 // thickness grows from a hair's breadth at the border to the full offset
 // `edge` mask units inside.
-import { smoothstep } from './util.js';
+import { smoothstep, len3 } from './util.js';
 
 export class SkinPatch {
   /**
@@ -121,7 +121,7 @@ export class SkinPatch {
       let nx = w0 * N[a] + w1 * N[b] + w2 * N[c] + w3 * N[d];
       let ny = w0 * N[a + 1] + w1 * N[b + 1] + w2 * N[c + 1] + w3 * N[d + 1];
       let nz = w0 * N[a + 2] + w1 * N[b + 2] + w2 * N[c + 2] + w3 * N[d + 2];
-      const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+      const l = len3(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
       const h = rim + (offset * (thickness ? thickness[v] : 1) - rim) * smoothstep(0, edge, mask[v]);
       pos[v * 3] = w0 * P[a] + w1 * P[b] + w2 * P[c] + w3 * P[d] + nx * h;
       pos[v * 3 + 1] = w0 * P[a + 1] + w1 * P[b + 1] + w2 * P[c + 1] + w3 * P[d + 1] + ny * h;

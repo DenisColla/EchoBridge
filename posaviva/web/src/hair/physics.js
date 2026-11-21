@@ -17,7 +17,7 @@
 // bending resistance, collisions. Runs a bounded number of iterations per frame
 // until settled.
 import * as THREE from 'three';
-import { smoothstep } from './util.js';
+import { smoothstep, len2, len3 } from './util.js';
 
 const _m = new THREE.Matrix4(), _hinv = new THREE.Matrix4(), _mb = new THREE.Matrix4();
 const _v = new THREE.Vector3(), _p0 = new THREE.Vector3();
@@ -99,7 +99,7 @@ export class BodyColliders {
         if (t < t0 || t > t1) continue;
         const dx = x - abx * t, dy = y - aby * t, dz = z - abz * t;
         if (upperOnly && dy < 0) continue;
-        const d = Math.hypot(dx, dy, dz);
+        const d = len3(dx, dy, dz);
         if (d < 0.2 * s) ds.push(d);
       }
       if (!ds.length) return 0.04 * s;
@@ -156,7 +156,7 @@ export class BodyColliders {
       const cz = (zf + zb) / 2, R = new Float32Array(NSECT);
       for (const v of sel) {
         const x = P[v * 3], z = P[v * 3 + 2] - cz;
-        const r = Math.hypot(x, z), a = sectorOf(x, z);
+        const r = len2(x, z), a = sectorOf(x, z);
         if (r > R[a]) R[a] = r;
       }
       fillSectors(R);
@@ -226,7 +226,7 @@ export class BodyColliders {
       tr(c.b, c.bb, cur, o + 3);
       cur[o + 6] = c.r;
       cur[o + 7] = (cur[o] + cur[o + 3]) / 2; cur[o + 8] = (cur[o + 1] + cur[o + 4]) / 2; cur[o + 9] = (cur[o + 2] + cur[o + 5]) / 2;
-      cur[o + 10] = Math.hypot(cur[o + 3] - cur[o], cur[o + 4] - cur[o + 1], cur[o + 5] - cur[o + 2]) / 2 + c.r;
+      cur[o + 10] = len3(cur[o + 3] - cur[o], cur[o + 4] - cur[o + 1], cur[o + 5] - cur[o + 2]) / 2 + c.r;
     }
     // gravity and ground in head space
     const g = this.gravity, gp = this.ground;
@@ -256,7 +256,7 @@ export class BodyColliders {
     }
     const c = this._c;
     let dx = chest[0] - c.x, dy = chest[1] - c.y, dz = chest[2] - c.z;
-    const dl = Math.hypot(dx, dy, dz) || 1;
+    const dl = len3(dx, dy, dz) || 1;
     this.down[0] = dx / dl; this.down[1] = dy / dl; this.down[2] = dz / dl;
     // change signature
     const sig = this.sig;
@@ -320,7 +320,7 @@ export class BodyColliders {
       // the top band is rounded off (dome) so points entering from above are pushed smoothly
       const dome = k === 0 ? Math.sqrt(0.15 + 0.85 * t) : 1;
       const cz = b0.cz + (b1.cz - b0.cz) * t;
-      const dz = qz - cz, rr = Math.hypot(qx, dz);
+      const dz = qz - cz, rr = len2(qx, dz);
       if (rr >= Math.max(b0.Rmax, b1.Rmax) * dome + r) break; // clearly outside
       const f = sectorF(qx, dz), a0 = f | 0, a1 = (a0 + 1) % NSECT, fa = f - a0;
       const Rb0 = b0.R[a0] + (b0.R[a1] - b0.R[a0]) * fa, Rb1 = b1.R[a0] + (b1.R[a1] - b1.R[a0]) * fa;
@@ -357,7 +357,7 @@ const _hn = [0, 0, 0];
 export function pushHead(map, x, y, z, margin, out, o) {
   const c = map.c;
   const dx = x - c.x, dy = y - c.y, dz = z - c.z;
-  const r = Math.hypot(dx, dy, dz);
+  const r = len3(dx, dy, dz);
   out[o] = x; out[o + 1] = y; out[o + 2] = z;
   if (r < 1e-6) return false;
   const rh = map.sample(dx, dy, dz, _hn);
@@ -385,7 +385,7 @@ export class GuideSolver {
     this.seg = new Float32Array(rest.length / 3);
     for (const g of guides) for (let k = 1; k < g.K; k++) {
       const a = (g.start + k - 1) * 3, b = a + 3;
-      this.seg[g.start + k] = Math.hypot(lengths[b] - lengths[a], lengths[b + 1] - lengths[a + 1], lengths[b + 2] - lengths[a + 2]);
+      this.seg[g.start + k] = len3(lengths[b] - lengths[a], lengths[b + 1] - lengths[a + 1], lengths[b + 2] - lengths[a + 2]);
     }
     this.gStep = 0.008 * (map.scale || 1);
     /** contact in the last iteration: 1 body (with its normal in cn), 2 head */
@@ -425,7 +425,7 @@ export class GuideSolver {
             const gn = gx * nx + gy * ny + gz * nz;
             if (gn < 0) {
               const tx = gx - gn * nx, ty = gy - gn * ny, tz = gz - gn * nz;
-              const tl = Math.hypot(tx, ty, tz), lim = -gn * mu;
+              const tl = len3(tx, ty, tz), lim = -gn * mu;
               const f = tl > lim ? (tl - lim) / tl : 0;
               gx = tx * f; gy = ty * f; gz = tz * f;
             }
@@ -435,14 +435,14 @@ export class GuideSolver {
           // follow the leader (inextensible) with bending resistance
           const p = o - 3;
           let dx = x - cur[p], dy = y - cur[p + 1], dz = z - cur[p + 2];
-          let l = Math.hypot(dx, dy, dz) || 1e-9;
+          let l = len3(dx, dy, dz) || 1e-9;
           dx /= l; dy /= l; dz /= l;
           if (k >= 2 && bend > 0) {
             const q = p - 3;
             let px = cur[p] - cur[q], py = cur[p + 1] - cur[q + 1], pz = cur[p + 2] - cur[q + 2];
-            const pl = Math.hypot(px, py, pz) || 1e-9;
+            const pl = len3(px, py, pz) || 1e-9;
             dx += (px / pl) * bend; dy += (py / pl) * bend; dz += (pz / pl) * bend;
-            l = Math.hypot(dx, dy, dz) || 1e-9;
+            l = len3(dx, dy, dz) || 1e-9;
             dx /= l; dy /= l; dz /= l;
           }
           const L = seg[s0 + k];

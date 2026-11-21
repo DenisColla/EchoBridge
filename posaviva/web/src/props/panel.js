@@ -11,7 +11,7 @@ const fmtDeg = (v) => `${Math.round(v)}°`;
 
 export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
   shell.registerTool({
-    id: 'props', label: 'Oggetti', icon: 'cube', group: 'scene', order: 50, title: 'Oggetti di scena',
+    id: 'props', label: 'Oggetti', icon: 'cube', group: 'scene', order: 65, title: 'Oggetti di scena',
     build(el) {
       el.classList.add('pv-pr-panel');
       const strip = h('div', { class: 'pv-chips pv-pr-strip' });

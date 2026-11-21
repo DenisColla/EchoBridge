@@ -1,5 +1,6 @@
 /* "Viso" tool (face module). Scoped under .pvf */
-.pvf.pvf-disabled { opacity: .4; pointer-events: none; }
+.pvf .pvf-view { margin: 0 0 12px; }
+.pvf .pvf-view > .pv-btn { flex: 1 1 0; min-width: 0; }
 
 /* expression cards: compact, emoji-like icon + label */
 .pvf .pvf-grid { gap: 6px; }

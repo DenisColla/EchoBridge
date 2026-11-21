@@ -22,7 +22,8 @@ const AXIS_COLORS = ['#ff5d73', '#4fc3ff', '#7dff9a'];
 const HORIZON_COLOR = '#ffd166';
 
 export function defaultGuides() {
-  return { visible: true, mode: 0, horizon: false, yaw: 0, density: 16, color: null, opacity: 0.75, thirds: false, frame: null, mask: 0.5, gridSync: true };
+  // hidden by default: turning "Mostra guide" on with nothing chosen picks 2 points + horizon (guidesPanel.js)
+  return { visible: false, mode: 0, horizon: false, yaw: 0, density: 16, color: null, opacity: 0.75, thirds: false, frame: null, mask: 0.5, gridSync: true };
 }
 
 const DEG = Math.PI / 180;

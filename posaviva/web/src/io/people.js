@@ -6,11 +6,13 @@ import * as THREE from 'three';
 import { h, icon, iconButton, button, segmented, toast, haptic, confirmDialog, promptDialog, sheetMenu } from '../ui/kit.js';
 
 export const MAX_CHARACTERS = 8;
-const SEX_LABEL = { F: 'Donna', M: 'Uomo' };
-const SPACING = 0.8; // m between characters placed side by side
-const MIN_GAP = 0.62; // m: a spot closer than this to another character is taken
+export const SEX_LABEL = { F: 'Donna', M: 'Uomo' };
+/** default names: "Donna 1", "Uomo 2" … (numbered per sex) */
+const DEFAULT_NAME = /^(Donna|Uomo) \d+$/;
+const GAP = 0.06; // m of free space between the bounds of characters placed side by side
+const STEP = 0.05; // m: search step of a free spot along the camera's right vector
 
-const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _box = new THREE.Box3();
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _pt = new THREE.Vector3(), _box = new THREE.Box3(), _box2 = new THREE.Box3();
 
 /** Hidden state lives in ch.data.ui.hidden (serialized with the character). */
 export function setCharacterHidden(ch, hidden) {
@@ -21,15 +23,20 @@ export function setCharacterHidden(ch, hidden) {
 }
 
 export function describe(ch) {
+  // "Donna 1" already says the sex
+  if (ch.name.startsWith(SEX_LABEL[ch.sex] || '\0')) return `Corporatura ${ch.preset.label.toLowerCase()}`;
   return `${SEX_LABEL[ch.sex] || ''} · ${ch.preset.label}`;
 }
+
+/** True for an automatic name ("Donna 1", "Uomo 2"), which follows the sex. */
+export function isDefaultName(name) { return DEFAULT_NAME.test(name || ''); }
 
 /** World bounds of a character from its skinned body (sampled). */
 export function characterBox(ch, box = _box) {
   box.makeEmpty();
   ch.root.updateWorldMatrix(true, true);
   const P = ch.getSkinnedPositions(), M = ch.rig.matrixWorld, verts = ch.model.groupVertices[0];
-  for (let i = 0; i < verts.length; i += 7) { const k = verts[i] * 3; box.expandByPoint(_v.set(P[k], P[k + 1], P[k + 2]).applyMatrix4(M)); }
+  for (let i = 0; i < verts.length; i += 7) { const k = verts[i] * 3; box.expandByPoint(_pt.set(P[k], P[k + 1], P[k + 2]).applyMatrix4(M)); }
   return box;
 }
 
@@ -185,10 +192,12 @@ export class PeopleTool {
   duplicate(ch) {
     if (this.app.characters.length >= MAX_CHARACTERS) return this._limitMessage();
     const c2 = this.app.duplicateCharacter(ch);
-    // keep a readable, unique name ("Anna" -> "Anna 2")
-    c2.name = this.uniqueName(ch.name.replace(/\s+\d+$/, ''), c2);
-    const spot = this.freeSpot(ch.root.position);
-    if (spot) c2.root.position.copy(spot);
+    // keep a readable, unique name ("Anna" -> "Anna 2", "Donna 1" -> "Donna 2")
+    c2.name = isDefaultName(ch.name) ? this.defaultName(c2.sex, c2) : this.uniqueName(ch.name.replace(/\s+\d+$/, ''), c2);
+    const spot = this.freeSpot(ch.root.position, c2);
+    if (spot) this._place(c2, spot, c2.root.rotation.y);
+    // props held in its hands come along (same side, fingers already posed)
+    this.app.props?.copyHeld?.(ch, c2);
     this.app.invalidate();
     this.app.dispatchEvent({ type: 'characters' });
     this.app.commit('duplica personaggio');
@@ -224,24 +233,53 @@ export class PeopleTool {
     for (let i = 2; ; i++) if (!taken.has(`${base} ${i}`)) return `${base} ${i}`;
   }
 
+  /** First free automatic name of a sex: "Donna 1", "Donna 2", "Uomo 1" … */
+  defaultName(sex, except = null) {
+    const base = SEX_LABEL[sex] || 'Personaggio';
+    const taken = new Set(this.app.characters.filter((c) => c !== except).map((c) => c.name));
+    for (let i = 1; ; i++) if (!taken.has(`${base} ${i}`)) return `${base} ${i}`;
+  }
+
   /**
-   * Ground spot near `around` (default: the orbit target) not occupied by another
-   * character, searched side by side along the camera's right vector.
+   * Ground spot near `around` (default: the selected character, else the orbit
+   * target) where `ch` (default: an A-pose body about 1 m wide) does not touch
+   * another character, searched side by side along the camera's right vector
+   * (right first). Spacing comes from the actual bounds (arms, poses, body
+   * types), so new characters in A-pose never interlock their hands.
    */
-  freeSpot(around = null) {
+  freeSpot(around = null, ch = null) {
     const app = this.app, cam = app.camera;
     const sel = app.selection.character;
-    const c = (around ? _v.copy(around) : sel ? _v.copy(sel.root.position) : _v.copy(app.controls.target)).setY(0);
+    const c = (around ? _v.copy(around) : sel && sel !== ch ? _v.copy(sel.root.position) : _v.copy(app.controls.target)).setY(0);
     const right = _v2.set(1, 0, 0).applyQuaternion(cam.quaternion).setY(0);
     if (right.lengthSq() < 1e-6) right.set(1, 0, 0); else right.normalize();
-    const others = app.characters.map((ch) => ch.root.position);
-    const free = (x, z) => others.every((p) => Math.hypot(p.x - x, p.z - z) >= MIN_GAP);
-    for (let i = 0; i < 24; i++) {
-      const k = i === 0 ? 0 : (i % 2 ? 1 : -1) * Math.ceil(i / 2);
-      const x = c.x + right.x * k * SPACING, z = c.z + right.z * k * SPACING;
-      if (free(x, z)) return new THREE.Vector3(x, 0, z);
+    const fwd = _v3.set(-right.z, 0, right.x);
+    // extent of a box along a horizontal axis: center and half size
+    const cen = (b, a) => ((b.min.x + b.max.x) * a.x + (b.min.z + b.max.z) * a.z) / 2;
+    const half = (b, a) => (Math.abs(a.x) * (b.max.x - b.min.x) + Math.abs(a.z) * (b.max.z - b.min.z)) / 2;
+    // the new character: offset of its bounds center from its root (along right / forward) and half sizes
+    let nr = 0, nf = 0, hr = 0.53, hf = 0.22;
+    if (ch) {
+      const b = characterBox(ch, _box2), p = ch.root.position;
+      nr = cen(b, right) - (p.x * right.x + p.z * right.z); nf = cen(b, fwd) - (p.x * fwd.x + p.z * fwd.z);
+      hr = half(b, right); hf = half(b, fwd);
+    }
+    const others = app.characters.filter((o) => o !== ch && o.root.visible).map((o) => {
+      const b = characterBox(o, _box2);
+      return { r: cen(b, right), f: cen(b, fwd), hr: half(b, right), hf: half(b, fwd) };
+    });
+    const c0r = c.x * right.x + c.z * right.z + nr, c0f = c.x * fwd.x + c.z * fwd.z + nf;
+    const free = (t) => others.every((o) => Math.abs(c0r + t - o.r) >= hr + o.hr + GAP || Math.abs(c0f - o.f) >= hf + o.hf + GAP);
+    for (let i = 0; i < 240; i++) {
+      const t = (i === 0 ? 0 : (i % 2 ? 1 : -1) * Math.ceil(i / 2)) * STEP;
+      if (free(t)) return new THREE.Vector3(c.x + right.x * t, 0, c.z + right.z * t);
     }
     return null;
+  }
+
+  _place(ch, pos, rotationY) {
+    if (typeof ch.setPlacement === 'function') ch.setPlacement({ position: pos, rotationY });
+    else { ch.root.position.copy(pos); ch.root.rotation.y = rotationY; }
   }
 
   /** Adds a character of a preset, selects it and frames it. */
@@ -250,16 +288,26 @@ export class PeopleTool {
     if (app.characters.length >= MAX_CHARACTERS) { this._limitMessage(); return null; }
     const preset = app.model.presetById.get(presetId);
     if (!preset) return null;
-    const spot = this.freeSpot();
-    const opts = { preset: presetId, name: this.uniqueName(preset.label) };
+    // created at the anchor facing the camera, then moved to a spot that fits its real bounds
+    const sel = app.selection.character;
+    const anchor = (sel ? sel.root.position.clone() : app.controls.target.clone()).setY(0);
+    const face = (p) => {
+      const step = Math.PI / 12; // snapped to 15 degrees
+      return Math.round(Math.atan2(app.camera.position.x - p.x, app.camera.position.z - p.z) / step) * step || 0;
+    };
+    const ch = app.addCharacter({ preset: presetId, name: this.defaultName(preset.sex), position: anchor.toArray(), rotationY: face(anchor) });
+    let spot = this.freeSpot(anchor, ch);
     if (spot) {
-      opts.position = spot.toArray();
-      // face the camera (snapped to 15 degrees)
-      const dx = app.camera.position.x - spot.x, dz = app.camera.position.z - spot.z;
-      const step = Math.PI / 12;
-      opts.rotationY = Math.round(Math.atan2(dx, dz) / step) * step || 0;
+      this._place(ch, spot, face(spot));
+      // turning toward the camera from the new spot changes its width a little: check again
+      spot = this.freeSpot(spot, ch);
+      if (spot) this._place(ch, spot, face(spot));
+    } else {
+      // crowded: at the right end of the row
+      const xs = app.characters.filter((o) => o !== ch).map((o) => o.root.position.x);
+      const p = new THREE.Vector3((xs.length ? Math.max(...xs) : anchor.x) + 1.3, 0, anchor.z);
+      this._place(ch, p, face(p));
     }
-    const ch = app.addCharacter(opts);
     this.ctx.viewOffset?.holdSelection(700);
     app.select(ch);
     this.frame(ch);

@@ -95,6 +95,25 @@ export class PropManager extends THREE.EventDispatcher {
     return q;
   }
 
+  /**
+   * Copies the props held by character `src` into the same hands of `dst`
+   * (a duplicated character with the same pose: the fingers already grip).
+   * No undo step. Returns the number of props copied.
+   */
+  copyHeld(src, dst) {
+    let n = 0;
+    for (const p of [...this.props]) {
+      if (!p.hold || p.hold.ch !== src) continue;
+      const j = p.toJSON();
+      delete j.id; delete j.hold;
+      const q = this.create(j);
+      if (!this.attach(q, dst, p.hold.side, { pose: false, emit: false })) q.root.position.y = Math.max(0, q.root.position.y);
+      n++;
+    }
+    if (n) this._changed(null, 'list');
+    return n;
+  }
+
   clear() {
     for (const p of [...this.props]) p.dispose();
     this.props.length = 0;

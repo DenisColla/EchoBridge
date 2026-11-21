@@ -13,7 +13,7 @@ import { createEyeTexture, IRIS_UV, PUPIL_UV } from './eyeTexture.js';
 import { Lashes } from './lashes.js';
 import { Brows, BROW_BY_ID } from './brows.js';
 import { composeExpression, sameWeights, PRESET_BY_ID, FINE_BY_ID } from './expressions.js';
-import { aimHeadLocal, freeTarget, headWorldMatrix } from './gaze.js';
+import { aimHeadLocal, freeTarget, headWorldMatrix, currentPad } from './gaze.js';
 import { buildFacePanel } from './panel.js';
 import { tongueFollowsJaw } from './mouth.js';
 
@@ -100,6 +100,8 @@ class FaceRig {
     this.shapeDirty = true;
     this.exprDirty = true;
     this.matKey = null; // hair colour the lash / brow materials were made for
+    /** vertical gaze of the camera / point modes (quantized), followed by the lids; null = unknown */
+    this.autoGy = null;
     /** camera / point gaze change detection: head world matrix + target */
     this.sig = new Float64Array(19).fill(NaN);
     this._on = {
@@ -208,6 +210,9 @@ class FaceRig {
     _T.copy(_W).applyMatrix4(_Hi.copy(_H).invert());
     const changed = aimHeadLocal(this.ch, _T);
     if (changed) this.ctl._gazeMoved(this.ch);
+    // the lids follow the eyes up / down (0.05 steps: re-composed only when it shows)
+    const gy = Math.round(Math.max(-1, Math.min(1, currentPad(this.ch)[1])) * 20) / 20;
+    if (gy !== this.autoGy) { this.autoGy = gy; this.ctl.applyExpression(this.ch); }
     return changed;
   }
 
@@ -295,14 +300,19 @@ class FaceController extends THREE.EventDispatcher {
   state(ch = this.app.selection.character) { return ch ? faceState(ch) : null; }
 
   // ------------------------------------------------------------ expression
+  /** Expression weights for the face state of ch (lids following an automatic gaze included). */
+  composeFor(ch) {
+    return composeExpression(faceState(ch), this.rigs.get(ch)?.autoGy ?? null);
+  }
+
   /** Recomputes ch.expression from ch.data.face (throttled to one per frame). */
   applyExpression(ch, now = false) {
-    if (now) { this._pendingExpr.delete(ch); ch.setExpression(composeExpression(faceState(ch)), true); this._emit(ch, 'expression'); return; }
+    if (now) { this._pendingExpr.delete(ch); ch.setExpression(this.composeFor(ch), true); this._emit(ch, 'expression'); return; }
     this._pendingExpr.add(ch);
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
-      for (const c of this._pendingExpr) if (this.rigs.has(c)) { c.setExpression(composeExpression(faceState(c)), true); this._emit(c, 'expression'); }
+      for (const c of this._pendingExpr) if (this.rigs.has(c)) { c.setExpression(this.composeFor(c), true); this._emit(c, 'expression'); }
       this._pendingExpr.clear();
     });
   }
@@ -377,7 +387,7 @@ class FaceController extends THREE.EventDispatcher {
     st.lookAtCamera = false; st.lookAt = null;
     if (rig.applyFreeGaze()) this.app.invalidate();
     // the lids follow a vertical gaze (part of the composed expression)
-    if (wasAuto || !sameWeights(composeExpression(st), ch.expression)) this.applyExpression(ch, commit);
+    if (wasAuto || !sameWeights(this.composeFor(ch), ch.expression)) this.applyExpression(ch, commit);
     this._emit(ch, 'gaze');
     if (commit) this.app.commit('sguardo');
   }

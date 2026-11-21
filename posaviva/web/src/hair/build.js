@@ -9,7 +9,7 @@ import { StrandSet } from './strands.js';
 import { SkinPatch } from './patch.js';
 import { makeMask, sampleRoots, tangentBasis } from './scalp.js';
 import { shapeProfile, GuideSolver, pushHead } from './physics.js';
-import { rng, clamp, lerp, smoothstep } from './util.js';
+import { rng, clamp, lerp, smoothstep, len3 } from './util.js';
 
 const _u = [0, 0, 0], _t1 = [0, 0, 0], _t2 = [0, 0, 0];
 
@@ -19,7 +19,7 @@ export const PART_X = { left: 0.34, center: 0, right: -0.34 };
 /** Resamples polyline pts (K points) to K points spanning arc length [0, cut]. */
 export function truncate(pts, K, cut) {
   const A = new Float32Array(K);
-  for (let k = 1; k < K; k++) A[k] = A[k - 1] + Math.hypot(pts[k * 3] - pts[k * 3 - 3], pts[k * 3 + 1] - pts[k * 3 - 2], pts[k * 3 + 2] - pts[k * 3 - 1]);
+  for (let k = 1; k < K; k++) A[k] = A[k - 1] + len3(pts[k * 3] - pts[k * 3 - 3], pts[k * 3 + 1] - pts[k * 3 - 2], pts[k * 3 + 2] - pts[k * 3 - 1]);
   cut = Math.min(cut, A[K - 1]);
   const out = new Float32Array(K * 3);
   let j = 0;
@@ -74,7 +74,7 @@ export class HairBuilder {
     this.patch = new SkinPatch(this.env.model, this.env.ch.shapePositions, {
       mask: (x, y, z) => {
         _u[0] = x - c[0]; _u[1] = y - c[1]; _u[2] = z - c[2];
-        const l = Math.hypot(_u[0], _u[1], _u[2]) || 1;
+        const l = len3(_u[0], _u[1], _u[2]) || 1;
         _u[0] /= l; _u[1] /= l; _u[2] /= l;
         return mask(_u);
       },
@@ -128,7 +128,7 @@ export class HairBuilder {
         let cut = -1, acc = 0;
         const cy = o.clip.y ? o.clip.y(root) : -1e9;
         for (let k = 1; k < o.K; k++) {
-          const seg = Math.hypot(pts[k * 3] - pts[k * 3 - 3], pts[k * 3 + 1] - pts[k * 3 - 2], pts[k * 3 + 2] - pts[k * 3 - 1]);
+          const seg = len3(pts[k * 3] - pts[k * 3 - 3], pts[k * 3 + 1] - pts[k * 3 - 2], pts[k * 3 + 2] - pts[k * 3 - 1]);
           let out = false, f = 1;
           if (pts[k * 3 + 1] < cy) { out = true; f = clamp((pts[k * 3 - 2] - cy) / (pts[k * 3 - 2] - pts[k * 3 + 1] || 1), 0, 1); }
           else if (o.clip.mask) {
@@ -222,7 +222,7 @@ export class HairBuilder {
       for (let pass = 0; pass < 3; pass++) {
         this._pushHead(q, R * 1.1);
         this.col.push(q[0], q[1], q[2], R * 0.9, q, 0);
-        const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2], l = Math.hypot(dx, dy, dz) || 1;
+        const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2], l = len3(dx, dy, dz) || 1;
         q[0] = p[0] + (dx / l) * seg; q[1] = p[1] + (dy / l) * seg; q[2] = p[2] + (dz / l) * seg;
       }
       d[0] = q[0] - p[0]; d[1] = q[1] - p[1]; d[2] = q[2] - p[2]; norm(d);
@@ -267,7 +267,7 @@ export class HairBuilder {
     const added = [];
     const plaitEnd = 0.84; // braided part, then tie + loose end
     const A = new Float32Array(K);
-    for (let k = 1; k < K; k++) A[k] = A[k - 1] + Math.hypot(axis[k * 3] - axis[k * 3 - 3], axis[k * 3 + 1] - axis[k * 3 - 2], axis[k * 3 + 2] - axis[k * 3 - 1]);
+    for (let k = 1; k < K; k++) A[k] = A[k - 1] + len3(axis[k * 3] - axis[k * 3 - 3], axis[k * 3 + 1] - axis[k * 3 - 2], axis[k * 3 + 2] - axis[k * 3 - 1]);
     const period = W * 3.1; // one full plait cycle
     const end = Math.round((K - 1) * plaitEnd);
     for (let j = 0; j < 3; j++) {
@@ -403,11 +403,22 @@ export class HairBuilder {
   point(u, h = 0) { return this.grower.surface(u, h, [0, 0, 0]); }
 
   /** Unit vector (normalised copy). */
-  dir(x, y, z) { const l = Math.hypot(x, y, z) || 1; return [x / l, y / l, z / l]; }
+  dir(x, y, z) { const l = len3(x, y, z) || 1; return [x / l, y / l, z / l]; }
 
   // ---------------------------------------------------------------- dynamic setup
   /** Builds the solver input and clump bindings for all dynamic components. */
   finishDynamics() {
+    const g = this.dynamicsSteps();
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+
+  /**
+   * finishDynamics as a generator: yields after the rest settle and every few
+   * dozen clump bindings, so the rig can spread a rebuild over several frames.
+   */
+  *dynamicsSteps() {
     if (!this.comps.length) return null;
     const list = this.strands.list;
     const guides = [];
@@ -436,7 +447,7 @@ export class HairBuilder {
         const G = Math.min(n, Math.max(Math.min(n, 6), Math.round((Gtot * n) / ntot)));
         // farthest point sampling on (root + first free point) positions
         const keys = idx.map((si) => { const st = list[si], k1 = Math.min(K - 1, st.pin + 1) * 3, p = st.pts; return [p[0], p[1], p[2], p[k1], p[k1 + 1], p[k1 + 2]]; });
-        const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) + Math.hypot(a[3] - b[3], a[4] - b[4], a[5] - b[5]);
+        const dist = (a, b) => len3(a[0] - b[0], a[1] - b[1], a[2] - b[2]) + len3(a[3] - b[3], a[4] - b[4], a[5] - b[5]);
         const chosen = [0];
         const dmin = new Float32Array(n).fill(1e9);
         for (let gi = 1; gi < G; gi++) {
@@ -460,7 +471,12 @@ export class HairBuilder {
     // every pose change only moves the hair by the difference it makes
     this.map.scale = this.s;
     const solver = new GuideSolver(grown, guides, this.map, this.col);
-    for (let it = 0; it < 40; it += 4) { solver.iterate(4); if (solver.meanMove < 0.00025) break; }
+    for (let it = 0; it < 40; it += 4) {
+      solver.iterate(4);
+      if (solver.meanMove < 0.00025) break;
+      if (it === 16) yield 'settle';
+    }
+    yield 'settled';
     const rest = solver.cur;
     const frames = guideFrames(rest, guides, this.c, null);
     const { T, N, B } = frames;
@@ -474,7 +490,7 @@ export class HairBuilder {
         const k1 = Math.min(K - 1, st.pin + 1) * 3;
         const near = gids.map((gid) => {
           const q = rest.subarray(guides[gid].start * 3);
-          return { gid, d: Math.hypot(r[0] - q[0], r[1] - q[1], r[2] - q[2]) + Math.hypot(r[k1] - q[k1], r[k1 + 1] - q[k1 + 1], r[k1 + 2] - q[k1 + 2]) };
+          return { gid, d: len3(r[0] - q[0], r[1] - q[1], r[2] - q[2]) + len3(r[k1] - q[k1], r[k1 + 1] - q[k1 + 1], r[k1 + 2] - q[k1 + 2]) };
         }).sort((a, b) => a.d - b.d).slice(0, 3);
         let ws = near.map((x) => 1 / Math.pow(x.d + 0.003, 3));
         if (near[0].d < 1e-6) ws = near.map((_, i) => (i === 0 ? 1 : 0));
@@ -511,7 +527,7 @@ export class HairBuilder {
               const l2 = ex * ex + ey * ey + ez * ez || 1e-12;
               // the last segment may be extrapolated a little (clumps slightly longer than their guide)
               const ff = clamp(((px - rest[a]) * ex + (py - rest[a + 1]) * ey + (pz - rest[a + 2]) * ez) / l2, 0, i === K - 2 ? 1.6 : 1);
-              const d = Math.hypot(px - rest[a] - ex * ff, py - rest[a + 1] - ey * ff, pz - rest[a + 2] - ez * ff);
+              const d = len3(px - rest[a] - ex * ff, py - rest[a + 1] - ey * ff, pz - rest[a + 2] - ez * ff);
               if (d < best - 1e-7) { best = d; i0 = i; f = ff; }
             }
             prevI[j] = i0;
@@ -531,6 +547,7 @@ export class HairBuilder {
           }
         }
         binds.push(b);
+        if (binds.length % 48 === 0) yield 'binds';
       }
     }
     // segment lengths come from the grown curves (the settled ones may carry collision stretch)
@@ -540,9 +557,15 @@ export class HairBuilder {
   finish() {
     return { strands: this.strands, patch: this.patch, capOffset: this.capOffset, solids: this.solids, dyn: this.finishDynamics() };
   }
+
+  /** finish() as a generator (see dynamicsSteps). */
+  *finishSteps() {
+    const dyn = yield* this.dynamicsSteps();
+    return { strands: this.strands, patch: this.patch, capOffset: this.capOffset, solids: this.solids, dyn };
+  }
 }
 
-function norm(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; v[0] /= l; v[1] /= l; v[2] /= l; return v; }
+function norm(v) { const l = len3(v[0], v[1], v[2]) || 1; v[0] /= l; v[1] /= l; v[2] /= l; return v; }
 
 /** Frames of a single polyline (see guideFrames). */
 function frames1(pts, K, c) { return guideFrames(pts, [{ start: 0, K }], c, null); }
@@ -561,15 +584,15 @@ export function guideFrames(P, guides, c, out) {
     for (let k = 0; k < K; k++) {
       const a = (s0 + Math.max(0, k - 1)) * 3, b = (s0 + Math.min(K - 1, k + 1)) * 3, o = (s0 + k) * 3;
       const x = P[b] - P[a], y = P[b + 1] - P[a + 1], z = P[b + 2] - P[a + 2];
-      const l = Math.hypot(x, y, z) || 1;
+      const l = len3(x, y, z) || 1;
       T[o] = x / l; T[o + 1] = y / l; T[o + 2] = z / l;
     }
     let o = s0 * 3;
     let nx = P[o] - c[0], ny = P[o + 1] - c[1], nz = P[o + 2] - c[2];
     let d = nx * T[o] + ny * T[o + 1] + nz * T[o + 2];
     nx -= d * T[o]; ny -= d * T[o + 1]; nz -= d * T[o + 2];
-    let l = Math.hypot(nx, ny, nz);
-    if (l < 1e-9) { nx = 0; ny = 0; nz = 1; d = T[o + 2]; nx -= d * T[o]; ny -= d * T[o + 1]; nz -= d * T[o + 2]; l = Math.hypot(nx, ny, nz) || 1; }
+    let l = len3(nx, ny, nz);
+    if (l < 1e-9) { nx = 0; ny = 0; nz = 1; d = T[o + 2]; nx -= d * T[o]; ny -= d * T[o + 1]; nz -= d * T[o + 2]; l = len3(nx, ny, nz) || 1; }
     N[o] = nx / l; N[o + 1] = ny / l; N[o + 2] = nz / l;
     for (let k = 1; k < K; k++) {
       const p = (s0 + k - 1) * 3, q = p + 3;
@@ -586,7 +609,7 @@ export function guideFrames(P, guides, c, out) {
       if (c2 > 1e-12) { const k2 = (2 / c2) * (v2x * rLx + v2y * rLy + v2z * rLz); rx -= k2 * v2x; ry -= k2 * v2y; rz -= k2 * v2z; }
       d = rx * T[q] + ry * T[q + 1] + rz * T[q + 2];
       rx -= d * T[q]; ry -= d * T[q + 1]; rz -= d * T[q + 2];
-      l = Math.hypot(rx, ry, rz) || 1;
+      l = len3(rx, ry, rz) || 1;
       N[q] = rx / l; N[q + 1] = ry / l; N[q + 2] = rz / l;
     }
     for (let k = 0; k < K; k++) {
@@ -622,7 +645,7 @@ function sphereSolid(C, r, tone, sub = 1, rnd = null, u = null, squash = 1) {
     // puffs of a volume (afro) shade mostly like the volume itself: normals bent towards u
     let nx = v[0], ny = v[1], nz = v[2];
     if (u) { nx = v[0] * 0.45 + u[0]; ny = v[1] * 0.45 + u[1]; nz = v[2] * 0.45 + u[2]; }
-    const l = Math.hypot(nx, ny, nz) || 1;
+    const l = len3(nx, ny, nz) || 1;
     nor[i * 3] = nx / l; nor[i * 3 + 1] = ny / l; nor[i * 3 + 2] = nz / l;
     if (u && v[0] * u[0] + v[1] * u[1] + v[2] * u[2] < -0.3) tn[i] = tone * 0.82; // underside darker
   }

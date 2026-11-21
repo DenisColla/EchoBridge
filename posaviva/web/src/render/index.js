@@ -32,6 +32,8 @@ export const QUALITY = {
 };
 
 export const DEFAULT_BG = '#2a2c33';
+/** app.capture() rejects with this message while the WebGL context is lost. */
+export const CONTEXT_LOST_MSG = 'La grafica si sta ripristinando: riprova tra qualche secondo.';
 export const PAPER = '#f4f1ea';
 const DEFAULTS = {
   style: 'realistic',
@@ -89,15 +91,29 @@ export function create(app, shell) {
   const styleCfg = () => STYLE_RENDER[state.style] || STYLE_RENDER.realistic;
 
   // -------------------------------------------------------------- apply settings
+  /**
+   * Environment (IBL) fill: the style's base intensity, scaled by the light rig's
+   * ambient level when the rig exposes `envScale` (contract: the rig never writes
+   * scene.environmentIntensity itself then, it calls applyRendererState() or fires a
+   * 'change' event when its ambient changes). Returns true when the value changed.
+   */
+  function applyEnv() {
+    const sr = styleCfg();
+    const k = app.lightRig && typeof app.lightRig.envScale === 'number' ? Math.max(0, app.lightRig.envScale) : 1;
+    const before = scene.environmentIntensity;
+    if (sr.env > 0) {
+      const env = ensureEnv();
+      // the scene module may install its own environment: only manage ours
+      if (scene.environment === null || scene.environment === env) { scene.environment = env; scene.environmentIntensity = sr.env * k; }
+    } else if (envTex && scene.environment === envTex) scene.environmentIntensity = 0;
+    return scene.environmentIntensity !== before;
+  }
+
   function applyRendererState() {
     const sr = styleCfg();
     renderer.toneMapping = sr.toneMapping;
     renderer.toneMappingExposure = sr.exposure ? state.exposure : 1;
-    if (sr.env > 0) {
-      const env = ensureEnv();
-      // the scene module may install its own environment: only manage ours
-      if (scene.environment === null || scene.environment === env) { scene.environment = env; scene.environmentIntensity = sr.env; }
-    } else if (envTex && scene.environment === envTex) scene.environmentIntensity = 0;
+    if (applyEnv()) app.invalidate();
 
     app.ground.visible = !!state.ground;
     app.grid.visible = !!state.grid;
@@ -213,6 +229,8 @@ export function create(app, shell) {
    * transparent defaults to true when the background is set to "Trasparente".
    */
   async function capture({ scale = 2, transparent, width, height } = {}) {
+    // a lost WebGL context renders nothing: never hand out a blank image
+    if (app.contextLost || renderer.getContext().isContextLost?.()) throw new Error(CONTEXT_LOST_MSG);
     if (transparent === undefined) transparent = state.bg.type === 'transparent';
     const cam = app.camera, canvas = app.canvas;
     const cssW = canvas.clientWidth || canvas.width || 1, cssH = canvas.clientHeight || canvas.height || 1;
@@ -246,6 +264,8 @@ export function create(app, shell) {
       if (renderer.readRenderTargetPixelsAsync) await renderer.readRenderTargetPixelsAsync(res.target, 0, 0, W, H, buf);
       else renderer.readRenderTargetPixels(res.target, 0, 0, W, H, buf);
     } finally { res.dispose(); }
+    // the context may have been lost while the pixels were read back
+    if (app.contextLost) throw new Error(CONTEXT_LOST_MSG);
     // GL rows are bottom-up
     const out = document.createElement('canvas');
     out.width = W; out.height = H;
@@ -265,6 +285,8 @@ export function create(app, shell) {
     get quality() { return quality(); },
     get prefs() { return { ...prefs }; },
     getSettings, set, setStyle, setQuality, setPref, capture,
+    /** re-applies tone mapping, environment fill (style base × app.lightRig.envScale), floor, grid, shadows */
+    applyRendererState,
     STYLES,
 
     serializeScene() { return getSettings(); },
@@ -304,6 +326,32 @@ export function create(app, shell) {
 
   // the scene module (light rig) registers after this one
   app.addEventListener('ready', applyShadowQuality);
+  // light rig ambient -> environment fill (when the rig exposes envScale, see applyEnv)
+  let rigHooked = null;
+  const hookRig = () => {
+    const rig = app.lightRig;
+    if (!rig?.addEventListener || rig === rigHooked) return;
+    rigHooked = rig;
+    rig.addEventListener('change', () => { if (typeof rig.envScale === 'number' && applyEnv()) app.invalidate(); });
+    if (typeof rig.envScale === 'number' && applyEnv()) app.invalidate();
+  };
+  app.addEventListener('ready', hookRig);
+
+  // WebGL context restored: three.js re-uploads geometry, textures and targets lazily,
+  // but GPU-generated content is gone. The PMREM environment map was rendered on the
+  // GPU (it would come back black): build a new one. The pipeline's targets and
+  // GTAO buffers are re-rendered every frame; shadow maps are flagged by the app.
+  app.addEventListener('contextrestored', () => {
+    const old = envTex;
+    envTex = null;
+    if (old) {
+      if (scene.environment === old) scene.environment = null;
+      try { old.dispose(); } catch { /* objects of the lost context */ }
+    }
+    applyRendererState();
+    app.dispatchEvent({ type: 'renderstyle', settings: getSettings() }); // the rig rescales the new environment
+    app.invalidate();
+  });
 
   applyPrefs();
   applyShadowQuality();

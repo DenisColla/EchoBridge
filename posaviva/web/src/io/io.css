@@ -115,6 +115,8 @@
 .pv-io-brand { display: flex; align-items: center; gap: 14px; margin: 2px 0 6px; }
 .pv-io-logo { width: 58px; height: 58px; border-radius: 18px; display: flex; align-items: center; justify-content: center; color: #fff; flex: none;
   background: linear-gradient(140deg, #8f7dff, #5b4bd6 55%, #3aa8a0); box-shadow: 0 8px 22px rgba(124,108,255,.35); }
+.pv-io-logo.art { background: none; overflow: hidden; box-shadow: 0 8px 22px rgba(91, 60, 220, .35); }
+.pv-io-logo.art svg { display: block; width: 100%; height: 100%; }
 .pv-io-brand-name { font-size: 20px; font-weight: 700; letter-spacing: .01em; }
 .pv-io-brand-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 .pv-io-gestures { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }

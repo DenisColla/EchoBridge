@@ -1,12 +1,13 @@
 // "Viso" tool panel: expression presets, intensity, gaze pad, fine tuning,
 // eyebrow style, eyelashes and eye colour. Works on the selected character.
 import * as THREE from 'three';
-import { h, section, slider, toggle, cardGrid, chips, button, iconButton, swatches, haptic } from '../ui/kit.js';
+import { h, section, slider, toggle, cardGrid, chips, button, iconButton, swatches, haptic, icon, toast } from '../ui/kit.js';
 import { EYE_COLORS } from '../body/bodyModule.js';
 import { PRESETS, FINE_GROUPS, composeExpression, sameWeights, isAsymmetric } from './expressions.js';
 import { BROW_STYLES } from './brows.js';
 import { faceIconURL } from './faceIcons.js';
 import { currentPad, eyesWorld } from './gaze.js';
+import { focusHead } from '../pose/focus.js';
 
 const _v = new THREE.Vector3(), _f = new THREE.Vector3(), _q = new THREE.Quaternion();
 
@@ -14,6 +15,26 @@ export function buildFacePanel(el, app, shell, face) {
   el.classList.add('pvf');
   let ch = null;
   let visible = false;
+
+  // ------------------------------------------------------------ view (close-up / full figure)
+  const closeBtn = button({ label: 'Primo piano', icon: 'face', small: true, onClick: () => {
+    if (!ch) return;
+    haptic('tick');
+    if (!focusHead(app, shell, ch)) toast('Il personaggio è nascosto', { kind: 'info', ms: 1600 });
+  } });
+  const fullBtn = button({ label: 'Figura intera', icon: 'person', small: true, variant: 'ghost', onClick: () => {
+    if (!ch) return;
+    haptic('tick');
+    app.sceneTools?.camera?.frameSubject?.();
+  } });
+  const viewRow = h('div', { class: 'pvf-actions pvf-view' }, closeBtn, fullBtn);
+
+  // ------------------------------------------------------------ empty state (no character selected)
+  const empty = h('div', { class: 'pv-body-empty pvf-empty' },
+    icon('user', 30),
+    h('strong', {}, 'Nessun personaggio selezionato'),
+    h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
+    button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => app.modules.ui?.openPeople?.() || shell.openTool('people') }));
 
   // ------------------------------------------------------------ expressions
   const grid = cardGrid({
@@ -65,7 +86,10 @@ export function buildFacePanel(el, app, shell, face) {
   // ------------------------------------------------------------ details
   const brows = chips({ items: BROW_STYLES.map((s) => ({ id: s.id, label: s.label })), value: 'natural', onSelect: (id) => { if (!ch) return; haptic('tick'); face.setBrows(ch, id); brows.setValue(id); } });
   const lashes = toggle({ label: 'Ciglia', value: true, onChange: (on) => ch && face.setLashes(ch, on) });
-  const eyeColor = swatches({ colors: EYE_COLORS, value: '#5b3a21', onChange: (c) => { if (!ch) return; ch.setAppearance({ eyes: c }); app.commit('colore occhi'); } });
+  // custom picker: live preview while it moves, one undo step on release
+  const eyeColor = swatches({ colors: EYE_COLORS, value: '#5b3a21',
+    onInput: (c) => { if (ch) ch.setAppearance({ eyes: c }); },
+    onChange: (c) => { if (!ch) return; ch.setAppearance({ eyes: c }); app.commit('colore occhi'); } });
 
   const exprSection = section('Espressione', [
     h('div', { class: 'pvf-exprhead' }, intensity),
@@ -84,12 +108,14 @@ export function buildFacePanel(el, app, shell, face) {
     lashes,
     h('div', { class: 'pvf-sub' }, 'Colore occhi'), eyeColor,
   ]);
-  el.append(exprSection, gazeSection, fineSection, detailSection);
+  const content = h('div', { class: 'pvf-content' }, viewRow, exprSection, gazeSection, fineSection, detailSection);
+  el.append(empty, content);
 
   // ------------------------------------------------------------ sync
   function refresh() {
     ch = app.selection.character;
-    el.classList.toggle('pvf-disabled', !ch);
+    empty.style.display = ch ? 'none' : '';
+    content.style.display = ch ? '' : 'none';
     if (!ch) return;
     const st = face.state(ch);
     intensity.setValue(st.intensity);
@@ -105,7 +131,7 @@ export function buildFacePanel(el, app, shell, face) {
   function syncExpressionState() {
     if (!ch) return;
     const st = face.state(ch);
-    const matches = sameWeights(composeExpression(st), ch.expression);
+    const matches = sameWeights(face.composeFor ? face.composeFor(ch) : composeExpression(st), ch.expression);
     grid.setValue(matches ? st.preset : null);
     const tuned = matches && Object.keys(st.fine).length > 0;
     exprState.textContent = !matches ? 'Personalizzata' : tuned ? 'Con ritocchi' : '';
@@ -216,6 +242,7 @@ export function buildFacePanel(el, app, shell, face) {
   app.addEventListener('selection', () => { if (live()) { refresh(); updateMarker(); } });
   app.addEventListener('loaded', () => { if (live()) { refresh(); updateMarker(); } });
   app.addEventListener('history', () => { if (live()) refresh(); });
+  app.addEventListener('characters', () => { if (live()) { refresh(); updateMarker(); } });
   app.addEventListener('facechange', (e) => { if (live() && e.character === ch) { if (e.what === 'gaze') updateMarker(); if (e.what === 'expression') syncExpressionState(); } });
   // orbiting behind the character mirrors the pad (it always maps to screen directions)
   let flipRaf = 0, lastFlip = 1;

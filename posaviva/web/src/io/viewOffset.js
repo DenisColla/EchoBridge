@@ -59,6 +59,26 @@ export class ViewOffset {
     };
     app.addEventListener('ready', hookProps);
     app.addEventListener('tool', hookProps);
+    // body shape changes from any source (Corpo sliders, sex, undo/redo of a shape …)
+    // resize the selected character: refit once it settles
+    this._shapeCh = null;
+    this._shapeT = 0;
+    this._onShape = () => {
+      if (!this.shell.panelOpen) return;
+      clearTimeout(this._shapeT);
+      this._shapeT = setTimeout(() => this.update({ keepIfVisible: true }), 250);
+    };
+    const bindShape = () => {
+      const ch = app.selection?.character || null;
+      if (ch === this._shapeCh) return;
+      this._shapeCh?.removeEventListener('shape', this._onShape);
+      this._shapeCh = ch;
+      ch?.addEventListener('shape', this._onShape);
+    };
+    app.addEventListener('selection', bindShape);
+    app.addEventListener('ready', bindShape);
+    /** OrbitControls pan speed without offset (read when an offset starts) */
+    this._basePan = null;
     app.addRenderHook(() => this._tick());
   }
 
@@ -120,14 +140,22 @@ export class ViewOffset {
     const cam = this.camera, c = this.cur;
     const W = this.app.canvas.clientWidth || 1, H = this.app.canvas.clientHeight || 1;
     const identity = Math.abs(c.s - 1) < 1e-4 && Math.abs(c.ox) < 0.25 && Math.abs(c.oy) < 0.25;
+    const ctl = this.app.controls;
     if (this._suspended || identity) {
       if (cam.view?.enabled) cam.clearViewOffset();
       else if (Math.abs(cam.aspect - W / H) > 1e-6) { cam.aspect = W / H; cam.updateProjectionMatrix(); }
+      if (this._basePan !== null && !this._suspended) { ctl.panSpeed = this._basePan; this._basePan = null; }
     } else {
       const Wv = W * c.s, Hv = H * c.s;
       // full image = the camera frame scaled by s; window = the canvas, shifted so the
       // frame center lands on (W/2 + ox, H/2 + oy)
       cam.setViewOffset(Wv, Hv, Wv / 2 - (W / 2 + c.ox), Hv / 2 - (H / 2 + c.oy), W, H);
+      // OrbitControls pans by the un-offset frame: on screen everything is scaled by s,
+      // so a two-finger pan would lag behind the fingers. Compensate.
+      if (ctl) {
+        if (this._basePan === null) this._basePan = ctl.panSpeed;
+        ctl.panSpeed = this._basePan / Math.max(S_MIN, c.s);
+      }
     }
     this.app.invalidate();
   }

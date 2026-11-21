@@ -48,6 +48,16 @@ export function create(app, shell) {
   registerCameraTool(app, shell, camera);
   registerGuidesTool(app, shell, guides);
 
+  // ---------------------------------------------------------------- start-up framing
+  // The default camera is a fixed portrait-friendly pose: in landscape (or with
+  // a taller / shorter default character) it crops the figure. When no camera
+  // was restored (no autosave), frame the subject once every module is ready.
+  // 'ready' comes before main.js's history.reset(), so this is not an undo step.
+  let cameraRestored = false;
+  app.addEventListener('ready', () => {
+    if (!cameraRestored && app.characters.length && !camera.subjectInView(1.15)) camera.frameSubject({ animate: false, commit: false });
+  });
+
   // ---------------------------------------------------------------- module hooks
   const listeners = new WeakMap();
   const dirty = () => lights.markWorldDirty();
@@ -72,7 +82,7 @@ export function create(app, shell) {
       // undo history) and the camera only follows committed camera actions
       const fromHistory = !!app.history?._restoring;
       if (obj.lights) lights.setState(obj.lights);
-      if (obj.camera) camera.setState(obj.camera, { fromHistory });
+      if (obj.camera) { camera.setState(obj.camera, { fromHistory }); cameraRestored = true; }
       if (obj.guides && !fromHistory) guides.setState(obj.guides);
       dirty();
     },

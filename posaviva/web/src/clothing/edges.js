@@ -6,6 +6,7 @@
 // parent's wrinkle displacement, so hems and collars follow the folds.
 // Extras: {group, pos:number[], parent:number[], uv:number[], tris:number[]} with
 // vertex indices local to the extras block.
+import { len3 } from './mesh.js';
 const PI = Math.PI;
 
 function newExtras(group) { return { group, pos: [], parent: [], uv: [], tris: [], nrmFlat: false }; }
@@ -16,18 +17,18 @@ function loopFrames(draft, L, N) {
   for (let i = 0; i < m; i++) {
     const a = L[(i + m - 1) % m] * 3, b = L[(i + 1) % m] * 3, v = L[i] * 3;
     let tx = P[b] - P[a], ty = P[b + 1] - P[a + 1], tz = P[b + 2] - P[a + 2];
-    const tl = Math.hypot(tx, ty, tz) || 1;
+    const tl = len3(tx, ty, tz) || 1;
     tx /= tl; ty /= tl; tz /= tl;
     const nx = N[v], ny = N[v + 1], nz = N[v + 2];
     // outward (away from the garment) = t x n
     let bx = ty * nz - tz * ny, by = tz * nx - tx * nz, bz = tx * ny - ty * nx;
-    const bl = Math.hypot(bx, by, bz) || 1;
+    const bl = len3(bx, by, bz) || 1;
     T[i * 3] = tx; T[i * 3 + 1] = ty; T[i * 3 + 2] = tz;
     Bv[i * 3] = bx / bl; Bv[i * 3 + 1] = by / bl; Bv[i * 3 + 2] = bz / bl;
-    if (i > 0) { const p = L[i - 1] * 3; arc[i] = arc[i - 1] + Math.hypot(P[v] - P[p], P[v + 1] - P[p + 1], P[v + 2] - P[p + 2]); }
+    if (i > 0) { const p = L[i - 1] * 3; arc[i] = arc[i - 1] + len3(P[v] - P[p], P[v + 1] - P[p + 1], P[v + 2] - P[p + 2]); }
   }
   const l0 = L[0] * 3, lm = L[m - 1] * 3;
-  arc[m] = arc[m - 1] + Math.hypot(P[l0] - P[lm], P[l0 + 1] - P[lm + 1], P[l0 + 2] - P[lm + 2]);
+  arc[m] = arc[m - 1] + len3(P[l0] - P[lm], P[l0 + 1] - P[lm + 1], P[l0 + 2] - P[lm + 2]);
   return { T, B: Bv, arc };
 }
 
@@ -147,7 +148,7 @@ export function discExtras(ex, draft, v, N, radius, height, segs = 12) {
   // tangent frame
   let ax = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
   let tx = ax[1] * n[2] - ax[2] * n[1], ty = ax[2] * n[0] - ax[0] * n[2], tz = ax[0] * n[1] - ax[1] * n[0];
-  const tl = Math.hypot(tx, ty, tz) || 1;
+  const tl = len3(tx, ty, tz) || 1;
   tx /= tl; ty /= tl; tz /= tl;
   const sx = n[1] * tz - n[2] * ty, sy = n[2] * tx - n[0] * tz, sz = n[0] * ty - n[1] * tx;
   const base = ex.pos.length / 3;

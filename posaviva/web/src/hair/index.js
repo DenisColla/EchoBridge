@@ -10,7 +10,7 @@ import { HairRig } from './rig.js';
 import { normalizeState, defaultState, BEARDS } from './state.js';
 import { STYLES, STYLE_BY_ID } from './styles.js';
 import { buildHairPanel } from './panel.js';
-import { strandTexture } from './texture.js';
+import { strandTexture, stubbleTexture } from './texture.js';
 
 export function create(app, shell) {
   const rigs = new Map();
@@ -26,7 +26,8 @@ export function create(app, shell) {
       if (rig.mesh) mats.apply(rig.mesh, { kind: 'hair', color: st.color, map: strandTexture(), vertexColors: true, ...(STYLE_BY_ID.get(st.style)?.material || {}) });
       if (rig.beard) {
         mats.apply(rig.beard.mesh, rig.beard.spec.stubble
-          ? { kind: 'hair', color: st.color, transparent: true, opacity: 0.55, roughness: 0.85, sheen: 0 }
+          // stippled follicles (alpha map) over a faint base: about 35 % coverage on average
+          ? { kind: 'hair', color: st.color, map: stubbleTexture(), transparent: true, opacity: 0.62, roughness: 0.85, sheen: 0 }
           : { kind: 'hair', color: st.color, vertexColors: true, roughness: 0.6 });
       }
     },
@@ -52,6 +53,32 @@ export function create(app, shell) {
     let rig = rigs.get(ch);
     if (!rig) { rig = new HairRig(ctl, ch); rigs.set(ch, rig); }
     return rig;
+  }
+
+  /**
+   * Corpo > Sesso: hair still equal to the old sex's default (style, colour, sliders, beard)
+   * becomes the new sex's default. Only for edits of this character: undo / load replace ch.data.
+   */
+  const seen = new Map(); // ch -> {data, sex, preset, fn}
+  const sameHair = (a, b) => ['style', 'color', 'parting', 'bangs', 'beard'].every((k) => a[k] === b[k]) && Math.abs(a.length - b.length) < 1e-6 && Math.abs(a.volume - b.volume) < 1e-6;
+  function watchSex(ch) {
+    if (seen.has(ch)) return;
+    const rec = { data: ch.data, sex: ch.sex, preset: ch.presetId };
+    rec.fn = () => {
+      if (ch.data === rec.data && ch.sex !== rec.sex && ch.data.hair && !app.history?.restoring) {
+        const old = normalizeState(defaultState({ sex: rec.sex, presetId: rec.preset }));
+        if (sameHair(ch.data.hair, old)) {
+          ch.data.hair = defaultState(ch);
+          if (ch.appearance.hair !== ch.data.hair.color) ch.setAppearance({ hair: ch.data.hair.color });
+          const rig = rigs.get(ch);
+          if (rig) ctl.applyMaterial(rig);
+          ctl.changed(ch); // rebuilt with the new body (debounced shape rebuild); the Corpo panel commits
+        }
+      }
+      rec.data = ch.data; rec.sex = ch.sex; rec.preset = ch.presetId;
+    };
+    ch.addEventListener('shape', rec.fn);
+    seen.set(ch, rec);
   }
 
   /** Normalises ch.data.hair (defaults for new characters / old saves) and syncs colour + materials. */
@@ -107,13 +134,19 @@ export function create(app, shell) {
   };
 
   return {
-    onCharacterAdded(ch) { sync(ch); },
+    onCharacterAdded(ch) { sync(ch); watchSex(ch); },
     onCharacterRemoved(ch) {
       rigs.get(ch)?.dispose();
       rigs.delete(ch);
+      const rec = seen.get(ch);
+      if (rec) { ch.removeEventListener('shape', rec.fn); seen.delete(ch); }
     },
     // undo / redo / load: cheap when nothing changed (the rig compares geometry keys per frame);
     // a restored body shape is rebuilt on the next frame (no slider debounce)
-    deserializeCharacter(ch) { sync(ch).shapeTime = 0; },
+    deserializeCharacter(ch) {
+      sync(ch).shapeTime = 0;
+      const rec = seen.get(ch);
+      if (rec) { rec.data = ch.data; rec.sex = ch.sex; rec.preset = ch.presetId; }
+    },
   };
 }

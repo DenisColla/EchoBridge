@@ -361,3 +361,13 @@ Listens to app.clothing.manager 'built' {character} so long hair drapes over reb
 
 ### Android bridge (final)
 `window.__onAndroidBack` (set by the shell); CSS vars `--safe-top/right/bottom/left` and `--gesture-left/right` (system back-gesture zones in CSS px, 0 with 3-button navigation); `window.__onInsets({top,right,bottom,left,gestureLeft,gestureRight})`.
+
+### Final round additions
+- Clothing: each garment mesh has its OWN `THREE.Skeleton` (same `ch.bones`, bind inverses frozen at build time, `mesh.userData.ownSkeleton = true`) so garments ride the bones during shape-slider drags until the staged rebuild; never rebind garments. Builds are staged over frames (~12 ms budget). `groundClearance` is measured from the built shoe. Garments (except shoes) never go below the character's floor.
+- Hair: builds staged across frames (the old mesh stays until the swap); head map reused when a slider only moves the head; stubble uses an alpha stipple map. On a sex change, hair/outfit still equal to the old defaults switch to the new sex's defaults.
+- Render: `app.modules.render.applyRendererState()`; IBL intensity = style env x `app.lightRig.envScale` (getter on the light rig); `app.capture()` rejects with an Italian message while `app.contextLost`; PMREM rebuilt on `contextrestored`; garment fold ink threshold `valleyK = lerp(70, 12, crease)`.
+- Face: Viso has "Primo piano" / "Figura intera"; `app.face.composeFor(ch)`; lids follow the gaze in all modes.
+- Pose: `pose/focus.js {focusPoints, focusHead, focusHand, faceForward}` (Mani: "Inquadra la mano"); `library.js` exports `lowestGroundY(ch, withShoes)`, `seatMark`, `setSeatMark`, `measureSeat`; `applyPoseObject` opts `shoes` (default true); `ch.data.pose = {seat}`; copyPose re-fits the seat.
+- Scene/io: camera state stores the view aspect; `app.sceneTools.camera.refitForAspect(oldAspect)`, `subjectInView(tol)`; the subject is framed at `ready` when no camera was restored and reframed on orientation flips. `io/viewOffset.update()` computes `target` synchronously (public). New characters are spaced by their widths and named "Donna 1", "Uomo 2"…
+- Core: `ch.dropToGround()` uses shoe soles (and ignores foot/toe skin) when shoes are worn.
+- Empty state class `.pv-body-empty` is shared by all character panels.

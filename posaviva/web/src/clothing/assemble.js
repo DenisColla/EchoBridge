@@ -11,8 +11,8 @@
 //                    coordinate) for the per-garment detail map (seams, pockets…)
 // Seams: vertices are split where the angle wraps and between regions.
 import * as THREE from 'three';
-import { quadNormals, buildAdjacency, buildEdges } from './mesh.js';
-import { WrinklePart, foldFields, noise3, FOLD_BIAS } from './wrinkles.js';
+import { quadNormals, buildAdjacency, buildEdges, len3 } from './mesh.js';
+import { WrinklePart, foldFields, noise3, FOLD_BIAS, scratch } from './wrinkles.js';
 import { staticFolds } from './build.js';
 
 /** Atlas rects [x0, y0, w, h] per region (0 torso, 1 arm L, 2 arm R, 3 leg L, 4 leg R). */
@@ -76,7 +76,7 @@ function meshSpacing(draft) {
   for (let f = 0, nq = Q.length >> 2; f < nq; f += 2) {
     const a = Q[f * 4], b = Q[f * 4 + 1], c = Q[f * 4 + 3];
     const r = C.limb[a] && C.wT[a] < 0.5 ? C.limb[a] : 0;
-    for (const e of [b, c]) L[r].push(Math.hypot(P[a * 3] - P[e * 3], P[a * 3 + 1] - P[e * 3 + 1], P[a * 3 + 2] - P[e * 3 + 2]));
+    for (const e of [b, c]) L[r].push(len3(P[a * 3] - P[e * 3], P[a * 3 + 1] - P[e * 3 + 1], P[a * 3 + 2] - P[e * 3 + 2]));
   }
   return L.map((v) => { if (v.length < 8) return 0; v.sort((x, y) => x - y); return v[v.length >> 1]; });
 }
@@ -96,11 +96,11 @@ function coarseBasis(draft, bi) {
     const nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
     const d = ax * nx + ay * ny + az * nz;
     let ex = ax - d * nx, ey = ay - d * ny, ez = az - d * nz;
-    let l = Math.hypot(ex, ey, ez);
+    let l = len3(ex, ey, ez);
     if (l < 0.2) { // axis almost along the normal (e.g. shoulder top): any tangent
       const fx = Math.abs(nx) < 0.9 ? 1 : 0, fy = fx ? 0 : 1;
       const dd = fx * nx + fy * ny;
-      ex = fx - dd * nx; ey = fy - dd * ny; ez = -dd * nz; l = Math.hypot(ex, ey, ez) || 1;
+      ex = fx - dd * nx; ey = fy - dd * ny; ez = -dd * nz; l = len3(ex, ey, ez) || 1;
     }
     ex /= l; ey /= l; ez /= l;
     B[i * 6] = ex; B[i * 6 + 1] = ey; B[i * 6 + 2] = ez;
@@ -256,7 +256,7 @@ export function assemble(pieces, bi, opts = {}) {
   for (const p of parts) {
     fineCoarse.fill(1, p.offset, p.offset + p.wp.n); // fine vertex c < n is coarse vertex c
     fineLift.set(p.lift, p.offset); delete p.lift;
-    dirN.set(p.N, p.offset * 3); p.wp.disp = disp.subarray(p.offset, p.offset + p.nf);
+    dirN.set(p.N, p.offset * 3); p.wp.disp = disp.subarray(p.offset, p.offset + p.nf); delete p.N;
     fineP.set(p.P.subarray(0, p.nf * 3), p.offset * 3);
     fineSI.set(p.skin.idx.subarray(0, p.nf * 4), p.offset * 4); fineSW.set(p.skin.w.subarray(0, p.nf * 4), p.offset * 4);
     delete p.P; delete p.skin;
@@ -308,6 +308,10 @@ const LEG_CLEAR = 0.006;
 /** How much of a leg contact the fabric below it inherits per ring (hangs from the knee). */
 const HANG = 0.965;
 const _pa = new Float32Array(3);
+
+/** Lowest posed height of garment points over the character's floor (m) and the coarse test reach. */
+const FLOOR_Y = 0.0045, FLOOR_REACH = 0.075;
+
 
 /** Search radius (m) for the layer below a garment vertex. */
 const LAYER_REACH = 0.035;
@@ -368,7 +372,6 @@ export class GarmentRuntime {
     this.dirN = dirN;
     this.disp = disp;
     this.index = index;
-    this.nacc = new Float32Array(nslot * 3);
     this.k = -1;
     /** outward push (m, along dirN) that keeps this garment over the layers below it */
     this.push = new Float32Array(disp.length);
@@ -629,6 +632,7 @@ export class GarmentRuntime {
       const ux = RP[q] + RN[q] * e, uy = RP[q + 1] + RN[q + 1] * e, uz = RP[q + 2] + RN[q + 2] * e;
       let ox = 0, oy = 0, oz = 0;
       if (r.off3) { ox = r.off3[q]; oy = r.off3[q + 1]; oz = r.off3[q + 2]; }
+      if (r.floorOn) { ox += r.fl3[q]; oy += r.fl3[q + 1]; oz += r.fl3[q + 2]; }
       const qx = b[0] * (ux + ox) + b[3] * (uy + oy) + b[6] * (uz + oz) + b[9], qy = b[1] * (ux + ox) + b[4] * (uy + oy) + b[7] * (uz + oz) + b[10], qz = b[2] * (ux + ox) + b[5] * (uy + oy) + b[8] * (uz + oz) + b[11];
       const v = L.gap[p] - ((px - qx) * nx + (py - qy) * ny + (pz - qz) * nz);
       if (v > need[i]) need[i] = v;
@@ -673,26 +677,95 @@ export class GarmentRuntime {
       if (changed) this._legsDirty = true;
       changed = this._legPass(M) || changed;
     }
+    if (this.floor && (changed || innerMoved || this._floorDirty !== false)) {
+      this._floorDirty = false;
+      changed = this._floorPass(M) || changed;
+    }
     if (changed) this.write();
     return changed;
   }
 
+  /**
+   * Floor contact: no vertex of the posed garment below the character's floor
+   * (rig space y = 0: the root's own placement height). Lying, sitting or
+   * kneeling on the ground, loose fabric would otherwise hang through it. Points
+   * below are lifted onto the floor (rest-space offsets through the inverse of
+   * their blended skin matrix, like the skirt's leg pass). Parts whose posed rest
+   * surface stays well above the floor are skipped after a cheap coarse test.
+   * Returns true when the offsets changed.
+   */
+  _floorPass(M) {
+    const F = this.fine, P = F.P, si = F.si, sw = F.sw, N = this.dirN, disp = this.disp, push = this.push, off3 = this.off3;
+    let near = false;
+    for (const part of this.parts) {
+      const wp = part.wp, G = wp.G, SI = wp.skinIdx, SW = wp.skinW;
+      part.nearFloor = false;
+      // coarse rest surface, posed: is any of it within reach of the floor?
+      for (let i = 0; i < wp.n; i += 2) {
+        const x = G[i * 3], y = G[i * 3 + 1], z = G[i * 3 + 2];
+        let py = 0;
+        for (let k = 0; k < 4; k++) {
+          const w = SW[i * 4 + k];
+          if (!w) continue;
+          const o = SI[i * 4 + k] * 16;
+          py += w * (M[o + 1] * x + M[o + 5] * y + M[o + 9] * z + M[o + 13]);
+        }
+        if (py < FLOOR_REACH) { part.nearFloor = true; near = true; break; }
+      }
+    }
+    if (!near) {
+      if (!this.floorOn) return false;
+      this.floorOn = false;
+      return true;
+    }
+    const fl3 = this.fl3 || (this.fl3 = new Float32Array(disp.length * 3));
+    // offsets left from an earlier contact are void while the pass was off
+    if (!this.floorOn) fl3.fill(0);
+    let changed = false, any = false;
+    for (const part of this.parts) {
+      const o0 = part.offset, o1 = o0 + part.nf;
+      if (!part.nearFloor) {
+        for (let q = o0 * 3; q < o1 * 3; q++) if (fl3[q]) { fl3[q] = 0; changed = true; }
+        continue;
+      }
+      for (let i = o0; i < o1; i++) {
+        const a = blendMatrix(M, si, sw, i, _ma);
+        const d = disp[i] + push[i], o = i * 3;
+        let x = P[o] + N[o] * d, y = P[o + 1] + N[o + 1] * d, z = P[o + 2] + N[o + 2] * d;
+        if (off3) { x += off3[o]; y += off3[o + 1]; z += off3[o + 2]; }
+        const py = a[1] * x + a[4] * y + a[7] * z + a[10];
+        let rx = 0, ry = 0, rz = 0;
+        if (py < FLOOR_Y) {
+          inv3(a, 0, FLOOR_Y - py, 0, _pa);
+          rx = _pa[0]; ry = _pa[1]; rz = _pa[2];
+          any = true;
+        }
+        if (Math.abs(rx - fl3[o]) > 1e-5 || Math.abs(ry - fl3[o + 1]) > 1e-5 || Math.abs(rz - fl3[o + 2]) > 1e-5) changed = true;
+        fl3[o] = rx; fl3[o + 1] = ry; fl3[o + 2] = rz;
+      }
+    }
+    this.floorOn = any;
+    return changed;
+  }
+
   write() {
-    const { rv2v, base, dirN, nid, nacc, index } = this;
-    const disp = this._sum || (this._sum = new Float32Array(this.disp.length));
-    for (let i = 0; i < disp.length; i++) disp[i] = this.disp[i] + this.push[i];
+    const { rv2v, base, dirN, nid, index } = this;
+    // scratch shared by every garment (writes never overlap)
+    const nacc = scratch(0, this.nslot * 3), disp = scratch(1, this.disp.length);
+    for (let i = 0, m = this.disp.length; i < m; i++) disp[i] = this.disp[i] + this.push[i];
     const posAttr = this.geometry.attributes.position, nrmAttr = this.geometry.attributes.normal;
     const P = posAttr.array, NR = nrmAttr.array;
     const n = rv2v.length;
-    const off3 = this.off3;
+    const off3 = this.off3, fl3 = this.floorOn ? this.fl3 : null;
     for (let r = 0; r < n; r++) {
       const v = rv2v[r], o = r * 3;
       if (v < 0) { P[o] = base[o]; P[o + 1] = base[o + 1]; P[o + 2] = base[o + 2]; continue; }
       const d = disp[v], q = v * 3;
       P[o] = base[o] + dirN[q] * d; P[o + 1] = base[o + 1] + dirN[q + 1] * d; P[o + 2] = base[o + 2] + dirN[q + 2] * d;
       if (off3) { P[o] += off3[q]; P[o + 1] += off3[q + 1]; P[o + 2] += off3[q + 2]; }
+      if (fl3) { P[o] += fl3[q]; P[o + 1] += fl3[q + 1]; P[o + 2] += fl3[q + 2]; }
     }
-    nacc.fill(0);
+    nacc.fill(0, 0, this.nslot * 3);
     for (let t = 0, m = index.length; t < m; t += 3) {
       const a = index[t], b = index[t + 1], c = index[t + 2];
       const ao = a * 3, bo = b * 3, co = c * 3;

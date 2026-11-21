@@ -6,6 +6,7 @@ import { h, section, slider, segmented, button, toast, haptic, icon } from '../u
 import { HAND_PRESETS, applyHandPreset } from './library.js';
 import { FINGER_NAMES, toDeg, toRad } from './controls.js';
 import { getThumbRenderer } from './thumbs.js';
+import { focusHand } from './focus.js';
 
 const D = Math.PI / 180;
 // full curl (c = 1) per phalanx, degrees: [base, media, punta]; thumb: [CMC, MCP, IP]
@@ -30,6 +31,26 @@ export function registerHandsTool(ctx) {
         options: [{ value: 'R', label: 'Destra' }, { value: 'L', label: 'Sinistra' }, { value: 'both', label: 'Entrambe' }],
         value: side, onChange: (v) => { side = v; haptic('tick'); sync(); },
       });
+
+      // ---------------------------------------------------------------- view
+      const frameBtn = button({ label: 'Inquadra la mano', icon: 'hand', small: true, onClick: () => {
+        const ch = app.selection.character;
+        if (!ch) return;
+        haptic('tick');
+        if (!focusHand(app, shell, ch, side)) toast('Il personaggio è nascosto', { kind: 'info', ms: 1600 });
+      } });
+      const fullBtn = button({ label: 'Figura intera', icon: 'person', small: true, variant: 'ghost', onClick: () => {
+        if (!app.selection.character) return;
+        haptic('tick');
+        app.sceneTools?.camera?.frameSubject?.();
+      } });
+
+      // ---------------------------------------------------------------- empty state
+      const empty = h('div', { class: 'pv-body-empty' },
+        icon('user', 30),
+        h('strong', {}, 'Nessun personaggio selezionato'),
+        h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
+        button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => app.modules.ui?.openPeople?.() || shell.openTool('people') }));
 
       // ---------------------------------------------------------------- presets
       const presetGrid = h('div', { class: 'pv-pose-hand-grid' });
@@ -154,17 +175,20 @@ export function registerHandsTool(ctx) {
       } });
 
       const hint = h('p', { class: 'pv-pose-note' }, 'Tocca un dito nella vista per ruotarlo con gli anelli.');
-      el.append(
-        sideSeg, h('div', { style: { height: '10px' } }),
+      const content = h('div', {},
+        sideSeg, h('div', { class: 'pv-pose-actions pv-pose-view' }, frameBtn, fullBtn),
         section('Pose della mano', [presetGrid, presetEmpty]),
         section('Dita', [...curlSliders, spreadSlider, oppSlider]),
         section('Polso', [wristSlider, h('div', { class: 'pv-pose-actions' }, resetBtn, mirrorBtn), hint]),
       );
+      el.append(empty, content);
 
       function sync() {
         const ch = app.selection.character;
-        el.style.opacity = ch ? '' : '0.4';
+        empty.style.display = ch ? 'none' : '';
+        content.style.display = ch ? '' : 'none';
         sideSeg.setValue(side);
+        frameBtn.querySelector('span').textContent = side === 'both' ? 'Inquadra le mani' : 'Inquadra la mano';
         if (!ch) return;
         const s = side === 'both' ? 'R' : side;
         curlSliders.forEach((sl, fi) => sl.setValue(getCurl(ch, s, fi + 1)));

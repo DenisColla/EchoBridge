@@ -5,6 +5,10 @@
 // Conventions: a quad mesh is `quads` = Uint32Array(4 * faceCount) of vertex
 // indices, counter-clockwise seen from outside (same winding as the body).
 
+/** Vector lengths without Math.hypot (V8 allocates an arguments array per multi-argument hypot call). */
+export const len2 = (x, y) => Math.sqrt(x * x + y * y);
+export const len3 = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
+
 /** Unique undirected edges. ef1 = -1 marks boundary edges. faceEdges[f*4+k] = edge (v_k, v_k+1). */
 export function buildEdges(nv, quads) {
   const nf = quads.length >> 2;
@@ -221,7 +225,7 @@ export function quadNormals(nv, quads, P, out = new Float32Array(nv * 3)) {
 
 export function normalize3(A, n) {
   for (let i = 0; i < n; i++) {
-    const o = i * 3, l = Math.hypot(A[o], A[o + 1], A[o + 2]);
+    const o = i * 3, l = len3(A[o], A[o + 1], A[o + 2]);
     if (l > 1e-20) { A[o] /= l; A[o + 1] /= l; A[o + 2] /= l; } else { A[o] = 0; A[o + 1] = 1; A[o + 2] = 0; }
   }
   return A;
@@ -278,7 +282,7 @@ export function edgeDistance(nv, adjacency, X, seeds, maxDist = Infinity) {
     if (d > dist[v] || d > maxDist) continue;
     for (let j = off[v]; j < off[v + 1]; j++) {
       const u = adj[j];
-      const nd = d + Math.hypot(X[u * 3] - X[v * 3], X[u * 3 + 1] - X[v * 3 + 1], X[u * 3 + 2] - X[v * 3 + 2]);
+      const nd = d + len3(X[u * 3] - X[v * 3], X[u * 3 + 1] - X[v * 3 + 1], X[u * 3 + 2] - X[v * 3 + 2]);
       if (nd < dist[u] && size < heapV.length) { dist[u] = nd; push(u, nd); }
     }
   }

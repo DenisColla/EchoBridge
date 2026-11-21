@@ -3,7 +3,7 @@
 // (0 = front, 90 = ear, 180 = back), both in degrees. A region is the set of
 // directions whose elevation is above a hairline curve e_min(a); masks return
 // the signed angular distance to the hairline in degrees (> 0 inside).
-import { table, rng, DEG } from './util.js';
+import { table, rng, DEG, len3 } from './util.js';
 
 // Natural hairlines (calibrated on the MakeHuman head: the ear sits at a ~ 85-115°).
 const HAIRLINE_F = [[0, 31], [20, 30.5], [40, 27.5], [52, 22], [60, 13], [66, -2], [71, -12], [77, -13], [82, 1], [87, 15], [96, 19], [108, 18], [115, 9], [121, -14], [131, -32], [150, -44], [180, -49]];
@@ -62,7 +62,7 @@ export function sampleRoots(mask, count, seed, margin = 0.5) {
     tangentBasis(u, _t1, _t2);
     const j1 = (rnd() - 0.5) * spacing * 0.7, j2 = (rnd() - 0.5) * spacing * 0.7;
     let x = u[0] + _t1[0] * j1 + _t2[0] * j2, y = u[1] + _t1[1] * j1 + _t2[1] * j2, z = u[2] + _t1[2] * j1 + _t2[2] * j2;
-    const l = Math.hypot(x, y, z); x /= l; y /= l; z /= l;
+    const l = len3(x, y, z); x /= l; y /= l; z /= l;
     u[0] = x; u[1] = y; u[2] = z;
     if (mask(u) > margin) out.push(x, y, z);
   }
@@ -76,7 +76,7 @@ export function tangentBasis(u, t1, t2) {
   let rx = 0, ry = 1, rz = 0;
   if (Math.abs(u[1]) > 0.9) { rx = 1; ry = 0; }
   let x = u[1] * rz - u[2] * ry, y = u[2] * rx - u[0] * rz, z = u[0] * ry - u[1] * rx;
-  const l = Math.hypot(x, y, z) || 1;
+  const l = len3(x, y, z) || 1;
   t1[0] = x / l; t1[1] = y / l; t1[2] = z / l;
   t2[0] = u[1] * t1[2] - u[2] * t1[1]; t2[1] = u[2] * t1[0] - u[0] * t1[2]; t2[2] = u[0] * t1[1] - u[1] * t1[0];
 }

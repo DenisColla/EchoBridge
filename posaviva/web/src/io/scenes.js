@@ -179,6 +179,9 @@ export class SceneManager extends EventTarget {
       this.app.deserialize(base);
       const ch = this.app.addCharacter({ preset: 'f_normal' });
       this.app.select(ch);
+      // as at start-up: the default camera crops the figure in landscape
+      const cam = this.app.sceneTools?.camera;
+      if (cam?.subjectInView && !cam.subjectInView(1.15)) cam.frameSubject({ animate: false, commit: false });
     } finally { this._restoring = false; }
     this.current = { id: null, name: 'Senza titolo' };
     this._resetHistory(true);

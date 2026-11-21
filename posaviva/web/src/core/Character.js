@@ -16,6 +16,19 @@ export const DEFAULT_APPEARANCE = {
   lips: null,
 };
 
+/** Per mesh vertex: 1 when its dominant bone is a foot or toe bone (cached per model). */
+function footSkinMask(model) {
+  if (model._footSkin) return model._footSkin;
+  const m = new Uint8Array(model.vertexCount);
+  const isFoot = model.bones.map((b) => /^(foot|toe)/.test(b.name));
+  for (let v = 0; v < model.vertexCount; v++) {
+    let best = 0, bw = -1;
+    for (let k = 0; k < 4; k++) { const w = model.skinWeight[v * 4 + k]; if (w > bw) { bw = w; best = model.skinIndex[v * 4 + k]; } }
+    m[v] = isFoot[best] ? 1 : 0;
+  }
+  return (model._footSkin = m);
+}
+
 export class Character extends THREE.EventDispatcher {
   /**
    * @param {HumanModel} model
@@ -525,18 +538,20 @@ export class Character extends THREE.EventDispatcher {
   dropToGround() {
     this.root.updateMatrixWorld(true);
     const P = this.getSkinnedPositions();
-    let minY = Infinity;
     const M = this.rig.matrixWorld;
-    for (const v of this.model.groupVertices[0]) {
-      _v1.set(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]).applyMatrix4(M);
-      if (_v1.y < minY) minY = _v1.y;
-    }
     const s = this.root.scale.y || 1;
-    // the skin keeps `groundClearance` above the floor (shoe soles); attachments tagged
-    // userData.groundContact (shoes) must touch the floor themselves
-    let lowest = minY - this.groundClearance * s;
-    for (const mesh of this.attachments) {
-      if (!mesh.userData.groundContact || !mesh.visible || !mesh.isSkinnedMesh) continue;
+    // shoes (attachments tagged userData.groundContact) carry the floor contact of the
+    // feet: then foot/toe skin is left out and the shoe soles must touch the floor
+    const shoes = [...this.attachments].filter((m) => m.userData.groundContact && m.visible && m.isSkinnedMesh);
+    const foot = shoes.length ? footSkinMask(this.model) : null;
+    let lowest = Infinity;
+    for (const v of this.model.groupVertices[0]) {
+      if (foot && foot[v]) continue;
+      _v1.set(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]).applyMatrix4(M);
+      if (_v1.y < lowest) lowest = _v1.y;
+    }
+    lowest -= this.groundClearance * s; // skin keeps the sole thickness above the floor
+    for (const mesh of shoes) {
       const g = mesh.geometry, pos = g.attributes.position;
       const tmp = this._contactTmp && this._contactTmp.length >= pos.array.length ? this._contactTmp : (this._contactTmp = new Float32Array(pos.array.length));
       this.skinPositions(pos.array, g.attributes.skinIndex.array, g.attributes.skinWeight.array, tmp, pos.count);
@@ -545,6 +560,7 @@ export class Character extends THREE.EventDispatcher {
         if (_v1.y < lowest) lowest = _v1.y;
       }
     }
+    if (!Number.isFinite(lowest)) return;
     // floor = the character's own placement height (it may stand on a raised spot)
     const floorY = this.root.getWorldPosition(_v2).y;
     const upLocal = _v3.set(0, 1, 0).applyQuaternion(this.root.getWorldQuaternion(_q1).invert());

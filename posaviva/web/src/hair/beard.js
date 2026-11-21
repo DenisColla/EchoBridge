@@ -5,7 +5,8 @@
 import * as THREE from 'three';
 import { SkinPatch } from './patch.js';
 import { StrandSet, HairGeometry } from './strands.js';
-import { rng, smoothstep, clamp } from './util.js';
+import { rng, smoothstep, clamp, len2, len3 } from './util.js';
+import { STUBBLE_TILE } from './texture.js';
 
 /** shell: thickness (m); clumps: count; len: [min, max] clump length (m); region: mask kind */
 export const BEARD_SPECS = {
@@ -21,7 +22,7 @@ function beardMask(kind, F) {
   const s = F.s, M = F.mouth, C = F.chin, E = F.ear, nb = F.nose.baseY;
   const lips = (x, y, z) => {
     if (z < M.z - 0.035 * s) return 1;
-    const q = Math.hypot(x / (M.halfW + 0.003 * s), (y - M.y) / (0.0105 * s));
+    const q = len2(x / (M.halfW + 0.003 * s), (y - M.y) / (0.0105 * s));
     return (q - 1) * 0.008 * s;
   };
   const nose = (x, y) => (Math.abs(x) < 0.028 * s ? nb - 0.0015 * s - y : 1);
@@ -34,7 +35,7 @@ function beardMask(kind, F) {
   }
   if (kind === 'goatee') {
     return (x, y, z) => {
-      const q = Math.hypot(x / (M.halfW + 0.013 * s), (y - (M.y - 0.012 * s)) / (0.046 * s));
+      const q = len2(x / (M.halfW + 0.013 * s), (y - (M.y - 0.012 * s)) / (0.046 * s));
       return Math.min((1 - q) * 0.012 * s, z - (M.z - 0.05 * s), y - (C.y - 0.012 * s), lips(x, y, z), nose(x, y));
     };
   }
@@ -88,6 +89,15 @@ export class Beard {
     this.hg.col.fill(0.78, 0, this.patch.count * 3);
     this._buf = new Float32Array(this.K * 3);
     this.fit();
+    // stubble: metric UVs over the face (cylindrical around the head axis) for the follicle map
+    if (spec.stubble) {
+      const pp = this.patch.pos, uv = this.hg.uv, cz = frame.c.z, R = 0.07 * s;
+      for (let v = 0; v < this.patch.count; v++) {
+        uv[v * 2] = (Math.atan2(pp[v * 3], pp[v * 3 + 2] - cz) * R) / STUBBLE_TILE;
+        uv[v * 2 + 1] = pp[v * 3 + 1] / STUBBLE_TILE;
+      }
+      this.hg.geometry.attributes.uv.needsUpdate = true;
+    }
     const mesh = new THREE.SkinnedMesh(this.hg.geometry, []);
     mesh.name = 'beard';
     mesh.castShadow = true;
@@ -109,7 +119,7 @@ export class Beard {
     for (let t = 0; t < I.length; t += 3) {
       const a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3;
       const ux = X[b] - X[a], uy = X[b + 1] - X[a + 1], uz = X[b + 2] - X[a + 2], vx = X[c] - X[a], vy = X[c + 1] - X[a + 1], vz = X[c + 2] - X[a + 2];
-      area += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+      area += len3(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
     }
     const dmin = Math.sqrt(area / spec.clumps) * 0.85;
     const rnd = rng(0xbea4d);
@@ -122,7 +132,7 @@ export class Beard {
       let near = false;
       for (let dx = -1; dx <= 1 && !near; dx++) for (let dy = -1; dy <= 1 && !near; dy++) for (let dz = -1; dz <= 1 && !near; dz++) {
         const lst = cell.get(key(x + dx * dmin, y + dy * dmin, z + dz * dmin));
-        if (lst) for (const q of lst) if (Math.hypot(X[q * 3] - x, X[q * 3 + 1] - y, X[q * 3 + 2] - z) < dmin) { near = true; break; }
+        if (lst) for (const q of lst) if (len3(X[q * 3] - x, X[q * 3 + 1] - y, X[q * 3 + 2] - z) < dmin) { near = true; break; }
       }
       if (near) continue;
       const k = key(x, y, z);
@@ -160,8 +170,8 @@ export class Beard {
         let gx = r.mustache ? r.side * 0.55 : r.curl * 0.3, gy = -1, gz = 0.12;
         const d = gx * nx + gy * ny + gz * nz;
         gx -= d * nx; gy -= d * ny; gz -= d * nz;
-        let gl = Math.hypot(gx, gy, gz);
-        if (gl < 0.2) { gx = 0; gy = -0.3; gz = 1; const d2 = gz * nz + gy * ny; gx -= d2 * nx; gy -= d2 * ny; gz -= d2 * nz; gl = Math.hypot(gx, gy, gz) || 1; }
+        let gl = len3(gx, gy, gz);
+        if (gl < 0.2) { gx = 0; gy = -0.3; gz = 1; const d2 = gz * nz + gy * ny; gx -= d2 * nx; gy -= d2 * ny; gz -= d2 * nz; gl = len3(gx, gy, gz) || 1; }
         gx /= gl; gy /= gl; gz /= gl;
         for (let k = 0; k < K; k++) {
           const u = k / (K - 1), a = r.L * u;

@@ -9,6 +9,7 @@
 // long hair over shoulders and back. Points before the hang line are rigid
 // (attached to the head); the rest is simulated by the GuideSolver.
 import { pushHead } from './physics.js';
+import { len3 } from './util.js';
 
 const _f = [0, 0, 0], _d = [0, 0, 0], _u = [0, 0, 0], _n = [0, 0, 0], _q = [0, 0, 0], _p = [0, 0, 0];
 
@@ -30,7 +31,7 @@ export class Grower {
   dirOf(p, out) {
     const c = this.c;
     out[0] = p[0] - c[0]; out[1] = p[1] - c[1]; out[2] = p[2] - c[2];
-    const l = Math.hypot(out[0], out[1], out[2]) || 1;
+    const l = len3(out[0], out[1], out[2]) || 1;
     out[0] /= l; out[1] /= l; out[2] /= l;
     return out;
   }
@@ -91,7 +92,7 @@ export class Grower {
         if ((low || hanging) && col.push(_q[0], _q[1], _q[2], o.rad ?? 0.004, _q, 0) && hanging && o.hang.drape) contact = true;
         if (pass === 0) { // keep the segment length
           let dx = _q[0] - p[0], dy = _q[1] - p[1], dz = _q[2] - p[2];
-          const l = Math.hypot(dx, dy, dz) || 1;
+          const l = len3(dx, dy, dz) || 1;
           _q[0] = p[0] + (dx / l) * seg; _q[1] = p[1] + (dy / l) * seg; _q[2] = p[2] + (dz / l) * seg;
         }
       }
@@ -110,7 +111,7 @@ export class Grower {
 function hugHead(map, q, h) {
   const c = map.c;
   const dx = q[0] - c.x, dy = q[1] - c.y, dz = q[2] - c.z;
-  const r = Math.hypot(dx, dy, dz) || 1e-9;
+  const r = len3(dx, dy, dz) || 1e-9;
   const rh = map.radius(dx, dy, dz);
   if (rh <= 0) return;
   const k = (rh + h) / r;
@@ -118,7 +119,7 @@ function hugHead(map, q, h) {
 }
 
 function norm(v) {
-  const l = Math.hypot(v[0], v[1], v[2]);
+  const l = len3(v[0], v[1], v[2]);
   if (l > 1e-12) { v[0] /= l; v[1] /= l; v[2] /= l; }
   return v;
 }

@@ -15,7 +15,7 @@
 //      treatments (hems, rib bands, collars, lapels) and wrinkles
 // The result is a "draft" (fine quad surface + metadata) that assemble.js
 // turns into a SkinnedMesh geometry and a wrinkle runtime.
-import { buildEdges, buildAdjacency, boundaryCounts, boundaryLoops, subdivide, applyStencil, applyParents, quadNormals, normalize3, edgeDistance } from './mesh.js';
+import { buildEdges, buildAdjacency, boundaryCounts, boundaryLoops, subdivide, applyStencil, applyParents, quadNormals, normalize3, edgeDistance, len3 } from './mesh.js';
 import { PART, NPART } from './body.js';
 import { hangFit, bridgeSmooth, metricSmooth, enforceOffset, smoothWeights, top4, footEnvelope } from './fit.js';
 import { collideBody } from './collide.js';
@@ -224,10 +224,34 @@ export function buildBodyDraft(ctx, def, opts) {
     for (let i = 0; i < cons.length; i++) vals[i][v] = cons[i].fn(v, x, y, z);
   }
   const faceIn = selectFaces(topo, vals, P);
-  return draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT);
+  return runSteps(draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT));
 }
 
-function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
+/** buildBodyDraft as a generator: yields between the mask, the fit, the weights and the subdivision. */
+export function* buildBodyDraftSteps(ctx, def, opts) {
+  const { topo, bi } = ctx;
+  const P = bi.P, nvb = topo.nv;
+  const fitT = opts.fit ?? 0.5;
+  const kit = maskKit(bi);
+  const cons = def.mask(kit, ctx.sex, opts).filter(Boolean);
+  const vals = cons.map(() => new Float32Array(nvb));
+  for (let v = 0; v < nvb; v++) {
+    const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
+    for (let i = 0; i < cons.length; i++) vals[i][v] = cons[i].fn(v, x, y, z);
+  }
+  const faceIn = selectFaces(topo, vals, P);
+  yield 'mask';
+  return yield* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT);
+}
+
+/** Runs a generator to completion and returns its value. */
+function runSteps(gen) {
+  let r = gen.next();
+  while (!r.done) r = gen.next();
+  return r.value;
+}
+
+function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   const { topo, bi, occ } = ctx;
   const P = bi.P, N = bi.N;
   const fit = def.fit || {};
@@ -283,7 +307,7 @@ function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
       const u = topo.adj.adj[j];
       if ((val[v] > 0) === (val[u] > 0)) continue;
       const t = Math.min(0.8, val[v] / (val[v] - val[u]));
-      const d = t * Math.hypot(P[u * 3] - P[v * 3], P[u * 3 + 1] - P[v * 3 + 1], P[u * 3 + 2] - P[v * 3 + 2]);
+      const d = t * len3(P[u * 3] - P[v * 3], P[u * 3 + 1] - P[v * 3 + 1], P[u * 3 + 2] - P[v * 3 + 2]);
       if (d < best) { best = d; bu = u; bt = t; }
     }
     if (bu >= 0) {
@@ -292,7 +316,7 @@ function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
         P0[i * 3 + k] = P[v * 3 + k] + (P[bu * 3 + k] - P[v * 3 + k]) * bt;
         N0[i * 3 + k] = N[v * 3 + k] + (N[bu * 3 + k] - N[v * 3 + k]) * bt;
       }
-      const l = Math.hypot(N0[i * 3], N0[i * 3 + 1], N0[i * 3 + 2]) || 1;
+      const l = len3(N0[i * 3], N0[i * 3 + 1], N0[i * 3 + 2]) || 1;
       N0[i * 3] /= l; N0[i * 3 + 1] /= l; N0[i * 3 + 2] /= l;
       snapClear[i] = bi.clearance[v] + (bi.clearance[bu] - bi.clearance[v]) * bt;
       cvals[ia][i] = 0;
@@ -324,6 +348,7 @@ function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
       if (z > zone[i]) zone[i] = z;
     }
   });
+  yield 'coarse';
 
   // ---- offsets
   const thick = fit.thickness ?? 0.002;
@@ -399,6 +424,7 @@ function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   // walls back between the toes.
   if (fit.envelope) footEnvelope(c, bi, fit.envelope);
   collideBody(bi, n, G, body, offBody, test, 2);
+  yield 'fit';
 
   // ---- skin weights (dense over the bones in use)
   const model = topo.model, SI = model.skinIndex, SW = model.skinWeight;
@@ -417,6 +443,7 @@ function draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   }
   if (def.weightBlend) def.weightBlend(W, nb, boneLocal, c, bi, model, fitT);
   smoothWeights(n, nb, W, adj, Math.round((fit.wSmooth ?? 2) + loose * 6), null);
+  yield 'weights';
 
   // ---- subdivision
   const levels = def.subdiv ?? 1;

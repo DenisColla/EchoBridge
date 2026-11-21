@@ -86,7 +86,12 @@ export function buildPanel(el, app, shell, mgr) {
     refresh();
   } });
 
-  const empty = h('div', { class: 'pv-clothes-empty' }, 'Seleziona un personaggio');
+  // same empty state as the other character panels (Corpo, Posa, Viso, Mani)
+  const empty = h('div', { class: 'pv-body-empty pv-clothes-empty' },
+    icon('user', 30),
+    h('strong', {}, 'Nessun personaggio selezionato'),
+    h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
+    button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => { if (app.modules.ui?.openPeople) app.modules.ui.openPeople(); else shell.openTool('people'); } }));
   const wornSection = section('Indossati', [wornRow, editor]);
   el.append(
     empty,
@@ -130,7 +135,13 @@ export function buildPanel(el, app, shell, mgr) {
     edStyle.textContent = def.styles.map((s) => STYLE_LABEL.get(s)).join(' · ');
     const pal = def.palette || [];
     const colors = pal.includes(def.color) ? pal : [def.color, ...pal].slice(0, 9);
-    const sw = swatches({ colors, value: it.color, onChange: (c) => { if (!ch) return; mgr.update(ch, it.id, { color: c }); scheduleCommit('colore'); renderWorn(); renderCards(); } });
+    // custom colour picker: live preview while it moves, one undo step when it is released
+    const setColor = (c) => { if (!ch) return false; mgr.update(ch, it.id, { color: c }); renderWorn(); renderCards(); return true; };
+    const sw = swatches({
+      colors, value: it.color,
+      onInput: (c) => setColor(c),
+      onChange: (c) => { if (setColor(c)) app.commit('colore'); },
+    });
     colorHost.replaceChildren(sw);
     colorEl = sw;
     fitSl.setValue(it.fit ?? 0.5);
@@ -179,7 +190,7 @@ export function buildPanel(el, app, shell, mgr) {
   }
 
   function refresh() {
-    ch = app.selection.character || app.characters[0] || null;
+    ch = app.selection.character || null;
     empty.style.display = ch ? 'none' : '';
     for (const s of el.querySelectorAll('.pv-section')) s.style.display = ch ? '' : 'none';
     if (!ch) return;
@@ -202,8 +213,6 @@ export function buildPanel(el, app, shell, mgr) {
     if (first) requestAnimationFrame(flush);
   }
   function flush() { const f = pending; pending = null; f?.(); }
-  let commitTimer = 0;
-  function scheduleCommit(label) { clearTimeout(commitTimer); commitTimer = setTimeout(() => app.commit(label), 350); }
 
   const visible = () => shell.activeToolId === 'clothes';
   app.addEventListener('selection', () => { if (visible()) refresh(); });

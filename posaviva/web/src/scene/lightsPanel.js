@@ -92,7 +92,12 @@ export function registerLightsTool(app, shell, rig) {
       const kelvin = slider({ label: 'Temperatura colore', min: 2000, max: 10000, step: 50, value: 5600, format: (v) => `${Math.round(v)} K`, onInput: (v) => live({ kelvin: v, color: null }), onChange: end });
       kelvin.classList.add('pv-sc-kelvin');
       kelvin.input.style.setProperty('--kgrad', kelvinGradientCSS(2000, 10000));
-      const gels = swatches({ colors: GELS, value: null, onChange: (c) => { const d = rig.selected; if (d) { rig.set(d.id, { color: c }); app.commit('colore luce'); } } });
+      // custom colour: live preview while the picker moves, one undo step when it is released
+      const gels = swatches({
+        colors: GELS, value: null,
+        onInput: (c) => live({ color: c }),
+        onChange: (c) => { const d = rig.selected; if (d) { rig.set(d.id, { color: c }); app.commit('colore luce'); } },
+      });
       const gelsRow = h('div', { class: 'pv-sc-sub' }, h('div', { class: 'pv-sc-label' }, 'Gelatina / colore personalizzato'), gels);
 
       // ---------------------------------------------------------- position

@@ -19,7 +19,7 @@ import { BodyThumbs } from './thumbs.js';
 import { ViewOffset } from './viewOffset.js';
 import { Exporter } from './exporter.js';
 import { SceneManager } from './scenes.js';
-import { PeopleTool, setCharacterHidden } from './people.js';
+import { PeopleTool, setCharacterHidden, isDefaultName, SEX_LABEL } from './people.js';
 import { TopBar } from './topbar.js';
 import { showOnboarding, isOnboarded, resetOnboarding } from './onboarding.js';
 import * as S from './sheets.js';
@@ -40,7 +40,10 @@ export function create(app, shell) {
   const viewOffset = new ViewOffset(app, shell);
   const exporter = new Exporter(app, viewOffset);
   const scenes = new SceneManager(app, { thumbnail: () => exporter.thumbnail() });
-  const ctx = { app, shell, settings, thumbs, viewOffset, exporter, scenes };
+  // the splash artwork (index.html), reused as the logo in "Info e crediti" (the splash is removed after start-up)
+  const splashSvg = document.querySelector('#pv-loading .logo svg');
+  const logoSVG = splashSvg ? splashSvg.outerHTML.replace(/\bpvl(g|r)\b/g, 'pvInfo$1') : null;
+  const ctx = { app, shell, settings, thumbs, viewOffset, exporter, scenes, logoSVG };
 
   const actions = {
     newScene: () => S.newScene(ctx),
@@ -120,9 +123,16 @@ export function create(app, shell) {
     showOnboarding, tip,
 
     // module hooks
-    onCharacterAdded(ch) {
+    onCharacterAdded(ch, opts = {}) {
+      // characters created without a name (start-up, "Nuova scena", other modules) get
+      // "Donna 1" / "Uomo 2" instead of the body-type label
+      if (!opts?.json && !opts?.name) ch.name = people.defaultName(ch.sex, ch);
       let last = '';
-      const fn = () => {
+      const fn = (e) => {
+        // an automatic name follows a change of sex (Corpo › Sesso): "Donna 1" -> "Uomo 1"
+        if (e?.type === 'shape' && isDefaultName(ch.name) && !ch.name.startsWith(SEX_LABEL[ch.sex] + ' ')) {
+          ch.name = people.defaultName(ch.sex, ch); // the chip and the list refresh below
+        }
         const key = `${ch.presetId}|${ch.appearance.skin}|${ch.name}`;
         if (key === last) return;
         last = key;

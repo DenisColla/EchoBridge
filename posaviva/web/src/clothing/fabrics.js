@@ -7,6 +7,7 @@
 // Detail maps multiply the garment color (white = no change).
 import * as THREE from 'three';
 import { ATLAS, T_RANGE, A_RANGE } from './assemble.js';
+import { len3 } from './mesh.js';
 
 const TAU = Math.PI * 2;
 
@@ -16,7 +17,7 @@ const TAU = Math.PI * 2;
  * roughness / sheen for the cloth material.
  */
 export const FABRICS = {
-  jersey: { tile: 0.02, ns: 0.45, roughness: 0.86, sheen: 0.5 },
+  jersey: { tile: 0.02, ns: 0.3, roughness: 0.86, sheen: 0.5 },
   rib: { tile: 0.02, ns: 0.8, roughness: 0.88, sheen: 0.45 },
   fleece: { tile: 0.025, ns: 0.4, roughness: 0.94, sheen: 0.7 },
   tricot: { tile: 0.018, ns: 0.3, roughness: 0.6, sheen: 0.35 },
@@ -58,34 +59,34 @@ export function weaveNormal(type) {
     const u = i / S, v = j / S;
     let h = 0;
     switch (type) {
-      case 'jersey': h = knit(u, v, 16, 20) + 0.25 * vnoise(u * 8, v * 8, 8); break;
-      case 'micro': h = knit(u, v, 32, 40) * 0.6 + 0.1 * vnoise(u * 16, v * 16, 16); break;
-      case 'lycra': h = knit(u, v, 32, 40) * 0.5; break;
-      case 'tricot': h = 0.6 * Math.abs(Math.sin(u * 24 * Math.PI)) + 0.3 * knit(u, v, 24, 48); break;
-      case 'rib': h = Math.pow(Math.abs(Math.sin(u * 8 * Math.PI)), 0.6) + 0.25 * knit(u, v, 16, 20); break;
-      case 'fleece': h = 0.6 * knit(u, v, 12, 16) + 0.5 * vnoise(u * 16, v * 16, 16) + 0.2 * vnoise(u * 48, v * 48, 48); break;
+      case 'jersey': h = knit(u, v, 16, 16) + 0.25 * vnoise(u * 8, v * 8, 8); break;
+      case 'micro': h = knit(u, v, 32, 32) * 0.6 + 0.1 * vnoise(u * 16, v * 16, 16); break;
+      case 'lycra': h = knit(u, v, 32, 32) * 0.5; break;
+      case 'tricot': h = 0.6 * Math.abs(Math.sin(u * 32 * Math.PI)) + 0.3 * knit(u, v, 32, 64); break;
+      case 'rib': h = Math.pow(Math.abs(Math.sin(u * 8 * Math.PI)), 0.6) + 0.25 * knit(u, v, 16, 16); break;
+      case 'fleece': h = 0.6 * knit(u, v, 16, 16) + 0.5 * vnoise(u * 16, v * 16, 16) + 0.2 * vnoise(u * 64, v * 64, 64); break;
       case 'denim': {
         // 3/1 twill: diagonal wales + warp slubs
-        const t = fr((u * 24 + v * 24));
+        const t = fr((u * 32 + v * 32));
         h = Math.pow(Math.sin(t * Math.PI), 0.8) * 0.8 + 0.25 * vnoise(u * 4, v * 64, 4) + 0.15 * vnoise(u * 64, v * 64, 64);
         break;
       }
       case 'wool': { const t = fr(u * 32 + v * 32); h = 0.5 * Math.sin(t * Math.PI) + 0.35 * vnoise(u * 32, v * 32, 32); break; }
-      case 'poplin': h = 0.5 * (Math.sin(u * 64 * Math.PI) ** 2) * (0.6 + 0.4 * Math.sin(v * 64 * Math.PI) ** 2) + 0.5 * (Math.sin(v * 72 * Math.PI) ** 2) * 0.3; break;
-      case 'canvas': h = 0.55 * Math.abs(Math.sin(u * 24 * Math.PI)) * Math.abs(Math.sin(v * 24 * Math.PI + (Math.floor(u * 24) % 2) * 1.57)) + 0.25 * vnoise(u * 32, v * 32, 32); break;
+      case 'poplin': h = 0.5 * (Math.sin(u * 64 * Math.PI) ** 2) * (0.6 + 0.4 * Math.sin(v * 64 * Math.PI) ** 2) + 0.5 * (Math.sin(v * 64 * Math.PI) ** 2) * 0.3; break;
+      case 'canvas': h = 0.55 * Math.abs(Math.sin(u * 32 * Math.PI)) * Math.abs(Math.sin(v * 32 * Math.PI + (Math.floor(u * 32) % 2) * 1.57)) + 0.25 * vnoise(u * 32, v * 32, 32); break;
       case 'crepe': h = 0.6 * vnoise(u * 32, v * 32, 32) + 0.4 * vnoise(u * 64, v * 64, 64); break;
       case 'leather': {
         // cellular grain
-        const gx = u * 24, gy = v * 24, cx = Math.floor(gx), cy = Math.floor(gy);
+        const gx = u * 32, gy = v * 32, cx = Math.floor(gx), cy = Math.floor(gy);
         let d1 = 9;
         for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
-          const px = cx + a + hash(((cx + a) % 24 + 24) % 24, ((cy + b) % 24 + 24) % 24), py = cy + b + hash(((cy + b) % 24 + 24) % 24 + 7, ((cx + a) % 24 + 24) % 24 + 3);
-          d1 = Math.min(d1, Math.hypot(gx - px, gy - py));
+          const px = cx + a + hash(((cx + a) % 32 + 32) % 32, ((cy + b) % 32 + 32) % 32), py = cy + b + hash(((cy + b) % 32 + 32) % 32 + 7, ((cx + a) % 32 + 32) % 32 + 3);
+          d1 = Math.min(d1, Math.sqrt((gx - px) ** 2 + (gy - py) ** 2));
         }
         h = Math.min(1, d1 * 1.4) + 0.2 * vnoise(u * 8, v * 8, 8);
         break;
       }
-      case 'sneaker': h = 0.6 * (Math.abs(Math.sin(u * 20 * Math.PI)) * Math.abs(Math.sin(v * 20 * Math.PI))) ** 0.5 + 0.2 * vnoise(u * 32, v * 32, 32); break;
+      case 'sneaker': h = 0.6 * (Math.abs(Math.sin(u * 16 * Math.PI)) * Math.abs(Math.sin(v * 16 * Math.PI))) ** 0.5 + 0.2 * vnoise(u * 32, v * 32, 32); break;
       default: h = 0;
     }
     H[j * S + i] = h;
@@ -96,7 +97,7 @@ export function weaveNormal(type) {
     const hx = H[j * S + ((i + 1) % S)] - H[j * S + ((i + S - 1) % S)];
     const hy = H[((j + 1) % S) * S + i] - H[((j + S - 1) % S) * S + i];
     let nx = -hx * k, ny = -hy * k, nz = 1;
-    const l = Math.hypot(nx, ny, nz);
+    const l = len3(nx, ny, nz);
     nx /= l; ny /= l; nz /= l;
     const o = (j * S + i) * 4;
     data[o] = Math.round((nx * 0.5 + 0.5) * 255); data[o + 1] = Math.round((ny * 0.5 + 0.5) * 255); data[o + 2] = Math.round((nz * 0.5 + 0.5) * 255); data[o + 3] = 255;

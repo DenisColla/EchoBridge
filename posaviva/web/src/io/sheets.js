@@ -260,7 +260,7 @@ export function openExport(ctx, { share = false } = {}) {
       } else if (!r.cancelled) toast(`Esportazione non riuscita: ${r.error}`, { kind: 'error', ms: 3500 });
     } catch (e) {
       b.close();
-      console.error(e);
+      (app.contextLost ? console.warn : console.error)(e);
       toast(`Esportazione non riuscita: ${e.message || e}`, { kind: 'error', ms: 3500 });
     } finally { running = false; }
   }
@@ -339,11 +339,19 @@ export function appVersion() {
   try { const d = JSON.parse(window.AndroidBridge?.getDeviceInfo?.() || '{}'); return { version: d.appVersion || '1.0', device: d }; } catch { return { version: '1.0', device: {} }; }
 }
 
+/** App logo: the splash / launcher artwork (wooden mannequin) when available. */
+function brandLogo(ctx) {
+  if (!ctx.logoSVG) return h('div', { class: 'pv-io-logo' }, icon('pose', 34));
+  const el = h('div', { class: 'pv-io-logo art', 'aria-hidden': 'true' });
+  el.innerHTML = ctx.logoSVG;
+  return el;
+}
+
 export function openInfo(ctx) {
   const { version, device } = appVersion();
   const dev = device.model ? `${device.manufacturer ? device.manufacturer + ' ' : ''}${device.model} · Android ${device.release || ''}${device.maxRefreshRate ? ` · ${Math.round(device.maxRefreshRate)} Hz` : ''}` : null;
   const body = h('div', { class: 'pv-io-info' },
-    h('div', { class: 'pv-io-brand' }, h('div', { class: 'pv-io-logo' }, icon('pose', 34)), h('div', {}, h('div', { class: 'pv-io-brand-name' }, 'PosaViva'), h('div', { class: 'pv-io-brand-sub' }, `Versione ${version} · Manichini 3D posabili per fumettisti`))),
+    h('div', { class: 'pv-io-brand' }, brandLogo(ctx), h('div', {}, h('div', { class: 'pv-io-brand-name' }, 'PosaViva'), h('div', { class: 'pv-io-brand-sub' }, `Versione ${version} · Manichini 3D posabili per fumettisti`))),
     section('Gesti', [
       h('ul', { class: 'pv-io-gestures' },
         h('li', {}, icon('tap', 20), h('span', {}, h('b', {}, 'Tocca'), ' una parte del corpo per selezionarla')),

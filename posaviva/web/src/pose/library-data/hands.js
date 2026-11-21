@@ -34,7 +34,8 @@ export const HAND_DEFS = [
   { id: 'thumbs_up', label: 'Pollice su', i: [84, 100, 64, 0], m: [88, 100, 64, 0], r: [90, 100, 62, 0], p: [92, 98, 58, 2], t: [8, 0, 22, -4, -8], cup: 12 },
   { id: 'ok', label: 'OK', i: [46, 50, 30, 2], m: [6, 6, 4, 0], r: [10, 10, 6, 4], p: [14, 12, 8, 10], t: [-36, 34, 0, 20, 24], cup: 4 },
   { id: 'horns', label: 'Corna', i: [0, 0, 0, 8], m: [88, 100, 62, 0], r: [90, 100, 60, 0], p: [0, 0, 0, 14], t: [-44, 36, 4, 36, 32], cup: 8 },
-  { id: 'finger_gun', label: 'Pistola', i: [0, 0, 0, 0], m: [84, 100, 62, 0], r: [90, 100, 60, 0], p: [92, 96, 56, 2], t: [8, -8, -14, -4, -6], cup: 10 },
+  // finger gun: index + middle together as the barrel, thumb cocked up (tells it apart from 'Due')
+  { id: 'finger_gun', label: 'Pistola', i: [0, 0, 0, -9], m: [3, 3, 0, -15], r: [90, 100, 60, 0], p: [92, 96, 56, 2], t: [8, -8, -14, -4, -6], cup: 10 },
   // counting the Italian way: one = thumb, two = thumb + index, three = + middle
   { id: 'count1', label: 'Uno (pollice)', i: [84, 100, 64, 0], m: [88, 100, 64, 0], r: [90, 100, 62, 0], p: [92, 98, 58, 2], t: [4, -6, -16, -4, -6], cup: 12 },
   { id: 'count2', label: 'Due', i: [0, 0, 0, 4], m: [86, 100, 62, 0], r: [90, 100, 60, 0], p: [92, 96, 56, 2], t: [2, -4, -6, -2, -4], cup: 10 },

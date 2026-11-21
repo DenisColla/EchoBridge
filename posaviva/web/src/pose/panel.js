@@ -216,9 +216,15 @@ export function registerPoseTool(ctx) {
       const jointsToggle = toggle({ label: 'Mostra articolazioni', value: state.showJoints, onChange: (v) => ctx.setPref('showJoints', v) });
       const optSection = section('Opzioni', [limitsToggle, pinToggle2, jointsToggle], { collapsible: true });
 
-      const noChar = h('div', { class: 'pv-pose-empty' }, icon('people', 26), h('div', {}, h('b', {}, 'Nessun personaggio'), h('div', {}, 'Aggiungi o seleziona un personaggio per posarlo.')));
+      // same empty state as the other character tools (Corpo, Viso, Mani, Vestiti)
+      const noChar = h('div', { class: 'pv-body-empty' },
+        icon('user', 30),
+        h('strong', {}, 'Nessun personaggio selezionato'),
+        h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
+        button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => app.modules.ui?.openPeople?.() || shell.openTool('people') }));
       const modePanes = h('div', { class: 'pv-pose-pane' });
-      el.append(modeSeg, noChar, modePanes, mapSection, fingerSection, poseSection, optSection);
+      const content = h('div', {}, modeSeg, modePanes, mapSection, fingerSection, poseSection, optSection);
+      el.append(noChar, content);
 
       function legend(color, label) { return h('span', { class: 'pv-pose-legend-item' }, h('i', { style: { background: color } }), label); }
 
@@ -233,7 +239,7 @@ export function registerPoseTool(ctx) {
         const { character: ch, control } = ctx.sel();
         modeSeg.setValue(state.mode);
         noChar.style.display = ch ? 'none' : '';
-        for (const s of [modePanes, mapSection, fingerSection, poseSection]) s.style.opacity = ch ? '' : '0.4';
+        content.style.display = ch ? '' : 'none';
         let pane = state.mode;
         if (pane === 'rotate' && !control) pane = 'empty';
         if (pane !== lastPane) {

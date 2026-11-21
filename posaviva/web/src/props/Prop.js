@@ -12,7 +12,8 @@ import { mergeParts } from './geo.js';
 
 const DEG = Math.PI / 180;
 let _uid = 0;
-const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
+const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _m3 = new THREE.Matrix4(), _mFreeInv = new THREE.Matrix4();
+const _qd = new THREE.Quaternion();
 const _q = new THREE.Quaternion(), _e = new THREE.Euler(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
 const _corners = Array.from({ length: 8 }, () => new THREE.Vector3());
 
@@ -67,6 +68,16 @@ export class Prop {
   }
 
   get isHand() { return !!this.type.hand; }
+
+  /**
+   * Mirror symmetry plane of the geometry (pivot space): {axis 0 = x, 1 = y,
+   * 2 = z, c2 = twice the plane coordinate} or null. Cached per geometry. Used to turn a mirrored placement (right hand) into a proper one
+   * that looks exactly the same.
+   */
+  mirrorPlane() {
+    if (this._symKey !== this._geoKey) { this._symKey = this._geoKey; this._sym = detectMirrorPlane(this.meshes, this.geoBox); }
+    return this._sym;
+  }
   get label() { return this.type.label; }
 
   // ------------------------------------------------------------ geometry & look
@@ -236,16 +247,73 @@ export class Prop {
  */
 export function freeFromContentMatrix(prop, content, outPos, outEuler) {
   // pivot of the free mode
+  // (updatePivot() uses the module temporaries _m/_q: keep the inverse in its own matrix)
   const held = prop.hold;
   prop.hold = null;
   prop.updatePivot();
-  _m.copy(prop.pivot.matrix).invert();
+  _mFreeInv.copy(prop.pivot.matrix).invert();
   prop.hold = held;
   prop.updatePivot();
-  _m2.multiplyMatrices(content, _m);
-  _m2.decompose(outPos, _q, _s);
-  // a mirrored frame (right hand) decomposes with sx < 0: drop the mirror on X
-  outEuler.setFromQuaternion(_q, 'YXZ');
+  if (content !== _m2) _m2.copy(content);
+  // A mirrored frame (right hand) cannot be a free placement. Reflecting the
+  // geometry across its own symmetry plane gives a proper transform with the
+  // very same look (a cup keeps its handle side, a phone its screen side).
+  // Without a symmetry plane the mirror on X is dropped by decompose().
+  if (_m2.determinant() < 0) {
+    const sym = prop.mirrorPlane();
+    if (sym) {
+      _m3.identity();
+      _m3.elements[sym.axis * 5] = -1; // diagonal entry of the axis
+      _m3.elements[12 + sym.axis] = sym.c2; // x' = 2·plane - x along the axis
+      _m2.multiply(_m3);
+    }
+  }
+  _m2.multiply(_mFreeInv);
+  _m2.decompose(outPos, _qd, _s);
+  outEuler.setFromQuaternion(_qd, 'YXZ');
   return outPos;
+}
+
+/**
+ * Finds a mirror symmetry of the merged prop geometry: for x, z then y, and a
+ * plane through the middle of the bounds or through the origin, the vertices
+ * reflected across the plane must land on other vertices (within ~2 mm) for at
+ * least 98% of a sample. Returns {axis, c2} (c2 = twice the plane coordinate)
+ * of the best match, or null.
+ */
+function detectMirrorPlane(meshes, box) {
+  if (box.isEmpty()) return null;
+  const Q = 0.0015, cells = new Set();
+  const key = (x, y, z) => `${x},${y},${z}`;
+  const pts = [];
+  for (const mesh of meshes) {
+    const a = mesh.geometry.attributes.position.array;
+    for (let i = 0; i < a.length; i += 3) {
+      cells.add(key(Math.round(a[i] / Q), Math.round(a[i + 1] / Q), Math.round(a[i + 2] / Q)));
+      pts.push(a[i], a[i + 1], a[i + 2]);
+    }
+  }
+  const n = pts.length / 3, stride = Math.max(1, Math.floor(n / 1500));
+  const found = (x, y, z) => {
+    const ix = Math.round(x / Q), iy = Math.round(y / Q), iz = Math.round(z / Q);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) if (cells.has(key(ix + dx, iy + dy, iz + dz))) return true;
+    return false;
+  };
+  const p = [0, 0, 0];
+  let best = null, bestRatio = 0.98;
+  for (const axis of [0, 2, 1]) {
+    const mid = box.min.getComponent(axis) + box.max.getComponent(axis);
+    for (const c2 of Math.abs(mid) > 1e-4 ? [mid, 0] : [0]) {
+      let ok = 0, tot = 0;
+      for (let i = 0; i < n; i += stride) {
+        p[0] = pts[i * 3]; p[1] = pts[i * 3 + 1]; p[2] = pts[i * 3 + 2];
+        p[axis] = c2 - p[axis];
+        tot++;
+        if (found(p[0], p[1], p[2])) ok++;
+      }
+      if (tot && ok / tot > bestRatio + 1e-9) { bestRatio = ok / tot; best = { axis, c2 }; }
+    }
+  }
+  return best;
 }
 

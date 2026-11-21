@@ -306,6 +306,49 @@ function lowestBodyY(ch) {
   return minY;
 }
 
+let _shoeTmp = new Float32Array(3 * 2048);
+const _shoeMin = { L: Infinity, R: Infinity };
+/** Lowest world y of the visible shoes (attachments with userData.groundContact) per side. */
+function shoeMins(ch) {
+  _shoeMin.L = Infinity; _shoeMin.R = Infinity;
+  const W = ch.rig.matrixWorld.elements;
+  for (const mesh of ch.attachments || []) {
+    if (!mesh.userData?.groundContact || !mesh.visible || !mesh.isSkinnedMesh) continue;
+    const g = mesh.geometry, pos = g.attributes.position;
+    if (!pos || !g.attributes.skinIndex || !g.attributes.skinWeight) continue;
+    if (_shoeTmp.length < pos.count * 3) _shoeTmp = new Float32Array(pos.count * 3);
+    ch.skinPositions(pos.array, g.attributes.skinIndex.array, g.attributes.skinWeight.array, _shoeTmp, pos.count);
+    const R = pos.array;
+    for (let i = 0; i < pos.count; i++) {
+      const y = W[1] * _shoeTmp[i * 3] + W[5] * _shoeTmp[i * 3 + 1] + W[9] * _shoeTmp[i * 3 + 2] + W[13];
+      const sd = R[i * 3] > 0 ? 'L' : 'R'; // rest rig space: the character's left is +X
+      if (y < _shoeMin[sd]) _shoeMin[sd] = y;
+    }
+  }
+  return _shoeMin;
+}
+
+/** Lowest floor-contact point of one foot (world y): its shoe, or the skin minus the clearance. */
+function footGroundY(ch, sd, shoes = shoeMins(ch)) {
+  if (shoes[sd] < Infinity) return shoes[sd];
+  return minWorldY(ch, bodyData(ch.model).foot[sd]) - (ch.groundClearance || 0) * (ch.root.scale.y || 1);
+}
+
+/**
+ * World height of the lowest point that rests on the floor. Shoes (attachments tagged
+ * userData.groundContact) touch it themselves, so a tilted outsole or a raised heel
+ * cannot sink into it; the rest of the skin (knees, buttocks, hands, bare feet) keeps
+ * the shoe clearance above it. The foot skin inside a shoe does not count: near the toe
+ * the outsole is thinner than the clearance. Bone matrices must be current.
+ */
+export function lowestGroundY(ch, withShoes = true) {
+  const d = bodyData(ch.model);
+  if (!withShoes) return lowestBodyY(ch) - (ch.groundClearance || 0) * (ch.root.scale.y || 1);
+  const shoes = shoeMins(ch);
+  const L = footGroundY(ch, 'L', shoes), R = footGroundY(ch, 'R', shoes);
+  return Math.min(minWorldY(ch, d.rest) - (ch.groundClearance || 0) * (ch.root.scale.y || 1), L, R);
+}
+
 // ---------------------------------------------------------------- hand contacts
 // Presets are authored on f_normal with plain FK. A hand resting on the body (hips,
 // chin, thighs …) would sink into a bulkier body or float beside a slimmer one, so
@@ -499,7 +542,11 @@ function bodyData(model) {
   const foot = (sd) => byBones([`foot.${sd}`, ...[1, 2, 3, 4, 5].map((t) => `toe${t}-1.${sd}`)]);
   const cloud = [];
   for (const v of body) if (dom[v] >= 0 && !ARM_RE.test(model.bones[dom[v]].name)) cloud.push(v);
+  const feet = new Set([...foot('L'), ...foot('R')]);
+  const rest = [];
+  for (const v of body) if (!feet.has(v)) rest.push(v);
   d = {
+    rest: Int32Array.from(rest), // every body vertex but the feet (grounding)
     seat: byBones(['root', 'pelvis.L', 'pelvis.R', 'spine05', 'upperleg01.L', 'upperleg01.R']),
     foot: { L: foot('L'), R: foot('R') },
     upper: { L: byBones(['upperarm01.L', 'upperarm02.L']), R: byBones(['upperarm01.R', 'upperarm02.R']) },
@@ -694,13 +741,20 @@ function resolveArms(ch, s) {
 export function applyPosePreset(ch, presetId, opts = {}) {
   const p = POSE_BY_ID.get(presetId);
   if (!p) return false;
-  return applyPoseObject(ch, p.pose, { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, ...opts });
+  // floor poses (kneeling, lying, sitting on the floor) rest on the body: shoes tucked under the
+  // legs may dip into the floor rather than lift the whole body off it
+  const onFloor = p.category === 'floor' || (p.category === 'sit' && !p.seat);
+  const o = { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, shoes: !onFloor, ...opts };
+  if (ch.data) setSeatMark(ch, o.seat && o.ground ? o.seat : 0);
+  return applyPoseObject(ch, p.pose, o);
 }
 
 /**
  * Applies a pose in the contract format authored on f_normal (root offset scaled to
  * this body). opts: {ground=true, air=0, mirror=false, keepHands=false, touch=null,
- * seat=0 (chair height to fit, meters), collide=false (push the arms out of the body)}.
+ * seat=0 (chair height to fit, meters), collide=false (push the arms out of the body),
+ * shoes=true (shoes touch the floor and both feet are planted, see lowestGroundY /
+ * plantFeet; false: the skin keeps the clearance, shoes may dip into the floor)}.
  * Fires a single 'pose' event.
  */
 export function applyPoseObject(ch, pose, opts = {}) {
@@ -725,13 +779,91 @@ export function applyPoseObject(ch, pose, opts = {}) {
   if (opts.collide) resolveArms(ch, s);
   if (ground) {
     updateBonesSilently(ch);
-    const parentY = ch.root.getWorldPosition(_v).y + (ch.groundClearance || 0) * ch.root.scale.y;
-    const drop = parentY + air * s * ch.root.scale.y - lowestBodyY(ch);
-    _up.set(0, 1, 0).applyQuaternion(ch.root.getWorldQuaternion(_wq).invert());
-    ch.rootOffset.addScaledVector(_up, drop / (ch.root.scale.y || 1));
+    // the character's own floor (its placement height); shoes touch it, the skin keeps the clearance
+    const floor = ch.root.getWorldPosition(_v).y;
+    const shoes = opts.shoes !== false;
+    const drop = floor + air * s * ch.root.scale.y - lowestGroundY(ch, shoes);
+    liftRoot(ch, drop);
+    if (!air && shoes) plantFeet(ch, s);
   }
   ch.applyPose();
   return true;
+}
+
+// ---------------------------------------------------------------- both feet on the floor
+// The presets are authored barefoot on f_normal. With shoes (thick, rounded outsoles) or
+// on another body, a pose meant to stand on both feet (contrapposto, guards, walk …)
+// may touch the floor with one shoe only while the other floats 5-17 mm. plantFeet()
+// lowers the body onto the higher foot and lifts the lower one by the same amount with
+// the leg IK (its knee bends a little, the foot keeps its orientation). Skipped when a
+// foot is clearly lifted, or when another body part (a kneeling knee) would go through
+// the floor.
+const PLANT_MAX = 0.025; // m (f_normal): a foot closer than this to the floor stands on it
+const _pq = [];
+const _po = new THREE.Vector3(), _pp = new THREE.Vector3(), _pqt = new THREE.Quaternion();
+
+function plantFeet(ch, s) {
+  const sc = ch.root.scale.y || 1;
+  updateBonesSilently(ch);
+  const floor = ch.root.getWorldPosition(_v).y;
+  let sh = shoeMins(ch);
+  const yL = footGroundY(ch, 'L', sh) - floor, yR = footGroundY(ch, 'R', sh) - floor;
+  const g = Math.abs(yL - yR);
+  if (Math.min(yL, yR) > 0.003 * sc || g < 0.002 * sc || g > PLANT_MAX * s * sc) return;
+  const lo = yL < yR ? 'L' : 'R';
+  const ik = solverFor(ch.model), chain = ik.chains['foot.' + lo];
+  if (!chain) return;
+  // snapshot (restored when the result is not better)
+  for (let i = 0; i < ch.poseQuat.length; i++) (_pq[i] || (_pq[i] = new THREE.Quaternion())).copy(ch.poseQuat[i]);
+  _po.copy(ch.rootOffset);
+  liftRoot(ch, -g);
+  ik.rig.worldPos(ch, chain.end, _pp);
+  ik.rig.worldQuat(ch, chain.end, _pqt);
+  _pp.y += g;
+  ik.solveLimb(ch, chain, _pp, _pqt, 4);
+  updateBonesSilently(ch);
+  // nothing may go through the floor (a kneeling knee, the other foot): re-ground, then judge
+  liftRoot(ch, floor - lowestGroundY(ch));
+  sh = shoeMins(ch);
+  const nL = footGroundY(ch, 'L', sh) - floor, nR = footGroundY(ch, 'R', sh) - floor;
+  if (Math.abs(nL - nR) < g - 0.001 * sc) return; // both feet closer to the floor: keep
+  for (let i = 0; i < ch.poseQuat.length; i++) ch.poseQuat[i].copy(_pq[i]);
+  ch.rootOffset.copy(_po);
+  updateBonesSilently(ch);
+}
+
+// ---------------------------------------------------------------- seated poses
+/**
+ * Seat mark: a chair / stool preset records its seat height in ch.data.pose.seat
+ * (meters above the floor, serialized with the character, cleared by any other
+ * preset or a pose reset), so copying the pose to another body can fit the seat.
+ */
+export function seatMark(ch) { return +(ch.data?.pose?.seat) || 0; }
+export function setSeatMark(ch, seat) {
+  const d = ch.data.pose || (ch.data.pose = {});
+  if (seat > 0) d.seat = Math.round(seat * 1000) / 1000; else delete d.seat;
+  if (!Object.keys(d).length) delete ch.data.pose;
+}
+
+/**
+ * Current seat height of a seated character (lowest buttock / upper-thigh point above
+ * its floor, meters), or 0 when it does not sit: no seat mark, or the pose was edited
+ * into a standing one (no thigh raised more than 40° from hanging straight down).
+ */
+export function measureSeat(ch) {
+  if (!seatMark(ch)) return 0;
+  updateBonesSilently(ch);
+  let raised = false;
+  for (const sd of ['L', 'R']) {
+    const iH = boneIdx(ch, `upperleg01.${sd}`), iK = boneIdx(ch, `lowerleg01.${sd}`);
+    if (iH < 0 || iK < 0) continue;
+    bonePos(ch, iK, _ca).sub(bonePos(ch, iH, _cb)).normalize();
+    if (_ca.y > -Math.cos(40 * DEG)) raised = true;
+  }
+  if (!raised) return 0;
+  const sc = ch.root.scale.y || 1;
+  const h = (minWorldY(ch, bodyData(ch.model).seat) - ch.root.getWorldPosition(_v).y) / sc;
+  return h > 0.15 ? h : 0;
 }
 
 /**

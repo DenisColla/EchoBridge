@@ -68,4 +68,5 @@
 .pv-pose-lib-empty .pv-icon { color: var(--accent-hi); margin-bottom: 6px; }
 
 /* hands */
+.pv-pose-actions.pv-pose-view { margin: 10px 0 12px; }
 .pv-pose-hand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }

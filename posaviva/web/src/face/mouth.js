@@ -8,6 +8,7 @@
 // carries the tongue along (the root as much as the teeth, the tip a bit more),
 // so the tongue rests low in the open mouth. Units are replaced through the
 // core API model.addExpressionUnit(), so all characters (and saved scenes) get it.
+// Units in which the tongue already follows the jaw (fixed asset bake) are skipped.
 
 const _done = new WeakSet();
 
@@ -43,10 +44,16 @@ export function tongueFollowsJaw(model) {
       dx += d.val[k * 3] * d.scale; dy += d.val[k * 3 + 1] * d.scale; dz += d.val[k * 3 + 2] * d.scale;
     }
     dx /= teeth.length; dy /= teeth.length; dz /= teeth.length;
-    if (Math.hypot(dx, dy, dz) < 0.0005) continue;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < 0.0005 * 0.0005) continue;
     // dense delta of the unit, + the tongue following the jaw
     const acc = new Map();
     for (let k = 0; k < d.idx.length; k++) acc.set(d.idx[k], [d.val[k * 3] * d.scale, d.val[k * 3 + 1] * d.scale, d.val[k * 3 + 2] * d.scale]);
+    // assets whose bake already carries the tongue with the jaw (asset pipeline fix):
+    // leave the unit alone, or the tongue would move about twice as far
+    let along = 0;
+    for (const v of tongue) { const a = acc.get(v); if (a) along += (a[0] * dx + a[1] * dy + a[2] * dz) / d2; }
+    if (along / tongue.length > 0.5) continue;
     tongue.forEach((v, i) => {
       const a = acc.get(v) || [0, 0, 0];
       // the tongue's own (tiny) delta is replaced: it was computed as if the jaw stayed shut

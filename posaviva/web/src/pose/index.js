@@ -17,7 +17,7 @@ import { PoseGizmo } from './gizmo.js';
 import { registerPoseTool } from './panel.js';
 import { registerPresetsTool } from './presetsPanel.js';
 import { registerHandsTool } from './handsPanel.js';
-import { PRESERVED_BONES, mirrorPose } from './library.js';
+import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, lowestGroundY, measureSeat, seatMark, setSeatMark } from './library.js';
 
 const PREFS_KEY = 'posaviva.pose.prefs';
 const POSE_TOOLS = new Set(['pose', 'hands']);
@@ -105,13 +105,13 @@ export function create(app, shell) {
     },
     mirrorPose(ch) {
       const keep = PRESERVED_BONES.map((n) => [n, ch.getBoneRotation(n)?.clone()]);
-      const grounded = isGrounded(ch);
+      const mode = groundMode(ch);
       const p = mirrorPose(ch.getPose());
       ch.setPose(p, false);
       for (const [n, q] of keep) if (q) ch.setBoneRotation(n, q, false);
       ch.applyPose();
       // the mesh is not perfectly symmetric: a grounded pose stays on the floor
-      if (grounded) settle(ch);
+      if (mode) settle(ch, mode);
       ctx.edited(ch, true, 'specchia posa');
     },
     resetPose(ch) {
@@ -119,20 +119,26 @@ export function create(app, shell) {
       for (const q of ch.poseQuat) q.identity();
       ch.rootOffset.set(0, 0, 0);
       for (const [n, q] of keep) if (q) ch.setBoneRotation(n, q, false);
+      setSeatMark(ch, 0);
       ctx.edited(ch, true, 'azzera posa');
     },
-    /** copies the pose of src onto dst (eyes kept, root offset scaled by hip height) */
+    /**
+     * Copies the pose of src onto dst (eyes kept, root offset scaled by hip height).
+     * A grounded pose is re-grounded; a seated one (chair / stool preset, see
+     * library.seatMark) puts dst's buttocks at the height src sits at, feet planted, so
+     * a taller or shorter body still sits on the same chair; arms are pushed out of a
+     * bulkier torso like the presets do.
+     */
     copyPose(src, dst) {
       const pose = src.getPose();
       for (const n of PRESERVED_BONES) delete pose.bones[n];
-      const keep = PRESERVED_BONES.map((n) => [n, dst.getBoneRotation(n)?.clone()]);
-      const hs = src.restLocalPos[0].y, hd = dst.restLocalPos[0].y;
-      const s = hs > 0 ? hd / hs : 1;
-      const grounded = isGrounded(src);
-      dst.setPose({ bones: pose.bones, root: pose.root.map((v) => v * s) }, false);
-      for (const [n, q] of keep) if (q) dst.setBoneRotation(n, q, false);
-      dst.applyPose();
-      if (grounded) settle(dst);
+      const hs = src.restLocalPos[0].y;
+      const mode = groundMode(src);
+      const seat = mode ? measureSeat(src) : 0;
+      // applyPoseObject scales the root offset by hip / HIP_REF: pass it in f_normal units
+      const k = hs > 0 ? HIP_REF / hs : 1;
+      applyPoseObject(dst, { bones: pose.bones, root: pose.root.map((v) => v * k) }, { ground: !!mode, seat, collide: true, shoes: mode !== 'skin' });
+      setSeatMark(dst, seat > 0 ? seatMark(src) || seat : 0);
       notify('pose-final');
       app.commit('copia posa');
     },
@@ -143,20 +149,29 @@ export function create(app, shell) {
   };
   ctx.ops = ops;
 
-  /** lowest skinned body point (world y) */
-  function lowestY(ch) {
+  /**
+   * lowest point resting on the floor (world y): shoes touch it, the skin keeps the shoe
+   * clearance (same rule as Character.dropToGround)
+   */
+  function lowestY(ch, shoes = true) {
     ch.root.updateMatrixWorld(true);
-    const P = ch.getSkinnedPositions(), M = ch.rig.matrixWorld, v = new THREE.Vector3();
-    let minY = Infinity;
-    for (const i of app.model.groupVertices[0]) { v.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyMatrix4(M); if (v.y < minY) minY = v.y; }
-    return minY;
+    return lowestGroundY(ch, shoes);
   }
   /** the character's own floor: its placement height (on the ground or on a raised spot) */
-  const floorOf = (ch) => ch.root.getWorldPosition(new THREE.Vector3()).y + (ch.groundClearance || 0) * ch.root.scale.y;
-  function isGrounded(ch) { return Math.abs(lowestY(ch) - floorOf(ch)) < 0.02 * ch.root.scale.y; }
-  /** moves the root offset so the lowest body point rests on the character's floor */
-  function settle(ch) {
-    const d = floorOf(ch) - lowestY(ch);
+  const floorOf = (ch) => ch.root.getWorldPosition(new THREE.Vector3()).y;
+  /**
+   * How the character rests on its floor: 'shoes' (standing: shoes touch it), 'skin'
+   * (floor presets: the body rests on it, tucked shoes may dip in) or null (in the air).
+   */
+  function groundMode(ch) {
+    const f = floorOf(ch), tol = 0.02 * ch.root.scale.y;
+    const a = Math.abs(lowestY(ch, true) - f), b = Math.abs(lowestY(ch, false) - f);
+    if (Math.min(a, b) >= tol) return null;
+    return a <= b ? 'shoes' : 'skin';
+  }
+  /** moves the root offset so the lowest point rests on the character's floor (same rule as before) */
+  function settle(ch, mode = groundMode(ch) || 'shoes') {
+    const d = floorOf(ch) - lowestY(ch, mode !== 'skin');
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(ch.root.getWorldQuaternion(new THREE.Quaternion()).invert());
     ch.rootOffset.addScaledVector(up, d / (ch.root.scale.y || 1));
     ch.applyPose();

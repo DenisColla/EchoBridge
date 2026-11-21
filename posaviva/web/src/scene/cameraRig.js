@@ -67,8 +67,24 @@ export class CameraRig extends THREE.EventDispatcher {
     this.aiming = false;
     this._tune();
     // re-apply the focal length when the aspect changes (filmGauge is mapped
-    // to the long side, so the field of view would drift on rotation)
-    app.addEventListener('resize', () => { this.camera.setFocalLength(this.focal); this._changed(); });
+    // to the long side, so the field of view would drift on rotation). The
+    // vertical field of view of a 50 mm drops from ~39 to ~18 degrees when the
+    // phone turns to landscape: a subject that was entirely in view is framed again.
+    this._aspect = app.camera.aspect;
+    app.addEventListener('resize', () => {
+      const a0 = this._aspect, a1 = this.camera.aspect;
+      this._aspect = a1;
+      this.camera.setFocalLength(this.focal);
+      if ((a0 < 1) !== (a1 < 1)) this.refitForAspect(a0);
+      this._changed();
+    });
+    /** aspect of a restored camera state (scene opened / autosave): refit once the characters exist */
+    this._pendingAspect = 0;
+    app.addEventListener('loaded', () => {
+      const a = this._pendingAspect;
+      this._pendingAspect = 0;
+      if (a) this.refitForAspect(a);
+    });
     this.controls.addEventListener('start', () => { if (this.tween) this._endTween(false); });
     // opening another tool leaves the tap-to-aim mode
     app.addEventListener('tool', (e) => { if (e.id && this.aiming) this.cancelAim(); });
@@ -250,9 +266,10 @@ export class CameraRig extends THREE.EventDispatcher {
       return { ch, box: _box.clone(), center: characterCenter(ch, new THREE.Vector3()), eyes: characterEyes(ch, new THREE.Vector3()), yaw: characterYaw(ch) };
     }
     const box = new THREE.Box3();
-    if (!worldBounds(this.app, box)) box.setFromCenterAndSize(this.controls.target, _v.set(0.6, 1.8, 0.4));
+    const empty = !worldBounds(this.app, box);
+    if (empty) box.setFromCenterAndSize(this.controls.target, _v.set(0.6, 1.8, 0.4));
     const center = box.getCenter(new THREE.Vector3());
-    return { ch: null, box, center, eyes: center.clone().setY(box.min.y + (box.max.y - box.min.y) * 0.92), yaw: 0 };
+    return { ch: null, box, center, eyes: center.clone().setY(box.min.y + (box.max.y - box.min.y) * 0.92), yaw: 0, empty };
   }
 
   // ---------------------------------------------------------------- actions
@@ -266,17 +283,8 @@ export class CameraRig extends THREE.EventDispatcher {
   frameSubject({ animate = true, commit = true } = {}) {
     const box = this._subject().box;
     const cam = this.camera;
-    const Rinv = _q.copy(cam.quaternion).invert();
-    const tanY = Math.tan((cam.getEffectiveFOV() * DEG) / 2), tanX = tanY * cam.aspect;
-    const m = 0.88; // fraction of the half-frame the subject may use
     const C = box.getCenter(new THREE.Vector3());
-    let d = this.controls.minDistance;
-    for (let i = 0; i < 8; i++) {
-      // corner offset in camera space; at camera distance d its depth is d - oz
-      _v.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(C).applyQuaternion(Rinv);
-      d = Math.max(d, Math.abs(_v.x) / (m * tanX) + _v.z, Math.abs(_v.y) / (m * tanY) + _v.z);
-    }
-    d = this._clampDist(d);
+    const d = this._frameDist(box, C, cam.aspect);
     _v2.subVectors(cam.position, this.controls.target).normalize();
     const P = C.clone().addScaledVector(_v2, d);
     if (!animate) {
@@ -286,6 +294,69 @@ export class CameraRig extends THREE.EventDispatcher {
       return;
     }
     this._startTween({ target: C, position: P }, { duration: 520, commit: commit ? 'inquadra' : null, mode: 'linear' });
+  }
+
+  /**
+   * Smallest camera distance from C (along the current view direction) at which
+   * every corner of `box` fits in the frame of a given aspect with a margin.
+   */
+  _frameDist(box, C, aspect) {
+    const Rinv = _q.copy(this.camera.quaternion).invert();
+    const tanY = this.camera.filmGauge / (2 * this.focal * Math.max(aspect, 1)), tanX = tanY * aspect;
+    const m = 0.88; // fraction of the half-frame the subject may use
+    let d = this.controls.minDistance;
+    for (let i = 0; i < 8; i++) {
+      // corner offset in camera space; at camera distance d its depth is d - oz
+      _v.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).sub(C).applyQuaternion(Rinv);
+      d = Math.max(d, Math.abs(_v.x) / (m * tanX) + _v.z, Math.abs(_v.y) / (m * tanY) + _v.z);
+    }
+    return this._clampDist(d);
+  }
+
+  /**
+   * After a portrait <-> landscape change (or a scene saved in the other
+   * orientation) the focal length stays on the long side, so the subject would
+   * be cropped (portrait -> landscape) or tiny (landscape -> portrait). When the
+   * subject was entirely in view with the previous aspect, it is framed again if
+   * it is cropped now, or if it filled the old frame and would now be much
+   * smaller. A close-up on a detail is left alone. No undo step.
+   */
+  refitForAspect(oldAspect) {
+    const cam = this.camera;
+    if (!(oldAspect > 0) || (oldAspect < 1) === (cam.aspect < 1) || this.tween) return false;
+    const sub = this._subject(), box = sub.box;
+    if (sub.empty || box.isEmpty() || !this._boxInView(box, oldAspect, 1.15)) return false;
+    const C = box.getCenter(new THREE.Vector3());
+    const dir = _v2.subVectors(cam.position, this.controls.target).normalize();
+    const dCur = _v.subVectors(cam.position, C).dot(dir);
+    const filled = dCur <= 1.3 * this._frameDist(box, C, oldAspect);
+    if (this._boxInView(box, cam.aspect, 1) && !(filled && dCur > 1.3 * this._frameDist(box, C, cam.aspect))) return false;
+    this.frameSubject({ animate: false, commit: false });
+    this.app.modules?.ui?.viewOffset?.update?.({ keepIfVisible: true });
+    return true;
+  }
+
+  /** True if the subject's bounds are inside the camera frame (current aspect). */
+  subjectInView(tol = 1) {
+    const sub = this._subject();
+    return sub.empty || sub.box.isEmpty() || this._boxInView(sub.box, this.camera.aspect, tol);
+  }
+
+  /**
+   * True if every corner of `box` is inside the plain (un-offset) camera frame
+   * for a given aspect, with the current focal length (filmGauge on the long
+   * side). tol > 1 accepts corners slightly outside (the box is conservative).
+   */
+  _boxInView(box, aspect, tol = 1) {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const tanY = (cam.filmGauge / (2 * this.focal * Math.max(aspect, 1))) * tol, tanX = tanY * aspect;
+    for (let i = 0; i < 8; i++) {
+      _v.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).applyMatrix4(cam.matrixWorldInverse);
+      const z = -_v.z;
+      if (z < 1e-3 || Math.abs(_v.x) > z * tanX || Math.abs(_v.y) > z * tanY) return false;
+    }
+    return true;
   }
 
   /** Animated quick angle around the selected character (see QUICK_ANGLES). */
@@ -460,7 +531,8 @@ export class CameraRig extends THREE.EventDispatcher {
 
   // ---------------------------------------------------------------- (de)serialization
   getState() {
-    return { ...this.currentView(), keep: this.keepFraming, crev: this.crev, views: this.views.map((v) => (v ? { ...v } : null)) };
+    // a: aspect of the view, so a scene opened in the other orientation can be framed again
+    return { ...this.currentView(), a: r4(this.camera.aspect), keep: this.keepFraming, crev: this.crev, views: this.views.map((v) => (v ? { ...v } : null)) };
   }
 
   /**
@@ -483,6 +555,8 @@ export class CameraRig extends THREE.EventDispatcher {
     if (fromHistory && crev === this.crev) return;
     this.crev = crev;
     if (!Array.isArray(s.p) || !Array.isArray(s.t)) return;
+    // a scene saved in the other orientation: checked on 'loaded', when its characters exist
+    if (!fromHistory && s.a > 0 && (s.a < 1) !== (this.camera.aspect < 1)) this._pendingAspect = s.a;
     const cur = this.currentView();
     if (JSON.stringify([cur.p, cur.t, cur.f, cur.r]) === JSON.stringify([s.p, s.t, s.f, s.r])) return;
     this.applyView(s, { animate: fromHistory, duration: 320 });

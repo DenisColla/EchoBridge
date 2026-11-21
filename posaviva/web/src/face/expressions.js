@@ -206,8 +206,10 @@ const W_MIN = -1, W_MAX = 1.5;
  * preset * intensity (left/right swapped when `mirror`) + fine controls (never
  * mirrored: "Chiudi sinistro" always means the character's left eye).
  * Deterministic (also used to detect whether ch.expression still matches).
+ * autoGy: vertical gaze (-1..1) of the automatic modes ('Guarda la camera' /
+ * 'Guarda un punto'), which is runtime state: the lids follow it like the free gaze.
  */
-export function composeExpression(st) {
+export function composeExpression(st, autoGy = null) {
   const out = {};
   const add = (dict, k, mirror) => { for (const [u, w] of Object.entries(dict)) { const key = mirror ? mirrorUnit(u) : u; out[key] = (out[key] || 0) + w * k; } };
   const p = PRESET_BY_ID.get(st.preset);
@@ -217,11 +219,10 @@ export function composeExpression(st) {
     if (!f || !v) continue;
     if (v > 0) add(f.p, v, false); else if (f.n) add(f.n, -v, false);
   }
-  // lid-gaze coupling (free gaze only): the upper lids follow the eyes down / up
-  if (!st.lookAtCamera && !st.lookAt && Array.isArray(st.gaze)) {
-    const gy = st.gaze[1] || 0;
-    if (gy < 0) add(LID_DOWN, -gy, false); else if (gy > 0) add(LID_UP, gy, false);
-  }
+  // lid-gaze coupling: the upper lids follow the eyes down / up
+  const auto = st.lookAtCamera || st.lookAt;
+  const gy = auto ? (typeof autoGy === 'number' ? autoGy : 0) : Array.isArray(st.gaze) ? st.gaze[1] || 0 : 0;
+  if (gy < 0) add(LID_DOWN, -gy, false); else if (gy > 0) add(LID_UP, gy, false);
   const res = {};
   for (const [u, w] of Object.entries(out)) {
     const max = u.includes('closure') ? 1 : W_MAX; // a lid closes completely at 1
