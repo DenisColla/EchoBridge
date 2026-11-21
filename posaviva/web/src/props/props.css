@@ -1,0 +1,53 @@
+/* Props module ("Oggetti"). Prefix: pv-pr- */
+.pv-overlay > canvas.pv-pr-gizmo { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.pv-pr-strip { margin: 2px 0 6px; }
+.pv-pr-strip .pv-chip { min-height: 40px; }
+.pv-pr-add { border-style: dashed; }
+.pv-pr-add.active { border-style: solid; }
+
+.pv-pr-note { font-size: 12px; color: var(--muted); line-height: 1.35; margin: 2px 0 8px; }
+.pv-pr-catalog .pv-cards { gap: 6px; }
+.pv-pr-catalog .pv-card { padding: 6px 4px 7px; min-height: 92px; gap: 3px; }
+.pv-pr-catalog .pv-card:active { transform: scale(.96); background: rgba(124,108,255,.18); }
+.pv-pr-catalog .pv-card-label { font-size: 11.5px; line-height: 1.15; }
+.pv-pr-catalog .pv-card-visual { height: 62px; align-items: center; }
+.pv-card-visual canvas.pv-pr-thumb { width: 62px; height: 62px; max-height: 62px; border-radius: 10px; opacity: 0; transition: opacity .25s;
+  background: radial-gradient(circle at 50% 60%, rgba(255,255,255,.08), transparent 70%); }
+.pv-card-visual canvas.pv-pr-thumb.ready { opacity: 1; }
+
+.pv-pr-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.pv-pr-head .pv-pr-title { flex: 1; font-size: 17px; font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-pr-head .pv-btn.small { min-width: 42px; min-height: 42px; }
+.pv-pr-actions { margin: 8px 0 6px; }
+.pv-pr-actions .pv-btn { min-width: 0; }
+.pv-pr-field { margin: 4px 0 12px; }
+.pv-pr-label { font-size: 13px; margin-bottom: 6px; }
+.pv-pr-editor .pv-section .pv-section { margin: 6px 0 0; }
+.pv-pr-editor .pv-seg-btn { min-height: 40px; }
+
+/* ---- library */
+.pv-pr-search { position: relative; display: flex; align-items: center; gap: 6px; margin: 2px 0 8px; padding: 0 6px 0 12px; min-height: 44px;
+  border: 1px solid var(--line); background: var(--elev); border-radius: 14px; color: var(--muted); }
+.pv-pr-search:focus-within { border-color: var(--accent); }
+.pv-pr-search-input { flex: 1; min-width: 0; height: 42px; border: 0; outline: 0; background: transparent; color: var(--text, #fff); font: inherit; font-size: 15px; }
+.pv-pr-search-input::-webkit-search-cancel-button { display: none; }
+.pv-pr-search-clear { width: 40px; height: 40px; border: 0; background: transparent; color: var(--muted); border-radius: 12px; display: grid; place-items: center; }
+.pv-pr-svg { display: inline-flex; line-height: 0; }
+.pv-pr-cats { margin-bottom: 4px; }
+.pv-pr-cats .pv-chip { min-height: 40px; }
+.pv-pr-subs { margin: 2px 0 4px; }
+.pv-pr-subs .pv-chip { min-height: 34px; padding: 5px 11px; font-size: 12.5px; }
+.pv-pr-info { margin: 4px 2px 6px; }
+.pv-pr-empty { padding: 24px 8px; text-align: center; color: var(--muted); font-size: 13px; }
+.pv-pr-card { overflow: hidden; }
+.pv-pr-star { position: absolute; top: 2px; right: 2px; width: 30px; height: 30px; display: grid; place-items: center; color: rgba(255,255,255,.45); border-radius: 10px; }
+.pv-pr-star.on { color: #f4c542; }
+.pv-pr-badge { position: absolute; top: 5px; left: 7px; font-size: 11px; line-height: 1; color: var(--accent-2, #a99cff); font-weight: 700; opacity: .85; pointer-events: none; }
+.pv-card-visual img.pv-pr-thumb { width: 62px; height: 62px; max-height: 62px; object-fit: contain; opacity: 0; transition: opacity .25s; }
+.pv-card-visual img.pv-pr-thumb.ready { opacity: 1; }
+.pv-pr-preset .pv-card-visual canvas.pv-pr-thumb { width: 70px; height: 70px; max-height: 70px; }
+.pv-pr-loading { color: var(--accent-2, #a99cff); }
+.pv-pr-inline { margin: 0 0 0 6px; align-self: center; }
+.pv-pr-segchips { flex-wrap: wrap; overflow: visible; }
+.pv-pr-segchips .pv-chip { min-height: 38px; }

@@ -1,0 +1,83 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Development signing key, committed on purpose so every build (on any machine)
+// carries the same signature and installs as an update over the previous one.
+// It is NOT a secret: do not reuse it for a Play Store upload key.
+def devKeystore = rootProject.file('keystore/posaviva-dev.jks')
+
+android {
+    namespace = 'it.posaviva.app'
+    compileSdk = 36
+    buildToolsVersion = '36.0.0'
+
+    defaultConfig {
+        applicationId = 'it.posaviva.app'
+        minSdk = 30
+        targetSdk = 36
+        // Overridable for later releases: ./gradlew assembleRelease -PversionCode=2 -PversionName=1.0.1
+        versionCode = (project.findProperty('versionCode') ?: '3') as int
+        versionName = (project.findProperty('versionName') ?: '1.2.0') as String
+    }
+
+    signingConfigs {
+        dev {
+            storeFile = devKeystore
+            storePassword = 'posaviva-dev'
+            keyAlias = 'posaviva'
+            keyPassword = 'posaviva-dev'
+            // minSdk 30: the v1 JAR scheme is useless; v2 + v3 (key rotation ready).
+            enableV1Signing = false
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = false
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8: the shell is ~5 small classes, but androidx.webkit pulls in androidx.core
+            // and the Kotlin stdlib (~2.7 MB of uncompressed dex). Shrinking keeps only what
+            // is used. The JS bridge methods are kept by proguard-rules.pro.
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            debuggable = false
+            signingConfig = signingConfigs.dev
+        }
+        debug {
+            // Same key as release, so debug and release builds can replace each other.
+            signingConfig = signingConfigs.dev
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    androidResources {
+        // Default pattern minus "<dir>_*", so web build folders starting with "_"
+        // are packaged too. Dot-files (e.g. assets/www/.gitkeep) stay excluded.
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+    }
+
+    packaging {
+        resources {
+            // Kotlin reflection metadata and per-library version markers: the app is plain
+            // Java and never reads them.
+            excludes += ['kotlin/**', 'META-INF/*.version', 'META-INF/*.kotlin_module', 'DebugProbesKt.bin']
+        }
+    }
+
+    // Sideloaded app: no Play-only dependency metadata block in the APK signature.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.18.0'
+}
