@@ -58,6 +58,7 @@ import { POSE_DEFS } from './library-data/poses.js';
 import { ControlSet } from './controls.js';
 import { PoseRig } from './rig.js';
 import { IKSolver } from './ik.js';
+import { exaggerate, poseSnapshot } from './soft.js';
 
 export const POSE_CATEGORIES = [
   { id: 'stand', label: 'In piedi' },
@@ -166,11 +167,15 @@ const HAND_DEF_BY_ID = new Map(HAND_DEFS.map((d) => [d.id, d]));
 
 // ---------------------------------------------------------------- bodies
 // Distributed chains: per bone [wx, wy, wz] share of the macro's [x, y, z].
-// Flexion / side bending spread over the lumbar + thoracic spine, twist mostly
-// thoracic (as in a real spine); the neck carries the base of a head movement.
+// They are the "Colonna morbida" profiles of the posing controls (controls.js): the
+// back = 45% abdomen + 55% chest profile (flexion / side bend over the lumbar and
+// thoracic spine, twist mostly thoracic, a little into the base of the neck), the neck
+// = the neck profile (starting in the upper back). A preset is therefore exactly
+// readable on the Addome / Busto / Collo sliders and bends as one continuous curve.
 const CHAINS = {
-  spine: [['spine05', [0.10, 0.04, 0.12]], ['spine04', [0.20, 0.12, 0.22]], ['spine03', [0.24, 0.20, 0.24]], ['spine02', [0.24, 0.30, 0.22]], ['spine01', [0.22, 0.34, 0.20]]],
-  neck: [['neck01', [0.40, 0.36, 0.40]], ['neck02', [0.34, 0.34, 0.34]], ['neck03', [0.26, 0.30, 0.26]]],
+  spine: [['spine05', [0.1515, 0.083, 0.139]], ['spine04', [0.169, 0.1265, 0.171]], ['spine03', [0.2045, 0.2115, 0.2245]], ['spine02', [0.2245, 0.266, 0.228]],
+    ['spine01', [0.1865, 0.26, 0.1845]], ['neck01', [0.0475, 0.042, 0.042]], ['neck02', [0.0165, 0.011, 0.011]]],
+  neck: [['spine02', [0.04, 0, 0.04]], ['spine01', [0.10, 0.08, 0.10]], ['neck01', [0.34, 0.36, 0.34]], ['neck02', [0.29, 0.30, 0.29]], ['neck03', [0.23, 0.26, 0.23]]],
 };
 const ALIAS = { clav: 'clavicle', sh: 'shoulder01' };
 const META = new Set(['id', 'label', 'cat', 'ground', 'air', 'offset', 'note', 'touch', 'seat']);
@@ -226,10 +231,11 @@ function addJoint(acc, base, sfx, value, mirror) {
  * Compiles one authoring definition (library-data/poses.js format) into the
  * contract pose format {bones, root}. Exported for tools / user-made presets.
  */
-export function compilePoseDef(def) {
+export function compilePoseDef(def, lineGain = 1) {
   const acc = new BoneAcc();
-  for (const [key, value] of Object.entries(def)) {
+  for (let [key, value] of Object.entries(def)) {
     if (META.has(key) || value == null) continue;
+    if (lineGain !== 1 && LINE_KEYS.has(key)) value = gainOf(key, value, lineGain);
     const m = /^(.*)\.(L|R|LR)$/.exec(key);
     if (!m) { addJoint(acc, key, '', value, false); continue; }
     const [, base, side] = m;
@@ -240,18 +246,47 @@ export function compilePoseDef(def) {
 }
 
 /**
+ * Line of action of the presets: the back, neck, head and whole-body lean / roll of the
+ * authored values are amplified per category, so the torso reads as one clear, fluid
+ * curve at a glance (comic poses are pushed further than life). The facing (root yaw)
+ * and the limbs keep their authored values; the natural standing pose stays subtle.
+ */
+const LINE_GAIN = { stand: 1.3, action: 1.3, fight: 1.25, gesture: 1.25, sit: 1.2, floor: 1 };
+/**
+ * Whole-pose energy of the presets per category ("Dinamismo" baked in at apply time,
+ * see soft.exaggerate: limbs, back and lean pushed away from a relaxed stance, the
+ * legs at half strength, anatomical limits respected).
+ */
+const PRESET_DYNAMISM = { action: 1.3, fight: 1.25, gesture: 1.12 };
+const PRESET_DYNAMISM_BY_ID = { superhero_landing: 1, sprint: 1.12 };
+// (poses already at the edge: a deep forward lean must not tip over)
+const LINE_GAIN_BY_ID = { relaxed: 1.1, superhero_landing: 1, sprint: 1.1, push: 1.1 };
+const LINE_KEYS = new Set(['spine', 'neck', 'head', 'root']);
+function gainOf(key, value, g) {
+  const [x, y, z] = vec3(value);
+  // root: [pitch, roll, yaw] -> the yaw (facing) is not a line of action
+  return key === 'root' ? [x * g, y * g, z] : [x * g, y * g, z * g];
+}
+
+/**
  * [{id, label, category, pose:{bones,root}, ground, air?, touch?}] — `ground` = drop to
  * floor after applying (unless false), `air` = meters above the floor after the drop,
  * `touch` = hand contacts re-targeted on every body type (see reachTouches).
  */
 export const POSE_PRESETS = POSE_DEFS.map((def) => {
-  const p = { id: def.id, label: def.label, category: def.cat, pose: compilePoseDef(def), ground: def.ground !== false };
+  const gain = LINE_GAIN_BY_ID[def.id] ?? LINE_GAIN[def.cat] ?? 1;
+  const p = { id: def.id, label: def.label, category: def.cat, pose: compilePoseDef(def, gain), ground: def.ground !== false };
+  // (not for arms solved with the arm IK: their hand placement is exact)
+  const dyn = PRESET_DYNAMISM_BY_ID[def.id] ?? PRESET_DYNAMISM[def.cat] ?? 1;
+  if (dyn !== 1 && !def.air && !Object.keys(def).some((k) => /^(upperarm|lowerarm)/.test(k))) p.dynamism = dyn;
   if (def.air) p.air = def.air;
   if (def.touch) p.touch = def.touch;
   if (def.seat) p.seat = def.seat;
   return p;
 });
 const POSE_BY_ID = new Map(POSE_PRESETS.map((p) => [p.id, p]));
+/** Preset used as the natural standing pose of a new character. */
+export const NATURAL_POSE = 'relaxed';
 
 export function getPosePreset(id) { return POSE_BY_ID.get(id) || null; }
 export function getHandPreset(id) { return HAND_BY_ID.get(id) || null; }
@@ -347,6 +382,22 @@ export function lowestGroundY(ch, withShoes = true) {
   const shoes = shoeMins(ch);
   const L = footGroundY(ch, 'L', shoes), R = footGroundY(ch, 'R', shoes);
   return Math.min(minWorldY(ch, d.rest) - (ch.groundClearance || 0) * (ch.root.scale.y || 1), L, R);
+}
+
+/**
+ * Feet resting on the character's floor: {L, R} booleans (lowest shoe / foot point
+ * within `tol` meters of the placement height). Bone matrices must be current.
+ */
+export function feetOnFloor(ch, tol = 0.03) {
+  const floor = ch.root.getWorldPosition(_v).y, sc = ch.root.scale.y || 1;
+  const shoes = shoeMins(ch);
+  return { L: footGroundY(ch, 'L', shoes) - floor < tol * sc, R: footGroundY(ch, 'R', shoes) - floor < tol * sc };
+}
+
+/** Pushes the arms out of the torso / legs (same fit as the presets). Fires no event. */
+export function fitArms(ch) {
+  const rootY = ch.restLocalPos[0].y;
+  resolveArms(ch, rootY > 0 ? rootY / HIP_REF : 1);
 }
 
 // ---------------------------------------------------------------- hand contacts
@@ -744,7 +795,7 @@ export function applyPosePreset(ch, presetId, opts = {}) {
   // floor poses (kneeling, lying, sitting on the floor) rest on the body: shoes tucked under the
   // legs may dip into the floor rather than lift the whole body off it
   const onFloor = p.category === 'floor' || (p.category === 'sit' && !p.seat);
-  const o = { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, shoes: !onFloor, ...opts };
+  const o = { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, shoes: !onFloor, dynamism: p.dynamism || 1, ...opts };
   if (ch.data) setSeatMark(ch, o.seat && o.ground ? o.seat : 0);
   return applyPoseObject(ch, p.pose, o);
 }
@@ -752,6 +803,7 @@ export function applyPosePreset(ch, presetId, opts = {}) {
 /**
  * Applies a pose in the contract format authored on f_normal (root offset scaled to
  * this body). opts: {ground=true, air=0, mirror=false, keepHands=false, touch=null,
+ * dynamism=1 (exaggeration of the whole pose, see soft.exaggerate),
  * seat=0 (chair height to fit, meters), collide=false (push the arms out of the body),
  * shoes=true (shoes touch the floor and both feet are planted, see lowestGroundY /
  * plantFeet; false: the skin keeps the clearance, shoes may dip into the floor)}.
@@ -773,6 +825,10 @@ export function applyPoseObject(ch, pose, opts = {}) {
   const s = rootY > 0 ? rootY / HIP_REF : 1;
   const r = pose.root || [0, 0, 0];
   ch.rootOffset.set(r[0] * s, r[1] * s, r[2] * s);
+  if (opts.dynamism && opts.dynamism !== 1) {
+    const ik = solverFor(ch.model);
+    exaggerate(ch, poseSnapshot(ch), opts.dynamism, ik.rig, ik.controls);
+  }
   updateBonesSilently(ch);
   if (opts.seat && ground) fitSeat(ch, opts.seat);
   if (opts.touch) reachTouches(ch, opts.touch, !!opts.mirror, s);

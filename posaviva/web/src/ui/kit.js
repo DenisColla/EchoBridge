@@ -277,6 +277,7 @@ export function closeTopLayer() {
   const l = layers[layers.length - 1];
   if (!l) return false;
   if (l.dismissable === false) return true; // e.g. a blocking progress dialog: swallow back
+  if (l.back?.() === true) return true; // the layer stepped back inside itself (e.g. Guida: topic -> index)
   l.close(null);
   return true;
 }
@@ -291,7 +292,8 @@ function layerHost() {
  * Generic modal surface.
  * opts: {title, subtitle, body: Node|Node[], actions:[{label, value, variant:'primary'|'danger'|'ghost', icon}],
  *        kind:'dialog'|'sheet' (sheet = bottom sheet on phones, centered card on wide screens),
- *        dismissable=true (backdrop tap / back), className, icon, onClose(value)}
+ *        dismissable=true (backdrop tap / back), className, icon, onClose(value),
+ *        onBack() -> true when Android back / Escape was handled inside the layer (it then stays open)}
  * Returns {el, card, body, close(value), result: Promise<value|null>}.
  */
 export function modal(opts = {}) {
@@ -308,7 +310,7 @@ export function modal(opts = {}) {
   let resolve;
   const result = new Promise((r) => { resolve = r; });
   let closed = false;
-  const layer = { dismissable: opts.dismissable !== false, close: (v) => api.close(v) };
+  const layer = { dismissable: opts.dismissable !== false, close: (v) => api.close(v), back: opts.onBack || null };
   const api = {
     el, card, body, result,
     close(value = null) {

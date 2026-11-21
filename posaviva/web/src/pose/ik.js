@@ -81,6 +81,100 @@ export class IKSolver {
     return limited;
   }
 
+  // ------------------------------------------------------------ whole-body reach
+  /**
+   * State a reach() call restores before recruiting the body: clavicle + back values
+   * (hands), pelvis rotation (feet). Taken at drag start.
+   */
+  reachSnapshot(ch, chain) {
+    const rig = this.rig, C = (id) => this.controls.get(id);
+    const parts = chain.kind === 'arm' ? [C('shoulder.' + chain.side), C('abdomen'), C('chest')] : [];
+    const vals = [];
+    for (const c of parts) for (let k = 0; k < c.axes.length; k++) vals.push([c, k, rig.read(ch, c, k)]);
+    return { chain, vals, root: ch.poseQuat[0].clone() };
+  }
+
+  /**
+   * Whole-body reach: when the wrist / ankle target is beyond a comfortable reach of
+   * the limb, the body helps — a hand recruits the clavicle (first, small) and then
+   * the back (abdomen + chest bend / twist toward the target), a foot tilts the
+   * pelvis (a high kick leans the body back). Weighted by how far the target is,
+   * within the anatomical limits, always computed from the drag-start state so the
+   * body comes back when the hand / foot returns within reach. Matrices refreshed.
+   */
+  reach(ch, chain, target, snap) {
+    const rig = this.rig;
+    for (const [c, k, v] of snap.vals) rig.write(ch, c, k, v, false);
+    ch.poseQuat[0].copy(snap.root);
+    rig.refreshAll(ch);
+    rig.worldPos(ch, chain.upper, _S); rig.worldPos(ch, chain.lower, _E); rig.worldPos(ch, chain.end, _W);
+    const L = _S.distanceTo(_E) + _E.distanceTo(_W);
+    const comfy = (chain.kind === 'arm' ? 0.8 : 0.9) * L;
+    let excess = _S.distanceTo(target) - comfy;
+    if (excess <= 1e-4) return false;
+    excess = Math.min(excess, 0.9 * L);
+    let limited = false;
+    if (chain.kind === 'arm') {
+      // 1) clavicle: up to ~4 cm of shoulder travel (scaled to the body)
+      const clav = this.controls.get('shoulder.' + chain.side);
+      const iC = clav.pivotIndex;
+      const dc = Math.min(excess * 0.45, 0.05 * L / 0.55);
+      limited = this._swingToward(ch, clav, iC, _S, target, dc, null) || limited;
+      // 2) back: abdomen ~45%, chest the rest (a few passes: the bend is spread over
+      // the curved spine, so the shoulder travels less than a rigid turn would move it)
+      const ab = this.controls.get('abdomen'), chs = this.controls.get('chest');
+      for (let it = 0; it < 3; it++) {
+        rig.worldPos(ch, chain.upper, _S);
+        excess = _S.distanceTo(target) - comfy;
+        if (excess < 0.005 * L) break;
+        limited = this._swingToward(ch, ab, ab.pivotIndex, _S, target, excess * 0.75, null) || limited;
+        rig.worldPos(ch, chain.upper, _S);
+        excess = _S.distanceTo(target) - comfy;
+        if (excess < 0.005 * L) break;
+        limited = this._swingToward(ch, chs, chs.pivotIndex, _S, target, excess * 0.9, null) || limited;
+      }
+    } else {
+      // pelvis tilt about the root (max ~25°): the whole leg swings toward the target
+      // (a high kick leans the body back, the standing leg is re-solved by its pin)
+      rig.worldPos(ch, 0, _a);
+      _b.subVectors(_W, _a); _c.subVectors(target, _a);
+      if (_b.lengthSq() > 1e-8 && _c.lengthSq() > 1e-8) {
+        _b.normalize(); _c.normalize();
+        const ang = Math.min(Math.acos(THREE.MathUtils.clamp(_b.dot(_c), -1, 1)) * 0.4, (excess / L) * 1.2, 0.45);
+        _a.crossVectors(_b, _c);
+        if (_a.lengthSq() > 1e-10) {
+          _q.setFromAxisAngle(_a.normalize(), ang);
+          rig.rotateWorld(ch, 0, _q);
+          rig.refreshBone(ch, 0);
+        }
+      }
+    }
+    return limited;
+  }
+
+  /** turns a part (world rotation about bone `pivot`) so the point P moves up to `dist` toward `target` */
+  _swingToward(ch, ctrl, pivot, P, target, dist, snap) {
+    const rig = this.rig;
+    if (!(dist > 1e-5)) return false;
+    rig.worldPos(ch, pivot, _a);
+    _b.subVectors(P, _a);
+    const r = _b.length();
+    if (r < 1e-4) return false;
+    _c.subVectors(target, P);
+    const cl = _c.length();
+    if (cl < 1e-5) return false;
+    // wanted point: P moved toward the target, kept on the sphere of radius r about the pivot
+    _c.multiplyScalar(Math.min(dist, cl) / cl).add(P).sub(_a).setLength(r);
+    _q.setFromUnitVectors(_b.normalize(), _c.normalize());
+    if (!snap && !ctrl.coupled) {
+      const m = this._snaps || (this._snaps = new Map());
+      m.set(ctrl, snap = rig.snapshot(ch, ctrl, m.get(ctrl)));
+    }
+    const hit = rig.rotateControl(ch, ctrl, _q, snap);
+    rig.refreshControl(ch, ctrl);
+    return hit;
+  }
+
   /** Keeps the hand / foot world rotation, moving twist to the forearm / shin. */
   orientEnd(ch, chain, endQuat) {
     const rig = this.rig;
@@ -166,8 +260,7 @@ export class IKSolver {
         _b.normalize();
         _q2.setFromUnitVectors(f, _b);
         _q.slerpQuaternions(_I, _q2, share); // (target must not alias the result)
-        rig.rotateWorld(ch, ctrl.topIndex, _q);
-        limited = rig.project(ch, ctrl, snap) || limited;
+        limited = rig.rotateControl(ch, ctrl, _q, snap) || limited;
         rig.write(ch, ctrl, lat, snap.axes[lat]); // aiming never tilts the head sideways
         rig.refreshControl(ch, ctrl);
       }

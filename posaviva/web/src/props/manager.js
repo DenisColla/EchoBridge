@@ -6,7 +6,8 @@
 //   'change' {prop}  a prop's state changed (placement, params, color, hold)
 import * as THREE from 'three';
 import { Prop, freeFromContentMatrix } from './Prop.js';
-import { TYPE_BY_ID, defaultParams } from './catalog.js';
+import { TYPE_BY_ID, defaultParams, cleanParams } from './catalog.js';
+import { newSeed } from './params.js';
 import { fistFrame, wrapHand } from './grip.js';
 
 const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
@@ -29,6 +30,8 @@ export class PropManager extends THREE.EventDispatcher {
     /** @type {Prop|null} */
     this.selected = null;
     this.raycaster = new THREE.Raycaster();
+    /** room presets: dragging / turning one piece moves the whole group */
+    this.moveTogether = false;
     this._meshes = [];
     this._meshesDirty = true;
     // the pose library (hand presets) is written in parallel: feature-detect it
@@ -45,10 +48,19 @@ export class PropManager extends THREE.EventDispatcher {
     const p = new Prop(this.app.materials, state);
     if (state.grip) Object.assign(p.grip, { slide: +state.grip.slide || 0, twist: +state.grip.twist || 0, flip: !!state.grip.flip });
     p.setFree(state.pos, state.rot);
+    p.onAsync = (q) => this._onModelLoaded(q);
     this.app.world.add(p.root);
     this.props.push(p);
     this._meshesDirty = true;
     return p;
+  }
+
+  /** A realistic model finished loading (placeholder replaced): refresh picking, shadows, UI. */
+  _onModelLoaded(p) {
+    if (!this.props.includes(p)) return;
+    this._meshesDirty = true;
+    if (p.hold) this.refreshHold(p);
+    this._changed(p);
   }
 
   /**
@@ -64,10 +76,87 @@ export class PropManager extends THREE.EventDispatcher {
       const side = this.freeHand(near);
       if (side) held = this.attach(p, near, side, { pose: true, emit: false });
     }
-    if (!held) this._spawn(p, near);
+    if (!held) {
+      this._spawn(p, near);
+      // wall / ceiling items start at their usual height
+      if (Number.isFinite(type.spawnY)) p.root.position.y = type.spawnY;
+      if (type.lieRot) {
+        const D = Math.PI / 180;
+        p.root.rotation.set(type.lieRot[0] * D, p.root.rotation.y, type.lieRot[2] * D, 'YXZ');
+        this.ground(p);
+      }
+    }
     this._changed(p, 'list');
     if (select) this.select(p);
     return p;
+  }
+
+  /**
+   * Adds a furnished room preset (gen/rooms.js) as a group of props. The room
+   * is centered so that `near` (a character) stands in its open front part, or
+   * at the view center. The pieces are built over several frames (~12 ms each)
+   * so the UI never freezes; resolves with the created props.
+   */
+  async addPreset(preset, { near = null, select = true } = {}) {
+    const group = `g${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+    const base = new THREE.Vector3();
+    if (near) { near.root.updateWorldMatrix(true, false); base.setFromMatrixPosition(near.root.matrixWorld); base.z -= Math.max(0, (preset.size?.[1] || 4) / 2 - 1.1); }
+    else base.set(this.app.controls.target.x, 0, this.app.controls.target.z);
+    base.y = 0;
+    const created = [];
+    let t0 = performance.now();
+    for (const it of preset.items()) {
+      const type = TYPE_BY_ID.get(it.type);
+      if (!type) continue;
+      if (performance.now() - t0 > 12) {
+        this._meshesDirty = true;
+        this._changed(null, 'list');
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        t0 = performance.now();
+      }
+      const params = cleanParams(type, { ...defaultParams(type), ...(it.params || {}) });
+      const p = this.create({ type: it.type, params, color: it.color || type.color, group });
+      const yaw = ((it.yaw || 0) * Math.PI) / 180;
+      p.root.rotation.set(0, yaw, 0, 'YXZ');
+      p.root.position.set(0, 0, 0);
+      p.root.updateWorldMatrix(true, false);
+      // anchor the rotated footprint: ax/az = -1 min side, 0 center, 1 max side
+      p.worldBox(_box);
+      const ax = it.ax || 0, az = it.az || 0;
+      const fx = ax < 0 ? _box.min.x : ax > 0 ? _box.max.x : (_box.min.x + _box.max.x) / 2;
+      const fz = az < 0 ? _box.min.z : az > 0 ? _box.max.z : (_box.min.z + _box.max.z) / 2;
+      const [x, y, z] = it.pos || [0, 0, 0];
+      p.root.position.set(base.x + x - fx, y, base.z + z - fz);
+      created.push(p);
+    }
+    // pieces removed meanwhile (undo during the build) are dropped from the result
+    const alive = created.filter((p) => this.props.includes(p));
+    this._meshesDirty = true;
+    this._changed(null, 'list');
+    if (select && alive.length) this.select(alive.find((q) => q.type.id !== 'stanza' && q.type.id !== 'pavimento') || alive[0]);
+    return alive;
+  }
+
+  /** Props of the same group (room preset) as p, p included. */
+  groupOf(p) { return p?.group ? this.props.filter((q) => q.group === p.group) : p ? [p] : []; }
+
+  /** Removes every prop of p's group. */
+  removeGroup(p) {
+    const list = this.groupOf(p);
+    for (const q of list) { const i = this.props.indexOf(q); if (i >= 0) this.props.splice(i, 1); q.dispose(); }
+    this._meshesDirty = true;
+    if (list.includes(this.selected)) this.select(null);
+    this._changed(null, 'list');
+  }
+
+  /** Detaches p from its group (it becomes an independent prop). */
+  ungroup(p) { if (p?.group) { p.group = null; this._changed(p); } }
+
+  /** New random variant of a type with a 'seed' parameter. */
+  regenerate(p) {
+    if (!p.type.params.some((d) => d.type === 'seed')) return false;
+    this.setParams(p, { seed: newSeed() });
+    return true;
   }
 
   remove(p) {
@@ -216,10 +305,38 @@ export class PropManager extends THREE.EventDispatcher {
     return true;
   }
 
-  setYaw(p, yaw) { p.root.rotation.y = wrapAngle(yaw); this._changed(p); }
+  /** Other members of p's group when "move together" is on (room presets). */
+  _mates(p) { return this.moveTogether && p.group && !p.hold ? this.props.filter((q) => q !== p && q.group === p.group && !q.hold) : null; }
+
+  setYaw(p, yaw) {
+    const mates = this._mates(p);
+    const nyaw = wrapAngle(yaw), d = nyaw - p.root.rotation.y;
+    if (mates && Math.abs(d) > 1e-9) {
+      // the whole group turns around this prop's position
+      const c = Math.cos(d), sn = Math.sin(d), o = p.root.position;
+      for (const q of mates) {
+        const dx = q.root.position.x - o.x, dz = q.root.position.z - o.z;
+        q.root.position.x = o.x + dx * c + dz * sn;
+        q.root.position.z = o.z - dx * sn + dz * c;
+        q.root.rotation.y = wrapAngle(q.root.rotation.y + d);
+      }
+    }
+    p.root.rotation.y = nyaw;
+    this._changed(p);
+  }
   setTilt(p, x, z) { p.root.rotation.x = x; p.root.rotation.z = z; this._changed(p); }
-  setHeight(p, y) { p.root.position.y = y; this._changed(p); }
-  moveTo(p, x, z) { p.root.position.x = x; p.root.position.z = z; this._changed(p); }
+  setHeight(p, y) {
+    const mates = this._mates(p);
+    if (mates) for (const q of mates) q.root.position.y += y - p.root.position.y;
+    p.root.position.y = y;
+    this._changed(p);
+  }
+  moveTo(p, x, z) {
+    const mates = this._mates(p);
+    if (mates) for (const q of mates) { q.root.position.x += x - p.root.position.x; q.root.position.z += z - p.root.position.z; }
+    p.root.position.x = x; p.root.position.z = z;
+    this._changed(p);
+  }
 
   setScale(p, s) {
     p.scale = THREE.MathUtils.clamp(s, 0.1, 5);
@@ -444,6 +561,7 @@ export class PropManager extends THREE.EventDispatcher {
         p.scale = THREE.MathUtils.clamp(+it.scale || 1, 0.1, 5);
         const g = it.grip || {};
         Object.assign(p.grip, { slide: +g.slide || 0, twist: +g.twist || 0, flip: !!g.flip });
+        p.group = typeof it.group === 'string' ? it.group : null;
       }
       keep.add(p);
       const want = it.hold && it.hold.characterId ? { characterId: it.hold.characterId, side: it.hold.side === 'L' ? 'L' : 'R' } : null;
@@ -480,7 +598,7 @@ export class PropManager extends THREE.EventDispatcher {
   get meshes() {
     if (this._meshesDirty) {
       this._meshes.length = 0;
-      for (const p of this.props) if (p.root.visible) for (const m of p.meshes) this._meshes.push(m);
+      for (const p of this.props) if (p.root.visible) for (const m of p.meshes) if (!m.userData.noPick) this._meshes.push(m);
       this._meshesDirty = false;
     }
     return this._meshes;

@@ -184,11 +184,11 @@ function evalShape(p) {
 
 // ---------------------------------------------------------------- presets
 const PRESETS = [
-  { id: 'f_slim', label: 'Magra', sex: 'F', p: { gender: 0, muscle: 0.45, weight: 0.02, height: 0.6, proportions: 0.8, cup: 0.3, firmness: 0.6, linear: { 'bodyshapes/bodyshapes-elvs-fem-lean-column.target': 0.5 } } },
-  { id: 'f_normal', label: 'Normale', sex: 'F', p: { gender: 0, muscle: 0.5, weight: 0.42, height: 0.54, proportions: 0.72, cup: 0.55, firmness: 0.55, linear: { 'bodyshapes/bodyshapes-elvs-fem-neat-hourglass.target': 0.35 } } },
+  { id: 'f_slim', label: 'Magra', sex: 'F', p: { gender: 0, muscle: 0.5, weight: 0.02, height: 0.6, proportions: 0.8, cup: 0.3, firmness: 0.6, linear: { 'bodyshapes/bodyshapes-elvs-fem-lean-column.target': 0.5 } } },
+  { id: 'f_normal', label: 'Normale', sex: 'F', p: { gender: 0, muscle: 0.56, weight: 0.42, height: 0.54, proportions: 0.72, cup: 0.55, firmness: 0.55, linear: { 'bodyshapes/bodyshapes-elvs-fem-neat-hourglass.target': 0.35, 'stomach/stomach-tone-incr.target': 0.25 } } },
   { id: 'f_curvy', label: 'Curvy', sex: 'F', p: { gender: 0, muscle: 0.5, weight: 0.88, height: 0.52, proportions: 0.62, cup: 0.95, firmness: 0.45, linear: { 'bodyshapes/bodyshapes-elvs-fem-full-hourglass.target': 1.0, 'buttocks/buttocks-volume-incr.target': 0.7, 'hip/hip-scale-horiz-incr.target': 0.4, 'measure/measure-waist-circ-decr.target': 0.35 } } },
-  { id: 'm_slim', label: 'Magro', sex: 'M', p: { gender: 1, muscle: 0.38, weight: 0.0, height: 0.6, proportions: 0.78, linear: { 'bodyshapes/bodyshapes-elvs-man-lean-column.target': 0.5 } } },
-  { id: 'm_normal', label: 'Normale', sex: 'M', p: { gender: 1, muscle: 0.68, weight: 0.42, height: 0.57, proportions: 0.78, linear: { 'bodyshapes/bodyshapes-elvs-man-invert-triangle.target': 0.35 } } },
+  { id: 'm_slim', label: 'Magro', sex: 'M', p: { gender: 1, muscle: 0.45, weight: 0.0, height: 0.6, proportions: 0.78, linear: { 'bodyshapes/bodyshapes-elvs-man-lean-column.target': 0.5 } } },
+  { id: 'm_normal', label: 'Normale', sex: 'M', p: { gender: 1, muscle: 0.72, weight: 0.42, height: 0.57, proportions: 0.78, linear: { 'bodyshapes/bodyshapes-elvs-man-invert-triangle.target': 0.35, 'stomach/stomach-tone-incr.target': 0.35, 'torso/torso-muscle-pectoral-incr.target': 0.2 } } },
   { id: 'm_curvy', label: 'Robusto', sex: 'M', p: { gender: 1, muscle: 0.55, weight: 0.98, height: 0.52, proportions: 0.55, linear: { 'bodyshapes/bodyshapes-elvs-man-apple.target': 0.5 } } },
 ];
 
@@ -370,10 +370,11 @@ for (const [bn, list] of Object.entries(wfile.weights)) {
   const t = boneIndex.get(weightTarget(bn));
   for (const [vi, w] of list) perV[vi].set(t, (perV[vi].get(t) || 0) + w);
 }
+smoothSkinWeights(perV);
 const skinIndex = new Uint8Array(NV * 4), skinWeight = new Float32Array(NV * 4);
 let unweighted = 0;
 for (let i = 0; i < NV; i++) {
-  const e = [...perV[i].entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const e = [...perV[i].entries()].sort((a, b) => b[1] - a[1]).filter((x, k) => k === 0 || x[1] >= 0.004).slice(0, 4);
   const sum = e.reduce((s, x) => s + x[1], 0);
   if (!sum) { unweighted++; skinIndex[i * 4] = boneIndex.get('spine05'); skinWeight[i * 4] = 1; continue; }
   e.forEach(([b, w], k) => { skinIndex[i * 4 + k] = b; skinWeight[i * 4 + k] = w / sum; });
@@ -381,6 +382,251 @@ for (let i = 0; i < NV; i++) {
 console.log(`bones kept: ${boneNames.length}, unweighted verts: ${unweighted}`);
 // weights as 16-bit fractions (renormalized to sum 1 when loaded)
 meta.skin = { index: emit(skinIndex), weight: { ...emit(Uint16Array.from(skinWeight, (w) => Math.round(w * 65535))), normalized: true } };
+
+// ---------------------------------------------------------------- soft joints (weight smoothing)
+// MakeHuman's default weights switch from one bone to the next over a few cm,
+// which bends elbows, knees, shoulders and hips like hinges (a pinched crease
+// on the inside, a flattened corner outside). Here the weights are diffused
+// over the body surface (graph Laplacian = geodesic smoothing) inside a soft
+// region around each joint, widest on the inner side of a bend. Fingers, toes
+// and the face are locked; weights never cross the body midline to the other
+// side's bones. The result is renormalized; skinning still uses 4 influences.
+function smoothSkinWeights(perV) {
+  const NB = boneNames.length, P = base.v, M = 0.1; // base mesh dm -> m
+  const jp = (name) => { const l = skel.joints[name]; const p = [0, 0, 0]; for (const v of l) { p[0] += P[v * 3] * M; p[1] += P[v * 3 + 1] * M; p[2] += P[v * 3 + 2] * M; } return p.map((x) => x / l.length); };
+  const head = (b) => jp(skel.bones[b].head);
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const nrm = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  // dense weights for body vertices
+  const isBody = new Uint8Array(NV);
+  for (let f = 0; f < faceG.length; f++) if (faceG[f] === 0) for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff) isBody[v] = 1; }
+  const W = new Float32Array(NV * NB);
+  for (let v = 0; v < NV; v++) {
+    if (!isBody[v]) continue;
+    let s = 0; for (const w of perV[v].values()) s += w;
+    for (const [b, w] of perV[v]) W[v * NB + b] = w / (s || 1);
+  }
+  // adjacency (quad / triangle edges of the body)
+  const nb = Array.from({ length: NV }, () => new Set());
+  for (let f = 0; f < faceG.length; f++) {
+    if (faceG[f] !== 0) continue;
+    const q = [0, 1, 2, 3].map((k) => faceV[f * 4 + k]).filter((v) => v !== 0xffff);
+    for (let k = 0; k < q.length; k++) { const a = q[k], b = q[(k + 1) % q.length]; nb[a].add(b); nb[b].add(a); }
+  }
+  // locks: fingers, toes, face (head-dominant) keep their weights exactly
+  const idxOf = (re) => boneNames.map((n, i) => (re.test(n) ? i : -1)).filter((i) => i >= 0);
+  const fingers = idxOf(/^(finger|toe)/), headB = boneIndex.get('head');
+  const locked = new Uint8Array(NV);
+  for (let v = 0; v < NV; v++) {
+    if (!isBody[v]) { locked[v] = 1; continue; }
+    let fw = 0; for (const b of fingers) fw += W[v * NB + b];
+    if (fw > 0.02 || W[v * NB + headB] > 0.985) locked[v] = 1;
+  }
+  // regions: [joint bone, radius m, strength, inner-bend direction (unit, optional), inner boost]
+  const regions = [];
+  for (const s of SIDE) {
+    const sh = head(`upperarm01.${s}`), el = head(`lowerarm01.${s}`), wr = head(`wrist.${s}`);
+    const ua = nrm(sub(el, sh)), fa = nrm(sub(wr, el));
+    const elbowIn = nrm(sub(fa, ua.map((x) => x * dot(fa, ua)))); // where the forearm folds to (anterior)
+    regions.push([`lowerarm01.${s}`, 0.085, 0.75, elbowIn, 0.55]);
+    regions.push([`lowerarm02.${s}`, 0.10, 0.45]);
+    regions.push([`upperarm02.${s}`, 0.10, 0.4]);
+    regions.push([`upperarm01.${s}`, 0.115, 0.7, [0, -1, 0], 0.35]); // armpit side smoother than the deltoid cap
+    regions.push([`shoulder01.${s}`, 0.075, 0.5]);
+    regions.push([`clavicle.${s}`, 0.06, 0.3]);
+    regions.push([`wrist.${s}`, 0.045, 0.45]);
+    regions.push([`upperleg01.${s}`, 0.14, 0.6, [0, -0.2, 1], 0.3]); // groin crease side
+    regions.push([`upperleg02.${s}`, 0.12, 0.4]);
+    regions.push([`lowerleg01.${s}`, 0.10, 0.75, [0, 0, -1], 0.5]); // back of the knee
+    regions.push([`lowerleg02.${s}`, 0.11, 0.4]);
+    regions.push([`foot.${s}`, 0.06, 0.4]);
+  }
+  for (const b of ['spine04', 'spine03', 'spine02', 'spine01']) regions.push([b, 0.12, 0.5]);
+  regions.push(['neck01', 0.07, 0.5], ['neck02', 0.06, 0.45], ['head', 0.065, 0.45]);
+  const R = regions.map(([b, r, st, dir, boost]) => ({ c: head(b), r, st, dir, boost: boost || 0 }));
+  const S = new Float32Array(NV);
+  for (let v = 0; v < NV; v++) {
+    if (locked[v]) continue;
+    const p = [P[v * 3] * M, P[v * 3 + 1] * M, P[v * 3 + 2] * M];
+    let s = 0;
+    for (const g of R) {
+      const d = sub(p, g.c), dl = Math.hypot(...d);
+      if (dl >= g.r) continue;
+      const t = 1 - dl / g.r;
+      let k = g.st * t * t * (3 - 2 * t);
+      // inner side of a bend: wider blend (round fold); outer side: tighter (bony corner)
+      if (g.dir) k *= 1 - g.boost + g.boost * 2 * Math.max(0, Math.min(1, 0.5 + 0.5 * dot(d, g.dir) / (dl || 1)));
+      s = Math.max(s, k);
+    }
+    S[v] = Math.min(0.9, s);
+  }
+  // side of each bone (+1 left, -1 right, 0 center)
+  const side = boneNames.map((n) => (n.endsWith('.L') ? 1 : n.endsWith('.R') ? -1 : 0));
+  const active = []; for (let v = 0; v < NV; v++) if (S[v] > 0.001) active.push(v);
+  const tmp = new Float32Array(NB);
+  let A = Float32Array.from(W), B = Float32Array.from(W);
+  const ITER = 36;
+  for (let it = 0; it < ITER; it++) {
+    for (const v of active) {
+      tmp.fill(0);
+      let n = 0;
+      for (const u of nb[v]) { n++; const o = u * NB; for (let b = 0; b < NB; b++) tmp[b] += A[o + b]; }
+      const s = S[v], o = v * NB, x = P[v * 3] * M;
+      let sum = 0;
+      for (let b = 0; b < NB; b++) {
+        let w = (1 - s) * A[o + b] + (n ? s * tmp[b] / n : 0);
+        if ((side[b] > 0 && x < -0.008) || (side[b] < 0 && x > 0.008)) w = 0; // never across the midline
+        B[o + b] = w; sum += w;
+      }
+      if (sum > 0) for (let b = 0; b < NB; b++) B[o + b] /= sum;
+    }
+    [A, B] = [B, A];
+  }
+  let changed = 0, maxD = 0;
+  for (const v of active) {
+    const m = new Map();
+    let d = 0;
+    for (let b = 0; b < NB; b++) { const w = A[v * NB + b]; if (w > 1e-4) m.set(b, w); d = Math.max(d, Math.abs(w - W[v * NB + b])); }
+    if (d > 0.01) changed++;
+    maxD = Math.max(maxD, d);
+    perV[v] = m;
+  }
+  console.log(`soft joints: ${active.length} vertices smoothed, ${changed} changed by > 1% (max ${maxD.toFixed(2)})`);
+}
+
+// ---------------------------------------------------------------- pose correctives
+// Pose-space corrective shapes, applied on the CPU by Character to its rest
+// positions as functions of joint angles (see Character.flushCorrectives): biceps
+// bulge, inner-elbow volume and olecranon when the elbow flexes; kneecap and
+// back-of-knee volume when the knee bends; deltoid / trapezius bunching when the
+// arm is raised; gluteal and groin volume at hip flexion. Each corrective is a
+// sparse list of body vertices with a signed weight (Int8, x amp meters) along the
+// rest normal, generated from the geometry: limb frames from the skeleton
+// joints, angular masks around the limb axis, gated by the skin weights and
+// smoothed over the surface. Drivers:
+//   flexX  rotation of the bone about its rest X axis (hinge), degrees * sign
+//   raise  elevation of the bone's Y axis from the torso's down axis, minus rest
+{
+  const P = toM(evalShape({ gender: 0.5, muscle: 0.5, weight: 0.5, height: 0.5, proportions: 0.6 }));
+  const isBody = new Uint8Array(NV);
+  const bodyF = [];
+  for (let f = 0; f < faceG.length; f++) if (faceG[f] === 0) { bodyF.push(f); for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff) isBody[v] = 1; } }
+  const N = new Float32Array(NV * 3);
+  for (const f of bodyF) {
+    const q = [0, 1, 2, 3].map((k) => faceV[f * 4 + k]).filter((v) => v !== 0xffff);
+    const [a, b, c] = q;
+    const u = [0, 1, 2].map((k) => P[b * 3 + k] - P[a * 3 + k]), w = [0, 1, 2].map((k) => P[c * 3 + k] - P[a * 3 + k]);
+    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    for (const v of q) for (let k = 0; k < 3; k++) N[v * 3 + k] += n[k];
+  }
+  for (let v = 0; v < NV; v++) { const l = Math.hypot(N[v * 3], N[v * 3 + 1], N[v * 3 + 2]) || 1; for (let k = 0; k < 3; k++) N[v * 3 + k] /= l; }
+  const nbrs = Array.from({ length: NV }, () => new Set());
+  for (const f of bodyF) {
+    const q = [0, 1, 2, 3].map((k) => faceV[f * 4 + k]).filter((v) => v !== 0xffff);
+    for (let k = 0; k < q.length; k++) { const a = q[k], b = q[(k + 1) % q.length]; nbrs[a].add(b); nbrs[b].add(a); }
+  }
+  const jp = (name) => { const l = skel.joints[name]; const p = [0, 0, 0]; for (const v of l) for (let k = 0; k < 3; k++) p[k] += P[v * 3 + k]; return p.map((x) => x / l.length); };
+  const head = (b) => jp(skel.bones[b].head);
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const nrm = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+  const perp = (a, u) => nrm(sub(a, u.map((x) => x * dot(a, u))));
+  const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  const bump = (t, a, pk, b) => (t < pk ? sstep(a, pk, t) : 1 - sstep(pk, b, t));
+  const boneSum = (v, names) => { let s = 0; for (let k = 0; k < 4; k++) if (names.has(boneNames[skinIndex[v * 4 + k]])) s += skinWeight[v * 4 + k]; return s; };
+  /**
+   * Mask over a limb segment A->B: t along it (0..1), angular falloff around
+   * `dir` (unit, perpendicular to the segment), gated by the listed bones.
+   */
+  const limbMask = ({ A, B, t: [t0, tp, t1], dir, cmin, bones, gate = 1.5 }) => {
+    const u = nrm(sub(B, A)), L = Math.hypot(...sub(B, A)), m = new Float32Array(NV), set = new Set(bones);
+    for (let v = 0; v < NV; v++) {
+      if (!isBody[v]) continue;
+      const p = [P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], d = sub(p, A), t = dot(d, u) / L;
+      if (t < t0 || t > t1) continue;
+      const r = perp(d, u), c = dir ? dot(r, dir) : 1;
+      const g = Math.min(1, boneSum(v, set) * gate);
+      if (!g) continue;
+      m[v] = bump(t, t0, tp, t1) * (dir ? sstep(cmin, 1, c) : 1) * g;
+    }
+    return m;
+  };
+  /** Mask around a point, on the side whose normals face `dir`. */
+  const blobMask = ({ C, r, dir, cmin, bones, gate = 1.5 }) => {
+    const m = new Float32Array(NV), set = bones ? new Set(bones) : null;
+    for (let v = 0; v < NV; v++) {
+      if (!isBody[v]) continue;
+      const p = [P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], dl = Math.hypot(...sub(p, C));
+      if (dl > r) continue;
+      const n = [N[v * 3], N[v * 3 + 1], N[v * 3 + 2]];
+      const g = set ? Math.min(1, boneSum(v, set) * gate) : 1;
+      m[v] = (1 - sstep(0.35 * r, r, dl)) * (dir ? sstep(cmin, 1, dot(n, dir)) : 1) * g;
+    }
+    return m;
+  };
+  const smoothM = (m, it) => {
+    let a = m, b = new Float32Array(NV);
+    for (let k = 0; k < it; k++) {
+      for (let v = 0; v < NV; v++) { if (!isBody[v] || !nbrs[v].size) { b[v] = a[v]; continue; } let s = 0; for (const u of nbrs[v]) s += a[u]; b[v] = 0.5 * a[v] + 0.5 * s / nbrs[v].size; }
+      [a, b] = [b, a];
+    }
+    return a;
+  };
+  const combine = (parts) => { const m = new Float32Array(NV); for (const [w, mk] of parts) for (let v = 0; v < NV; v++) m[v] += w * mk[v]; return m; };
+  const list = [];
+  const push = (id, side, driver, amp, mask) => {
+    const sm = smoothM(mask, 3);
+    let mx = 0; for (let v = 0; v < NV; v++) mx = Math.max(mx, Math.abs(sm[v]));
+    const idx = [], w = [];
+    for (let v = 0; v < NV; v++) { const q = Math.round((sm[v] / (mx || 1)) * 127); if (q) { idx.push(v); w.push(q); } }
+    list.push({ id, side, driver, amp: +(amp * mx).toFixed(5), idx: emit(Uint16Array.from(idx)), w: emit(Int8Array.from(w)), count: idx.length });
+  };
+  for (const s of SIDE) {
+    const sg = s === 'L' ? 1 : -1;
+    const sh = head(`upperarm01.${s}`), el = head(`lowerarm01.${s}`), wr = head(`wrist.${s}`);
+    const ua = nrm(sub(el, sh)), fa = nrm(sub(wr, el));
+    const ant = perp(fa, ua); // where the forearm folds to: the biceps side of the upper arm
+    const antF = perp(ua.map((x) => -x), fa); // the flexor side of the forearm (faces the upper arm when bent)
+    const UA = [`upperarm01.${s}`, `upperarm02.${s}`], FA = [`lowerarm01.${s}`, `lowerarm02.${s}`];
+    // elbow flexion: biceps peak + brachialis, flexor mass, inner fold volume, olecranon; triceps lengthens
+    push(`elbow.${s}`, s, { type: 'flexX', bone: `lowerarm01.${s}`, sign: -1, from: 4, to: 95 }, 0.013, combine([
+      [1.0, limbMask({ A: sh, B: el, t: [0.3, 0.68, 1.02], dir: ant, cmin: -0.15, bones: UA })],
+      [0.45, limbMask({ A: el, B: wr, t: [-0.02, 0.2, 0.5], dir: antF, cmin: -0.3, bones: FA })],
+      [0.35, blobMask({ C: el, r: 0.06, dir: ant, cmin: 0.1 })],
+      [0.4, blobMask({ C: el.map((x, k) => x - ant[k] * 0.02 - ua[k] * 0.01), r: 0.035, dir: ant.map((x) => -x), cmin: 0.3, bones: [...UA, ...FA] })],
+      [-0.3, limbMask({ A: sh, B: el, t: [0.25, 0.6, 0.95], dir: ant.map((x) => -x), cmin: 0.2, bones: UA })],
+    ]));
+    // knee flexion: kneecap stays prominent, back of the knee keeps its volume (calf / hamstrings)
+    const hp = head(`upperleg01.${s}`), kn = head(`lowerleg01.${s}`), an = head(`foot.${s}`);
+    const th = nrm(sub(kn, hp)), sn = nrm(sub(an, kn));
+    const front = perp([0, 0, 1], th), back = front.map((x) => -x);
+    const UL = [`upperleg01.${s}`, `upperleg02.${s}`], LL = [`lowerleg01.${s}`, `lowerleg02.${s}`];
+    push(`knee.${s}`, s, { type: 'flexX', bone: `lowerleg01.${s}`, sign: -1, from: 4, to: 115 }, 0.010, combine([
+      [1.0, blobMask({ C: kn.map((x, k) => x + front[k] * 0.03 + th[k] * 0.012), r: 0.06, dir: front, cmin: 0.2 })],
+      [0.8, blobMask({ C: kn.map((x, k) => x + back[k] * 0.025), r: 0.08, dir: back, cmin: 0.0 })],
+      [0.6, limbMask({ A: kn, B: an, t: [0.02, 0.22, 0.5], dir: perp(back, sn), cmin: -0.2, bones: LL })],
+      [0.4, limbMask({ A: hp, B: kn, t: [0.55, 0.85, 1.05], dir: perp(back, th), cmin: 0.0, bones: UL })],
+    ]));
+    // arm raised: deltoid bunches over the shoulder, upper trapezius rises
+    const cl = head(`clavicle.${s}`), sp = head(`shoulder01.${s}`);
+    const up = [0, 1, 0], out = [sg, 0, 0];
+    push(`shoulder.${s}`, s, { type: 'raise', bone: `upperarm01.${s}`, from: 8, to: 105 }, 0.011, combine([
+      [1.0, blobMask({ C: sh.map((x, k) => x + up[k] * 0.025 + out[k] * 0.01), r: 0.085, dir: nrm([sg * 0.6, 0.8, 0]), cmin: -0.1, bones: [...UA, `shoulder01.${s}`, `clavicle.${s}`] })],
+      [0.5, limbMask({ A: sh, B: el, t: [-0.05, 0.18, 0.5], dir: perp(up, ua), cmin: -0.2, bones: UA })],
+      [0.45, blobMask({ C: cl.map((x, k) => (x + sp[k]) / 2 + up[k] * 0.03), r: 0.07, dir: up, cmin: 0.2, bones: [`clavicle.${s}`, `shoulder01.${s}`, 'neck01', 'spine01'] })],
+    ]));
+    // hip flexion: buttock keeps its round volume, groin fold keeps out of the belly
+    const pel = [`pelvis.${s}`, ...UL, 'root', 'spine05'];
+    push(`hip.${s}`, s, { type: 'flexX', bone: `upperleg01.${s}`, sign: 1, from: 6, to: 100 }, 0.013, combine([
+      [1.0, blobMask({ C: hp.map((x, k) => x + [0, -0.05, -0.07][k] + out[k] * 0.01), r: 0.12, dir: [0, -0.25, -1].map((x) => x / Math.hypot(0.25, 1)), cmin: 0.1, bones: pel })],
+      [0.35, blobMask({ C: hp.map((x, k) => x + [0, -0.01, 0.06][k]), r: 0.07, dir: nrm([0, 0.3, 1]), cmin: 0.2, bones: pel })],
+    ]));
+  }
+  // reference upper-arm length of the shape the masks were built on (amplitudes scale with body size)
+  meta.correctives = { version: 1, list, refArm: +Math.hypot(...sub(head('lowerarm01.L'), head('upperarm01.L'))).toFixed(4) };
+  console.log(`correctives: ${list.map((c) => `${c.id}:${c.count}`).join(' ')}`);
+}
 
 // ---------------------------------------------------------------- eyes proxy
 {
@@ -587,6 +833,288 @@ import zlib from 'node:zlib';
   const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
   fs.writeFileSync(path.join(OUT, 'skin.png'), png);
   console.log(`skin.png ${(png.length / 1e3).toFixed(0)} KB`);
+}
+
+// ---------------------------------------------------------------- anatomical normal maps
+// Tangent-space normal maps in body UV space with muscle and bony relief, one per
+// sex: skin_normal.png (female; also the generic fallback) and skin_normal_m.png
+// (male). The relief is the band-passed displacement, along the normal, from the
+// average shape to muscular / lean / toned MakeHuman shapes: the local form of
+// pectorals, abs, serratus, deltoids, arm and leg muscles, clavicles, scapulae,
+// ribs, kneecaps … without their volume (the silhouette keeps the preset shape).
+// It is baked as the normals of the displaced mesh expressed in each render
+// vertex's UV tangent frame (smooth, no faceting), plus fine procedural relief
+// (knuckles, hand/foot tendons, kneecap rim) as a texel height map.
+// three.js builds the TBN from screen-space UV derivatives, so the frame used
+// here is (dP/du, dP/dv, N) orthogonalized against N; image row 0 is v = 1.
+{
+  const SIZE = 1024;
+  const t0 = Date.now();
+  const bodyF = [];
+  const isBody = new Uint8Array(NV);
+  for (let f = 0; f < faceG.length; f++) if (faceG[f] === 0) { bodyF.push(f); for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff) isBody[v] = 1; } }
+  // vertex adjacency (CSR) over body edges
+  const adjS = Array.from({ length: NV }, () => new Set());
+  for (const f of bodyF) {
+    const q = [0, 1, 2, 3].map((k) => faceV[f * 4 + k]).filter((v) => v !== 0xffff);
+    for (let k = 0; k < q.length; k++) { const a = q[k], b = q[(k + 1) % q.length]; adjS[a].add(b); adjS[b].add(a); }
+  }
+  const aOff = new Uint32Array(NV + 1);
+  for (let v = 0; v < NV; v++) aOff[v + 1] = aOff[v] + adjS[v].size;
+  const aList = new Uint32Array(aOff[NV]);
+  for (let v = 0; v < NV; v++) { let k = aOff[v]; for (const u of adjS[v]) aList[k++] = u; }
+  /** Jacobi Laplacian smoothing of a scalar field over the body surface. */
+  const smoothField = (h, iters, lam = 0.5) => {
+    let a = Float32Array.from(h), b = new Float32Array(NV);
+    for (let it = 0; it < iters; it++) {
+      for (let v = 0; v < NV; v++) {
+        const n = aOff[v + 1] - aOff[v];
+        if (!isBody[v] || !n) { b[v] = a[v]; continue; }
+        let s = 0; for (let k = aOff[v]; k < aOff[v + 1]; k++) s += a[aList[k]];
+        b[v] = (1 - lam) * a[v] + lam * s / n;
+      }
+      [a, b] = [b, a];
+    }
+    return a;
+  };
+  const band = (h, lo, hi) => { const s1 = smoothField(h, lo), s2 = smoothField(h, hi); for (let v = 0; v < NV; v++) s1[v] -= s2[v]; return s1; };
+  /** Area-weighted vertex normals over body faces. */
+  const vnormals = (P) => {
+    const N = new Float32Array(NV * 3);
+    for (const f of bodyF) {
+      const a = faceV[f * 4], b = faceV[f * 4 + 1], c = faceV[f * 4 + 2], d = faceV[f * 4 + 3];
+      const p = (i, k) => P[i * 3 + k];
+      let ux, uy, uz, vx, vy, vz;
+      if (d !== 0xffff) { ux = p(c, 0) - p(a, 0); uy = p(c, 1) - p(a, 1); uz = p(c, 2) - p(a, 2); vx = p(d, 0) - p(b, 0); vy = p(d, 1) - p(b, 1); vz = p(d, 2) - p(b, 2); }
+      else { ux = p(b, 0) - p(a, 0); uy = p(b, 1) - p(a, 1); uz = p(b, 2) - p(a, 2); vx = p(c, 0) - p(a, 0); vy = p(c, 1) - p(a, 1); vz = p(c, 2) - p(a, 2); }
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      for (const v of [a, b, c, d]) if (v !== 0xffff) { N[v * 3] += nx; N[v * 3 + 1] += ny; N[v * 3 + 2] += nz; }
+    }
+    for (let v = 0; v < NV; v++) { const l = Math.hypot(N[v * 3], N[v * 3 + 1], N[v * 3 + 2]) || 1; N[v * 3] /= l; N[v * 3 + 1] /= l; N[v * 3 + 2] /= l; }
+    return N;
+  };
+  const headB = boneIndex.get('head');
+  const boneW = (v, re) => { let w = 0; for (let k = 0; k < 4; k++) if (re.test(boneNames[skinIndex[v * 4 + k]])) w += skinWeight[v * 4 + k]; return w; };
+  // face / skull: no body relief (expressions own the face); soft border on the neck
+  const faceMask = new Float32Array(NV);
+  for (let v = 0; v < NV; v++) { let w = 0; for (let k = 0; k < 4; k++) if (skinIndex[v * 4 + k] === headB) w += skinWeight[v * 4 + k]; faceMask[v] = w; }
+  const keep = smoothField(faceMask, 4).map((w) => 1 - Math.min(1, Math.max(0, (w - 0.25) / 0.5)));
+  const fingerW = new Float32Array(NV);
+  for (let v = 0; v < NV; v++) fingerW[v] = boneW(v, /^(finger|metacarpal|toe)/);
+
+  const tgt = (rels) => { const d = new Float64Array(NV * 3); for (const r of rels) addTarget(d, r, 1); return Float32Array.from(d, (x) => x * DM2M); };
+  const along = (D, N) => { const h = new Float32Array(NV); for (let v = 0; v < NV; v++) h[v] = D[v * 3] * N[v * 3] + D[v * 3 + 1] * N[v * 3 + 1] + D[v * 3 + 2] * N[v * 3 + 2]; return h; };
+  const minus = (A, B) => { const o = new Float32Array(A.length); for (let i = 0; i < A.length; i++) o[i] = A[i] - B[i]; return o; };
+  const sides = (rel) => [rel.replace('{s}', 'l'), rel.replace('{s}', 'r')];
+  const TONE = [
+    'stomach/stomach-tone-incr.target', 'pelvis/pelvis-tone-incr.target', 'torso/torso-muscle-pectoral-incr.target', 'torso/torso-muscle-dorsi-incr.target',
+    ...sides('armslegs/{s}-upperarm-muscle-incr.target'), ...sides('armslegs/{s}-lowerarm-muscle-incr.target'), ...sides('armslegs/{s}-upperarm-shoulder-muscle-incr.target'),
+    ...sides('armslegs/{s}-upperleg-muscle-incr.target'), ...sides('armslegs/{s}-lowerleg-muscle-incr.target'),
+  ];
+  const toneD = tgt(TONE);
+
+  // ---- per-sex relief (m along the normal)
+  const relief = (g) => {
+    const avg = { gender: g, muscle: 0.5, weight: 0.5, height: 0.5, proportions: 0.6, cup: 0.5, firmness: 0.5 };
+    const P0 = toM(evalShape(avg)), N0 = vnormals(P0);
+    const leanP = toM(evalShape({ ...avg, muscle: 0.5, weight: 0 }));
+    const musc = along(minus(toM(evalShape({ ...avg, muscle: 1, weight: 0 })), leanP), N0); // muscle growth on a lean body
+    const lean = along(minus(leanP, P0), N0); // fat loss: bony landmarks
+    const tone = along(toneD, N0);
+    const bm = band(musc, 2, 12), bl = band(lean, 2, 12), bt = band(tone, 2, 16);
+    const h = new Float32Array(NV);
+    const kM = g ? 1.2 : 1.45, kL = g ? 0.6 : 0.95, kT = g ? 0.7 : 0.75;
+    // soft limit (nipples, navel, genitals carry the largest offsets): |h| < ~7 mm
+    for (let v = 0; v < NV; v++) h[v] = isBody[v] ? 0.007 * Math.tanh(keep[v] * (kM * bm[v] + kL * bl[v] + kT * bt[v]) / 0.007) : 0;
+    if (process.env.DEBUG_RELIEF) {
+      for (const [nm, f] of [['musc', bm], ['lean', bl], ['tone', bt], ['all', h]]) debugField(f, `${process.env.DEBUG_RELIEF}/relief-${g ? 'm' : 'f'}-${nm}.png`);
+      debugField(Float32Array.from({ length: NV }, (_, v) => N0[v * 3 + 2] * 0.006), `${process.env.DEBUG_RELIEF}/front-${g}.png`);
+      debugField(Float32Array.from({ length: NV }, (_, v) => (P0[v * 3 + 1] - 0.4) * 0.006 / 0.8), `${process.env.DEBUG_RELIEF}/height-${g}.png`);
+    }
+    return { P0, N0, h: smoothField(h, 1, 0.3) };
+  };
+
+  // ---- fine relief (texel height, m) from the skeleton: knuckles, extensor tendons, kneecap rim
+  const fine = (P0) => {
+    const jp = (name) => { const l = skel.joints[name]; const p = [0, 0, 0]; for (const v of l) for (let k = 0; k < 3; k++) p[k] += P0[v * 3 + k]; return p.map((x) => x / l.length); };
+    const segs = []; // [a, b, radius, height, kind]
+    for (const s of SIDE) {
+      for (let f = 2; f <= 5; f++) {
+        const k = jp(`finger${f}-1.${s}____head`), w = jp(`wrist.${s}____head`);
+        segs.push({ a: w, b: k, r: 0.0032, hgt: 0.0010, t0: 0.25, t1: 0.92, depth: 0.03 }); // extensor tendon on the back of the hand
+        segs.push({ a: k, b: k, r: 0.0065, hgt: 0.0016, dot: true, depth: 0.03 }); // knuckle
+        for (let j = 2; j <= 3; j++) { const q = jp(`finger${f}-${j}.${s}____head`); segs.push({ a: q, b: q, r: 0.0042, hgt: 0.0007, dot: true, depth: 0.02 }); }
+      }
+      const fk = jp(`finger1-2.${s}____head`); segs.push({ a: fk, b: fk, r: 0.005, hgt: 0.0008, dot: true, depth: 0.025 });
+      for (let f = 1; f <= 5; f++) { const ft = jp(`toe${f}-1.${s}____head`), an = jp(`foot.${s}____head`); segs.push({ a: an, b: ft, r: 0.0034, hgt: 0.0009, t0: 0.3, t1: 0.85, depth: 0.045 }); }
+      const kn = jp(`lowerleg01.${s}____head`), an = jp(`foot.${s}____head`), hp = jp(`upperleg01.${s}____head`);
+      // tibia crest (shin) and Achilles tendon
+      segs.push({ a: kn, b: an, r: 0.006, hgt: 0.0012, t0: 0.12, t1: 0.8, front: true, depth: 0.06 });
+      segs.push({ a: an, b: kn, r: 0.007, hgt: 0.0012, t0: 0.05, t1: 0.35, back: true, depth: 0.075 });
+      segs.push({ knee: true, c: kn, up: [hp[0] - kn[0], hp[1] - kn[1], hp[2] - kn[2]] });
+    }
+    return (X, n, out) => {
+      let hsum = 0;
+      for (const s of segs) {
+        if (s.knee) {
+          // patella: raised rounded plate on the front of the knee with a soft rim
+          const L = Math.hypot(...s.up), u = s.up.map((x) => x / L);
+          const d = [X[0] - s.c[0], X[1] - s.c[1], X[2] - s.c[2]];
+          const along = d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+          const front = n[2];
+          if (front < 0.2 || Math.hypot(...d) > 0.12) continue;
+          const lat = Math.hypot(d[0] - u[0] * along, 0);
+          const e = ((along - 0.012) / 0.03) ** 2 + (lat / 0.026) ** 2;
+          hsum += 0.0022 * Math.exp(-e * 1.6) * Math.min(1, (front - 0.2) / 0.4);
+          continue;
+        }
+        const ab = [s.b[0] - s.a[0], s.b[1] - s.a[1], s.b[2] - s.a[2]], ll = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2;
+        let t = ll ? ((X[0] - s.a[0]) * ab[0] + (X[1] - s.a[1]) * ab[1] + (X[2] - s.a[2]) * ab[2]) / ll : 0;
+        let fade = 1;
+        if (!s.dot) { if (t < s.t0 || t > s.t1) continue; const m = Math.min(t - s.t0, s.t1 - t) / 0.08; fade = Math.min(1, m); }
+        t = Math.max(0, Math.min(1, t));
+        const q = [s.a[0] + ab[0] * t, s.a[1] + ab[1] * t, s.a[2] + ab[2] * t];
+        // distance to the axis measured on the surface: drop the component along the normal
+        const d = [X[0] - q[0], X[1] - q[1], X[2] - q[2]];
+        const dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+        if (dn < 0 || dn > s.depth) continue; // skin right over the axis, on its outer side
+        if (s.front && n[2] < 0.3) continue;
+        if (s.back && n[2] > -0.3) continue;
+        const dt = Math.hypot(d[0] - n[0] * dn, d[1] - n[1] * dn, d[2] - n[2] * dn);
+        if (dt > s.r * 3) continue;
+        hsum += s.hgt * fade * Math.exp(-((dt / s.r) ** 2));
+      }
+      out[0] = hsum;
+    };
+  };
+
+  /** debug: a per-vertex field rasterized in UV space as grey (±6 mm). */
+  const debugField = (f, file) => {
+    const S = 512, im = new Uint8Array(S * S * 4).fill(255);
+    for (const fc of bodyF) {
+      const r = [faceRV[fc * 4], faceRV[fc * 4 + 1], faceRV[fc * 4 + 2], faceRV[fc * 4 + 3]];
+      for (const [a, b, c] of r[3] !== 0xffff ? [[r[0], r[1], r[2]], [r[0], r[2], r[3]]] : [[r[0], r[1], r[2]]]) {
+        const P = [a, b, c].map((x) => [rvUV[x * 2] * S, (1 - rvUV[x * 2 + 1]) * S, f[rv2v[x]]]);
+        const den = (P[1][1] - P[2][1]) * (P[0][0] - P[2][0]) + (P[2][0] - P[1][0]) * (P[0][1] - P[2][1]);
+        if (Math.abs(den) < 1e-9) continue;
+        for (let y = Math.floor(Math.min(P[0][1], P[1][1], P[2][1])); y <= Math.ceil(Math.max(P[0][1], P[1][1], P[2][1])); y++) for (let x = Math.floor(Math.min(P[0][0], P[1][0], P[2][0])); x <= Math.ceil(Math.max(P[0][0], P[1][0], P[2][0])); x++) {
+          if (x < 0 || y < 0 || x >= S || y >= S) continue;
+          const l1 = ((P[1][1] - P[2][1]) * (x - P[2][0]) + (P[2][0] - P[1][0]) * (y - P[2][1])) / den, l2 = ((P[2][1] - P[0][1]) * (x - P[2][0]) + (P[0][0] - P[2][0]) * (y - P[2][1])) / den, l3 = 1 - l1 - l2;
+          if (l1 < 0 || l2 < 0 || l3 < 0) continue;
+          const val = l1 * P[0][2] + l2 * P[1][2] + l3 * P[2][2];
+          const g8 = Math.max(0, Math.min(255, Math.round(128 + val / 0.006 * 127)));
+          const o = (y * S + x) * 4; im[o] = im[o + 1] = im[o + 2] = g8;
+        }
+      }
+    }
+    writePNG(file, S, S, im);
+  };
+  const bake = (g, file) => {
+    const { P0, N0, h } = relief(g);
+    // displaced surface normals (the relief at vertex resolution)
+    const P1 = new Float32Array(NV * 3);
+    for (let v = 0; v < NV; v++) for (let k = 0; k < 3; k++) P1[v * 3 + k] = P0[v * 3 + k] + N0[v * 3 + k] * h[v];
+    const N1 = vnormals(P1);
+    // UV tangent frame per render vertex
+    const NR = rv2v.length, Tu = new Float64Array(NR * 3), Tv = new Float64Array(NR * 3);
+    const tris = [];
+    for (const f of bodyF) {
+      const r = [faceRV[f * 4], faceRV[f * 4 + 1], faceRV[f * 4 + 2], faceRV[f * 4 + 3]];
+      tris.push([r[0], r[1], r[2]]); if (r[3] !== 0xffff) tris.push([r[0], r[2], r[3]]);
+    }
+    const triT = new Float32Array(tris.length * 2); // |dP/du|, |dP/dv| per triangle (m per UV unit)
+    tris.forEach(([a, b, c], ti) => {
+      const pa = rv2v[a] * 3, pb = rv2v[b] * 3, pc = rv2v[c] * 3;
+      const e1 = [P0[pb] - P0[pa], P0[pb + 1] - P0[pa + 1], P0[pb + 2] - P0[pa + 2]], e2 = [P0[pc] - P0[pa], P0[pc + 1] - P0[pa + 1], P0[pc + 2] - P0[pa + 2]];
+      const du1 = rvUV[b * 2] - rvUV[a * 2], dv1 = rvUV[b * 2 + 1] - rvUV[a * 2 + 1], du2 = rvUV[c * 2] - rvUV[a * 2], dv2 = rvUV[c * 2 + 1] - rvUV[a * 2 + 1];
+      const det = du1 * dv2 - du2 * dv1;
+      if (Math.abs(det) < 1e-12) return;
+      const r = 1 / det;
+      const tu = [0, 1, 2].map((k) => (e1[k] * dv2 - e2[k] * dv1) * r), tv = [0, 1, 2].map((k) => (e2[k] * du1 - e1[k] * du2) * r);
+      triT[ti * 2] = Math.hypot(...tu); triT[ti * 2 + 1] = Math.hypot(...tv);
+      for (const x of [a, b, c]) for (let k = 0; k < 3; k++) { Tu[x * 3 + k] += tu[k]; Tv[x * 3 + k] += tv[k]; }
+    });
+    const TS = new Float32Array(NR * 3), RB = new Float32Array(NR * 9); // tangent-space detail normal; frame (T, B, N)
+    for (let r = 0; r < NR; r++) {
+      const v = rv2v[r], n = [N0[v * 3], N0[v * 3 + 1], N0[v * 3 + 2]];
+      let t = [Tu[r * 3], Tu[r * 3 + 1], Tu[r * 3 + 2]];
+      let dn = t[0] * n[0] + t[1] * n[1] + t[2] * n[2]; t = t.map((x, k) => x - n[k] * dn); let l = Math.hypot(...t) || 1; t = t.map((x) => x / l);
+      // bitangent exactly as three.js builds it from a tangent attribute: cross(N, T) * w
+      let b = [n[1] * t[2] - n[2] * t[1], n[2] * t[0] - n[0] * t[2], n[0] * t[1] - n[1] * t[0]];
+      if (b[0] * Tv[r * 3] + b[1] * Tv[r * 3 + 1] + b[2] * Tv[r * 3 + 2] < 0) b = b.map((x) => -x);
+      const m = [N1[v * 3], N1[v * 3 + 1], N1[v * 3 + 2]];
+      TS[r * 3] = m[0] * t[0] + m[1] * t[1] + m[2] * t[2];
+      TS[r * 3 + 1] = m[0] * b[0] + m[1] * b[1] + m[2] * b[2];
+      TS[r * 3 + 2] = m[0] * n[0] + m[1] * n[1] + m[2] * n[2];
+      RB.set([...t, ...b, ...n], r * 9);
+    }
+    // rasterize: interpolated detail normal, 3D position, normal and UV scale per texel
+    const S = SIZE, img = new Float32Array(S * S * 3), pos = new Float32Array(S * S * 3), nrm = new Float32Array(S * S * 3), scl = new Float32Array(S * S * 2), cov = new Uint8Array(S * S);
+    const fineH = fine(P0);
+    tris.forEach(([ra, rb, rc], ti) => {
+      const ua = rvUV[ra * 2] * S, va = (1 - rvUV[ra * 2 + 1]) * S, ub = rvUV[rb * 2] * S, vb = (1 - rvUV[rb * 2 + 1]) * S, uc = rvUV[rc * 2] * S, vc = (1 - rvUV[rc * 2 + 1]) * S;
+      const minX = Math.max(0, Math.floor(Math.min(ua, ub, uc)) - 1), maxX = Math.min(S - 1, Math.ceil(Math.max(ua, ub, uc)) + 1);
+      const minY = Math.max(0, Math.floor(Math.min(va, vb, vc)) - 1), maxY = Math.min(S - 1, Math.ceil(Math.max(va, vb, vc)) + 1);
+      const den = (vb - vc) * (ua - uc) + (uc - ub) * (va - vc);
+      if (Math.abs(den) < 1e-9) return;
+      const A = rv2v[ra], B = rv2v[rb], C = rv2v[rc];
+      for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+        const px = x + 0.5, py = y + 0.5;
+        const l1 = ((vb - vc) * (px - uc) + (uc - ub) * (py - vc)) / den, l2 = ((vc - va) * (px - uc) + (ua - uc) * (py - vc)) / den, l3 = 1 - l1 - l2;
+        if (l1 < -0.01 || l2 < -0.01 || l3 < -0.01) continue;
+        const o = y * S + x;
+        for (let k = 0; k < 3; k++) {
+          img[o * 3 + k] = l1 * TS[ra * 3 + k] + l2 * TS[rb * 3 + k] + l3 * TS[rc * 3 + k];
+          pos[o * 3 + k] = l1 * P0[A * 3 + k] + l2 * P0[B * 3 + k] + l3 * P0[C * 3 + k];
+          nrm[o * 3 + k] = l1 * N0[A * 3 + k] + l2 * N0[B * 3 + k] + l3 * N0[C * 3 + k];
+        }
+        scl[o * 2] = triT[ti * 2]; scl[o * 2 + 1] = triT[ti * 2 + 1];
+        cov[o] = 1;
+      }
+    });
+    // fine relief: texel heights -> slopes in the UV frame (central differences inside an island)
+    const H = new Float32Array(S * S), tmp = [0];
+    for (let o = 0; o < S * S; o++) if (cov[o]) { fineH([pos[o * 3], pos[o * 3 + 1], pos[o * 3 + 2]], [nrm[o * 3], nrm[o * 3 + 1], nrm[o * 3 + 2]], tmp); H[o] = tmp[0]; }
+    for (let y = 1; y < S - 1; y++) for (let x = 1; x < S - 1; x++) {
+      const o = y * S + x;
+      if (!cov[o] || !scl[o * 2]) continue;
+      const hx0 = cov[o - 1] ? H[o - 1] : H[o], hx1 = cov[o + 1] ? H[o + 1] : H[o];
+      const hy0 = cov[o - S] ? H[o - S] : H[o], hy1 = cov[o + S] ? H[o + S] : H[o];
+      // per texel: du = 1/S -> |dP/du|/S meters; image y grows as v decreases
+      const sx = (hx1 - hx0) / (2 * scl[o * 2] / S), sy = -(hy1 - hy0) / (2 * scl[o * 2 + 1] / S);
+      img[o * 3] -= sx; img[o * 3 + 1] -= sy;
+    }
+    // dilate islands (mip-mapping / filtering at seams)
+    for (let it = 0; it < 6; it++) {
+      const add = [];
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+        const o = y * S + x; if (cov[o]) continue;
+        const s = [0, 0, 0]; let n = 0;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= S || yy >= S) continue; const q = yy * S + xx; if (cov[q] === 1) { s[0] += img[q * 3]; s[1] += img[q * 3 + 1]; s[2] += img[q * 3 + 2]; n++; } }
+        if (n) add.push([o, s.map((c) => c / n)]);
+      }
+      for (const [o, c] of add) { img[o * 3] = c[0]; img[o * 3 + 1] = c[1]; img[o * 3 + 2] = c[2]; cov[o] = 2; }
+      for (const [o] of add) cov[o] = 1;
+    }
+    const rgba = new Uint8Array(S * S * 4);
+    let maxSlope = 0;
+    for (let o = 0; o < S * S; o++) {
+      let x = 0, y = 0, z = 1;
+      if (cov[o]) {
+        x = img[o * 3]; y = img[o * 3 + 1]; z = Math.max(0.2, img[o * 3 + 2]); const l = Math.hypot(x, y, z); x /= l; y /= l; z /= l;
+        // tilt limit (45 deg): normalScale multiplies x/y at runtime
+        const sl = Math.hypot(x, y); if (sl > 0.707) { x *= 0.707 / sl; y *= 0.707 / sl; z = 0.707; }
+        maxSlope = Math.max(maxSlope, Math.hypot(x, y));
+      }
+      rgba[o * 4] = Math.round((x * 0.5 + 0.5) * 255); rgba[o * 4 + 1] = Math.round((y * 0.5 + 0.5) * 255); rgba[o * 4 + 2] = Math.round((z * 0.5 + 0.5) * 255); rgba[o * 4 + 3] = 255;
+    }
+    writePNG(path.join(OUT, file), S, S, rgba);
+    let hmin = 0, hmax = 0; for (const x of h) { hmin = Math.min(hmin, x); hmax = Math.max(hmax, x); }
+    console.log(`${file}: ${S}x${S}, relief ${(hmin * 1000).toFixed(1)}..${(hmax * 1000).toFixed(1)} mm, max tilt ${(Math.asin(Math.min(1, maxSlope)) * 180 / Math.PI).toFixed(0)} deg, ${(fs.statSync(path.join(OUT, file)).size / 1e3).toFixed(0)} KB`);
+  };
+  bake(0, 'skin_normal.png');
+  bake(1, 'skin_normal_m.png');
+  console.log(`normal maps baked in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 }
 
 // ---------------------------------------------------------------- PNG helpers

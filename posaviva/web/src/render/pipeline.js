@@ -20,9 +20,9 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import {
   MAX_INK_RADIUS, makePrepassMaterial, makeEdgeMaterial, makeHDistMaterial, makeInkMaterial,
-  makeAOMultiplyMaterial, makeBackgroundMaterial, makeOutputMaterial, setOutputToneMapping,
+  makeAOMultiplyMaterial, makeBackgroundMaterial, makeOutputMaterial, setOutputToneMapping, SKIN_ID0,
 } from './shaders.js';
-import { inkLinePx } from './materials.js';
+import { inkLinePx, inkColorLinear } from './materials.js';
 
 const _size = new THREE.Vector2();
 const _color = new THREE.Color();
@@ -67,6 +67,7 @@ export class RenderPipeline {
     this.opts = {
       ink: false, inkWidth: 1.5, inkColor: '#111111', inkOpacity: 1, crease: 0.5,
       ao: false, aoIntensity: 0.85, aoScale: 0.5, aoSamples: 12, aoRadius: 0.32,
+      skinWarm: 0, // warm (subsurface) tint of the AO on skin, 0..1 (set per style)
       bg: { type: 'solid', color: '#2a2c33', top: '#4b5262', bottom: '#1d1f25' },
       shadowMapSize: 2048,
     };
@@ -87,7 +88,7 @@ export class RenderPipeline {
 
     // per-mesh G-buffer materials & ids
     this._pp = new WeakMap();
-    this._ids = { regular: 0, folds: 0, contour: 0 };
+    this._ids = { regular: 0, folds: 0, contour: 0, skin: 0 };
 
     // reusable per-frame lists
     this.content = []; this.grounds = []; this.helpers = [];
@@ -183,7 +184,8 @@ export class RenderPipeline {
 
   /**
    * Object ids encode which inner lines an object gets (see the edge shader):
-   *   1..95    regular  — contours + sharp creases (bodies, props)
+   *   1..95    regular  — contours + sharp creases (props 1..63, skin bodies 64..95: the AO
+   *                       passes give skin a warm occlusion)
    *   96..127  folds    — also curvature "valley" lines (garment wrinkles, geometric or normal-mapped)
    *   128..254 contour  — outlines and overlaps only: eyeballs (the concave iris must not draw
    *                       lines) and hair (creases between strand cards only make short,
@@ -201,7 +203,8 @@ export class RenderPipeline {
     }
     if (kind === 'eye' || kind === 'hair') return 128 + (c.contour++ % 127);
     if (kind === 'cloth') return 96 + (c.folds++ % 32);
-    return 1 + (c.regular++ % 95);
+    if (kind === 'skin') return SKIN_ID0 + (c.skin++ % (96 - SKIN_ID0));
+    return 1 + (c.regular++ % (SKIN_ID0 - 1));
   }
 
   /** Renders view normals + ids + depth of the content into set.gbuf. */
@@ -270,6 +273,7 @@ export class RenderPipeline {
     u.tAO.value = g.gtaoMap; u.tAODepth.value = set.gbuf.depthTexture;
     u.aoSize.value.set(g.width, g.height);
     u.aoNear.value = camera.near; u.aoFar.value = camera.far;
+    u.tAOId.value = set.gbuf.texture; u.skinWarm.value = this.opts.skinWarm;
   }
 
   /** Multiplies the canvas by the AO of `set`. */
@@ -354,7 +358,8 @@ export class RenderPipeline {
     set.ensure(_size.x, _size.y);
     const pxScale = renderer.getPixelRatio();
     this._classify(scene);
-    inkLinePx.value = 2 * this._inkRadii(pxScale).rC; // lines drawn by materials (ink eyes)
+    inkLinePx.value = 2 * this._inkRadii(pxScale).rC; // lines drawn by materials (ink eyes, anatomy)
+    inkColorLinear.value.set(o.inkColor);
 
     // GTAO needs half-float targets: without color-buffer-float support AO is skipped
     const useAO = o.ao && !this.suspendAO && this.floatTargets;
@@ -461,6 +466,7 @@ export class RenderPipeline {
     const o = this.opts;
     this._classify(scene);
     inkLinePx.value = 2 * this._inkRadii(pxScale).rC;
+    inkColorLinear.value.set(o.inkColor);
 
     const useAO = o.ao && this.floatTargets;
     const usePre = o.ink || useAO;

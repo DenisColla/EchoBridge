@@ -307,6 +307,8 @@ export function openSettings(ctx) {
       h('div', { class: 'pv-io-setting-row static' }, icon('globe', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Lingua dell\'app'), h('small', {}, 'Altre lingue in arrivo')), h('span', { class: 'pv-io-setting-value' }, 'Italiano')),
     ]),
     section('Aiuto', [
+      h('div', { class: 'pv-io-setting-row' }, icon('help', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Guida'), h('small', {}, 'Istruzioni passo per passo di tutte le funzioni')),
+        button({ label: 'Apri', small: true, onClick: () => { m.close(null); ctx.actions.openGuide(); } })),
       h('div', { class: 'pv-io-setting-row' }, icon('bookOpen', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Tutorial iniziale'), h('small', {}, 'Rivedi le schede di benvenuto e riattiva i suggerimenti')),
         button({ label: 'Ripristina', small: true, onClick: () => { m.close(null); ctx.actions.restartTutorial(); } })),
     ]),
@@ -357,7 +359,9 @@ export function openInfo(ctx) {
         h('li', {}, icon('tap', 20), h('span', {}, h('b', {}, 'Tocca'), ' una parte del corpo per selezionarla')),
         h('li', {}, icon('rotate', 20), h('span', {}, h('b', {}, 'Trascina gli anelli'), ' per ruotare l\'articolazione')),
         h('li', {}, icon('orbit', 20), h('span', {}, h('b', {}, 'Un dito'), ' sullo sfondo per girare attorno alla scena')),
-        h('li', {}, icon('pinch', 20), h('span', {}, h('b', {}, 'Due dita'), ' per spostare e zoomare'))),
+        h('li', {}, icon('pinch', 20), h('span', {}, h('b', {}, 'Due dita'), ' per spostare e zoomare')),
+        h('li', {}, icon('zoom', 20), h('span', {}, h('b', {}, 'Zoom rapido'), ' (in basso a destra) per inquadrare testa, mani o piedi'))),
+      button({ label: 'Apri la guida completa', icon: 'help', small: true, onClick: () => { m.close(null); ctx.actions.openGuide(); } }),
     ]),
     section('Crediti', [
       h('p', { class: 'pv-io-credit' }, h('b', {}, 'Modello umano: MakeHuman. '), 'Mesh di base, target delle forme, scheletro ed occhi provengono dal progetto MakeHuman (makehumancommunity.org) e sono rilasciati con licenza ', h('b', {}, 'CC0 1.0'), ' (pubblico dominio). Grazie alla comunità MakeHuman!'),
@@ -366,5 +370,6 @@ export function openInfo(ctx) {
       dev ? h('p', { class: 'pv-io-credit muted' }, `Dispositivo: ${dev}`) : null,
     ]),
   );
-  return modal({ title: 'Info e crediti', icon: 'info', kind: 'sheet', body, className: 'pv-io-info-sheet' });
+  const m = modal({ title: 'Info e crediti', icon: 'info', kind: 'sheet', body, className: 'pv-io-info-sheet' });
+  return m;
 }

@@ -7,11 +7,13 @@
 // - image export (PNG 1x/2x/3x, transparent background, comic-panel crop) and sharing
 // - settings (quality, vibration, tips, language, tutorial), info & credits
 // - first-run onboarding and first-use tips per tool group
+// - "Guida": in-app step-by-step guide (menu › Guida, "?" in the top bar), see guide.js / guideData.js
 // - keeps the 3D subject visible when the sheet / side panel is open (camera view offset)
 //
 // Public API: app.modules.ui = { scenes, exporter, settings, thumbs, viewOffset, people,
 //   openPeople({add}), addCharacter(presetId), saveScene(), newScene(), openScenes(), openExport({share}),
-//   exportSceneFile(), importSceneFile(), openSettings(), openInfo(), showOnboarding(), tip(groupId) }
+//   exportSceneFile(), importSceneFile(), openSettings(), openInfo(), openGuide({topic, query, context}),
+//   showOnboarding(), tip(groupId) }
 import './io.css';
 import { toast } from '../ui/kit.js';
 import { Settings } from './storage.js';
@@ -54,9 +56,21 @@ export function create(app, shell) {
     importSceneFile: () => S.importSceneFile(ctx),
     openSettings: () => S.openSettings(ctx),
     openInfo: () => S.openInfo(ctx),
-    restartTutorial: () => { resetOnboarding(); settings.set('tipsSeen', {}); settings.set('tips', true); showOnboarding(); },
+    restartTutorial: () => { resetOnboarding(); settings.set('tipsSeen', {}); settings.set('tips', true); onboarding(); },
+    /** Guida: opts {topic, query, context: true (topic of the open tool / pose mode)} */
+    openGuide: (o = {}) => loadGuide().then((g) => g.openGuide(ctx, o)).catch((e) => {
+      console.error('[PosaViva] guide failed', e);
+      toast('Impossibile aprire la guida', { kind: 'error' });
+      return null;
+    }),
   };
   ctx.actions = actions;
+
+  // the guide is a separate chunk (bundled in the app: works offline), fetched on first use
+  // or when the app is idle after start-up, so that the first "?" opens instantly
+  let guideMod = null;
+  const loadGuide = () => (guideMod ||= import('./guide.js'));
+  const onboarding = () => showOnboarding({ openGuide: (o) => actions.openGuide(o) });
 
   const people = new PeopleTool(ctx);
   ctx.people = people;
@@ -97,8 +111,10 @@ export function create(app, shell) {
     const forceTour = /[?&]tour=1\b/.test(location.search);
     if (forceTour || (!isOnboarded() && !navigator.webdriver)) {
       // after the loading screen has faded; e2e scripts may set the flag meanwhile
-      setTimeout(() => { if (forceTour || !isOnboarded()) showOnboarding(); }, 750);
+      setTimeout(() => { if (forceTour || !isOnboarded()) onboarding(); }, 750);
     }
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
+    setTimeout(() => idle(() => loadGuide().catch(() => { guideMod = null; })), 4000);
   }));
 
   // ---- per-character listeners (chip / list refresh on preset or skin changes)
@@ -120,7 +136,8 @@ export function create(app, shell) {
     openExport: (o = {}) => S.openExport(ctx, o),
     exportSceneFile: actions.exportSceneFile, importSceneFile: actions.importSceneFile,
     openSettings: actions.openSettings, openInfo: actions.openInfo,
-    showOnboarding, tip,
+    openGuide: actions.openGuide,
+    showOnboarding: onboarding, tip,
 
     // module hooks
     onCharacterAdded(ch, opts = {}) {

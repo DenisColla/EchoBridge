@@ -7,6 +7,9 @@
 //               rotation. Limits are respected, a haptic tick marks a limit.
 //  Trascina (IK): handles on hands, feet, head (aim) and pelvis.
 //  Sposta:      ground ring (drag = move on the floor) + knob (drag = turn).
+//  Linea:       one-finger stroke over the character = line of action (the body
+//               bends to follow it, see actionLine.js); the current line of the
+//               body and the last stroke are drawn faintly.
 //  Joint dots ('Mostra articolazioni'): tap targets for small parts.
 import * as THREE from 'three';
 import { haptic } from '../ui/kit.js';
@@ -56,6 +59,8 @@ export class PoseGizmo {
     this._order = [];
     this._bi = (n) => ctx.rig.model.boneIndex.get(n);
     this._rect = null; this._rectsDirty = true;
+    this.lineBox = { x0: 0, y0: 0, x1: 0, y1: 0, ok: false }; // screen bounds of the character (Linea)
+    this._linePts = []; this._lineScr = []; this._strokeScr = [];
     app.addEventListener('resize', () => { this._rectsDirty = true; });
     ctx.shell.addEventListener?.('layout', () => { this._rectsDirty = true; });
     app.addAfterRenderHook(() => this.draw());
@@ -124,11 +129,66 @@ export class PoseGizmo {
     for (const r of this.rings) r.ok = false;
     this.center.ok = false; this.ground.ok = false;
     for (const e of this.effectors) e.ok = false;
+    this.lineBox.ok = false;
     if (mode === 'rotate') {
       const ctrl = ctx.sel().control;
       if (ctrl) this._drawRings(ch, ctrl);
     } else if (mode === 'ik') this._drawEffectors(ch);
     else if (mode === 'move') this._drawGround(ch);
+    // (Linea only while the Posa panel is open: with the panel closed one-finger drags orbit)
+    else if (mode === 'line' && this.shell.activeToolId === 'pose') this._drawLine(ch);
+  }
+
+  // ------------------------------------------------------------ line of action
+  _drawLine(ch) {
+    const g = this.g, line = this.ctx.line;
+    // screen bounds of the character (stroke start area): body line + hands + elbows
+    const pts = line.bodyLine(ch, this._linePts);
+    const box = this.lineBox;
+    box.x0 = box.y0 = Infinity; box.x1 = box.y1 = -Infinity;
+    const scr = this._lineScr;
+    let n = 0;
+    const add = (p) => {
+      if (!this._project(p, _pt)) return false;
+      box.x0 = Math.min(box.x0, _pt.x); box.x1 = Math.max(box.x1, _pt.x); box.y0 = Math.min(box.y0, _pt.y); box.y1 = Math.max(box.y1, _pt.y);
+      return true;
+    };
+    for (const p of pts) {
+      if (!add(p)) continue;
+      const o = scr[n] || (scr[n] = { x: 0, y: 0 });
+      o.x = _pt.x; o.y = _pt.y; n++;
+    }
+    for (const id of ['hand.L', 'hand.R', 'foot.L', 'foot.R']) add(line.terminal(ch, id, _v2));
+    box.ok = n > 1 && box.x1 > box.x0;
+    if (!box.ok) return;
+    const m = 56; // finger margin
+    box.x0 -= m; box.y0 -= m; box.x1 += m; box.y1 += m;
+    // current line of the body: faint dashed curve
+    g.save();
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    g.setLineDash([2, 7]);
+    g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = 5; smoothPath(g, scr, n); g.stroke();
+    g.strokeStyle = 'rgba(255,184,107,.85)'; g.lineWidth = 2.5; smoothPath(g, scr, n); g.stroke();
+    g.setLineDash(NODASH);
+    // last stroke (world points on its plane): faint
+    const last = line.last;
+    if (last && last.ch === ch && !(this.drag?.kind === 'stroke')) {
+      let k = 0;
+      for (const p of last.world) {
+        if (!this._project(p, _pt)) continue;
+        const o = this._strokeScr[k] || (this._strokeScr[k] = { x: 0, y: 0 });
+        o.x = _pt.x; o.y = _pt.y; k++;
+      }
+      g.strokeStyle = 'rgba(0,0,0,.22)'; g.lineWidth = 9; smoothPath(g, this._strokeScr, k); g.stroke();
+      g.strokeStyle = 'rgba(182,155,255,.6)'; g.lineWidth = 5; smoothPath(g, this._strokeScr, k); g.stroke();
+    }
+    // stroke being drawn
+    if (this.drag?.kind === 'stroke' && this.drag.pts.length > 1) {
+      const P = this.drag.pts;
+      g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = 9; smoothPath(g, P, P.length); g.stroke();
+      g.strokeStyle = '#c9b8ff'; g.lineWidth = 5; smoothPath(g, P, P.length); g.stroke();
+    }
+    g.restore();
   }
 
   _drawRings(ch, ctrl) {
@@ -217,7 +277,7 @@ export class PoseGizmo {
 
   /** direction (in the ring plane) used as the ring's "hand": the bone itself when possible */
   _refDir(ch, ctrl, k, axis, out) {
-    const i = ctrl.axes[k].drives[0].i;
+    const i = ctrl.axes[k].pd.i;
     const m = ch.bones[i].matrixWorld;
     for (const col of [1, 2, 0]) {
       out.setFromMatrixColumn(m, col).normalize();
@@ -412,6 +472,9 @@ export class PoseGizmo {
       let best = null, bd = HIT_EFF;
       for (const e of this.effectors) { if (!e.ok) continue; const d = Math.hypot(e.x - x, e.y - y); if (d < bd) { bd = d; best = e; } }
       if (best) return { kind: 'effector', id: best.id };
+    } else if (mode === 'line') {
+      const b = this.lineBox;
+      if (b.ok && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return { kind: 'stroke' };
     } else if (mode === 'move') {
       const gr = this.ground;
       if (gr.knob.ok && Math.hypot(gr.knob.x - x, gr.knob.y - y) < 26) return { kind: 'turn' };
@@ -481,6 +544,14 @@ export class PoseGizmo {
       if (!d || e.pointerId !== d.pointerId) return;
       e.stopImmediatePropagation();
       d.lastX = e.clientX; d.lastY = e.clientY;
+      if (d.kind === 'stroke') {
+        // every point counts (coalesced ones too): the stroke is a curve, not a handle
+        const evs = e.getCoalescedEvents?.() || [];
+        for (const ce of evs.length ? evs : [e]) d.pts.push({ x: ce.clientX, y: ce.clientY });
+        if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= d.slop) d.moved = true;
+        app.invalidate();
+        return;
+      }
       if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; if (this.drag === d) this._update(d); });
     };
     const up = (e) => {
@@ -490,12 +561,14 @@ export class PoseGizmo {
       // flush the throttled update (pending frame and/or a last move in the up event)
       const pending = !!d.raf;
       if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+      if (e.type === 'pointerup' && d.kind === 'stroke') d.pts.push({ x: e.clientX, y: e.clientY });
       if (e.type === 'pointerup') {
         const moved = e.clientX !== d.lastX || e.clientY !== d.lastY;
         d.lastX = e.clientX; d.lastY = e.clientY;
         if (pending || moved) this._update(d);
       }
       this.drag = null;
+      d.cancelled = e.type === 'pointercancel';
       app.controls.enabled = d.controlsWasEnabled;
       try { c.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
       this.shell.hint('');
@@ -521,9 +594,13 @@ export class PoseGizmo {
       t0: e.timeStamp, slop: e.pointerType === 'touch' ? 7 : 3,
     };
     app.controls.enabled = false;
-    if (hit.kind === 'ring' || hit.kind === 'ball') {
+    if (hit.kind === 'stroke') {
+      d.pts = [{ x: e.clientX, y: e.clientY }];
+      this.shell.hint('Disegna la linea d\'azione');
+    } else if (hit.kind === 'ring' || hit.kind === 'ball') {
       const ctrl = this.ctx.sel().control;
       d.ctrl = ctrl;
+      d.follow = this.ctx.follow.begin(ch, ctrl);
       d.k = hit.k;
       d.center = rig.worldPos(ch, ctrl.pivotIndex, new THREE.Vector3());
       d.snap = rig.snapshot(ch, ctrl);
@@ -574,6 +651,7 @@ export class PoseGizmo {
       } else {
         const chain = ik.chains[hit.id];
         d.chain = chain;
+        d.reach = ik.reachSnapshot(ch, chain);
         d.endQuat = rig.worldQuat(ch, chain.end, new THREE.Quaternion());
         d.endOffset = rig.worldPos(ch, chain.end, new THREE.Vector3()).sub(handle); // wrist/ankle - handle (constant: orientation kept)
         // other foot stays planted
@@ -604,6 +682,7 @@ export class PoseGizmo {
   }
 
   _update(d) {
+    if (d.kind === 'stroke') return;
     const x = d.lastX, y = d.lastY;
     if (!d.moved && Math.hypot(x - d.x0, y - d.y0) < d.slop) return;
     const ch = d.ch;
@@ -634,6 +713,7 @@ export class PoseGizmo {
       limited = r.clamped;
       if (limited) d.value = r.value; // no wind-up past the limit
       rig.refreshControl(ch, d.ctrl);
+      if (d.follow) this.ctx.follow.update();
       this._hintAxis(ch, d.ctrl, d.k);
     } else if (d.kind === 'ball') {
       const mx = x - d.px, my = y - d.py;
@@ -645,10 +725,14 @@ export class PoseGizmo {
       const len = _ax.length();
       if (len < 1e-6) return;
       _q.setFromAxisAngle(_ax.multiplyScalar(1 / len), len * 0.0105);
-      for (const i of d.ctrl.freeRoots) rig.rotateWorld(ch, i, _q);
-      if (d.ctrl.baseId === 'hand') this.ctx.transferWristTwist(ch, d.ctrl);
-      limited = rig.project(ch, d.ctrl, d.snap);
+      if (d.ctrl.coupled) limited = rig.rotateControl(ch, d.ctrl, _q, d.snap);
+      else {
+        for (const i of d.ctrl.freeRoots) rig.rotateWorld(ch, i, _q);
+        if (d.ctrl.baseId === 'hand') this.ctx.transferWristTwist(ch, d.ctrl);
+        limited = rig.project(ch, d.ctrl, d.snap);
+      }
       rig.refreshControl(ch, d.ctrl);
+      if (d.follow) this.ctx.follow.update();
     } else if (d.kind === 'effector') {
       const p = this._ray(x, y).intersectPlane(d.plane, _v3);
       if (!p) return;
@@ -665,7 +749,9 @@ export class PoseGizmo {
         limited = ik.aimHead(ch, d.handle, d.snapNeck, d.snapHead);
       } else {
         const target = _w.copy(d.handle).add(d.endOffset);
-        limited = ik.solveLimb(ch, d.chain, target, d.endQuat, 3);
+        // far targets: clavicle + back (hands) or pelvis (feet) help the limb reach
+        limited = ik.reach(ch, d.chain, target, d.reach);
+        limited = ik.solveLimb(ch, d.chain, target, d.endQuat, 3) || limited;
         for (const pin of d.pins) ik.solvePinned(ch, pin);
       }
     } else if (d.kind === 'move') {
@@ -705,7 +791,9 @@ export class PoseGizmo {
   }
 
   _end(d) {
+    if (d.follow) this.ctx.follow.end();
     if (!d.moved) return;
+    if (d.kind === 'stroke') { if (!d.cancelled) this.ctx.applyStroke(d.ch, d.pts); return; }
     const labels = { ring: 'ruota parte', ball: 'ruota parte', effector: 'trascina', move: 'sposta personaggio', turn: 'ruota personaggio' };
     if (d.kind === 'move' || d.kind === 'turn') this.ctx.placed(d.ch, true, labels[d.kind]);
     else this.ctx.edited(d.ch, true, labels[d.kind]);
@@ -722,6 +810,19 @@ export class PoseGizmo {
     if (deg === -180) deg = 180;
     this.shell.hint(`Rotazione: ${deg}°`);
   }
+}
+
+/** smooth path (quadratic B-spline through midpoints) of the first n points */
+function smoothPath(g, P, n) {
+  g.beginPath();
+  if (n < 2) return;
+  g.moveTo(P[0].x, P[0].y);
+  if (n === 2) { g.lineTo(P[1].x, P[1].y); return; }
+  for (let i = 1; i < n - 1; i++) {
+    const mx = (P[i].x + P[i + 1].x) / 2, my = (P[i].y + P[i + 1].y) / 2;
+    g.quadraticCurveTo(P[i].x, P[i].y, mx, my);
+  }
+  g.lineTo(P[n - 1].x, P[n - 1].y);
 }
 
 function segDist(px, py, ax, ay, bx, by) {

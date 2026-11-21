@@ -1,9 +1,10 @@
-// "Oggetti" panel: catalog (generated thumbnails) when nothing is selected,
-// editor of the selected prop otherwise. A chip strip on top lists the props
-// in the scene for quick selection.
-import { h, section, slider, segmented, button, swatches, cardGrid, toggle, toast, haptic, icon } from '../ui/kit.js';
-import { CATEGORIES, PROP_TYPES, PROP_COLORS } from './catalog.js';
+// "Oggetti" panel: library (search, categories, lazy thumbnails, room presets)
+// when nothing is selected, editor of the selected prop otherwise. A chip
+// strip on top lists the props in the scene for quick selection.
+import { h, section, slider, segmented, button, swatches, toggle, toast, haptic, icon, chips, confirmDialog } from '../ui/kit.js';
+import { PROP_COLORS, TINT_COLORS } from './catalog.js';
 import { SIDE_LABEL } from './manager.js';
+import { buildLibrary } from './library.js';
 
 const R2D = 180 / Math.PI, D2R = Math.PI / 180;
 const fmtM = (v) => `${v.toFixed(2)} m`;
@@ -15,6 +16,7 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
     build(el) {
       el.classList.add('pv-pr-panel');
       const strip = h('div', { class: 'pv-chips pv-pr-strip' });
+      let library = null;
       const catalog = buildCatalog();
       const editorHost = h('div', { class: 'pv-pr-editor' });
       el.append(strip, catalog, editorHost);
@@ -40,15 +42,8 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
 
       // ------------------------------------------------------------ catalog
       function buildCatalog() {
-        const wrap = h('div', { class: 'pv-pr-catalog' });
-        const note = h('div', { class: 'pv-pr-note' }, 'Tocca un oggetto per aggiungerlo accanto al personaggio selezionato. Gli oggetti "In mano" vanno direttamente nella sua mano libera.');
-        wrap.appendChild(note);
-        for (const cat of CATEGORIES) {
-          const items = PROP_TYPES.filter((t) => t.cat === cat.id).map((t) => ({ id: t.id, label: t.label, thumb: thumbs.canvasFor(t) }));
-          const grid = cardGrid({ items, columns: 4, onSelect: (id) => addProp(id) });
-          wrap.appendChild(section(cat.label, [grid]));
-        }
-        return wrap;
+        library = buildLibrary({ thumbs, onAdd: addProp, onAddPreset: addPreset, panelBody: shell.panelBody });
+        return library.el;
       }
 
       function addProp(id) {
@@ -59,6 +54,13 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         app.commit('aggiungi oggetto');
         if (p.hold) toast(`${p.label} nella mano ${SIDE_LABEL[p.hold.side]} di ${p.hold.ch.name}`);
         else if (p.isHand && ch) toast(`${ch.name} ha già le mani occupate: ${p.label.toLowerCase()} appoggiato a terra`);
+      }
+
+      async function addPreset(preset) {
+        const list = await manager.addPreset(preset, { near: app.selection.character });
+        if (!list.length) return;
+        app.commit('aggiungi stanza');
+        toast(`${preset.label}: ${list.length} oggetti. Tocca un mobile per modificarlo o spostare tutta la stanza.`, 3200);
       }
 
       // ------------------------------------------------------------ editor
@@ -75,6 +77,32 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
           button({ icon: 'check', small: true, title: 'Fine', onClick: () => manager.select(null) }),
         );
         parts.push(head);
+
+        // ---- realistic model still loading
+        if (p.type.model) {
+          const loading = h('div', { class: 'pv-pr-note pv-pr-loading' }, 'Caricamento del modello…');
+          parts.push(loading);
+          syncers.push(() => { loading.style.display = p.loading ? '' : 'none'; });
+        }
+
+        // ---- new random variant
+        if (p.type.params.some((d) => d.type === 'seed')) {
+          parts.push(h('div', { class: 'pv-row pv-pr-actions' }, button({ label: 'Rigenera', icon: 'sparkle', variant: 'primary', onClick: () => {
+            manager.regenerate(p); haptic(10); commit('rigenera oggetto');
+          } }), h('div', { class: 'pv-pr-note pv-pr-inline' }, 'Nuova variante casuale')));
+        }
+
+        // ---- room preset group
+        if (p.group) {
+          const n = manager.groupOf(p).length;
+          const together = toggle({ label: 'Muovi tutta la stanza', value: manager.moveTogether, onChange: (v) => { manager.moveTogether = v; } });
+          const del = button({ label: 'Elimina stanza', icon: 'trash', variant: 'danger', small: true, onClick: async () => {
+            if (await confirmDialog(`Eliminare tutti i ${manager.groupOf(p).length} oggetti della stanza?`, { title: 'Elimina stanza', okLabel: 'Elimina', danger: true })) { manager.removeGroup(p); commit('elimina stanza'); }
+          } });
+          const split = button({ label: 'Separa', icon: 'unlock', small: true, onClick: () => { manager.ungroup(p); commit('separa oggetto'); editor = null; render(); } });
+          parts.push(section(`Stanza (${n} oggetti)`, [h('div', { class: 'pv-pr-note' }, 'Con “Muovi tutta la stanza” trascini o ruoti tutti i mobili insieme.'), together, h('div', { class: 'pv-row pv-pr-actions' }, split, del)]));
+          syncers.push(() => together.setValue(manager.moveTogether));
+        }
 
         // ---- hand
         if (p.isHand) {
@@ -155,7 +183,15 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         const paramCtl = new Map();
         for (const d of p.type.params) {
           let ctl;
-          if (d.type === 'seg') ctl = segmented({ options: d.options, value: p.params[d.id], onChange: (v) => { manager.setParams(p, { [d.id]: v }); commit('modifica oggetto'); sync(); } });
+          if (d.type === 'seed') continue;
+          if (d.type === 'seg' && d.options.length > 3) {
+            ctl = chips({ items: d.options.map((o) => ({ id: String(o.value), label: o.label })), value: String(p.params[d.id]), onSelect: (v) => {
+              const opt = d.options.find((o) => String(o.value) === v);
+              manager.setParams(p, { [d.id]: opt.value }); ctl.setValue(v); commit('modifica oggetto'); sync();
+            } });
+            ctl.classList.add('pv-pr-segchips');
+            const set = ctl.setValue; ctl.setValue = (v) => set(String(v));
+          } else if (d.type === 'seg') ctl = segmented({ options: d.options, value: p.params[d.id], onChange: (v) => { manager.setParams(p, { [d.id]: v }); commit('modifica oggetto'); sync(); } });
           else if (d.type === 'toggle') ctl = toggle({ label: d.label, value: p.params[d.id], onChange: (v) => { manager.setParams(p, { [d.id]: v }); commit('modifica oggetto'); } });
           else {
             const fmt = d.type === 'int' ? (v) => String(Math.round(v)) : d.unit === 'm' ? fmtM : (v) => `${Math.round(v * 100)}%`;
@@ -168,7 +204,7 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         const scale = slider({ label: 'Scala', min: 0.25, max: 3, step: 0.01, value: p.scale, defaultValue: 1, center: false, format: (v) => `${Math.round(v * 100)}%`,
           onInput: (v) => manager.setScale(p, v), onChange: () => { if (p.hold) manager.closeHand(p); commit('scala oggetto'); } });
         dims.push(scale);
-        parts.push(section('Dimensioni', dims));
+        parts.push(section(p.type.model ? 'Dimensioni' : 'Forma e dimensioni', dims));
         syncers.push(() => {
           for (const d of p.type.params) paramCtl.get(d.id)?.setValue(p.params[d.id]);
           scale.setValue(p.scale);
@@ -176,9 +212,9 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
           if (p.type.id === 'muro') paramCtl.get('offset').style.display = p.params.opening === 'none' ? 'none' : '';
         });
 
-        // ---- color
-        const sw = swatches({ colors: PROP_COLORS, value: p.color, onChange: (c) => { manager.setColor(p, c); commit('colore oggetto'); } });
-        parts.push(section('Colore', [sw]));
+        // ---- color (realistic models: tint over the original textures)
+        const sw = swatches({ colors: p.type.model ? TINT_COLORS : PROP_COLORS, value: p.color, onChange: (c) => { manager.setColor(p, c); commit('colore oggetto'); } });
+        parts.push(p.type.model ? section('Tinta', [h('div', { class: 'pv-pr-note' }, 'Bianco = colori originali del modello.'), sw]) : section('Colore', [sw]));
         syncers.push(() => sw.setValue(p.color));
 
         const root = h('div', {}, parts);

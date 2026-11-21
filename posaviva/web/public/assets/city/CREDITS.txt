@@ -1,0 +1,32 @@
+PosaViva — Esterni (realistic models)
+
+The 3D models in models/ and their thumbnails in thumbs/ come from Poly Haven (https://polyhaven.com)
+and are licensed CC0 1.0 Universal (public domain): https://creativecommons.org/publicdomain/zero/1.0/
+They were converted (merged meshes, simplified geometry, smaller textures with baked ambient occlusion).
+
+Masso — "Boulder 01" by Rico Cilliers — https://polyhaven.com/a/boulder_01
+Gruppo di rocce — "Namaqualand Boulder 02" by Greg Zaal, Rico Cilliers — https://polyhaven.com/a/namaqualand_boulder_02
+Masso squadrato — "Namaqualand Boulder 03" by Jenelle van Heerden, Dario Barresi — https://polyhaven.com/a/namaqualand_boulder_03
+Masso arrotondato — "Namaqualand Boulder 04" by Jenelle van Heerden — https://polyhaven.com/a/namaqualand_boulder_04
+Roccia — "Namaqualand Boulder 05" by Jenelle van Heerden, Dario Barresi — https://polyhaven.com/a/namaqualand_boulder_05
+Roccia appuntita — "Namaqualand Boulder 06" by Greg Zaal, Jenelle van Heerden — https://polyhaven.com/a/namaqualand_boulder_06
+Pietra — "Rock 07" by Jenelle van Heerden — https://polyhaven.com/a/rock_07
+Parete rocciosa — "Rock Face 01" by Dario Barresi — https://polyhaven.com/a/rock_face_01
+Sperone di roccia — "Rock Face 02" by Dario Barresi, Rico Cilliers — https://polyhaven.com/a/rock_face_02
+Parete di massi — "Namaqualand Cliff 01" by Jenelle van Heerden, Rico Cilliers — https://polyhaven.com/a/namaqualand_cliff_01
+Pendio di montagna — "Mountainside" by Dario Barresi, Rico Cilliers — https://polyhaven.com/a/mountainside
+Ceppo — "Tree Stump 01" by Rob Tuytel — https://polyhaven.com/a/tree_stump_01
+Ceppo con muschio — "Tree Stump 02" by Rob Tuytel — https://polyhaven.com/a/tree_stump_02
+Tronco caduto — "Dead Tree Trunk" by Rob Tuytel — https://polyhaven.com/a/dead_tree_trunk
+Tronco secco — "Dead Tree Trunk 02" by Jenelle van Heerden, Rico Cilliers — https://polyhaven.com/a/dead_tree_trunk_02
+Albero faretra — "Quiver Tree 01" by James Ray Cock, Dario Barresi, Rico Cilliers — https://polyhaven.com/a/quiver_tree_01
+Albero faretra basso — "Quiver Tree 02" by Dario Barresi, Rico Cilliers — https://polyhaven.com/a/quiver_tree_02
+Lampione a lanterna — "Street Lamp 01" by Josh Dean — https://polyhaven.com/a/street_lamp_01
+Tombino in ghisa — "Water Manhole Cover" by Raunox — https://polyhaven.com/a/water_manhole_cover
+Blocco di cemento — "Concrete Road Barrier" by Amal Kumar — https://polyhaven.com/a/concrete_road_barrier
+Blocco con ganci — "Concrete Road Barrier 02" by Amal Kumar — https://polyhaven.com/a/concrete_road_barrier_02
+Armadio elettrico — "Utility Box 01" by James Ray Cock — https://polyhaven.com/a/utility_box_01
+Armadio elettrico verde — "Utility Box 02" by James Ray Cock — https://polyhaven.com/a/utility_box_02
+Tavolo da picnic — "Wooden Picnic Table" by Ulan Cabanilla — https://polyhaven.com/a/wooden_picnic_table
+Pneumatico — "Old Tyre" by MP — https://polyhaven.com/a/old_tyre
+Auto coperta da telo — "Covered Car" by MP — https://polyhaven.com/a/covered_car

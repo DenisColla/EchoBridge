@@ -165,19 +165,22 @@ function fixWinding(geo) {
   }
 }
 
-/** Keeps only position/normal/uv so heterogeneous helpers can be merged. */
-function normalizeAttributes(geo) {
-  for (const name of Object.keys(geo.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv') geo.deleteAttribute(name);
+/** Keeps only position/normal/uv (+ color) so heterogeneous helpers can be merged. */
+function normalizeAttributes(geo, withColor) {
+  for (const name of Object.keys(geo.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv' && !(withColor && name === 'color')) geo.deleteAttribute(name);
   if (!geo.attributes.normal) geo.computeVertexNormals();
   if (!geo.attributes.uv) geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count * 2), 2));
+  if (withColor && !geo.attributes.color) geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count * 3).fill(1), 3));
   geo.morphAttributes = {};
   geo.clearGroups();
   return geo;
 }
 
-/** Merges geometries into one (disposes the inputs). */
+/** Merges geometries into one (disposes the inputs). Vertex colors are kept when any part has them. */
 export function mergeParts(list) {
-  const geos = list.filter(Boolean).map(normalizeAttributes);
+  const src = list.filter(Boolean);
+  const withColor = src.some((g) => g.attributes.color);
+  const geos = src.map((g) => normalizeAttributes(g, withColor));
   if (!geos.length) return null;
   const anyNonIndexed = geos.some((g) => !g.index);
   const ready = anyNonIndexed ? geos.map((g) => (g.index ? g.toNonIndexed() : g)) : geos;
@@ -186,6 +189,63 @@ export function mergeParts(list) {
   merged.computeBoundingBox();
   merged.computeBoundingSphere();
   return merged;
+}
+
+const _col = new THREE.Color();
+/** Paints a geometry with a vertex color (sRGB hex or THREE.Color); used for many-colored merged parts (books…). */
+export function colorize(geo, c) {
+  _col.set(c).convertSRGBToLinear();
+  const n = geo.attributes.position.count, a = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { a[i * 3] = _col.r; a[i * 3 + 1] = _col.g; a[i * 3 + 2] = _col.b; }
+  geo.setAttribute('color', new THREE.BufferAttribute(a, 3));
+  return geo;
+}
+
+/**
+ * Horizontal rectangle facing up (or down with t.down) at height t.y, with UVs in
+ * texture tiles (uv = meters / t.tile) for repeating textures (floors, rugs use tile = size).
+ */
+export function planeXZ(w, d, t = {}) {
+  const geo = new THREE.PlaneGeometry(w, d, 1, 1);
+  geo.rotateX(t.down ? Math.PI / 2 : -Math.PI / 2);
+  const tile = t.tile ?? null;
+  if (tile) {
+    const uv = geo.attributes.uv, p = geo.attributes.position;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, (p.getX(i) + w / 2) / tile, (p.getZ(i) + d / 2) / tile);
+  }
+  return place(geo, t);
+}
+
+/** Vertical rectangle facing +Z (t.ry turns it), bottom-centered at y = t.y. UVs 0..1 or tiled (meters / t.tile). */
+export function planeXY(w, h, t = {}) {
+  const geo = new THREE.PlaneGeometry(w, h, 1, 1);
+  geo.translate(0, h / 2, 0);
+  const tile = t.tile ?? null;
+  if (tile) {
+    const uv = geo.attributes.uv, p = geo.attributes.position;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, (p.getX(i) + w / 2) / tile, p.getY(i) / tile);
+  }
+  return place(geo, t);
+}
+
+/**
+ * Extruded polygon: points [[x, z], ...] in the XZ plane (counter-clockwise seen
+ * from above), from y = t.y up by `height`. Optional bevel. Used for L-shaped tops.
+ */
+export function extrudeXZ(points, height, t = {}) {
+  const s = new THREE.Shape(points.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const bev = Math.min(t.bevel ?? 0, height * 0.3);
+  const geo = new THREE.ExtrudeGeometry(s, { depth: Math.max(1e-4, height - 2 * bev), bevelEnabled: bev > 0, bevelThickness: bev, bevelSize: bev, bevelSegments: 2, curveSegments: t.curve ?? 8 });
+  geo.translate(0, 0, bev);
+  geo.rotateX(-Math.PI / 2); // extrusion along +Y; shape y = -z -> z
+  return place(geo, { ...t, y: t.y ?? 0 });
+}
+
+/** Thin curved panel (cylinder section) — lamp shades, curtains, bathtub sides. */
+export function shell(rBottom, rTop, h, t = {}) {
+  const geo = new THREE.CylinderGeometry(rTop, rBottom, h, t.seg ?? 32, t.hs ?? 1, true, t.start ?? 0, t.arc ?? Math.PI * 2);
+  geo.translate(0, h / 2, 0);
+  return place(geo, t);
 }
 
 export { DEG };

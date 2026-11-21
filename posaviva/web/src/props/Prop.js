@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import { TYPE_BY_ID, ROLES, cleanParams } from './catalog.js';
 import { mergeParts } from './geo.js';
+import { loadModel, partSpec } from './models.js';
 
 const DEG = Math.PI / 180;
 let _uid = 0;
@@ -48,6 +49,12 @@ export class Prop {
     this.grip = { slide: 0, twist: 0, flip: false };
     /** automatic twist around the handle (hanging props such as bags), radians */
     this.hangTwist = 0;
+    /** room preset / group id (props added together, e.g. a furnished room) */
+    this.group = typeof state.group === 'string' ? state.group : null;
+    /** called when an asynchronously loaded model replaced the placeholder */
+    this.onAsync = null;
+    /** model types: true while the placeholder box is shown */
+    this.loading = false;
 
     this.root = new THREE.Group();
     this.root.name = `prop:${this.type.id}`;
@@ -75,6 +82,7 @@ export class Prop {
    * that looks exactly the same.
    */
   mirrorPlane() {
+    if (this.type.model) return null;
     if (this._symKey !== this._geoKey) { this._symKey = this._geoKey; this._sym = detectMirrorPlane(this.meshes, this.geoBox); }
     return this._sym;
   }
@@ -87,20 +95,20 @@ export class Prop {
     if (!force && key === this._geoKey) return false;
     this._geoKey = key;
     this._disposeMeshes();
-    const parts = this.type.build(this.params);
     this.geoBox.makeEmpty();
-    for (const [role, list] of Object.entries(parts)) {
-      const geo = mergeParts(list);
-      if (!geo) continue;
-      const mesh = new THREE.Mesh(geo);
-      mesh.name = `prop:${this.type.id}:${role}`;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      mesh.userData.prop = this;
-      mesh.userData.role = role;
-      this.pivot.add(mesh);
-      this.meshes.push(mesh);
-      this.geoBox.union(geo.boundingBox);
+    if (this.type.model) this._buildModel();
+    else {
+      const parts = this.type.build(this.params);
+      // optional per-build material specs: {$specs: {role: spec | (color) => spec}}
+      const specs = parts.$specs || null;
+      for (const [role, list] of Object.entries(parts)) {
+        if (role === '$specs') continue;
+        const geo = mergeParts(list);
+        if (!geo) continue;
+        const mesh = this._addMesh(geo, role);
+        if (specs && specs[role]) mesh.userData.spec = specs[role];
+        this.geoBox.union(geo.boundingBox);
+      }
     }
     this._colorKey = null;
     this.applyColor();
@@ -108,10 +116,71 @@ export class Prop {
     return true;
   }
 
+  _addMesh(geo, role) {
+    const mesh = new THREE.Mesh(geo);
+    mesh.name = `prop:${this.type.id}:${role}`;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.prop = this;
+    mesh.userData.role = role;
+    // e.g. the floor of a room: taps go through it (to characters / deselect)
+    if (this.type.noPickRoles?.includes(role)) mesh.userData.noPick = true;
+    this.pivot.add(mesh);
+    this.meshes.push(mesh);
+    return mesh;
+  }
+
+  /**
+   * Realistic model types: shared GLB parts once loaded (cache), a translucent
+   * placeholder box of the catalog size meanwhile. The rebuild runs again when
+   * the file arrives and `onAsync` tells the manager.
+   */
+  _buildModel() {
+    const entry = loadModel(this.type.model);
+    if (entry.state === 'ready') {
+      this.loading = false;
+      entry.parts.forEach((part, i) => {
+        const mesh = this._addMesh(part.geometry, `part${i}`);
+        mesh.userData.sharedGeo = true;
+        mesh.userData.part = part;
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(part.matrix);
+        mesh.matrixWorldNeedsUpdate = true;
+        this.geoBox.union(part.box);
+      });
+      return;
+    }
+    const [w, h, d] = this.type.size || [0.4, 0.4, 0.4];
+    const geo = new THREE.BoxGeometry(Math.max(0.02, w), Math.max(0.02, h), Math.max(0.02, d));
+    geo.translate(0, h / 2, 0);
+    geo.computeBoundingBox();
+    const mesh = this._addMesh(geo, 'placeholder');
+    mesh.castShadow = false;
+    mesh.userData.spec = { kind: 'prop', color: '#9aa3ad', roughness: 0.9, transparent: true, opacity: 0.35 };
+    this.geoBox.union(geo.boundingBox);
+    if (entry.state === 'loading' && !this.loading) {
+      this.loading = true;
+      entry.promise.then(() => {
+        this.loading = false;
+        if (!this.meshes.length || this.meshes[0].userData.role !== 'placeholder') return; // disposed or rebuilt
+        if (entry.state !== 'ready') return;
+        this.rebuild(true);
+        this.onAsync?.(this);
+      });
+    }
+  }
+
   applyColor() {
     if (this._colorKey === this.color) return;
     this._colorKey = this.color;
-    for (const mesh of this.meshes) this.materials.apply(mesh, (ROLES[mesh.userData.role] || ROLES.main)(this.color));
+    for (const mesh of this.meshes) {
+      const u = mesh.userData;
+      let spec;
+      if (u.part) spec = partSpec(u.part, this.color);
+      else if (u.spec) spec = typeof u.spec === 'function' ? u.spec(this.color) : u.spec;
+      else spec = (ROLES[u.role] || ROLES.main)(this.color);
+      this.materials.apply(mesh, spec);
+    }
   }
 
   setParams(patch) {
@@ -221,6 +290,7 @@ export class Prop {
     }
     const g = this.grip;
     if (g.slide || g.twist || g.flip) j.grip = { slide: r4(g.slide), twist: r4(g.twist), flip: !!g.flip };
+    if (this.group) j.group = this.group;
     return j;
   }
 
@@ -232,7 +302,7 @@ export class Prop {
   _disposeMeshes() {
     for (const mesh of this.meshes) {
       this.materials.release(mesh);
-      mesh.geometry.dispose();
+      if (!mesh.userData.sharedGeo) mesh.geometry.dispose(); // model geometry is shared by every instance
       mesh.removeFromParent();
     }
     this.meshes.length = 0;

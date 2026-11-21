@@ -2,7 +2,14 @@
 .pv-pose-gizmo { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
 .pv-pose-modes { margin-bottom: 12px; }
-.pv-pose-modes .pv-seg-btn { min-height: 44px; }
+/* four modes: icon above the label so they fit a phone panel */
+.pv-pose-modes .pv-seg-btn { min-height: 50px; flex-direction: column; gap: 2px; padding: 5px 2px; font-size: 12.5px; }
+.pv-pose-modes .pv-seg-btn svg { width: 19px; height: 19px; }
+
+/* Linea d'azione: whole-pose adjustments */
+.pv-pose-adjust { margin: 4px 0 8px; }
+.pv-pose-adjust .pv-slider { margin-bottom: 6px; }
+.pv-pose-slider-hint { margin: -2px 0 4px; color: var(--faint); font-size: 12px; line-height: 1.35; }
 
 /* selected part header */
 .pv-pose-part { display: flex; align-items: center; gap: 4px; padding: 8px 6px 8px 10px; margin-bottom: 10px;

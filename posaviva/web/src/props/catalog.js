@@ -11,11 +11,45 @@
 //    `hand.rest` gives the orientation used when the prop lies free in the world.
 import * as THREE from 'three';
 import { box, boxOn, cylinder, lathe, rod, sphere, torus, tube, roundedSlab, blade, place } from './geo.js';
+import { range, int, seg, flag } from './params.js';
+import { STORAGE_TYPES } from './gen/storage.js';
+import { KITCHEN_TYPES } from './gen/kitchen.js';
+import { FURNITURE_TYPES, divano as divanoGen, letto as lettoGen, DIVANO_PARAMS, LETTO_PARAMS } from './gen/furniture.js';
+import { BATH_TYPES } from './gen/bath.js';
+import { OFFICE_TYPES } from './gen/office.js';
+import { OBJECT_TYPES } from './gen/objects.js';
+import { LEISURE_TYPES } from './gen/leisure.js';
+import { STRUCTURE_TYPES } from './gen/structures.js';
+import { PH_MODELS } from './phModels.js';
 
+export { range, int, seg, flag };
+
+/**
+ * Library categories (chips of the "Oggetti" panel) with optional sub-categories.
+ * Other modules add theirs with registerPropTypes(types, categories); a category
+ * with `ownTool: true` is listed by its own tool and hidden from "Oggetti".
+ */
+const sub = (id, label) => ({ id, label });
 export const CATEGORIES = [
-  { id: 'arredo', label: 'Arredo' },
-  { id: 'strutture', label: 'Strutture' },
+  { id: 'sedute', label: 'Sedute', subs: [sub('sedie', 'Sedie'), sub('poltrone', 'Poltrone'), sub('divani', 'Divani'), sub('sgabelli', 'Sgabelli'), sub('panche', 'Panche')] },
+  { id: 'tavoli', label: 'Tavoli', subs: [sub('pranzo', 'Da pranzo'), sub('salotto', 'Da salotto'), sub('scrivanie', 'Scrivanie'), sub('comodini', 'Comodini'), sub('consolle', 'Consolle')] },
+  { id: 'letti', label: 'Letti' },
+  { id: 'armadi', label: 'Armadi e mensole', subs: [sub('armadi', 'Armadi'), sub('credenze', 'Credenze'), sub('cassettiere', 'Cassettiere'), sub('librerie', 'Librerie e scaffali')] },
+  { id: 'cucina', label: 'Cucina', subs: [sub('mobili', 'Mobili'), sub('elettrodomestici', 'Elettrodomestici'), sub('pentole', 'Pentole'), sub('utensili', 'Utensili')] },
+  { id: 'bagno', label: 'Bagno', subs: [sub('sanitari', 'Sanitari'), sub('mobili', 'Mobili'), sub('accessori', 'Accessori')] },
+  { id: 'ufficio', label: 'Ufficio e scuola', subs: [sub('mobili', 'Mobili'), sub('scuola', 'Scuola'), sub('cancelleria', 'Cancelleria'), sub('libri', 'Libri')] },
+  { id: 'elettronica', label: 'Elettronica', subs: [sub('tv-audio', 'TV e audio'), sub('computer', 'Computer'), sub('foto-video', 'Foto e video'), sub('negozio', 'Varie')] },
+  { id: 'luci', label: 'Luci', subs: [sub('soffitto', 'Soffitto'), sub('terra-tavolo', 'Terra e tavolo'), sub('parete', 'Parete'), sub('portatili', 'Portatili')] },
+  { id: 'decorazioni', label: 'Decorazioni', subs: [sub('quadri', 'Quadri e specchi'), sub('vasi', 'Vasi'), sub('statue', 'Statue'), sub('orologi', 'Orologi'), sub('tessili', 'Tessili'), sub('varie', 'Varie')] },
+  { id: 'piante', label: 'Piante' },
+  { id: 'cibo', label: 'Cibo e stoviglie', subs: [sub('frutta-verdura', 'Frutta e verdura'), sub('dolci-pane', 'Pane e dolci'), sub('stoviglie', 'Stoviglie'), sub('bevande', 'Bevande'), sub('dispensa', 'Dispensa')] },
+  { id: 'contenitori', label: 'Contenitori', subs: [sub('scatole', 'Scatole'), sub('casse', 'Casse'), sub('barili', 'Barili'), sub('cesti-secchi', 'Cesti e secchi'), sub('taniche', 'Taniche')] },
+  { id: 'attrezzi', label: 'Attrezzi', subs: [sub('utensili', 'Utensili'), sub('officina', 'Officina'), sub('giardino', 'Giardino'), sub('pulizia', 'Pulizia'), sub('scale', 'Scale'), sub('scienza', 'Scienza'), sub('armi', 'Armi')] },
+  { id: 'sport', label: 'Sport e svago', subs: [sub('palloni', 'Palloni'), sub('palestra', 'Palestra'), sub('giochi', 'Giochi'), sub('musica', 'Musica')] },
+  { id: 'accessori', label: 'Scarpe e accessori', subs: [sub('scarpe', 'Scarpe'), sub('borse-valigie', 'Borse e valigie'), sub('occhiali-orologi', 'Occhiali e orologi'), sub('varie', 'Varie')] },
+  { id: 'strutture', label: 'Strutture', subs: [sub('stanze', 'Stanze e pavimenti'), sub('porte-finestre', 'Porte e finestre'), sub('scale', 'Scale'), sub('forme', 'Forme')] },
   { id: 'mano', label: 'In mano' },
+  { id: 'stanze', label: 'Stanze pronte', presets: true },
 ];
 
 /** Swatches offered by the color picker. */
@@ -43,12 +77,72 @@ export const ROLES = {
   paper: () => ({ kind: 'prop', color: '#eee6d2', roughness: 0.95 }),
   screen: () => ({ kind: 'prop', color: '#0d0f13', roughness: 0.12, metalness: 0.2 }),
   coffee: () => ({ kind: 'prop', color: '#3a2214', roughness: 0.2 }),
+  // interiors
+  lacquer: () => ({ kind: 'prop', color: '#eeece7', roughness: 0.35 }),
+  woodLight: () => ({ kind: 'prop', color: '#c49a6c', roughness: 0.55 }),
+  woodDark: () => ({ kind: 'prop', color: '#3f2a1c', roughness: 0.5 }),
+  counter: () => ({ kind: 'prop', color: '#cfc9bf', roughness: 0.3 }),
+  appliance: () => ({ kind: 'prop', color: '#ecedee', roughness: 0.3, metalness: 0.05 }),
+  steel: () => ({ kind: 'prop', color: '#b9bdc2', metalness: 0.8, roughness: 0.32 }),
+  steelDark: () => ({ kind: 'prop', color: '#5b5f64', metalness: 0.7, roughness: 0.38 }),
+  chrome: () => ({ kind: 'prop', color: '#d9dde2', metalness: 1, roughness: 0.12 }),
+  black: () => ({ kind: 'prop', color: '#1c1d20', roughness: 0.42 }),
+  blackD: () => ({ kind: 'prop', color: '#1c1d20', roughness: 0.6, side: 'double' }),
+  plastic: () => ({ kind: 'prop', color: '#d8d8d4', roughness: 0.5 }),
+  plasticW: () => ({ kind: 'prop', color: '#f1f1ee', roughness: 0.38 }),
+  ceramic: () => ({ kind: 'prop', color: '#f3f2ee', roughness: 0.16 }),
+  glass: () => ({ kind: 'prop', color: '#cfe3ea', roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.3 }),
+  glassLamp: () => ({ kind: 'prop', color: '#fff8e6', roughness: 0.3, transparent: true, opacity: 0.75 }),
+  mirror: () => ({ kind: 'prop', color: '#c9d4da', metalness: 0.55, roughness: 0.12 }),
+  frame: () => ({ kind: 'prop', color: '#3d2b1f', roughness: 0.5 }),
+  books: () => ({ kind: 'prop', color: '#ffffff', roughness: 0.75, vertexColors: true }),
+  cushions: () => ({ kind: 'prop', color: '#ffffff', roughness: 0.92, sheen: 0.5, vertexColors: true }),
+  vcGloss: () => ({ kind: 'prop', color: '#ffffff', roughness: 0.15, vertexColors: true }),
+  petals: () => ({ kind: 'prop', color: '#ffffff', roughness: 0.7, vertexColors: true, side: 'double' }),
+  decor: () => ({ kind: 'prop', color: '#a8443a', roughness: 0.45 }),
+  pot: () => ({ kind: 'prop', color: '#b5653d', roughness: 0.8 }),
+  soil: () => ({ kind: 'prop', color: '#3b2a1e', roughness: 1 }),
+  leaf: () => ({ kind: 'prop', color: '#3f6b35', roughness: 0.55, side: 'double' }),
+  leaf2: () => ({ kind: 'prop', color: '#5a7f3a', roughness: 0.6, side: 'double' }),
+  stem: () => ({ kind: 'prop', color: '#4c6a33', roughness: 0.7 }),
+  wicker: () => ({ kind: 'prop', color: '#b08a55', roughness: 0.85 }),
+  shade: (c) => ({ kind: 'prop', color: '#f2ead8', roughness: 0.9, side: 'double', sheen: 0.3 }),
+  bulb: () => ({ kind: 'prop', color: '#fffbe8', roughness: 0.2 }),
+  diffuser: () => ({ kind: 'prop', color: '#f7f7f5', roughness: 0.95 }),
+  fabric: () => ({ kind: 'prop', color: '#8c949c', roughness: 0.95, sheen: 0.4 }),
+  curtain: (c) => ({ kind: 'prop', color: c, roughness: 0.95, sheen: 0.5, side: 'double' }),
+  blanketD: () => ({ kind: 'prop', color: '#8ea2b7', roughness: 0.94, sheen: 0.6, side: 'double' }),
+  curtainBed: () => ({ kind: 'prop', color: '#d8cbb2', roughness: 0.95, sheen: 0.5, side: 'double' }),
+  ceiling: () => ({ kind: 'prop', color: '#f2f0ea', roughness: 0.95 }),
+  door: () => ({ kind: 'prop', color: '#efece6', roughness: 0.45 }),
+  doorShade: () => ({ kind: 'prop', color: '#e2ded6', roughness: 0.45 }),
+  marble: () => ({ kind: 'prop', color: '#e9e6e1', roughness: 0.2 }),
+  mug: () => ({ kind: 'prop', color: '#c0504d', roughness: 0.25 }),
+  screenOn: () => ({ kind: 'prop', color: '#2c4f86', roughness: 0.15, metalness: 0.1 }),
+  water: () => ({ kind: 'prop', color: '#9cc6d6', roughness: 0.05, transparent: true, opacity: 0.45 }),
+  wine: () => ({ kind: 'prop', color: '#5a0f1c', roughness: 0.1, transparent: true, opacity: 0.85 }),
+  beer: () => ({ kind: 'prop', color: '#d89a2b', roughness: 0.1, transparent: true, opacity: 0.85 }),
+  bottleGreen: () => ({ kind: 'prop', color: '#1f4d2e', roughness: 0.08, transparent: true, opacity: 0.85 }),
+  bottleBrown: () => ({ kind: 'prop', color: '#6b3a17', roughness: 0.08, transparent: true, opacity: 0.85 }),
+  bottleClear: () => ({ kind: 'prop', color: '#d9d4c3', roughness: 0.06, transparent: true, opacity: 0.55 }),
+  cork: () => ({ kind: 'prop', color: '#a0784e', roughness: 0.9 }),
+  cap: () => ({ kind: 'prop', color: '#c9a227', metalness: 0.7, roughness: 0.35 }),
+  label: (c) => ({ kind: 'prop', color: '#efe6d0', roughness: 0.8 }),
+  food: () => ({ kind: 'prop', color: '#e8c46a', roughness: 0.5 }),
+  meat: () => ({ kind: 'prop', color: '#6e3420', roughness: 0.6 }),
+  pizza: () => ({ kind: 'prop', color: '#d8743a', roughness: 0.7 }),
+  cardboard: () => ({ kind: 'prop', color: '#b58a5a', roughness: 0.9 }),
+  tape: () => ({ kind: 'prop', color: '#c8a46e', roughness: 0.4 }),
+  felt: (c) => ({ kind: 'prop', color: c, roughness: 0.98 }),
+  tableBlue: () => ({ kind: 'prop', color: '#1f3f7a', roughness: 0.4 }),
+  piano: () => ({ kind: 'prop', color: '#111114', roughness: 0.12 }),
+  keysWhite: () => ({ kind: 'prop', color: '#f4f2ea', roughness: 0.25 }),
+  basketball: () => ({ kind: 'prop', color: '#d9822b', roughness: 0.7 }),
+  globe: () => ({ kind: 'prop', color: '#3f7fb2', roughness: 0.4 }),
+  shoe: (c) => ({ kind: 'prop', color: c, roughness: 0.4 }),
+  tilesWall: () => ({ kind: 'prop', color: '#e9e6df', roughness: 0.3 }),
 };
 
-const range = (id, label, min, max, step, def, unit = 'm') => ({ id, type: 'range', label, min, max, step, default: def, unit });
-const int = (id, label, min, max, def) => ({ id, type: 'int', label, min, max, step: 1, default: def, unit: '' });
-const seg = (id, label, options, def) => ({ id, type: 'seg', label, options, default: def });
-const flag = (id, label, def) => ({ id, type: 'toggle', label, default: def });
 
 // ---------------------------------------------------------------------------- furniture
 function sedia() {
@@ -109,41 +203,6 @@ function tavolo(p) {
     main.push(box(0.022, 0.08, 2 * lz - L, { x: s * lx, y: ay, r: 0.005 }));
   }
   return { main };
-}
-
-function divano(p) {
-  const W = p.width, D = 0.9, LEG = 0.1, AW = 0.17, AH = 0.64, BH = 0.86, BASE = 0.22;
-  const soft = [
-    boxOn(W - 0.04, BASE, D - 0.04, { y: LEG, r: 0.03 }),
-    boxOn(AW, AH - LEG, D, { x: W / 2 - AW / 2, y: LEG, r: 0.065 }),
-    boxOn(AW, AH - LEG, D, { x: -W / 2 + AW / 2, y: LEG, r: 0.065 }),
-    boxOn(W - 2 * AW + 0.04, BH - LEG, 0.2, { y: LEG, z: -D / 2 + 0.1, r: 0.06 }),
-  ];
-  const n = W >= 1.9 ? 3 : 2, cw = (W - 2 * AW) / n, top = LEG + BASE;
-  for (let i = 0; i < n; i++) {
-    const x = -W / 2 + AW + cw * (i + 0.5);
-    soft.push(boxOn(cw - 0.012, 0.13, D - 0.22, { x, y: top, z: 0.1, r: 0.055 }));
-    soft.push(box(cw - 0.014, 0.42, 0.16, { x, y: top + 0.13 + 0.2, z: -D / 2 + 0.29, rx: -11, r: 0.065 }));
-  }
-  const dark = [];
-  for (const sx of [-1, 1]) for (const sz of [-1, 1]) dark.push(cylinder(0.022, 0.017, LEG, { x: sx * (W / 2 - 0.09), z: sz * (D / 2 - 0.09), bevel: 0.004, seg: 14 }));
-  return { soft, dark };
-}
-
-function letto(p) {
-  const W = p.width, L = 2.0, LEG = 0.1;
-  const main = [
-    boxOn(W + 0.08, 0.22, L + 0.08, { y: LEG, r: 0.016 }),
-    boxOn(W + 0.08, 0.95, 0.07, { y: LEG * 0.5, z: -L / 2 - 0.075, r: 0.022 }),
-  ];
-  const dark = [];
-  for (const sx of [-1, 1]) for (const sz of [-1, 1]) dark.push(boxOn(0.06, LEG, 0.06, { x: sx * (W / 2 - 0.02), z: sz * (L / 2 - 0.02), r: 0.006 }));
-  const top = LEG + 0.2 + 0.22;
-  const linen = [boxOn(W, 0.22, L, { y: LEG + 0.2, r: 0.06 })];
-  const two = W >= 1.3, pw = two ? (W - 0.16) / 2 : Math.min(0.7, W - 0.2);
-  for (const x of two ? [-(pw / 2 + 0.03), pw / 2 + 0.03] : [0]) linen.push(box(pw, 0.13, 0.4, { x, y: top + 0.05, z: -L / 2 + 0.27, rx: -8, r: 0.06 }));
-  const blanket = [boxOn(W + 0.05, 0.07, L * 0.64, { y: top - 0.04, z: L / 2 - L * 0.32 + 0.025, r: 0.035 })];
-  return { main, dark, linen, blanket };
 }
 
 // ---------------------------------------------------------------------------- structures
@@ -373,29 +432,29 @@ const handDefaults = { radius: 0.016, presets: ['grip'] };
  * hand.slide(params) -> [min, max] meters along the handle.
  */
 export const PROP_TYPES = [
-  { id: 'sedia', label: 'Sedia', cat: 'arredo', color: '#8a5a3b', params: [], build: sedia },
-  { id: 'sgabello', label: 'Sgabello alto', cat: 'arredo', color: '#c49a6c', params: [range('height', 'Altezza seduta', 0.5, 0.85, 0.01, 0.65)], build: sgabello },
-  { id: 'panca', label: 'Panca', cat: 'arredo', color: '#8a5a3b', params: [range('length', 'Lunghezza', 0.6, 3, 0.05, 1.5)], build: panca },
-  { id: 'tavolo', label: 'Tavolo', cat: 'arredo', color: '#c49a6c', resizable: true,
+  { id: 'sedia', label: 'Sedia', cat: 'sedute', sub: 'sedie', tags: 'sedia legno cucina', color: '#8a5a3b', params: [], build: sedia },
+  { id: 'sgabello', label: 'Sgabello alto', cat: 'sedute', sub: 'sgabelli', tags: 'bar', color: '#c49a6c', params: [range('height', 'Altezza seduta', 0.5, 0.85, 0.01, 0.65)], build: sgabello },
+  { id: 'panca', label: 'Panca', cat: 'sedute', sub: 'panche', tags: 'panchina', color: '#8a5a3b', params: [range('length', 'Lunghezza', 0.6, 3, 0.05, 1.5)], build: panca },
+  { id: 'tavolo', label: 'Tavolo', cat: 'tavoli', sub: 'pranzo', tags: 'tavolo cucina pranzo', color: '#c49a6c', resizable: true,
     params: [range('width', 'Larghezza', 0.5, 3, 0.05, 1.2), range('depth', 'Profondità', 0.4, 1.5, 0.05, 0.75), range('height', 'Altezza', 0.4, 1.1, 0.01, 0.75)], build: tavolo },
-  { id: 'divano', label: 'Divano', cat: 'arredo', color: '#5d6b7a', params: [range('width', 'Larghezza', 1.4, 3, 0.05, 2.0)], build: divano },
-  { id: 'letto', label: 'Letto', cat: 'arredo', color: '#8a5a3b', params: [range('width', 'Larghezza', 0.9, 2, 0.05, 1.6)], build: letto },
+  { id: 'divano', label: 'Divano', cat: 'sedute', sub: 'divani', tags: 'divano sofà salotto penisola angolo', color: '#5d6b7a', params: [range('width', 'Larghezza', 1.4, 3.4, 0.05, 2.0), ...DIVANO_PARAMS], build: divanoGen },
+  { id: 'letto', label: 'Letto', cat: 'letti', sub: 'letti', tags: 'letto camera matrimoniale singolo castello', color: '#8a5a3b', params: [range('width', 'Larghezza', 0.9, 2, 0.05, 1.6), ...LETTO_PARAMS], build: lettoGen },
 
-  { id: 'cubo', label: 'Cubo / cassa', cat: 'strutture', color: '#c49a6c', resizable: true,
+  { id: 'cubo', label: 'Cubo / cassa', cat: 'strutture', sub: 'forme', color: '#c49a6c', resizable: true,
     params: [seg('style', 'Stile', [{ value: 'liscio', label: 'Liscio' }, { value: 'cassa', label: 'Cassa' }], 'liscio'),
       range('width', 'Larghezza', 0.1, 3, 0.01, 0.5), range('depth', 'Profondità', 0.1, 3, 0.01, 0.5), range('height', 'Altezza', 0.1, 3, 0.01, 0.5)], build: cubo },
-  { id: 'scala', label: 'Scala', cat: 'strutture', color: '#a9a49b',
+  { id: 'scala', label: 'Scalini', cat: 'strutture', sub: 'scale', color: '#a9a49b',
     params: [int('steps', 'Gradini', 2, 10, 5), range('width', 'Larghezza', 0.5, 3, 0.05, 1.0), flag('railing', 'Corrimano', false)], build: scala },
-  { id: 'muro', label: 'Muro', cat: 'strutture', color: '#d8d2c6', resizable: true,
+  { id: 'muro', label: 'Muro', cat: 'strutture', sub: 'stanze', color: '#d8d2c6', resizable: true,
     params: [seg('opening', 'Apertura', [{ value: 'none', label: 'Nessuna' }, { value: 'window', label: 'Finestra' }, { value: 'door', label: 'Porta' }], 'none'),
       range('offset', 'Posizione apertura', -1, 1, 0.01, 0, ''),
       range('length', 'Lunghezza', 0.5, 8, 0.05, 3), range('height', 'Altezza', 1, 4, 0.05, 2.6), range('thickness', 'Spessore', 0.06, 0.4, 0.01, 0.15)], build: muro },
-  { id: 'pedana', label: 'Pedana', cat: 'strutture', color: '#6f6b78', resizable: true,
+  { id: 'pedana', label: 'Pedana', cat: 'strutture', sub: 'forme', color: '#6f6b78', resizable: true,
     params: [range('width', 'Larghezza', 0.3, 5, 0.05, 2.0), range('depth', 'Profondità', 0.3, 5, 0.05, 1.2), range('height', 'Altezza', 0.05, 1.5, 0.01, 0.2)], build: pedana },
-  { id: 'colonna', label: 'Colonna', cat: 'strutture', color: '#cfc8bb', resizable: true,
+  { id: 'colonna', label: 'Colonna', cat: 'strutture', sub: 'forme', color: '#cfc8bb', resizable: true,
     params: [seg('style', 'Stile', [{ value: 'cilindro', label: 'Cilindro' }, { value: 'classica', label: 'Classica' }], 'cilindro'),
       range('diameter', 'Diametro', 0.1, 1.5, 0.01, 0.4), range('height', 'Altezza', 0.2, 5, 0.05, 2.5)], build: colonna },
-  { id: 'palla', label: 'Palla', cat: 'strutture', color: '#c0504d', params: [range('diameter', 'Diametro', 0.05, 1.2, 0.01, 0.22)], build: palla },
+  { id: 'palla', label: 'Palla', cat: 'strutture', sub: 'forme', color: '#c0504d', params: [range('diameter', 'Diametro', 0.05, 1.2, 0.01, 0.22)], build: palla },
 
   { id: 'spada', label: 'Spada', cat: 'mano', color: '#4a2f20', params: [range('blade', 'Lama', 0.3, 1.2, 0.01, 0.75)], build: spada,
     hand: { ...handDefaults, radius: 0.016, rest: () => [0, 0, -90], slide: () => [-0.05, 0.05] } },
@@ -417,13 +476,96 @@ export const PROP_TYPES = [
     hand: { ...handDefaults, radius: 0.0145, rest: (p) => (p.open ? [0, 0, 0] : [0, 0, -90]), slide: () => [-0.03, 0.6] } },
 ];
 
+// procedural interiors
+PROP_TYPES.push(...STORAGE_TYPES, ...KITCHEN_TYPES, ...FURNITURE_TYPES, ...BATH_TYPES, ...OFFICE_TYPES, ...OBJECT_TYPES, ...LEISURE_TYPES, ...STRUCTURE_TYPES);
+
+// ready-made variants of parametric types (same generator, other defaults): easier to find
+const VARIANTS = [
+  ['divano', 'divano_angolare', 'Divano con penisola', { shape: 'Ldx', width: 2.6 }],
+  ['divano', 'divanetto', 'Divanetto a 2 posti', { width: 1.5, style: 'squadrato', pillows: false }],
+  ['divano', 'divano_retro', 'Divano rétro', { style: 'retro', width: 2.0 }, { color: '#4f6b3a' }],
+  ['poltrona', 'poltrona_classica', 'Poltrona classica', { style: 'classica' }, { color: '#9b6b4a' }],
+  ['poltrona', 'poltrona_moderna', 'Poltrona moderna', { style: 'moderna' }, { color: '#c49a6c' }],
+  ['letto', 'letto_singolo', 'Letto singolo', { width: 0.9 }],
+  ['letto', 'letto_imbottito', 'Letto imbottito', { model: 'imbottito', width: 1.8 }, { color: '#8c8f99' }],
+  ['letto', 'letto_ferro', 'Letto in ferro sfatto', { model: 'ferro', width: 1.2, made: false }],
+  ['letto', 'letto_castello', 'Letto a castello', { model: 'castello', width: 0.9 }],
+  ['letto', 'letto_baldacchino', 'Letto a baldacchino', { model: 'baldacchino', width: 1.6 }],
+  ['letto', 'futon', 'Futon', { model: 'futon', width: 1.4, made: false }],
+  ['scrivania', 'scrivania_legno', 'Scrivania con cassetti', { style: 'legno', pc: 'laptop' }, { color: '#8a5a3b' }],
+  ['tavolino', 'tavolino_vetro', 'Tavolino in vetro', { style: 'vetro' }],
+  ['tavolino', 'tavolino_tondo', 'Tavolino tondo', { style: 'tondo', width: 0.8 }],
+  ['armadio', 'armadio_specchio', 'Armadio con specchi', { style: 'specchio' }],
+  ['armadio', 'armadio_scorrevole', 'Armadio scorrevole', { style: 'scorrevole', width: 2.4 }],
+  ['armadio', 'armadio_classico', 'Armadio classico', { style: 'riquadri', finish: 'legno', doors: 2, width: 1.2 }, { color: '#8a5a3b' }],
+  ['libreria', 'libreria_bianca', 'Libreria bianca', { style: 'bianco', width: 1.6 }],
+  ['libreria', 'libreria_bassa', 'Libreria bassa', { height: 0.9, width: 1.6, shelves: 2 }],
+  ['cucina', 'cucina_angolo', 'Cucina ad angolo', { shape: 'L' }],
+  ['frigo', 'frigo_americano', 'Frigorifero americano', { style: 'americano' }],
+  ['frigo', 'frigo_retro', 'Frigorifero rétro', { style: 'retro' }],
+  ['vasca', 'vasca_piedini', 'Vasca con piedini', { style: 'piedini' }],
+  ['lavabo', 'lavabo_colonna', 'Lavabo a colonna', { style: 'colonna' }],
+  ['lampada_terra', 'lampada_arco', 'Lampada ad arco', { style: 'arco' }],
+  ['lampada_terra', 'lampada_treppiede', 'Lampada a treppiede', { style: 'treppiede' }],
+  ['sospensione', 'sospensione_globo', 'Lampada a globo', { style: 'globo' }],
+  ['tappeto', 'tappeto_tondo', 'Tappeto tondo', { shape: 'tondo', pattern: 'geometrico', width: 1.6 }, { color: '#2f4a6b' }],
+  ['tappeto', 'tappeto_moderno', 'Tappeto moderno', { pattern: 'moderno' }, { color: '#c9a227' }],
+  ['quadro', 'quadro_astratto', 'Quadro astratto', { subject: 'astratto', format: 'verticale', frame: 'sottile' }],
+  ['quadro', 'cavalletto', 'Tela su cavalletto', { easel: true, frame: 'nessuna', subject: 'mare' }, { mount: undefined, spawnY: undefined }],
+  ['specchio', 'specchio_ovale', 'Specchio ovale', { style: 'dorato' }, { mount: 'wall', spawnY: 1.0 }],
+  ['pianta', 'ficus', 'Ficus', { species: 'ficus', height: 1.4 }],
+  ['pianta', 'sansevieria', 'Sansevieria', { species: 'sansevieria', height: 0.7, pot: 'bianco' }],
+  ['pianta', 'palma', 'Palma da interno', { species: 'palma', height: 1.6, pot: 'cesto' }],
+  ['pianta', 'felce', 'Felce', { species: 'felce', height: 0.6 }],
+  ['pianta', 'cactus', 'Cactus', { species: 'cactus', height: 0.5 }],
+  ['vaso_fiori', 'fiori_vaso', 'Fiori in vaso', { kind: 'margherite', vase: 'vetro' }, { cat: 'piante', sub: 'piante' }],
+  ['scarpe', 'scarpe_eleganti', 'Scarpe eleganti', { style: 'elegante' }, { color: '#3a2418' }],
+  ['scarpe', 'decollete', 'Décolleté', { style: 'decollete' }, { color: '#7a1f24' }],
+  ['scarpe', 'stivali', 'Stivali', { style: 'stivale' }, { color: '#4a2f20' }],
+  ['pianoforte', 'pianoforte_coda', 'Pianoforte a coda', { style: 'coda' }],
+  ['chitarra', 'chitarra_elettrica', 'Chitarra elettrica', { style: 'elettrica' }, { color: '#2f4a6b' }],
+  ['scala_interna', 'scala_l', 'Scala a L', { shape: 'L', railing: 'due' }],
+  ['lavagna', 'lavagna_nera', 'Lavagna nera', { kind: 'nera', stand: false, width: 2.0 }, { mount: 'wall', spawnY: 0.9, color: '#6b4a2f' }],
+  ['tv', 'tv_muro', 'TV a parete', { mount: 'muro', size: 65 }, { mount: 'wall', spawnY: 1.0 }],
+];
+for (const [baseId, id, label, defaults, extra = {}] of VARIANTS) {
+  const i = PROP_TYPES.findIndex((t) => t.id === baseId);
+  if (i < 0) continue;
+  const b = PROP_TYPES[i];
+  const v = { ...b, id, label, ...extra, params: b.params.map((p) => (p.id in defaults ? { ...p, default: defaults[p.id] } : p)), variantOf: baseId };
+  let j = i + 1;
+  while (j < PROP_TYPES.length && PROP_TYPES[j].variantOf === baseId) j++;
+  PROP_TYPES.splice(j, 0, v);
+}
+
+// realistic CC0 models (Poly Haven), loaded on first use (see models.js)
+const MODEL_BASE = './assets/props/';
+const CEIL_Y = 2.7, WALL_Y = 1.5;
+for (const m of PH_MODELS) {
+  const t = { id: m.id, label: m.label, cat: m.cat, sub: m.sub, tags: m.tags, color: '#ffffff', params: [], realistic: true,
+    model: `${MODEL_BASE}models/${m.ph}.glb`, thumb: `${MODEL_BASE}thumbs/${m.ph}.webp`, size: m.size, tint: true };
+  if (m.mount === 'ceil') { t.mount = 'ceil'; t.spawnY = Math.max(0, CEIL_Y - m.size[1]); }
+  else if (m.mount === 'wall') { t.mount = 'wall'; t.spawnY = Math.max(0.3, WALL_Y - m.size[1] / 2); }
+  // long tools / weapons start lying on the floor (flat side down)
+  if (m.lie) t.lieRot = m.size[0] < m.size[2] ? [0, 0, 90] : [-90, 0, 0];
+  PROP_TYPES.push(t);
+}
+
+/** Swatches of the tint picker of realistic models (white = original colors). */
+export const TINT_COLORS = ['#ffffff', '#f0d9b5', '#d9a07a', '#c0504d', '#7a1f24', '#e3c76a', '#8fb37a', '#6d8fb0', '#5d4e7a', '#8c8c8c'];
+
 export const TYPE_BY_ID = new Map(PROP_TYPES.map((t) => [t.id, t]));
 
 // ---------------------------------------------------------------------------- extension point
-// Other modules (buildings, city, interiors…) add their own prop types and
+// Other modules (buildings, city, animals…) add their own prop types and
 // categories at runtime. A type follows the PROP_TYPES contract: {id, label, cat,
-// color, params, build(params) -> {role: BufferGeometry[]}, resizable?, hand?};
-// `sub` (optional) groups items inside a category, `tags` help the search.
+// color, params, build(params) -> {role: BufferGeometry[], $specs?: {role: spec | (color) => spec}},
+// resizable?, hand?}; or a realistic model: {model: url of a GLB, size: [w, h, d], thumb?: image url}.
+// Optional: `sub` groups items inside a category (category.subs = [{id, label}]),
+// `tags` (Italian words) help the search, `thumb` an image instead of a rendered
+// thumbnail, `spawnY` the height of a new instance (wall / ceiling items),
+// a 'seed' param ({id: 'seed', type: 'seed'}) shows a "Rigenera" button.
+// Category: {id, label, subs?, ownTool?: true (listed by the module's own tool, not by "Oggetti")}.
 // Roles not in ROLES fall back to 'main'; modules may add roles (registerPropRoles).
 const _typeListeners = new Set();
 export function registerPropTypes(types = [], categories = []) {
@@ -456,6 +598,7 @@ export function cleanParams(type, params = {}) {
     const v = params[p.id];
     if (v === undefined || v === null) continue;
     if (p.type === 'range' || p.type === 'int') { const n = +v; if (Number.isFinite(n)) o[p.id] = Math.min(p.max, Math.max(p.min, p.type === 'int' ? Math.round(n) : n)); }
+    else if (p.type === 'seed') { const n = Math.round(+v); if (Number.isFinite(n)) o[p.id] = Math.max(0, Math.min(1e9, n)); }
     else if (p.type === 'toggle') o[p.id] = !!v;
     else if (p.type === 'seg' && p.options.some((x) => x.value === v)) o[p.id] = v;
   }

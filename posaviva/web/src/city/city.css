@@ -1,0 +1,36 @@
+/* Esterni module (city). Prefix: pv-ct- */
+.pv-ct-strip { margin: 2px 0 6px; }
+.pv-ct-strip .pv-chip { min-height: 40px; }
+.pv-ct-add { border-style: dashed; }
+.pv-ct-add.active { border-style: solid; }
+.pv-ct-note { font-size: 12px; color: var(--muted); line-height: 1.35; margin: 2px 0 8px; }
+.pv-ct-info { margin-top: 2px; }
+.pv-ct-search { width: 100%; box-sizing: border-box; min-height: 42px; border-radius: 12px; border: 1px solid var(--line, rgba(255,255,255,.14));
+  background: var(--panel2, rgba(255,255,255,.06)); color: inherit; font: inherit; font-size: 15px; padding: 8px 12px; margin: 2px 0 8px; }
+.pv-ct-subs { margin: 2px 0 8px; }
+.pv-ct-subs .pv-chip { min-height: 38px; }
+.pv-ct-grid { gap: 7px; }
+.pv-ct-card { position: relative; padding: 6px 4px 8px; min-height: 118px; gap: 4px; justify-content: flex-start; }
+.pv-ct-card:active { transform: scale(.96); }
+.pv-ct-card .pv-card-label { font-size: 11.5px; line-height: 1.15; text-align: center; }
+.pv-ct-card .pv-card-visual { height: 80px; align-items: center; }
+.pv-card-visual img.pv-ct-thumb { width: 80px; height: 80px; max-height: 80px; object-fit: contain; border-radius: 10px; opacity: 0; transition: opacity .25s;
+  background: radial-gradient(ellipse at 50% 80%, rgba(255,255,255,.10), rgba(255,255,255,0) 70%); }
+.pv-card-visual img.pv-ct-thumb.ready { opacity: 1; }
+.pv-ct-badge { position: absolute; top: 4px; right: 5px; font-size: 10.5px; line-height: 1; padding: 3px 5px; border-radius: 8px; background: rgba(0,0,0,.35); color: var(--muted); }
+.pv-ct-badge.real { color: #9fd3ff; }
+.pv-ct-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.pv-ct-head .pv-ct-title { flex: 1; font-size: 17px; font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-ct-head .pv-btn.small { min-width: 42px; min-height: 42px; }
+.pv-ct-regen { margin: 8px 0 6px; align-items: center; gap: 10px; }
+.pv-ct-regen .pv-btn { min-height: 44px; }
+.pv-ct-seed { font-size: 12px; color: var(--muted); }
+.pv-ct-field { margin: 4px 0 12px; }
+.pv-ct-label { font-size: 13px; margin-bottom: 6px; }
+.pv-ct-actions { margin: 8px 0 4px; gap: 6px; }
+.pv-ct-actions.wrap { flex-wrap: wrap; }
+.pv-ct-actions .pv-btn { min-width: 0; min-height: 40px; }
+.pv-ct-segchips { flex-wrap: wrap; overflow: visible; }
+.pv-ct-segchips .pv-chip { min-height: 36px; }
+.pv-ct-actions.wrap .pv-btn { flex: 1 1 calc(50% - 6px); min-width: calc(50% - 6px); }
+.pv-ct-actions.wrap .pv-btn span { white-space: nowrap; }

@@ -1,5 +1,5 @@
 // Top bar: selected-character chip (opens Personaggi), undo / redo wired to
-// app.history, main menu (scene files, export, settings, info).
+// app.history, "?" (Guida on the current topic), main menu (scene files, export, guide, settings, info).
 import { h, icon, iconButton, haptic, sheetMenu } from '../ui/kit.js';
 import { describe } from './people.js';
 
@@ -27,8 +27,12 @@ export class TopBar {
     this.undo = iconButton({ icon: 'undo', title: 'Annulla', onClick: () => { haptic('tick'); app.history.undo(); } });
     this.redo = iconButton({ icon: 'redo', title: 'Ripeti', onClick: () => { haptic('tick'); app.history.redo(); } });
     this.menuBtn = iconButton({ icon: 'menu', title: 'Menu', onClick: () => { haptic('tick'); this.openMenu(); } });
+    this.menuBtn.classList.add('pv-io-menu-btn');
+    // "?": the guide, opened on the topic of what is on screen (open tool, pose mode, close-up)
+    this.helpBtn = iconButton({ icon: 'help', title: 'Guida', onClick: () => { haptic('tick'); ctx.actions.openGuide({ context: true }); } });
+    this.helpBtn.classList.add('pv-io-help-btn');
     this.undo.disabled = this.redo.disabled = true;
-    shell.topRight.append(h('div', { class: 'pv-io-history' }, this.undo, this.redo), this.menuBtn);
+    shell.topRight.append(h('div', { class: 'pv-io-history' }, this.undo, this.redo), h('div', { class: 'pv-io-pill' }, this.helpBtn, this.menuBtn));
 
     app.addEventListener('history', (e) => { this.undo.disabled = !e.canUndo; this.redo.disabled = !e.canRedo; });
     for (const ev of ['selection', 'characters', 'loaded']) app.addEventListener(ev, () => this.refresh());
@@ -81,6 +85,7 @@ export class TopBar {
       { id: 'export', label: 'Esporta file scena (.json)', icon: 'download', onClick: a.exportSceneFile },
       { id: 'import', label: 'Importa file scena', icon: 'upload', onClick: a.importSceneFile },
       { separator: true },
+      { id: 'guide', label: 'Guida', icon: 'bookOpen', hint: 'Come si usa, passo per passo', onClick: () => a.openGuide() },
       { id: 'settings', label: 'Impostazioni', icon: 'settings', onClick: a.openSettings },
       { id: 'info', label: 'Info e crediti', icon: 'info', onClick: a.openInfo },
     ], { anchor: this.menuBtn });

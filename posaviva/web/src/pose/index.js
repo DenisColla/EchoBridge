@@ -17,14 +17,26 @@ import { PoseGizmo } from './gizmo.js';
 import { registerPoseTool } from './panel.js';
 import { registerPresetsTool } from './presetsPanel.js';
 import { registerHandsTool } from './handsPanel.js';
-import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, lowestGroundY, measureSeat, seatMark, setSeatMark } from './library.js';
+import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, applyPosePreset, lowestGroundY, measureSeat, seatMark, setSeatMark, feetOnFloor, fitArms, NATURAL_POSE } from './library.js';
+import { SpineFollow, applyNaturalness, exaggerate, poseSnapshot, bendLine, lineSnapshot } from './soft.js';
+import { ActionLine } from './actionLine.js';
 
 const PREFS_KEY = 'posaviva.pose.prefs';
 const POSE_TOOLS = new Set(['pose', 'hands']);
+export const POSE_MODES = ['rotate', 'ik', 'move', 'line'];
+/** "Naturalezza" of a new character (0..1): small deterministic asymmetries */
+export const DEFAULT_NATURALNESS = 0.6;
 
 function loadPrefs() {
-  const def = { mode: 'rotate', limits: true, pinFeet: true, showJoints: false };
+  const def = { mode: 'rotate', limits: true, pinFeet: true, showJoints: false, softSpine: true, counterTilt: true };
   try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
+}
+
+/** small deterministic hash of a string (0 .. 2^32-1) */
+function hashId(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
 }
 
 export function create(app, shell) {
@@ -34,8 +46,9 @@ export function create(app, shell) {
   const picker = new Picker(app, controls);
   const highlight = new Highlight(app);
   const state = loadPrefs();
-  if (!['rotate', 'ik', 'move'].includes(state.mode)) state.mode = 'rotate';
+  if (!POSE_MODES.includes(state.mode)) state.mode = 'rotate';
   rig.limits = state.limits;
+  controls.setSoft(state.softSpine);
   const listeners = new Set(); // panel refresh callbacks: fn(reason)
   const notify = (reason) => { for (const fn of listeners) fn(reason); };
 
@@ -80,6 +93,7 @@ export function create(app, shell) {
     setPref(key, value) {
       state[key] = value;
       if (key === 'limits') rig.limits = value;
+      if (key === 'softSpine') controls.setSoft(value);
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(state)); } catch { /* private mode */ }
       syncHighlight();
       notify('prefs');
@@ -89,6 +103,23 @@ export function create(app, shell) {
     select(ch, partId) { app.select(ch, partId || null); },
   };
 
+  ctx.feetOnFloor = (ch) => { ch.root.updateMatrixWorld(true); return feetOnFloor(ch); };
+  ctx.follow = new SpineFollow(ctx);
+  ctx.line = new ActionLine(ctx);
+  /** "Naturalezza" amount of a character (0..1, kept in ch.data.pose.nat) */
+  ctx.naturalness = (ch) => +(ch?.data?.pose?.nat) || 0;
+  /** after a preset replaced the pose: puts the character's "Naturalezza" back on top of it */
+  ctx.reapplyNaturalness = (ch) => {
+    const v = ctx.naturalness(ch);
+    if (v > 0) ctx.keepFeet(ch, () => applyNaturalness(ch, 0, v, rig, controls));
+  };
+  ctx.setNaturalness = (ch, v) => {
+    v = Math.max(0, Math.min(1, v));
+    applyNaturalness(ch, ctx.naturalness(ch), v, rig, controls);
+    const d = ch.data.pose || (ch.data.pose = {});
+    if (v > 0) d.nat = Math.round(v * 1000) / 1000; else delete d.nat;
+    if (!Object.keys(d).length) delete ch.data.pose;
+  };
   const gizmo = new PoseGizmo(ctx);
   ctx.gizmo = gizmo;
 
@@ -177,6 +208,40 @@ export function create(app, shell) {
     ch.applyPose();
   }
 
+  /** runs fn (pose edits, no matrix update needed) keeping the feet that stand on the floor planted (leg IK) */
+  ctx.keepFeet = (ch, fn) => {
+    const feet = ctx.feetOnFloor(ch);
+    const pins = ['L', 'R'].filter((sd) => feet[sd]).map((sd) => ik.pin(ch, sd));
+    fn();
+    rig.refreshAll(ch);
+    for (const p of pins) ik.solvePinned(ch, p);
+  };
+  /** Linea: fits the character to a stroke (client px) and records the undo step */
+  ctx.applyStroke = (ch, pts) => {
+    if (!app.characters.includes(ch)) return;
+    let r;
+    try { r = ctx.line.fit(ch, pts); } catch (e) { console.warn('[pose] line of action failed', e); r = { ok: false }; }
+    if (!r.ok) { shell.hint(r.reason === 'short' ? 'Linea troppo corta: disegna una curva più lunga' : 'Disegna la linea sopra il personaggio', 1800); app.invalidate(); return; }
+    haptic('light');
+    shell.hint('Linea d\'azione: ' + r.label, 1800);
+    ctx.edited(ch, true, 'linea d\'azione');
+  };
+  ctx.groundMode = groundMode;
+  ctx.settle = settle;
+  ctx.fitArms = (ch) => fitArms(ch);
+
+  /**
+   * Natural standing pose for a NEW character (never on load / undo / duplicate):
+   * relaxed contrapposto, soft arms, gentle S-curve, head slightly turned, plus the
+   * character's own small asymmetries; one character in two stands mirrored.
+   */
+  function naturalPose(ch) {
+    const h = hashId(ch.id);
+    applyPosePreset(ch, NATURAL_POSE, { mirror: (h & 1) === 1 });
+    ctx.keepFeet(ch, () => ctx.setNaturalness(ch, DEFAULT_NATURALNESS));
+    ch.applyPose();
+  }
+
   // ---------------------------------------------------------------- picking (tap)
   function onTap({ ndc, x, y }) {
     const tool = shell.activeToolId;
@@ -250,6 +315,8 @@ export function create(app, shell) {
     });
   });
   app.addEventListener('tool', () => { syncHighlight(); app.invalidate(); });
+  // the faint line-of-action stroke belongs to the pose it produced
+  app.addEventListener('loaded', () => ctx.line.clear());
   app.addEventListener('characters', () => notify('characters'));
 
   // Android back: leave part selection first
@@ -269,12 +336,13 @@ export function create(app, shell) {
 
   // ---------------------------------------------------------------- public API
   app.posing = {
+    modes: POSE_MODES,
     controls,
     rig,
     ik,
-    /** {mode, limits, pinFeet, showJoints} */
+    /** {mode: rotate/ik/move/line, limits, pinFeet, showJoints, softSpine, counterTilt} */
     get state() { return { ...state }; },
-    setMode(m) { if (['rotate', 'ik', 'move'].includes(m)) { ctx.setPref('mode', m); } },
+    setMode(m) { if (POSE_MODES.includes(m)) { ctx.setPref('mode', m); } },
     setPref: (k, v) => ctx.setPref(k, v),
     /** select a part by control id (e.g. 'forearm.L', 'f22.R') */
     selectPart: (ch, id) => app.select(ch, id),
@@ -291,13 +359,34 @@ export function create(app, shell) {
       return true;
     },
     pick: (ndc) => picker.pick(ndc),
+    /** Linea d'azione: bends the character to a stroke (client px points) and records an undo step */
+    drawLine: (ch, pts) => ctx.applyStroke(ch, pts),
+    /** the ActionLine solver ({fit, chain, bodyLine, last, clear}) */
+    actionLine: ctx.line,
+    /** "Naturalezza" 0..1 of a character (deterministic asymmetries, ch.data.pose.nat) */
+    naturalness: (ch) => ctx.naturalness(ch),
+    setNaturalness(ch, v, commit = false) { ctx.keepFeet(ch, () => ctx.setNaturalness(ch, v)); ctx.edited(ch, commit, 'naturalezza'); },
+    /** "Dinamismo": exaggerates the current pose (amount 1 = unchanged, 1.5 = +50%), limits respected */
+    dynamism(ch, amount, commit = false) {
+      const g = groundMode(ch);
+      exaggerate(ch, poseSnapshot(ch), amount, rig, controls);
+      ch.applyPose(); fitArms(ch);
+      if (g) settle(ch, g);
+      ctx.edited(ch, commit, 'dinamismo');
+    },
+    /** "Curva": scales the bend of the back's line of action (0 straight, 1 unchanged, 2 double) */
+    curve(ch, t, commit = false) { bendLine(ch, lineSnapshot(ch, rig, controls), t, rig); ctx.edited(ch, commit, 'curva linea d\'azione'); },
     /** overlay handles (read-only; screen positions of the last drawn frame, used by tests) */
     gizmo,
     ...ops,
   };
 
   return {
-    onCharacterAdded() {},
+    onCharacterAdded(ch, opts) {
+      // only a brand new character (not a load, undo or duplicate: those carry json)
+      if (!opts || opts.json || opts.pose === false) return;
+      try { naturalPose(ch); } catch (e) { console.warn('[pose] natural pose failed', e); }
+    },
     onCharacterRemoved(ch) {
       highlight.forget(ch);
       if (watched === ch) { watched.removeEventListener('pose', onPose); watched.removeEventListener('shape', onPose); watched = null; }

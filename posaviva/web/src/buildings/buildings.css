@@ -1,0 +1,29 @@
+/* Buildings module ("Edifici"). Prefix: pv-bd- */
+.pv-bd-strip { margin: 2px 0 6px; }
+.pv-bd-strip .pv-chip { min-height: 40px; }
+.pv-bd-add { border-style: dashed; }
+.pv-bd-add.active { border-style: solid; }
+.pv-bd-note { font-size: 12px; color: var(--muted); line-height: 1.35; margin: 2px 0 8px; }
+.pv-bd-subs { margin: 4px 0 10px; }
+.pv-bd-subs .pv-chip { min-height: 38px; }
+.pv-bd-grid .pv-cards { gap: 7px; }
+.pv-bd-grid .pv-card { padding: 6px 4px 8px; min-height: 120px; gap: 4px; justify-content: flex-start; }
+.pv-bd-grid .pv-card:active { transform: scale(.96); }
+.pv-bd-grid .pv-card-label { font-size: 11.5px; line-height: 1.15; text-align: center; }
+.pv-bd-grid .pv-card-visual { height: 84px; align-items: center; }
+.pv-card-visual img.pv-bd-thumb { width: 84px; height: 84px; max-height: 84px; object-fit: contain; border-radius: 10px; opacity: 0; transition: opacity .25s;
+  background: radial-gradient(ellipse at 50% 85%, rgba(255,255,255,.10), rgba(255,255,255,0) 70%); }
+.pv-card-visual img.pv-bd-thumb.ready { opacity: 1; }
+.pv-bd-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.pv-bd-head .pv-bd-title { flex: 1; font-size: 17px; font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-bd-head .pv-btn.small { min-width: 42px; min-height: 42px; }
+.pv-bd-regen { margin: 8px 0 6px; align-items: center; gap: 10px; }
+.pv-bd-regen .pv-btn { min-height: 44px; }
+.pv-bd-seed { font-size: 12px; color: var(--muted); }
+.pv-bd-field { margin: 4px 0 12px; }
+.pv-bd-field.wrap .pv-seg { flex-wrap: wrap; }
+.pv-bd-label { font-size: 13px; margin-bottom: 6px; }
+.pv-bd-actions { margin: 8px 0 4px; flex-wrap: wrap; gap: 6px; }
+.pv-bd-actions .pv-btn { min-width: 0; min-height: 40px; }
+.pv-bd-field.wrap .pv-seg-btn { flex: 1 1 30%; }
+.pv-bd-field .pv-seg-btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

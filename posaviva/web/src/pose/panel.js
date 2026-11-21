@@ -3,6 +3,7 @@
 // finger picker, options.
 import { h, section, slider, segmented, button, toggle, iconButton, sheetMenu, toast, haptic, icon } from '../ui/kit.js';
 import { AXIS_COLORS, FINGER_NAMES, toDeg, toRad } from './controls.js';
+import { buildAdjustSliders } from './adjust.js';
 
 const UP = {
   head: 'neck', neck: 'chest', chest: 'abdomen', abdomen: 'pelvis', shoulder: 'chest', arm: 'shoulder', forearm: 'arm', hand: 'forearm',
@@ -45,7 +46,7 @@ export function registerPoseTool(ctx) {
     build(el) {
       // ---------------------------------------------------------------- mode
       const modeSeg = segmented({
-        options: [{ value: 'rotate', label: 'Ruota', icon: 'rotate' }, { value: 'ik', label: 'Trascina', icon: 'tap' }, { value: 'move', label: 'Sposta', icon: 'move' }],
+        options: [{ value: 'rotate', label: 'Ruota', icon: 'rotate' }, { value: 'ik', label: 'Trascina', icon: 'tap' }, { value: 'line', label: 'Linea', icon: 'edit' }, { value: 'move', label: 'Sposta', icon: 'move' }],
         value: state.mode,
         onChange: (v) => { haptic('tick'); ctx.setPref('mode', v); refresh(); modeHint(); },
       });
@@ -68,7 +69,7 @@ export function registerPoseTool(ctx) {
       const sliderHost = h('div', { class: 'pv-pose-sliders' });
       let sliders = [];
       let sliderKey = '';
-      let sliding = -1;
+      let sliding = -1, following = null;
       let pendingApply = 0;
       function buildSliders(ch, ctrl) {
         const vis = ctx.visibleAxes(ctrl);
@@ -90,12 +91,16 @@ export function registerPoseTool(ctx) {
             onInput: (v) => {
               const c = ctx.sel().character;
               if (!c) return;
+              // the pelvis follows a side bend / twist of the back (planted feet)
+              if (sliding !== k || following !== c) { following = c; ctx.follow.begin(c, ctrl); }
               sliding = k;
               rig.write(c, ctrl, k, toRad(v) - rig.offset(c, ctrl, a));
+              ctx.follow.update();
               if (!pendingApply) pendingApply = requestAnimationFrame(() => { pendingApply = 0; ctx.edited(c, false); });
             },
             onChange: () => {
-              sliding = -1;
+              sliding = -1; following = null;
+              ctx.follow.end();
               const c = ctx.sel().character;
               if (c) ctx.edited(c, true, 'posa: ' + ctrl.label.toLowerCase());
             },
@@ -103,7 +108,7 @@ export function registerPoseTool(ctx) {
           s.classList.add('pv-pose-axis');
           s.style.setProperty('--axis-color', AXIS_COLORS[slot]);
           s._k = k;
-          s.input.addEventListener('pointerup', () => { sliding = -1; });
+          s.input.addEventListener('pointerup', () => { sliding = -1; following = null; ctx.follow.end(); });
           return s;
         });
         sliderHost.append(...sliders);
@@ -180,6 +185,18 @@ export function registerPoseTool(ctx) {
       const dropBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => { const ch = app.selection.character; if (!ch) return; haptic('tick'); ch.root.position.y = 0; ch.root.updateMatrixWorld(true); ctx.ops.dropToGround(ch); ctx.placed(ch); } });
       const movePane = h('div', {}, h('p', { class: 'pv-pose-note' }, 'Trascina l\'anello a terra (o il personaggio) per spostarlo, il pomello per ruotarlo.'), yawSlider, heightSlider, h('div', { class: 'pv-pose-actions' }, dropBtn));
 
+      // ---------------------------------------------------------------- line of action pane
+      const adjust = buildAdjustSliders(ctx);
+      const softToggle = toggle({ label: 'Colonna morbida', value: state.softSpine, onChange: (v) => { ctx.setPref('softSpine', v); softToggle2.setValue(v); sliderKey = ''; refresh(); } });
+      const tiltToggle = toggle({ label: 'Il bacino compensa', value: state.counterTilt, onChange: (v) => { ctx.setPref('counterTilt', v); tiltToggle2.setValue(v); } });
+      const clearLineBtn = button({ label: 'Nascondi traccia', icon: 'eyeOff', small: true, onClick: () => { ctx.line.clear(); app.invalidate(); } });
+      const linePane = h('div', {},
+        h('div', { class: 'pv-pose-info' },
+          h('div', { class: 'pv-pose-legend' }, legend('#c9b8ff', 'La tua linea'), legend('#ffb86b', 'Linea del corpo')),
+          h('p', {}, 'Disegna con un dito una curva sopra il personaggio: dal bacino alla testa piega la schiena (C, S o dritta), da un piede a una mano coinvolge anche gamba e braccio. Ruota la vista con un dito fuori dal personaggio.')),
+        adjust.el,
+        h('div', { class: 'pv-pose-actions wrap' }, clearLineBtn));
+
       function turnAboutPelvis(ch, yaw) {
         // keep the pelvis (ring center) fixed while turning
         const C = rig.worldPos(ch, 0);
@@ -212,9 +229,11 @@ export function registerPoseTool(ctx) {
         await sheetMenu(items, { title: 'Copia la posa su', anchor });
       }
       const limitsToggle = toggle({ label: 'Limiti anatomici', value: state.limits, onChange: (v) => { ctx.setPref('limits', v); sliderKey = ''; refresh(); } });
+      const softToggle2 = toggle({ label: 'Colonna morbida (schiena e collo curvano insieme)', value: state.softSpine, onChange: (v) => { ctx.setPref('softSpine', v); softToggle.setValue(v); sliderKey = ''; refresh(); } });
+      const tiltToggle2 = toggle({ label: 'Il bacino compensa (piedi a terra)', value: state.counterTilt, onChange: (v) => { ctx.setPref('counterTilt', v); tiltToggle.setValue(v); } });
       const pinToggle2 = toggle({ label: 'Piedi fissi (Trascina)', value: state.pinFeet, onChange: (v) => { ctx.setPref('pinFeet', v); pinToggle.setValue(v); } });
       const jointsToggle = toggle({ label: 'Mostra articolazioni', value: state.showJoints, onChange: (v) => ctx.setPref('showJoints', v) });
-      const optSection = section('Opzioni', [limitsToggle, pinToggle2, jointsToggle], { collapsible: true });
+      const optSection = section('Opzioni', [limitsToggle, softToggle2, tiltToggle2, pinToggle2, jointsToggle], { collapsible: true });
 
       // same empty state as the other character tools (Corpo, Viso, Mani, Vestiti)
       const noChar = h('div', { class: 'pv-body-empty' },
@@ -229,7 +248,7 @@ export function registerPoseTool(ctx) {
       function legend(color, label) { return h('span', { class: 'pv-pose-legend-item' }, h('i', { style: { background: color } }), label); }
 
       function modeHint() {
-        const t = { rotate: 'Tocca una parte, poi trascina un anello', ik: 'Trascina mani, piedi, testa o bacino', move: 'Trascina l\'anello a terra per spostare' }[state.mode];
+        const t = { rotate: 'Tocca una parte, poi trascina un anello', ik: 'Trascina mani, piedi, testa o bacino', move: 'Trascina l\'anello a terra per spostare', line: 'Disegna una curva sopra il personaggio' }[state.mode];
         shell.hint(t, 2200);
       }
 
@@ -244,12 +263,15 @@ export function registerPoseTool(ctx) {
         if (pane === 'rotate' && !control) pane = 'empty';
         if (pane !== lastPane) {
           lastPane = pane;
-          modePanes.replaceChildren(pane === 'rotate' ? rotatePane : pane === 'empty' ? emptyHint : pane === 'ik' ? h('div', {}, ikPane, pinToggle) : movePane);
+          modePanes.replaceChildren(pane === 'rotate' ? rotatePane : pane === 'empty' ? emptyHint : pane === 'ik' ? h('div', {}, ikPane, pinToggle) : pane === 'line' ? h('div', {}, linePane, softToggle, tiltToggle) : movePane);
           if (pane === 'empty') mapSection.classList.remove('collapsed');
         }
-        mapSection.style.display = state.mode === 'move' ? 'none' : '';
-        fingerSection.style.display = state.mode === 'move' ? 'none' : '';
+        mapSection.style.display = state.mode === 'move' || state.mode === 'line' ? 'none' : '';
+        fingerSection.style.display = state.mode === 'move' || state.mode === 'line' ? 'none' : '';
         pinToggle.setValue(state.pinFeet); pinToggle2.setValue(state.pinFeet);
+        softToggle.setValue(state.softSpine); softToggle2.setValue(state.softSpine);
+        tiltToggle.setValue(state.counterTilt); tiltToggle2.setValue(state.counterTilt);
+        if (ch && state.mode === 'line') adjust.refresh();
         limitsToggle.setValue(state.limits); jointsToggle.setValue(state.showJoints);
         if (ch && control && state.mode === 'rotate') {
           partName.textContent = control.label;

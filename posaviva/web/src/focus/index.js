@@ -188,6 +188,15 @@ export function create(app, shell) {
     lens.classList.add('show');
   }
   app.addAfterRenderHook(placeLens);
+  // a (nearly) full-height sheet leaves no room: hide the quick button instead of pushing it under the top bar
+  const fitWrap = () => {
+    const ins = shell.getViewInsets?.() || { top: 0, bottom: 0 };
+    const free = (app.canvas.clientHeight || window.innerHeight) - ins.top - ins.bottom;
+    wrap.style.display = free < 230 ? 'none' : '';
+    if (free < 230 && menuOpen) toggleMenu(false);
+  };
+  app.addEventListener('uilayout', fitWrap);
+  app.addEventListener('resize', fitWrap);
   app.addEventListener('selection', () => { placeLens(); if (menuOpen) buildMenu(); });
 
   return {

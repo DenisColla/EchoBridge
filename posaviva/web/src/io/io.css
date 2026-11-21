@@ -1,7 +1,7 @@
 /* io / ui module: top bar chip, Personaggi tool, scene browser, export, settings, onboarding. Prefix: pv-io- */
 
 /* ------------------------------------------------------------------ top bar */
-.pv-io-chip { display: inline-flex; align-items: center; gap: 9px; height: 46px; min-width: 0; flex: 0 1 auto; max-width: min(62vw, 300px); padding: 0 12px 0 6px; border-radius: 23px;
+.pv-io-chip { display: inline-flex; align-items: center; gap: 8px; height: 46px; min-width: 0; flex: 0 1 auto; max-width: min(62vw, 300px); padding: 0 10px 0 6px; border-radius: 23px;
   border: 1px solid var(--line); background: rgba(20, 22, 28, .66); backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
   box-shadow: 0 4px 14px rgba(0,0,0,.22); color: var(--text); transition: background .2s, border-color .2s, transform .12s var(--ease); }
 .pv-io-chip:active { transform: scale(.97); }
@@ -16,10 +16,11 @@
 .pv-io-chip-name { font-weight: 650; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pv-io-chip-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pv-io-chip.empty .pv-io-chip-sub:empty { display: none; }
-.pv-io-history { display: flex; border-radius: 14px; border: 1px solid var(--line); background: rgba(20, 22, 28, .66); backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
+/* pills of joined buttons: [annulla | ripeti] and [guida | menu] */
+.pv-io-history, .pv-io-pill { display: flex; border-radius: 14px; border: 1px solid var(--line); background: rgba(20, 22, 28, .66); backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
   box-shadow: 0 4px 14px rgba(0,0,0,.22); overflow: hidden; }
-.pv-topbar .pv-io-history .pv-icon-btn { background: transparent; border: 0; box-shadow: none; border-radius: 0; backdrop-filter: none; -webkit-backdrop-filter: none; width: 44px; }
-.pv-io-history .pv-icon-btn + .pv-icon-btn { border-left: 1px solid var(--line); }
+.pv-topbar .pv-io-history .pv-icon-btn, .pv-topbar .pv-io-pill .pv-icon-btn { background: transparent; border: 0; box-shadow: none; border-radius: 0; backdrop-filter: none; -webkit-backdrop-filter: none; width: 44px; }
+.pv-io-history .pv-icon-btn + .pv-icon-btn, .pv-io-pill .pv-icon-btn + .pv-icon-btn { border-left: 1px solid var(--line); }
 
 /* ------------------------------------------------------------------ Personaggi */
 .pv-io-people-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 2px 0 12px; }
@@ -139,24 +140,39 @@
 .pv-io-ob-stage.in-left { animation: pvObL .34s var(--ease-out); }
 @keyframes pvObR { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
 @keyframes pvObL { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
-.pv-io-ob-art { height: 150px; border-radius: 18px; background: radial-gradient(ellipse at 50% 60%, rgba(124,108,255,.22), transparent 70%), rgba(255,255,255,.03);
-  border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
-.pv-io-ob-art svg { width: 82%; height: 100%; fill: none; stroke: #b7bccb; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-.pv-io-ob-art .fig circle { fill: rgba(183,188,203,.12); }
-.pv-io-ob-art .hl, .pv-io-ob-art .hlfig { stroke: var(--accent-hi); stroke-width: 4; }
-.pv-io-ob-art .ripple { stroke: var(--accent-hi); stroke-width: 2.5; opacity: .9; transform-origin: 138px 74px; animation: pvRipple 1.6s ease-out infinite; }
-.pv-io-ob-art .ripple.r2 { animation-delay: .4s; opacity: .5; }
+/* line illustrations (io/art.js): onboarding cards and Guida */
+.pv-io-art { height: 150px; border-radius: 18px; background: radial-gradient(ellipse at 50% 60%, rgba(124,108,255,.22), transparent 70%), rgba(255,255,255,.03);
+  border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+.pv-io-ob-art { margin-bottom: 16px; }
+.pv-io-art svg { width: 82%; height: 100%; fill: none; stroke: #b7bccb; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.pv-io-art .fig circle { fill: rgba(183,188,203,.12); }
+.pv-io-art .hl, .pv-io-art .hlfig { stroke: var(--accent-hi); stroke-width: 4; }
+.pv-io-art .ripple { stroke: var(--accent-hi); stroke-width: 2.5; opacity: .9; transform-box: fill-box; transform-origin: center; animation: pvRipple 1.6s ease-out infinite; }
+.pv-io-art .ripple.r2 { animation-delay: .4s; opacity: .5; }
 @keyframes pvRipple { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(1.5); opacity: 0; } }
-.pv-io-ob-art .finger { fill: #e7d3c4; stroke: #2b2733; stroke-width: 2; }
-.pv-io-ob-art .ring { stroke-width: 3.5; }
-.pv-io-ob-art .rx { stroke: #ff6b6b; } .pv-io-ob-art .ry { stroke: #4ade80; } .pv-io-ob-art .rz { stroke: #60a5fa; }
-.pv-io-ob-art .joint { fill: var(--accent-hi); stroke: none; }
-.pv-io-ob-art .arrow { stroke: var(--accent-2); stroke-width: 3.5; }
-.pv-io-ob-art .arrow.soft { opacity: .55; }
-.pv-io-ob-art .dot { fill: rgba(124,108,255,.35); stroke: var(--accent-hi); }
-.pv-io-ob-art .frame { stroke: rgba(255,255,255,.18); stroke-width: 2; fill: rgba(255,255,255,.03); }
-.pv-io-ob-art .frame.on { stroke: var(--accent); fill: rgba(124,108,255,.12); }
-.pv-io-ob-art .spark { fill: #ffd76a; stroke: none; }
+.pv-io-art .finger { fill: #e7d3c4; stroke: #2b2733; stroke-width: 2; }
+.pv-io-art .ring { stroke-width: 3.5; }
+.pv-io-art .rx { stroke: #ff6b6b; } .pv-io-art .ry { stroke: #4ade80; } .pv-io-art .rz { stroke: #60a5fa; }
+.pv-io-art .joint { fill: var(--accent-hi); stroke: none; }
+.pv-io-art .arrow { stroke: var(--accent-2); stroke-width: 3.5; }
+.pv-io-art .arrow.soft { opacity: .55; }
+.pv-io-art .dot { fill: rgba(124,108,255,.35); stroke: var(--accent-hi); }
+.pv-io-art .frame { stroke: rgba(255,255,255,.18); stroke-width: 2; fill: rgba(255,255,255,.03); }
+.pv-io-art .frame.on { stroke: var(--accent); fill: rgba(124,108,255,.12); }
+.pv-io-art .spark { fill: #ffd76a; stroke: none; }
+.pv-io-art .dash { stroke: var(--accent-hi); stroke-width: 2; stroke-dasharray: 3 4; }
+.pv-io-art .link { stroke: var(--accent-hi); stroke-width: 2; opacity: .55; }
+.pv-io-art .lens { stroke: var(--accent-hi); stroke-width: 3; fill: rgba(124,108,255,.12); }
+.pv-io-art .fab { fill: var(--accent); stroke: none; }
+.pv-io-art .fabi { stroke: #fff; stroke-width: 2; }
+.pv-io-art .stroke { stroke: #c9b8ff; stroke-width: 6; opacity: .85; stroke-dasharray: 1; stroke-dashoffset: 1; animation: pvDraw 1.3s .25s ease-out forwards; }
+.pv-io-art .body { stroke: #ffb86b; stroke-width: 2.5; stroke-dasharray: 5 6; }
+.pv-io-art .soft { stroke: rgba(255,255,255,.2); stroke-width: 2.5; }
+.pv-io-art .qbg { fill: var(--accent); stroke: none; }
+.pv-io-art .q { stroke: #fff; stroke-width: 3.5; }
+.pv-io-art .qdot { fill: #fff; stroke: none; }
+@keyframes pvDraw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) { .pv-io-art .stroke { animation: none; stroke-dashoffset: 0; } .pv-io-art .ripple { animation: none; } }
 .pv-io-ob-step { font-size: 11.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-hi); }
 .pv-io-ob-title { font-size: 21px; font-weight: 700; margin: 4px 0 6px; line-height: 1.2; }
 .pv-io-ob-text { margin: 0; color: #cdd1dc; font-size: 14.5px; line-height: 1.5; min-height: 66px; }

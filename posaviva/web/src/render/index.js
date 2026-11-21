@@ -8,22 +8,28 @@
 //   mod.setStyle(id)                              'realistic' | 'clay' | 'toon' | 'lines'
 //   mod.setQuality('alta'|'media'|'bassa')        device preference (localStorage)
 //   mod.quality                                   current preset {id, prCap, shadow, aoScale, aoSamples}
+//   settings.softSkin (bool, default true)        'Deformazione morbida': dual-quaternion skinning
+//   settings.anatomy (0..1, 0 = off)              'Linee anatomiche': skin crease lines (toon / lines + ink)
 // Events on app: 'renderstyle' {settings} after any style setting changes,
 //   'capture' {phase:'before'|'after', transparent} around captures (hide your 2D overlays if needed).
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { materials, STYLES } from './materials.js';
+import { materials, STYLES, softSkin, anatomyLines } from './materials.js';
+import { invalidateAnatomy, uvIslandMask, invalidateUvMask } from './anatomy.js';
 import { RenderPipeline } from './pipeline.js';
 import { PerfController } from './perf.js';
 import { buildStylePanel } from './panel.js';
 
 /** Renderer configuration per style. env = environment (IBL) intensity. */
+// skinWarm = subsurface warmth of the ambient occlusion on skin (0..1)
 const STYLE_RENDER = {
-  realistic: { toneMapping: THREE.NeutralToneMapping, env: 0.22, exposure: true, ao: true },
-  clay: { toneMapping: THREE.NeutralToneMapping, env: 0.42, exposure: true, ao: true },
-  toon: { toneMapping: THREE.NoToneMapping, env: 0, exposure: false, ao: false },
-  lines: { toneMapping: THREE.NoToneMapping, env: 0, exposure: false, ao: false },
+  realistic: { toneMapping: THREE.NeutralToneMapping, env: 0.22, exposure: true, ao: true, skinWarm: 1 },
+  clay: { toneMapping: THREE.NeutralToneMapping, env: 0.42, exposure: true, ao: true, skinWarm: 0.25 },
+  toon: { toneMapping: THREE.NoToneMapping, env: 0, exposure: false, ao: false, skinWarm: 0 },
+  lines: { toneMapping: THREE.NoToneMapping, env: 0, exposure: false, ao: false, skinWarm: 0 },
 };
+/** styles whose skin can draw anatomical crease lines (with the ink outlines on) */
+const ANATOMY_LINE_STYLES = new Set(['toon', 'lines']);
 
 export const QUALITY = {
   alta: { id: 'alta', label: 'Alta', prCap: 2, shadow: 2048, aoScale: 0.5, aoSamples: 12 },
@@ -46,6 +52,8 @@ const DEFAULTS = {
   ground: true, grid: true, shadows: true,
   ao: true, aoIntensity: 0.8,
   exposure: 1,
+  softSkin: true, // 'Deformazione morbida' (dual-quaternion skinning)
+  anatomy: 0.3, // 'Linee anatomiche' 0..1 (0 = off)
 };
 const PREFS_KEY = 'posaviva.render.prefs';
 
@@ -73,6 +81,8 @@ export function create(app, shell) {
   let autoBg = null; // background replaced automatically by the 'lines' style (restored on leave)
   const solidBg = new THREE.Color();
   const override = (r, s, c) => { if (!holdFrames) pipeline.render(r, s, c); };
+  // the library derives the anatomy maps (cavity, crease lines) on the GPU and checks DQS support
+  materials.setRenderer(renderer, uvIslandMask(renderer, app.model));
 
   // PCFSoftShadowMap was removed in three r18x (it only logs a warning); PCF is the same thing now.
   if (renderer.shadowMap.type === THREE.PCFSoftShadowMap) renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -142,6 +152,10 @@ export function create(app, shell) {
     o.aoSamples = q.aoSamples;
     o.bg = state.bg;
     o.shadowMapSize = q.shadow;
+    o.skinWarm = sr.skinWarm || 0;
+    // anatomical crease lines: groove strength threshold from the slider (> 1 = off)
+    const a = +state.anatomy || 0;
+    anatomyLines.value.set(o.ink && ANATOMY_LINE_STYLES.has(state.style) && a > 0.005 ? THREE.MathUtils.lerp(0.8, 0.1, a) : 2, 1);
     // plain path when nothing special is needed
     if (state.bg.type === 'solid') scene.background = solidBg.set(state.bg.color);
     else if (state.bg.type === 'gradient') scene.background = solidBg.set(state.bg.bottom).lerp(new THREE.Color(state.bg.top), 0.5);
@@ -150,8 +164,27 @@ export function create(app, shell) {
     app.invalidate();
   }
 
+  /**
+   * Programs changed outside a style switch (soft skinning toggled): compile them
+   * asynchronously when the driver can, keeping the previous frame on screen.
+   */
+  async function compileHeld() {
+    const token = ++compileToken;
+    holdFrames = !!renderer.compileAsync && renderer.extensions.has('KHR_parallel_shader_compile');
+    applyPipeline();
+    if (!holdFrames) return;
+    try {
+      await Promise.race([renderer.compileAsync(scene, app.camera), new Promise((r) => setTimeout(r, 1800))]);
+    } catch { /* compile errors surface on the next render anyway */ }
+    if (token !== compileToken) return;
+    holdFrames = false;
+    applyPipeline();
+  }
+
   function applyAll() {
     if (materials.style !== state.style) materials.setStyle(state.style);
+    // 'Deformazione morbida': flips the DQS define on every skinned program (one recompile)
+    if (softSkin.enabled !== !!state.softSkin && softSkin.setEnabled(!!state.softSkin) > 0 && !holdFrames) compileHeld();
     applyRendererState();
     applyPipeline();
     panel?.sync();
@@ -285,6 +318,8 @@ export function create(app, shell) {
     get quality() { return quality(); },
     get prefs() { return { ...prefs }; },
     getSettings, set, setStyle, setQuality, setPref, capture,
+    /** dual-quaternion skinning controller ({enabled, supported, active}); toggle with set({softSkin}) */
+    softSkin,
     /** re-applies tone mapping, environment fill (style base × app.lightRig.envScale), floor, grid, shadows */
     applyRendererState,
     STYLES,
@@ -309,7 +344,7 @@ export function create(app, shell) {
     id: 'style', group: 'style', label: 'Stile', icon: 'palette', order: 100, title: 'Stile e resa',
     build(container) {
       panel = buildStylePanel(container, {
-        app, STYLES, QUALITY, STYLE_RENDER,
+        app, STYLES, QUALITY, STYLE_RENDER, softSkin, ANATOMY_LINE_STYLES,
         getState: () => state, getPrefs: () => prefs,
         set, setStyle: (id) => setStyle(id).then(() => app.commit('stile')), setQuality, setPref,
       });
@@ -342,6 +377,11 @@ export function create(app, shell) {
   // GPU (it would come back black): build a new one. The pipeline's targets and
   // GTAO buffers are re-rendered every frame; shadow maps are flagged by the app.
   app.addEventListener('contextrestored', () => {
+    // the anatomy maps were rendered on the GPU as well: rebuild them (and the materials using them)
+    for (const k of ['skinNormal', 'skinNormalM']) invalidateAnatomy(materials.textures[k]);
+    invalidateUvMask(app.model);
+    materials.uvMask = uvIslandMask(renderer, app.model);
+    materials.rebuildAll();
     const old = envTex;
     envTex = null;
     if (old) {

@@ -7,6 +7,7 @@
 // listen to the 'shape' event and rebuild themselves once the drag pauses; one
 // undo step is recorded on release.
 import { h, icon, section, slider, segmented, swatches, button, haptic } from '../ui/kit.js';
+import { PRESET_DEFINITION } from '../core/Character.js';
 
 export const SKIN_TONES = ['#f6d7c3', '#eac0a2', '#e0b49a', '#c99272', '#a86f4c', '#8a5536', '#6b3f26', '#4a2a19'];
 export const EYE_COLORS = ['#5b3a21', '#3d2614', '#7a5a2e', '#4f7a3a', '#3f6f9c', '#7aa6c9', '#6b7378', '#2a2a2a'];
@@ -24,6 +25,13 @@ export function createBodyModule(app, shell) {
     init() {},
     onCharacterAdded() {},
   };
+
+  // pose correctives (muscle bulges / joint volume): rebuilt at most once per frame, right
+  // before drawing, for the characters whose joint angles moved (see Character.flushCorrectives)
+  app.addRenderHook(() => {
+    for (const ch of app.characters) ch.flushCorrectives?.();
+    return false;
+  });
 
   shell.registerTool({
     id: 'body', label: 'Corpo', icon: 'body', group: 'look', order: 20,
@@ -92,6 +100,31 @@ export function createBodyModule(app, shell) {
         onChange: (c) => { if (!ch) return; ch.setAppearance({ eyes: c }); app.commit('occhi'); },
       });
 
+      // ---- muscle definition (anatomical relief of the skin: muscles, bony landmarks)
+      // stored as ch.appearance.definition; null = follow the body type's default
+      const presetDef = () => PRESET_DEFINITION[ch?.presetId] ?? 0.55;
+      const setDef = (v) => {
+        if (!ch) return;
+        const d = Math.abs(v - presetDef()) < 0.005 ? null : Math.round(v * 100) / 100;
+        if (ch.appearance.definition === d || (d === null && ch.appearance.definition == null)) return;
+        ch.setAppearance({ definition: d });
+      };
+      let defCommitted = null; // value of the last undo step (or of the panel refresh)
+      const defOpts = {
+        label: 'Definizione muscolare', min: 0, max: 1, step: 0.01, value: 0.55, defaultValue: 0.55,
+        format: (v) => Math.round(v * 100) + '%',
+        onInput: (v) => setDef(v),
+        onChange: (v) => {
+          if (!ch) return;
+          setDef(v);
+          const now = ch.appearance.definition ?? null;
+          defSlider.classList.toggle('changed', now !== null);
+          if (now !== defCommitted) { defCommitted = now; app.commit('definizione'); }
+        },
+      };
+      const defSlider = slider(defOpts);
+      const defNote = h('span', { class: 'pv-body-note' }, 'Rilievo di muscoli e ossa sulla pelle (pettorali, addominali, ginocchia…)');
+
       // ---- shape sliders (live rebuild, throttled to one per frame)
       let pending = false;
       app.addRenderHook(() => {
@@ -151,6 +184,7 @@ export function createBodyModule(app, shell) {
         section('Sesso', [sexSeg]),
         section('Corporatura', [typeGrid]),
         section('Pelle', [skin]),
+        section('Anatomia', [defSlider, defNote]),
         section('Occhi', [eyes]),
         section(SLIDER_GROUPS[0].title, [groupHosts[0]], { collapsible: true }),
         section(SLIDER_GROUPS[1].title, [groupHosts[1]], { collapsible: true }),
@@ -168,11 +202,17 @@ export function createBodyModule(app, shell) {
         renderSliders();
         skin.setValue(ch.appearance.skin);
         eyes.setValue(ch.appearance.eyes);
+        defOpts.defaultValue = presetDef();
+        defSlider.setValue(ch.definition);
+        defCommitted = ch.appearance.definition ?? null;
+        defSlider.classList.toggle('changed', defCommitted !== null);
       }
       const onApp = () => { if (shell.activeToolId === 'body') refresh(); };
       app.addEventListener('selection', () => { if (app.selection.character !== ch) flush(); onApp(); });
       app.addEventListener('loaded', onApp);
       app.addEventListener('characters', onApp);
+      // undo / redo restore appearance and shape in place: keep the controls in sync
+      app.addEventListener('history', () => { if (app.history?.restoring || shell.activeToolId !== 'body') return; queueMicrotask(onApp); });
       return { onShow: refresh, onHide: flush };
     },
   });

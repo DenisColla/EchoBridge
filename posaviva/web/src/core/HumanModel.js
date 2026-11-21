@@ -7,7 +7,7 @@
 // presets/sliders actually touched cost memory), UVs and skin weights as 16-bit
 // fractions. The public arrays keep the v1 types (Float32 positions/UV/weights,
 // Uint16 idx + Int16 val sparse deltas). v1 files still load.
-const CTORS = { Float32Array, Uint16Array, Int16Array, Uint8Array, Uint32Array, Int32Array };
+const CTORS = { Float32Array, Uint16Array, Int16Array, Uint8Array, Uint32Array, Int32Array, Int8Array };
 
 /**
  * Reads n zigzag LEB128 varints from bytes starting at p. Each value is a
@@ -82,6 +82,16 @@ export class HumanModel {
     this.joints = new Map(jn.map((n, k) => [n, ji.subarray(jo[k], jo[k + 1])]));
     this.skinIndex = view(meta.skin.index); // Uint8 x4 per mesh vertex
     this.skinWeight = this._weights(meta.skin.weight); // Float32 x4 per mesh vertex
+
+    /**
+     * Pose correctives (see tools/build-assets.mjs): [{id, side, driver:{type:'flexX'|'raise',
+     * bone, sign?, from, to (deg)}, amp (m), idx: Uint16Array (mesh vertices), w: Int8Array
+     * (signed weight /127 along the rest normal), boneIndex}]. Empty for older asset packs.
+     */
+    this.correctives = (meta.correctives?.list || []).map((c) => ({
+      ...c, idx: view(c.idx), w: view(c.w), boneIndex: this.boneIndex.get(c.driver.bone) ?? -1,
+    }));
+    this.correctiveRefArm = meta.correctives?.refArm || 0.28;
 
     const e = meta.eyes;
     this.eyes = {
@@ -167,6 +177,39 @@ export class HumanModel {
     return this._exprRegion;
   }
 
+  /**
+   * What the pose correctives can touch (union of every corrective): verts,
+   * faces (normal faces using them), nverts (vertices whose normal changes),
+   * rranges ([start, count] runs of render vertices to upload). Built once.
+   */
+  get correctiveRegion() {
+    if (this._corrRegion) return this._corrRegion;
+    const NV = this.vertexCount, F = this.faceV, topo = this.normalTopology;
+    const moved = new Uint8Array(NV);
+    for (const c of this.correctives) for (let k = 0; k < c.idx.length; k++) moved[c.idx[k]] = 1;
+    const faces = [], touched = new Uint8Array(NV);
+    for (const f of topo.faces) {
+      let hit = false;
+      for (let k = 0; k < 4; k++) { const v = F[f * 4 + k]; if (v !== 0xffff && moved[v]) { hit = true; break; } }
+      if (!hit) continue;
+      faces.push(f);
+      for (let k = 0; k < 4; k++) { const v = F[f * 4 + k]; if (v !== 0xffff) touched[v] = 1; }
+    }
+    const verts = [], nverts = [];
+    for (let v = 0; v < NV; v++) { if (moved[v]) verts.push(v); if (touched[v]) nverts.push(v); }
+    const rranges = [];
+    let start = -1, last = -2;
+    for (let r = 0; r < this.renderVertexCount; r++) {
+      const v = this.rv2v[r];
+      if (!moved[v] && !touched[v]) continue;
+      if (start < 0 || r - last > 24) { if (start >= 0) rranges.push(start, last - start + 1); start = r; }
+      last = r;
+    }
+    if (start >= 0) rranges.push(start, last - start + 1);
+    this._corrRegion = { verts: Uint32Array.from(verts), faces: Uint32Array.from(faces), nverts: Uint32Array.from(nverts), rranges, mask: moved };
+    return this._corrRegion;
+  }
+
   _sparse(ref) {
     if (ref.enc) return new PackedDelta(this.view(ref.enc), ref.count, ref.idxBytes, this.meta.quantization);
     return { idx: this.view(ref.idx), val: this.view(ref.val), count: ref.count, scale: this.meta.quantization };
@@ -236,5 +279,8 @@ export async function loadHumanModel(base = './assets/') {
     fetch(base + 'human.json').then((r) => { if (!r.ok) throw new Error('human.json ' + r.status); return r.json(); }),
     fetch(base + 'human.bin').then((r) => { if (!r.ok) throw new Error('human.bin ' + r.status); return r.arrayBuffer(); }),
   ]);
-  return new HumanModel(meta, bin);
+  const model = new HumanModel(meta, bin);
+  /** where the asset pack was loaded from (other assets, e.g. the male skin normal map, live next to it) */
+  model.assetBase = base;
+  return model;
 }

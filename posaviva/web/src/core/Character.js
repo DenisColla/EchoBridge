@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { HumanModel } from './HumanModel.js';
 import { materials } from '../render/materials.js';
+import { softSkin, skinPositionsDQ } from '../render/softskin.js';
 
 let _uid = 0;
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
@@ -15,6 +16,37 @@ export const DEFAULT_APPEARANCE = {
   eyes: '#5b3a21',
   lips: null,
 };
+
+/**
+ * Default muscle definition (0..1, strength of the anatomical normal map) per
+ * body preset; ch.appearance.definition overrides it when the user sets it.
+ */
+export const PRESET_DEFINITION = { f_slim: 0.6, f_normal: 0.55, f_curvy: 0.4, m_slim: 0.6, m_normal: 0.7, m_curvy: 0.45 };
+/** normalScale of the skin normal map at definition 1 */
+const DEFINITION_SCALE = 4.0;
+
+// Anatomical skin normal maps (body UV space): materials.textures.skinNormal
+// (female / fallback, loaded by main.js) and skinNormalM (male, loaded here on
+// first use). Characters re-apply their skin when one of them arrives.
+const _live = new Set();
+// switching the skinning mode changes the CPU-skinned surface (picking, grounding, framing)
+softSkin.addEventListener?.('change', () => { for (const ch of _live) if (!ch._disposed) ch._skinnedDirty = true; });
+let _maleNormalRequested = false;
+function skinNormalFor(ch) {
+  const t = materials.textures || {};
+  // the male map is requested with the first character of either sex (no swap later)
+  if (!t.skinNormalM && !_maleNormalRequested && typeof document !== 'undefined') {
+    _maleNormalRequested = true;
+    new THREE.TextureLoader().load((ch.model.assetBase || './assets/') + 'skin_normal_m.png', (tex) => {
+      tex.colorSpace = THREE.NoColorSpace; tex.anisotropy = 4;
+      materials.setTexture('skinNormalM', tex);
+    }, undefined, () => {});
+  }
+  return ch.sex === 'M' ? t.skinNormalM || t.skinNormal || null : t.skinNormal || null;
+}
+materials.addEventListener?.('refresh', () => {
+  for (const ch of _live) if (!ch._disposed && ch._skinNormalTex !== skinNormalFor(ch)) ch._applyMaterials();
+});
 
 /** Per mesh vertex: 1 when its dominant bone is a foot or toe bone (cached per model). */
 function footSkinMask(model) {
@@ -58,6 +90,21 @@ export class Character extends THREE.EventDispatcher {
     this.restNormals = new Float32Array(NV * 3);
     this.skinnedPositions = new Float32Array(NV * 3); // CPU skinned (rig space), lazily updated
     this._skinnedDirty = true;
+    // pose correctives (biceps / knee / deltoid / glute volume driven by joint angles):
+    // displayed rest = restPositions + correctiveOffsets; restPositions stays pose-independent
+    /** current corrective displacement per mesh vertex (rig rest space, m); zero outside model.correctiveRegion */
+    this.correctiveOffsets = new Float32Array(NV * 3);
+    /** rest positions actually drawn and CPU-skinned: restPositions + correctiveOffsets */
+    this.displayPositions = new Float32Array(NV * 3);
+    this.displayNormals = new Float32Array(NV * 3);
+    const NC = model.correctives.length;
+    this._corrTarget = new Float32Array(NC); // driver values 0..1 from the pose
+    this._corrApplied = new Float32Array(NC); // values the offsets were built with
+    this._corrPending = false;
+    this._corrScale = 1;
+    this._corrDown = new Float32Array(NC * 3); // 'raise' drivers: torso down axis in the bone's rest frame
+    /** pose correctives on/off (debug / comparison) */
+    this.correctivesEnabled = true;
 
     // --- scene graph: root (placement) > rig (identity) > bones + meshes
     this.root = new THREE.Group();
@@ -89,6 +136,7 @@ export class Character extends THREE.EventDispatcher {
     /** attachment meshes (garments, hair …) */
     this.attachments = new Set();
     this.rebuildShape();
+    _live.add(this);
   }
 
   get preset() { return this.model.presetById.get(this.presetId) || this.model.presets[0]; }
@@ -103,6 +151,11 @@ export class Character extends THREE.EventDispatcher {
     this._rNor = new Float32Array(NR * 3);
     geo.setAttribute('position', new THREE.BufferAttribute(this._rPos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('normal', new THREE.BufferAttribute(this._rNor, 3).setUsage(THREE.DynamicDrawUsage));
+    // smooth UV tangents (w = handedness) for the anatomical normal map: without them three.js
+    // derives a per-triangle frame from screen-space derivatives, which shows facets on relief
+    this._rTan = new Float32Array(NR * 4);
+    for (let r = 0; r < NR; r++) { this._rTan[r * 4] = 1; this._rTan[r * 4 + 3] = 1; }
+    geo.setAttribute('tangent', new THREE.BufferAttribute(this._rTan, 4));
     // uv / skin index / skin weights are the same for every character: one set of
     // attributes (and GPU buffers) shared by all bodies (~0.6 MB each saved)
     const shared = m._bodyStaticAttrs || (m._bodyStaticAttrs = (() => {
@@ -146,9 +199,26 @@ export class Character extends THREE.EventDispatcher {
     this._applyMaterials();
   }
 
+  /** Effective muscle definition 0..1 (appearance.definition, or the preset default). */
+  get definition() {
+    const d = this.appearance.definition;
+    return typeof d === 'number' && Number.isFinite(d) ? Math.max(0, Math.min(1, d)) : (PRESET_DEFINITION[this.presetId] ?? 0.55);
+  }
+
+  /** Skin material spec: color, lips, muscle definition and the anatomical normal map. */
+  skinSpec() {
+    const def = Math.round(this.definition * 20) / 20; // quantized: bounded material cache under the slider
+    const spec = { kind: 'skin', color: this.appearance.skin, lips: this.appearance.lips, definition: def };
+    const nm = skinNormalFor(this);
+    this._skinNormalTex = nm;
+    if (nm && def > 0) { spec.normalMap = nm; spec.normalScale = +(def * DEFINITION_SCALE).toFixed(3); }
+    return spec;
+  }
+
   _applyMaterials() {
+    if (!this.body) return;
     const specs = [
-      { kind: 'skin', color: this.appearance.skin, lips: this.appearance.lips },
+      this.skinSpec(),
       { kind: 'lashes', color: '#1a1410' },
       { kind: 'teeth', color: '#efe9dc' },
       { kind: 'tongue', color: '#b4545a' },
@@ -214,7 +284,10 @@ export class Character extends THREE.EventDispatcher {
   setPreset(presetId) {
     if (!this.model.presetById.has(presetId)) return;
     const wasDefaultName = this.name === this.preset.label;
+    const oldSex = this.sex, oldDef = this.definition;
     this.presetId = presetId;
+    // muscle definition follows the preset unless the user chose one; the normal map follows the sex
+    if (this.definition !== oldDef || this.sex !== oldSex) this._applyMaterials();
     if (wasDefaultName) this.name = this.preset.label;
     // drop sliders that do not apply to the new sex
     for (const s of this.model.sliders) if (s.sex && s.sex !== this.sex) delete this.sliders[s.id];
@@ -242,7 +315,10 @@ export class Character extends THREE.EventDispatcher {
     this._computeSkeletonRest();
     this._fitEyes();
     this._applyExpressionMorphs();
+    this._scheduleTangents();
+    this._setupCorrectives();
     this.applyPose();
+    this.flushCorrectives();
     this.dispatchEvent({ type: 'shape' });
   }
 
@@ -309,16 +385,140 @@ export class Character extends THREE.EventDispatcher {
       if (d) HumanModel.addSparse(R, d, this.expression[k]);
     }
     this._computeNormals(region);
+    this._syncDisplay(region);
     this._uploadBody(region);
     this._exprRegionV = m.expressionVersion || 0;
     this._skinnedDirty = true;
   }
 
-  /** Area-weighted vertex normals of restPositions (all of them, or only an expression region). */
-  _computeNormals(region = null) {
-    const m = this.model, P = this.restPositions, N = this.restNormals, F = m.faceV;
+  /**
+   * display = rest + corrective offsets. Full pass (shape): everything, then the
+   * corrective region's normals from the corrected positions. Expression region:
+   * only its vertices (the face; correctives live on limbs and torso).
+   */
+  _syncDisplay(region = null) {
+    const R = this.restPositions, N = this.restNormals, D = this.correctiveOffsets, DP = this.displayPositions, DN = this.displayNormals;
+    if (region) {
+      const V = region.verts, NVt = region.nverts;
+      for (let k = 0; k < V.length; k++) { const i = V[k] * 3; DP[i] = R[i] + D[i]; DP[i + 1] = R[i + 1] + D[i + 1]; DP[i + 2] = R[i + 2] + D[i + 2]; }
+      for (let k = 0; k < NVt.length; k++) { const i = NVt[k] * 3; DN[i] = N[i]; DN[i + 1] = N[i + 1]; DN[i + 2] = N[i + 2]; }
+      const FN = this._faceN, DF = this._dispFaceN, F = region.faces;
+      if (DF) for (let k = 0; k < F.length; k++) { const i = F[k] * 3; DF[i] = FN[i]; DF[i + 1] = FN[i + 1]; DF[i + 2] = FN[i + 2]; }
+      return;
+    }
+    DP.set(R); DN.set(N);
+    this._dispFaceN = this._dispFaceN || new Float32Array(this._faceN.length);
+    this._dispFaceN.set(this._faceN);
+    if (this._corrApplied.some((x) => x)) {
+      const reg = this.model.correctiveRegion, V = reg.verts;
+      for (let k = 0; k < V.length; k++) { const i = V[k] * 3; DP[i] += D[i]; DP[i + 1] += D[i + 1]; DP[i + 2] += D[i + 2]; }
+      this._computeNormals(reg, DP, DN, this._dispFaceN);
+    }
+  }
+
+  // ------------------------------------------------------------ pose correctives
+  /**
+   * Driver values (0..1) from the pose, cheap (a few quaternion ops per
+   * corrective). Marks the correctives pending when one moved by > ~2 degrees;
+   * the offsets are rebuilt at most once per frame by flushCorrectives().
+   */
+  _updateCorrectiveDrivers() {
+    const list = this.model.correctives, T = this._corrTarget, A = this._corrApplied;
+    if (!list.length) return;
+    let dirty = false;
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i], d = c.driver;
+      let val = 0;
+      if (this.correctivesEnabled && c.boneIndex >= 0) {
+        const q = this.poseQuat[c.boneIndex];
+        // bone Y axis after the pose rotation, in the bone's rest-local frame
+        const yx = 2 * (q.x * q.y - q.w * q.z), yy = 1 - 2 * (q.x * q.x + q.z * q.z), yz = 2 * (q.y * q.z + q.w * q.x);
+        let deg = 0;
+        if (d.type === 'flexX') deg = (d.sign || 1) * Math.atan2(yz, yy) * 57.29578;
+        else if (d.type === 'raise') {
+          const o = i * 3, dx = this._corrDown[o], dy = this._corrDown[o + 1], dz = this._corrDown[o + 2];
+          const cur = Math.acos(Math.max(-1, Math.min(1, yx * dx + yy * dy + yz * dz)));
+          deg = (cur - Math.acos(Math.max(-1, Math.min(1, dy)))) * 57.29578;
+        }
+        const t = Math.max(0, Math.min(1, (deg - d.from) / (d.to - d.from)));
+        val = t * t * (3 - 2 * t);
+      }
+      T[i] = val;
+      if (Math.abs(val - A[i]) > 0.02 || (val === 0 && A[i] !== 0) || (val === 1 && A[i] !== 1)) dirty = true;
+    }
+    if (dirty) this._corrPending = true;
+  }
+
+  /**
+   * Rebuilds the corrective offsets, display positions / normals of the
+   * corrective region and uploads them, if the drivers changed. Called once per
+   * frame by the body module's render hook (and before CPU skinning). Fires a
+   * 'corrective' event. Returns true when something changed.
+   */
+  flushCorrectives() {
+    if (!this._corrPending || this._disposed) return false;
+    this._corrPending = false;
+    const m = this.model, list = m.correctives, reg = m.correctiveRegion;
+    const D = this.correctiveOffsets, N = this.restNormals, R = this.restPositions, DP = this.displayPositions;
+    const V = reg.verts;
+    for (let k = 0; k < V.length; k++) { const i = V[k] * 3; D[i] = 0; D[i + 1] = 0; D[i + 2] = 0; }
+    for (let ci = 0; ci < list.length; ci++) {
+      const a = (this._corrApplied[ci] = this._corrTarget[ci]);
+      if (!a) continue;
+      const c = list[ci], s = (a * c.amp * this._corrScale) / 127, idx = c.idx, w = c.w;
+      for (let k = 0; k < idx.length; k++) {
+        const i = idx[k] * 3, f = w[k] * s;
+        D[i] += N[i] * f; D[i + 1] += N[i + 1] * f; D[i + 2] += N[i + 2] * f;
+      }
+    }
+    for (let k = 0; k < V.length; k++) { const i = V[k] * 3; DP[i] = R[i] + D[i]; DP[i + 1] = R[i + 1] + D[i + 1]; DP[i + 2] = R[i + 2] + D[i + 2]; }
+    if (!this._dispFaceN) return false;
+    this._computeNormals(reg, DP, this.displayNormals, this._dispFaceN);
+    this._uploadBody(reg);
+    this._skinnedDirty = true;
+    this.dispatchEvent({ type: 'corrective' });
+    return true;
+  }
+
+  /** Current corrective driver values by id (debug / tests). */
+  correctiveState() {
+    const o = {};
+    this.model.correctives.forEach((c, i) => { if (this._corrTarget[i] || this._corrApplied[i]) o[c.id] = +this._corrApplied[i].toFixed(3); });
+    return o;
+  }
+
+  /** Turns the pose correctives on or off (applies immediately). */
+  setCorrectivesEnabled(on) {
+    this.correctivesEnabled = !!on;
+    this._updateCorrectiveDrivers();
+    this.flushCorrectives();
+  }
+
+  /** Per-shape corrective setup: amplitude scale (size, muscle) and 'raise' reference axes. */
+  _setupCorrectives() {
+    const m = this.model, list = m.correctives;
+    if (!list.length) return;
+    const J = (n) => this.jointPositions.get(n);
+    const sh = J('upperarm01.L____head'), el = J('lowerarm01.L____head');
+    const size = sh && el ? sh.distanceTo(el) / (m.correctiveRefArm || 0.28) : 1;
+    const mus = Math.max(0, Math.min(1, (this.preset.params?.muscle ?? 0.5) + 0.45 * (this.sliders.muscle || 0)));
+    this._corrScale = size * (0.65 + 0.7 * mus);
+    list.forEach((c, i) => {
+      if (c.driver.type !== 'raise' || c.boneIndex < 0) return;
+      // torso down (-Y of the rig at rest) in the bone's rest frame: basis^T * (0,-1,0)
+      const e = this.restGlobal[c.boneIndex].elements;
+      const ax = Math.hypot(e[0], e[1], e[2]) || 1, ay = Math.hypot(e[4], e[5], e[6]) || 1, az = Math.hypot(e[8], e[9], e[10]) || 1;
+      this._corrDown[i * 3] = -e[1] / ax; this._corrDown[i * 3 + 1] = -e[5] / ay; this._corrDown[i * 3 + 2] = -e[9] / az;
+    });
+    this._corrApplied.fill(-1); // force a rebuild with the new scale / rest normals
+    this._corrPending = true;
+  }
+
+  /** Area-weighted vertex normals of restPositions (all of them, or only a region), or of P into N / FN. */
+  _computeNormals(region = null, P = this.restPositions, N = this.restNormals, FN = null) {
+    const m = this.model, F = m.faceV;
     const topo = m.normalTopology;
-    const FN = this._faceN || (this._faceN = new Float32Array(m.faceCount * 3));
+    FN = FN || this._faceN || (this._faceN = new Float32Array(m.faceCount * 3));
     const faces = region ? region.faces : topo.faces;
     for (let i = 0; i < faces.length; i++) {
       const f = faces[i], o = f * 4;
@@ -348,9 +548,70 @@ export class Character extends THREE.EventDispatcher {
     }
   }
 
+  /**
+   * Tangents follow the shape, but during a slider drag (a rebuild every frame)
+   * they are refreshed at most every 250 ms: a few degrees of tangent drift are
+   * invisible, the 2 ms per rebuild are not.
+   */
+  _scheduleTangents() {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    clearTimeout(this._tanTimer);
+    if (!this._tanTime || now - this._tanTime > 250) { this._tanTime = now; this._computeTangents(); return; }
+    this._tanTimer = setTimeout(() => { if (this._disposed) return; this._tanTime = 0; this._computeTangents(); }, 260);
+  }
+
+  /**
+   * Per render vertex UV tangent of the skin (dP/du orthogonalized against the
+   * rest normal, w = sign of the dP/dv side), same frame as the normal map bake
+   * (tools/build-assets.mjs). Shape changes only: expressions move the face,
+   * which carries no relief.
+   */
+  _computeTangents() {
+    const m = this.model, P = this.restPositions, N = this.restNormals, rv2v = m.rv2v, UV = m.rvUV, T = this._rTan;
+    const tris = m._skinTris || (m._skinTris = (() => {
+      const out = [];
+      for (const f of m.groupFaces[0]) {
+        const a = m.faceRV[f * 4], b = m.faceRV[f * 4 + 1], c = m.faceRV[f * 4 + 2], d = m.faceRV[f * 4 + 3];
+        out.push(a, b, c); if (d !== 0xffff) out.push(a, c, d);
+      }
+      return Uint16Array.from(out);
+    })());
+    const NR = m.renderVertexCount;
+    const acc = this._tanAcc || (this._tanAcc = new Float32Array(NR * 6));
+    acc.fill(0);
+    for (let i = 0; i < tris.length; i += 3) {
+      const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+      const pa = rv2v[a] * 3, pb = rv2v[b] * 3, pc = rv2v[c] * 3;
+      const e1x = P[pb] - P[pa], e1y = P[pb + 1] - P[pa + 1], e1z = P[pb + 2] - P[pa + 2];
+      const e2x = P[pc] - P[pa], e2y = P[pc + 1] - P[pa + 1], e2z = P[pc + 2] - P[pa + 2];
+      const du1 = UV[b * 2] - UV[a * 2], dv1 = UV[b * 2 + 1] - UV[a * 2 + 1], du2 = UV[c * 2] - UV[a * 2], dv2 = UV[c * 2 + 1] - UV[a * 2 + 1];
+      const det = du1 * dv2 - du2 * dv1;
+      if (Math.abs(det) < 1e-12) continue;
+      const r = 1 / det;
+      const tx = (e1x * dv2 - e2x * dv1) * r, ty = (e1y * dv2 - e2y * dv1) * r, tz = (e1z * dv2 - e2z * dv1) * r;
+      const bx = (e2x * du1 - e1x * du2) * r, by = (e2y * du1 - e1y * du2) * r, bz = (e2z * du1 - e1z * du2) * r;
+      for (const x of [a, b, c]) { const o = x * 6; acc[o] += tx; acc[o + 1] += ty; acc[o + 2] += tz; acc[o + 3] += bx; acc[o + 4] += by; acc[o + 5] += bz; }
+    }
+    for (let r = 0; r < NR; r++) {
+      const o = r * 6, v = rv2v[r] * 3;
+      const nx = N[v], ny = N[v + 1], nz = N[v + 2];
+      let tx = acc[o], ty = acc[o + 1], tz = acc[o + 2];
+      const d = tx * nx + ty * ny + tz * nz;
+      tx -= nx * d; ty -= ny * d; tz -= nz * d;
+      const l = Math.sqrt(tx * tx + ty * ty + tz * tz);
+      if (l < 1e-12) continue; // not a skin vertex (keeps the default frame)
+      tx /= l; ty /= l; tz /= l;
+      // handedness: does cross(N, T) point along dP/dv?
+      const cx = ny * tz - nz * ty, cy = nz * tx - nx * tz, cz = nx * ty - ny * tx;
+      const w = cx * acc[o + 3] + cy * acc[o + 4] + cz * acc[o + 5] < 0 ? -1 : 1;
+      T[r * 4] = tx; T[r * 4 + 1] = ty; T[r * 4 + 2] = tz; T[r * 4 + 3] = w;
+    }
+    this.body.geometry.attributes.tangent.needsUpdate = true;
+  }
+
   /** Copies rest positions/normals into the render buffers (all, or an expression region's runs). */
   _uploadBody(region = null) {
-    const m = this.model, P = this.restPositions, N = this.restNormals, rv2v = m.rv2v, RP = this._rPos, RN = this._rNor;
+    const m = this.model, P = this.displayPositions, N = this.displayNormals, rv2v = m.rv2v, RP = this._rPos, RN = this._rNor;
     const g = this.body.geometry, pa = g.attributes.position, na = g.attributes.normal;
     const runs = region ? region.rranges : null;
     const nr = runs ? runs.length : 2;
@@ -415,6 +676,7 @@ export class Character extends THREE.EventDispatcher {
     }
     this.rig.updateMatrixWorld(true);
     this._skinnedDirty = true;
+    this._updateCorrectiveDrivers();
     this.dispatchEvent({ type: 'pose' });
   }
 
@@ -503,6 +765,8 @@ export class Character extends THREE.EventDispatcher {
    */
   skinPositions(rest, skinIndex, skinWeight, out, count = rest.length / 3) {
     const M = this.updateSkinMatrices();
+    // CPU parity with the GPU: dual-quaternion skinning when 'Deformazione morbida' is active
+    if (softSkin.active) return skinPositionsDQ(M, rest, skinIndex, skinWeight, out, count);
     for (let i = 0; i < count; i++) {
       const x = rest[i * 3], y = rest[i * 3 + 1], z = rest[i * 3 + 2];
       let ox = 0, oy = 0, oz = 0;
@@ -521,8 +785,9 @@ export class Character extends THREE.EventDispatcher {
 
   /** CPU-skinned body mesh vertices (rig space), cached until pose/shape changes. */
   getSkinnedPositions() {
+    this.flushCorrectives();
     if (this._skinnedDirty) {
-      this.skinPositions(this.restPositions, this.model.skinIndex, this.model.skinWeight, this.skinnedPositions);
+      this.skinPositions(this.displayPositions, this.model.skinIndex, this.model.skinWeight, this.skinnedPositions);
       this._skinnedDirty = false;
     }
     return this.skinnedPositions;
@@ -606,6 +871,7 @@ export class Character extends THREE.EventDispatcher {
     const shapeKey = JSON.stringify([this.presetId, this.sliders]);
     const exprKey = JSON.stringify(this.expression);
     const appKey = JSON.stringify(this.appearance);
+    const skinKey = `${this.sex}|${this.definition}`; // preset default definition / sex normal map
     if (j.preset) this.presetId = j.preset;
     this.sliders = { ...(j.sliders || {}) };
     this.expression = { ...(j.expression || {}) };
@@ -616,7 +882,7 @@ export class Character extends THREE.EventDispatcher {
       this.root.rotation.y = j.placement.rotationY || 0;
       this.root.scale.setScalar(j.placement.scale || 1);
     }
-    if (JSON.stringify(this.appearance) !== appKey) { this._applyMaterials(); this.dispatchEvent({ type: 'appearance' }); }
+    if (JSON.stringify(this.appearance) !== appKey || `${this.sex}|${this.definition}` !== skinKey) { this._applyMaterials(); this.dispatchEvent({ type: 'appearance' }); }
     if (JSON.stringify([this.presetId, this.sliders]) !== shapeKey) this.rebuildShape();
     else if (JSON.stringify(this.expression) !== exprKey) { this._applyExpressionMorphs(false); this.dispatchEvent({ type: 'expression' }); }
     if (j.pose) this.setPose(j.pose);
@@ -631,6 +897,8 @@ export class Character extends THREE.EventDispatcher {
     materials.release?.(this.eyeMesh);
     // the bone matrices live in a GPU data texture owned by the skeleton
     this.skeleton.dispose();
+    clearTimeout(this._tanTimer);
     this._disposed = true;
+    _live.delete(this);
   }
 }

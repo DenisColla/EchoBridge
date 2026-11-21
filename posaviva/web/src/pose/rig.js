@@ -32,6 +32,7 @@ export class PoseRig {
     this._orderIdx = controls.order.map((o) => [0, 1, 2].map((k) => 'xyz'.indexOf(o[k].toLowerCase())));
     this._lim = new Float64Array(2);
     this._res = { value: 0, clamped: false }; // write() result (shared)
+    this._J = new Float64Array(9); this._v0 = new Float64Array(3); this._w3 = new Float64Array(3); this._d3 = new Float64Array(3);
   }
 
   _c(ch) {
@@ -122,6 +123,11 @@ export class PoseRig {
   read(ch, ctrl, k) {
     const a = ctrl.axes[k];
     let num = 0;
+    if (a.coupled) {
+      // shared chain bones: pseudo-inverse read (see ControlSet.setSoft)
+      for (const d of a.drives) if (d.rw) num += d.rw * d.sign * this.euler(ch, d.i)[d.li];
+      return num;
+    }
     if (a.sum) { for (const d of a.drives) num += d.sign * this.euler(ch, d.i)[d.li]; return num; }
     for (const d of a.drives) num += d.w * d.sign * this.euler(ch, d.i)[d.li];
     return num / a.wsum2;
@@ -155,6 +161,7 @@ export class PoseRig {
     const d = value - this.read(ch, ctrl, k);
     if (Math.abs(d) > 1e-9) {
       for (const dr of a.drives) {
+        if (!dr.w) continue;
         _n3.set(this.euler(ch, dr.i));
         _n3[dr.li] += dr.sign * dr.w * d;
         if (ctrl.free) _n3[dr.li] = wrap(_n3[dr.li]);
@@ -183,6 +190,12 @@ export class PoseRig {
    * snapshot. Returns true if a limit was hit.
    */
   project(ch, ctrl, snap) {
+    if (ctrl.coupled) {
+      // shared bones: only this part's share is re-written (other parts keep theirs)
+      let hit = false;
+      for (let k = 0; k < ctrl.axes.length; k++) hit = this.write(ch, ctrl, k, this.read(ch, ctrl, k)).clamped || hit;
+      return hit;
+    }
     const lim = this.limits && !ctrl.free;
     const scr = ctrl._scr || (ctrl._scr = { totals: new Float64Array(ctrl.axes.length), next: ctrl.boneIdx.map(() => new Float64Array(3)) });
     const { totals, next } = scr;
@@ -250,7 +263,7 @@ export class PoseRig {
    * The rotation of a ring about this axis by +a increases the axis value by a.
    */
   axisWorld(ch, ctrl, k, out = new THREE.Vector3()) {
-    const d = ctrl.axes[k].drives[0], i = d.i;
+    const d = ctrl.axes[k].pd, i = d.i;
     const order = this.controls.order[i].toLowerCase();
     const e = this.euler(ch, i);
     const F = this.frameQuat(ch, i, _q3);
@@ -262,6 +275,45 @@ export class PoseRig {
     return out.copy(UNIT[d.letter]).applyQuaternion(F).multiplyScalar(d.sign).normalize();
   }
 
+  /**
+   * Applies a world rotation W to a whole part (trackball, head aim) and projects it on
+   * its anatomical axes (limits). A chain part (abdomen / chest / neck) turns its pivot
+   * bone, measures the change and spreads it over the chain by its profile, so the
+   * curve stays continuous. Returns true when a limit was hit.
+   */
+  rotateControl(ch, ctrl, W, snap) {
+    if (!ctrl.coupled) {
+      for (const i of ctrl.freeRoots) this.rotateWorld(ch, i, W);
+      return this.project(ch, ctrl, snap);
+    }
+    // chain part: find the axis changes that turn the END of the chain (base of the
+    // head) by W — a small 3x3 linear solve on finite differences, since the bones of
+    // the curved back do not share one frame (an Euler change on the tilted lumbar
+    // bones is not the same world rotation as on the upright chest)
+    const iEnd = ctrl.boneIdx[ctrl.boneIdx.length - 1];
+    const n = ctrl.axes.length, J = this._J, v0 = this._v0, w = this._w3;
+    this.worldQuat(ch, iEnd, _q2);
+    _q1.copy(_q2).invert();
+    for (let k = 0; k < n; k++) v0[k] = this.read(ch, ctrl, k);
+    const hd = 0.02;
+    for (let k = 0; k < n; k++) {
+      this.write(ch, ctrl, k, v0[k] + hd, false);
+      this.refreshControl(ch, ctrl);
+      rotVec(this.worldQuat(ch, iEnd, _q3).multiply(_q1), _v1);
+      J[k * 3] = _v1.x / hd; J[k * 3 + 1] = _v1.y / hd; J[k * 3 + 2] = _v1.z / hd; // column k
+      this.write(ch, ctrl, k, v0[k], false);
+    }
+    rotVec(W, _v1);
+    w[0] = _v1.x; w[1] = _v1.y; w[2] = _v1.z;
+    const d = solve3(J, w, this._d3);
+    let hit = false;
+    for (let k = 0; k < n; k++) {
+      const dv = d ? d[k] : 0;
+      hit = this.write(ch, ctrl, k, v0[k] + (Number.isFinite(dv) ? dv : 0)).clamped || hit;
+    }
+    return hit;
+  }
+
   // ------------------------------------------------------------ matrices
   /** Updates matrices of bone i and its subtree from poseQuat (no events). */
   refreshBone(ch, i) {
@@ -270,6 +322,13 @@ export class PoseRig {
     // (as Character.applyPose: the root also carries the shoe ground clearance)
     if (i === 0) { bone.position.copy(ch.restLocalPos[0]).add(ch.rootOffset); bone.position.y += ch.groundClearance || 0; }
     bone.updateMatrixWorld(true);
+  }
+
+  /** Updates every bone from poseQuat / rootOffset (no events). */
+  refreshAll(ch) {
+    const bones = ch.bones;
+    for (let i = 1; i < bones.length; i++) bones[i].quaternion.copy(ch.restLocalQuat[i]).multiply(ch.poseQuat[i]);
+    this.refreshBone(ch, 0);
   }
 
   /** Updates matrices of every bone of a control (topmost first). */
@@ -302,6 +361,7 @@ export class PoseRig {
 
   /** Resets a control to the rest pose (shared bones: only its own components). */
   resetControl(ch, ctrl) {
+    if (ctrl.coupled) { for (let k = 0; k < ctrl.axes.length; k++) this.write(ch, ctrl, k, 0, false); return; }
     const { own, shared } = this._parts(ctrl);
     for (const i of own) ch.poseQuat[i].identity();
     for (const [i, letters] of shared) {
@@ -321,6 +381,11 @@ export class PoseRig {
       const m = n.endsWith('.L') ? n.slice(0, -2) + '.R' : n.endsWith('.R') ? n.slice(0, -2) + '.L' : n;
       return this.model.boneIndex.get(m);
     };
+    if (ctrl.coupled) {
+      // central chain part: mirror in place = side bend and twist change sign
+      for (let k = 0; k < ctrl.axes.length; k++) if (ctrl.axes[k].key !== 'flex') this.write(ch, ctrl, k, -this.read(ch, ctrl, k), false);
+      return;
+    }
     const { own, shared } = this._parts(ctrl);
     const ownList = [...own];
     if (includeHandFingers && ctrl.baseId === 'hand') {
@@ -338,4 +403,27 @@ export class PoseRig {
       this.setEuler(ch, b, dst[0], dst[1], dst[2]);
     }
   }
+}
+
+/** rotation vector (axis * angle) of a unit quaternion (shortest arc) */
+function rotVec(q, out) {
+  let w = q.w, x = q.x, y = q.y, z = q.z;
+  if (w < 0) { w = -w; x = -x; y = -y; z = -z; }
+  const s = Math.sqrt(x * x + y * y + z * z);
+  if (s < 1e-9) return out.set(2 * x, 2 * y, 2 * z);
+  const a = 2 * Math.atan2(s, w);
+  return out.set((x / s) * a, (y / s) * a, (z / s) * a);
+}
+
+/** solves J d = w for a 3x3 matrix stored by columns (J[k*3 + r] = row r of column k); null when singular */
+function solve3(J, w, out) {
+  const a = J[0], b = J[3], c = J[6], d = J[1], e = J[4], f = J[7], g = J[2], h = J[5], i = J[8];
+  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+  const det = a * A + b * B + c * C;
+  if (Math.abs(det) < 1e-12) return null;
+  const inv = 1 / det;
+  out[0] = (A * w[0] + (c * h - b * i) * w[1] + (b * f - c * e) * w[2]) * inv;
+  out[1] = (B * w[0] + (a * i - c * g) * w[1] + (c * d - a * f) * w[2]) * inv;
+  out[2] = (C * w[0] + (b * g - a * h) * w[1] + (a * e - b * d) * w[2]) * inv;
+  return out;
 }

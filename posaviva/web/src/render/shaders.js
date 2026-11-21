@@ -10,6 +10,7 @@
 //   3. inkAlpha()    : vertical pass -> exact euclidean distance -> anti-aliased
 //                      coverage for a line of radius r (separable distance transform).
 import * as THREE from 'three';
+import { softSkin, injectSoftSkin } from './softskin.js';
 
 /** Upper bound of the line radius (device px) the shaders support. */
 export const MAX_INK_RADIUS = 16;
@@ -55,6 +56,8 @@ export function makePrepassMaterial(src, id) {
   const uId = { value: id / 255 };
   m.onBeforeCompile = (shader) => {
     shader.uniforms.pvObjectId = uId;
+    // same (dual-quaternion) skinning as the colour pass, so ink lines and AO sit on the real surface
+    shader.vertexShader = injectSoftSkin(shader.vertexShader);
     shader.fragmentShader = 'uniform float pvObjectId;\n#include <map_pars_fragment>\n#include <alphatest_pars_fragment>\n' + shader.fragmentShader
       .replace('vec4 diffuseColor = vec4( 0.0, 0.0, 0.0, opacity );', 'vec4 diffuseColor = vec4( 0.0, 0.0, 0.0, opacity );\n#include <map_fragment>\n#include <alphatest_fragment>')
       .replace('gl_FragColor = vec4( normalize( normal ) * 0.5 + 0.5, diffuseColor.a );',
@@ -64,6 +67,7 @@ export function makePrepassMaterial(src, id) {
   };
   m.customProgramCacheKey = () => 'pv-gbuf';
   m.userData.pvId = uId;
+  softSkin.register(m, true);
   return m;
 }
 
@@ -272,7 +276,27 @@ const aoFunction = /* glsl */`
     return wsum > 1e-4 ? sum / wsum : 1.0;
   }`;
 
-const aoUniforms = () => ({ tAO: { value: null }, tAODepth: { value: null }, aoSize: { value: new THREE.Vector2(1, 1) }, aoNear: { value: 0.1 }, aoFar: { value: 100 } });
+const aoUniforms = () => ({ tAO: { value: null }, tAODepth: { value: null }, aoSize: { value: new THREE.Vector2(1, 1) }, aoNear: { value: 0.1 }, aoFar: { value: 100 }, tAOId: { value: null }, skinWarm: { value: 0 } });
+
+/** First object id of skin bodies in the G-buffer (skin ids are SKIN_ID0..95, still 'regular' for the ink). */
+export const SKIN_ID0 = 64;
+
+/**
+ * GLSL: AO factor as a colour. On skin (G-buffer ids SKIN_ID0..95) occlusion is
+ * warm: light that reaches a crease has scattered under the skin and lost its
+ * blue first (armpits, under the chest, between fingers read alive, not grey).
+ */
+const aoColorFunction = /* glsl */`
+  uniform sampler2D tAOId;
+  uniform float skinWarm;
+  vec3 aoColor( vec2 uv, float ao ) {
+    vec3 c = vec3( ao );
+    if ( skinWarm > 0.0 ) {
+      float id = floor( texture2D( tAOId, uv ).a * 255.0 + 0.5 );
+      if ( id > ${SKIN_ID0 - 0.5} && id < 95.5 ) c = mix( c, vec3( pow( ao, 0.55 ), pow( ao, 1.0 ), pow( ao, 1.12 ) ), skinWarm );
+    }
+    return c;
+  }`;
 
 /** Multiplies the frame by the ambient occlusion term (dst * ao). */
 export function makeAOMultiplyMaterial() {
@@ -283,10 +307,10 @@ export function makeAOMultiplyMaterial() {
     blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor,
     defines: { PV_ORTHO: 0 },
     uniforms: { ...aoUniforms(), intensity: { value: 1 } },
-    fragmentShader: aoFunction + /* glsl */`
+    fragmentShader: aoFunction + aoColorFunction + /* glsl */`
       uniform float intensity;
       varying vec2 vUv;
-      void main() { gl_FragColor = vec4( vec3( mix( 1.0, aoAt( vUv ), intensity ) ), 1.0 ); }`,
+      void main() { gl_FragColor = vec4( mix( vec3( 1.0 ), aoColor( vUv, aoAt( vUv ) ), intensity ), 1.0 ); }`,
   });
 }
 
@@ -337,7 +361,7 @@ export function makeOutputMaterial() {
       bgMode: { value: 0 }, bgTop: { value: new THREE.Vector3() }, bgBottom: { value: new THREE.Vector3() },
       toneMappingExposure: { value: 1 },
     },
-    fragmentShader: '#include <tonemapping_pars_fragment>\n' + inkFunction + aoFunction + /* glsl */`
+    fragmentShader: '#include <tonemapping_pars_fragment>\n' + inkFunction + aoFunction + aoColorFunction + /* glsl */`
       uniform sampler2D tColor;
       uniform float useAO, aoIntensity, useInk, inkOpacity, bgMode;
       uniform vec3 inkColor, bgTop, bgBottom;
@@ -360,7 +384,7 @@ export function makeOutputMaterial() {
           rgb = NeutralToneMapping( rgb );
         #endif
         rgb = sRGBTransferOETF( vec4( clamp( rgb, 0.0, 1.0 ), 1.0 ) ).rgb;
-        if ( useAO > 0.5 ) rgb *= mix( 1.0, aoAt( vUv ), aoIntensity );
+        if ( useAO > 0.5 ) rgb *= mix( vec3( 1.0 ), aoColor( vUv, aoAt( vUv ) ), aoIntensity );
         if ( bgMode > 0.5 ) {
           vec3 bg = mix( bgBottom, bgTop, smoothstep( 0.0, 1.0, vUv.y ) );
           rgb = rgb * a + bg * ( 1.0 - a );

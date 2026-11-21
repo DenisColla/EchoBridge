@@ -2,9 +2,10 @@
 // clay thumbnails (cached in memory + localStorage), "Specchia" toggle.
 // The preset list (library.js, owned by the pose-library engineer) may be empty
 // or grow: the grid is rebuilt whenever its signature changes.
-import { h, chips, toggle, toast, haptic, icon } from '../ui/kit.js';
+import { h, chips, toggle, toast, haptic, icon, section } from '../ui/kit.js';
 import { POSE_CATEGORIES, POSE_PRESETS, applyPosePreset } from './library.js';
 import { getThumbRenderer } from './thumbs.js';
+import { buildAdjustSliders } from './adjust.js';
 
 export function registerPresetsTool(ctx) {
   const { app, shell } = ctx;
@@ -21,7 +22,12 @@ export function registerPresetsTool(ctx) {
       mirrorToggle.classList.add('pv-pose-mirror-toggle');
       const grid = h('div', { class: 'pv-pose-lib-grid' });
       const empty = h('div', { class: 'pv-pose-lib-empty' });
-      el.append(h('div', { class: 'pv-pose-lib-top' }, chipHost), mirrorToggle, h('div', { style: { height: '10px' } }), grid, empty);
+      // whole-pose adjustments on top of a preset (Dinamismo exaggerates it for comics)
+      const adjust = buildAdjustSliders(ctx, { curve: false });
+      // (collapsed: the pose cards stay the first thing in view)
+      const adjustSection = section('Regola: Dinamismo · Naturalezza', [adjust.el], { collapsible: true, collapsed: true });
+      el.append(h('div', { class: 'pv-pose-lib-top' }, chipHost), mirrorToggle, adjustSection, h('div', { style: { height: '6px' } }), grid, empty);
+      ctx.onChange((reason) => { if (shown && reason !== 'prefs') adjust.refresh(); });
 
       let sig = '';
       let cards = new Map(); // id -> {card, thumb}
@@ -57,6 +63,7 @@ export function registerPresetsTool(ctx) {
         if (!ch) { toast('Seleziona un personaggio', { kind: 'warning' }); return; }
         haptic('tick');
         if (!applyPosePreset(ch, p.id, { mirror })) return;
+        ctx.reapplyNaturalness(ch); // the character's own small asymmetries stay
         applying = true;
         try { ctx.edited(ch, true, 'posa: ' + p.label.toLowerCase()); } finally { applying = false; }
         lastApplied = p.id; lastChar = ch;
@@ -122,6 +129,7 @@ export function registerPresetsTool(ctx) {
           rebuild();
           requestThumbs();
           pump();
+          adjust.refresh();
         },
         onHide() { shown = false; io?.disconnect(); thumbs?.persist(); },
       };

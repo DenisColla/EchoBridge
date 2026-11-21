@@ -284,6 +284,7 @@ export class ClothingManager extends THREE.EventDispatcher {
     const ch = st.ch;
     g.runtime = res.runtime;
     g.hidden = res.hidden;
+    g.hiddenVer = (g.hiddenVer || 0) + 1; // the mask changed even if the geoKey did not (rebuilt in place)
     g.occOut = res.occ;
     g.surfOut = res.surf;
     const mesh = new THREE.SkinnedMesh(res.runtime.geometry, []);
@@ -340,7 +341,7 @@ export class ClothingManager extends THREE.EventDispatcher {
 
   _updateHidden(st) {
     const masks = st.garments.filter((g) => g.hidden && g.mesh).map((g) => g.hidden);
-    const key = st.garments.filter((g) => g.hidden && g.mesh).map((g) => g.geoKey).join(',');
+    const key = st.garments.filter((g) => g.hidden && g.mesh).map((g) => `${g.geoKey}#${g.hiddenVer || 0}`).join(',');
     if (key === st.hiddenKey) return;
     st.hiddenKey = key;
     if (!masks.length) { st.ch.setHiddenBodyFaces(null); return; }

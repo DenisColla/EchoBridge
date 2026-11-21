@@ -122,8 +122,18 @@ export function buildStylePanel(el, ctx) {
   // custom pickers: live preview while the picker moves, one undo step when it is released
   const inkColor = swatches({ colors: INK_COLORS, value: S().inkColor,
     onInput: (c) => ctx.set({ inkColor: c }), onChange: (c) => ctx.set({ inkColor: c }, { commit: 'colore china' }) });
-  const inkBody = h('div', {}, inkWidth, crease, h('div', { class: 'pv-slider-head' }, h('span', { class: 'pv-slider-label' }, 'Colore china')), inkColor);
+  // anatomical crease lines drawn by the skin (toon / lines): groove strength threshold
+  const anatomy = slider({ label: 'Linee anatomiche', min: 0, max: 1, step: 0.01, value: S().anatomy ?? 0.3, defaultValue: 0.3,
+    format: (v) => (v < 0.005 ? 'off' : Math.round(v * 100) + '%'),
+    onInput: (v) => ctx.set({ anatomy: v }), onChange: () => ctx.app.commit('linee anatomiche') });
+  const inkBody = h('div', {}, inkWidth, crease, anatomy, h('div', { class: 'pv-slider-head' }, h('span', { class: 'pv-slider-label' }, 'Colore china')), inkColor);
   const inkSec = section('Contorni', [inkToggle, inkBody]);
+
+  // --- joints: dual-quaternion skinning
+  const softT = toggle({ label: 'Deformazione morbida', value: S().softSkin !== false, onChange: (v) => ctx.set({ softSkin: v }, { commit: 'deformazione morbida' }) });
+  const softNote = h('div', { class: 'pv-note', style: { marginTop: '6px', fontSize: '12px', color: 'var(--muted)' } },
+    'Gomiti, polsi, spalle e anche si piegano e ruotano senza strozzature: braccia e gambe mantengono il loro volume.');
+  const jointSec = section('Articolazioni', [softT, softNote]);
 
   // --- background
   const bgCards = cardGrid({
@@ -162,7 +172,7 @@ export function buildStylePanel(el, ctx) {
   const fpsT = toggle({ label: 'Mostra FPS', value: ctx.getPrefs().fps, onChange: (v) => ctx.setPref('fps', v) });
   const perfSec = section('Qualità e prestazioni', [qSeg, qInfo, dynT, fpsT], { collapsible: true });
 
-  el.append(section('Stile di resa', [styleCards]), lightSec, inkSec, bgSec, sceneSec, perfSec);
+  el.append(section('Stile di resa', [styleCards]), lightSec, inkSec, jointSec, bgSec, sceneSec, perfSec);
 
   function sync() {
     const s = S(), p = ctx.getPrefs(), sr = STYLE_RENDER[s.style];
@@ -179,6 +189,15 @@ export function buildStylePanel(el, ctx) {
     inkBody.style.display = inkOn ? '' : 'none';
     inkWidth.setValue(s.inkWidth);
     crease.setValue(s.crease);
+    anatomy.setValue(s.anatomy ?? 0.3);
+    anatomy.style.display = ctx.ANATOMY_LINE_STYLES?.has(s.style) ? '' : 'none';
+    // joints
+    const sk = ctx.softSkin;
+    softT.setValue(s.softSkin !== false && (!sk || sk.supported));
+    softT.querySelector('input').disabled = !!sk && !sk.supported;
+    softNote.textContent = sk && !sk.supported
+      ? 'Non disponibile su questo dispositivo: le articolazioni usano la deformazione lineare.'
+      : 'Gomiti, polsi, spalle e anche si piegano e ruotano senza strozzature: braccia e gambe mantengono il loro volume.';
     inkColor.setValue(s.inkColor);
     // background
     const preset = BG_PRESETS.find((x) => sameBg(x.bg, { ...s.bg }));

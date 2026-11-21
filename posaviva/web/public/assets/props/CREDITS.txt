@@ -1,0 +1,289 @@
+PosaViva — realistic props
+
+The 3D models in models/ and their thumbnails in thumbs/ come from Poly Haven (https://polyhaven.com)
+and are licensed CC0 1.0 Universal (public domain): https://creativecommons.org/publicdomain/zero/1.0/
+They were converted (merged meshes, simplified geometry, smaller textures with baked ambient occlusion).
+Thanks to the Poly Haven team and to the artists listed below.
+
+Poltrona vittoriana — "Arm Chair 01" by Kirill Sannikov — https://polyhaven.com/a/ArmChair_01
+Poltrona da barbiere — "Barber Shop Chair 01" by Fernando Quinn — https://polyhaven.com/a/BarberShopChair_01
+Poltrona lounge anni ’50 — "Mid Century Lounge Chair" by Kuutti Siitonen — https://polyhaven.com/a/mid_century_lounge_chair
+Poltrona moderna in pelle — "Modern Arm Chair 01" by Vibrant Nordic — https://polyhaven.com/a/modern_arm_chair_01
+Pouf — "Ottoman 01" by Caspian Fortune — https://polyhaven.com/a/Ottoman_01
+Poltrona cinese — "Chinese Armchair" by Kirill Sannikov — https://polyhaven.com/a/chinese_armchair
+Sedia imbottita verde — "Green Chair 01" by Kirill Sannikov — https://polyhaven.com/a/GreenChair_01
+Sedia a dondolo — "Rockingchair 01" by Jorge Camacho — https://polyhaven.com/a/Rockingchair_01
+Sedia scolastica — "School Chair 01" by Ethan Place — https://polyhaven.com/a/SchoolChair_01
+Sedia da pranzo moderna — "Dining Chair 02" by James Ray Cock — https://polyhaven.com/a/dining_chair_02
+Sedia in legno intrecciato — "Gallinera Chair" by Ulan Cabanilla — https://polyhaven.com/a/gallinera_chair
+Sedia rustica — "Painted Wooden Chair 01" by Kuutti Siitonen — https://polyhaven.com/a/painted_wooden_chair_01
+Sedia rustica con braccioli — "Painted Wooden Chair 02" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_chair_02
+Sedia di plastica — "Plastic Monobloc Chair 01" by Kuutti Siitonen — https://polyhaven.com/a/plastic_monobloc_chair_01
+Divano vittoriano — "Sofa 01" by Kirill Sannikov — https://polyhaven.com/a/Sofa_01
+Divano rétro — "Sofa 02" by Kirill Sannikov — https://polyhaven.com/a/sofa_02
+Divano capitonné — "Sofa 03" by Fran Calvente — https://polyhaven.com/a/sofa_03
+Divano cinese — "Chinese Sofa" by Kirill Sannikov — https://polyhaven.com/a/chinese_sofa
+Divanetto in legno — "Painted Wooden Sofa" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_sofa
+Dormeuse — "Vintage Day Bed" by Aron Łyczek — https://polyhaven.com/a/vintage_day_bed
+Sgabello da bar — "Bar Chair Round 01" by Dairon Sanchez — https://polyhaven.com/a/bar_chair_round_01
+Sgabello in metallo e pelle — "Metal Stool 01" by Ulan Cabanilla — https://polyhaven.com/a/metal_stool_01
+Sgabello alto con schienale — "Metal Stool 03" by Flo Tasser — https://polyhaven.com/a/metal_stool_03
+Sgabello da officina — "Metal Stool 02" by Ulan Cabanilla — https://polyhaven.com/a/metal_stool_02
+Sgabello pieghevole — "Folding Wooden Stool" by Ulan Cabanilla — https://polyhaven.com/a/folding_wooden_stool
+Sgabello in legno — "Wooden Stool 01" by Kuutti Siitonen — https://polyhaven.com/a/wooden_stool_01
+Sgabello dipinto — "Painted Wooden Stool" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_stool
+Sgabello cinese — "Chinese Stool" by Kirill Sannikov — https://polyhaven.com/a/chinese_stool
+Poggiapiedi in legno — "Wooden Stool 02" by Kuutti Siitonen — https://polyhaven.com/a/wooden_stool_02
+Panca dipinta — "Painted Wooden Bench" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_bench
+Tavolo con tovaglia a quadri — "Dining Table" by Aron Łyczek — https://polyhaven.com/a/dining_table
+Tavolo rustico lungo — "Painted Wooden Table" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_table
+Tavolo rotondo in legno — "Round Wooden Table 01" by Ulan Cabanilla — https://polyhaven.com/a/round_wooden_table_01
+Tavolino rotondo antico — "Round Wooden Table 02" by Ulan Cabanilla — https://polyhaven.com/a/round_wooden_table_02
+Tavolo semplice in legno — "Wooden Table 02" by Serhii Khromov — https://polyhaven.com/a/wooden_table_02
+Tavolino e sedie pieghevoli — "Outdoor Table Chair Set 01" by James Ray Cock — https://polyhaven.com/a/outdoor_table_chair_set_01
+Tavolino dipinto — "Coffee Table 01" by Fernando Quinn — https://polyhaven.com/a/CoffeeTable_01
+Tavolo basso in legno — "Wooden Table 01" by Ethan Place — https://polyhaven.com/a/WoodenTable_01
+Tavolino tondo in marmo — "Coffee Table Round 01" by Ulan Cabanilla — https://polyhaven.com/a/coffee_table_round_01
+Tavolino moderno in pietra — "Modern Coffee Table 01" by Amin — https://polyhaven.com/a/modern_coffee_table_01
+Tavolino quadrato moderno — "Modern Coffee Table 02" by Amin — https://polyhaven.com/a/modern_coffee_table_02
+Tavolino industriale — "Industrial Coffee Table" by Ulan Cabanilla — https://polyhaven.com/a/industrial_coffee_table
+Tavolino gotico — "Gothic Coffee Table" by Ulan Cabanilla — https://polyhaven.com/a/gothic_coffee_table
+Tavolino da tè cinese — "Chinese Tea Table" by Kirill Sannikov — https://polyhaven.com/a/chinese_tea_table
+Banco di scuola — "School Desk 01" by Ethan Place — https://polyhaven.com/a/SchoolDesk_01
+Scrivania in metallo — "Metal Office Desk" by Ulan Cabanilla — https://polyhaven.com/a/metal_office_desk
+Comodino classico — "Classic Nightstand 01" by Kirill Sannikov — https://polyhaven.com/a/ClassicNightstand_01
+Comodino dipinto — "Painted Wooden Nightstand" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_nightstand
+Tavolino laterale moderno — "Side Table 01" by James Ray Cock — https://polyhaven.com/a/side_table_01
+Tavolino alto — "Side Table Tall 01" by James Ray Cock — https://polyhaven.com/a/side_table_tall_01
+Tavolino tondo piccolo — "Wooden Table 02" by Fran Calvente — https://polyhaven.com/a/WoodenTable_02
+Tavolino in legno — "Small Wooden Table 01" by Ulan Cabanilla — https://polyhaven.com/a/small_wooden_table_01
+Consolle classica — "Classic Console 01" by Kirill Sannikov — https://polyhaven.com/a/ClassicConsole_01
+Consolle cinese — "Chinese Console Table" by Kirill Sannikov — https://polyhaven.com/a/chinese_console_table
+Letto gotico a baldacchino — "Gothic Bed 01" by Kirill Sannikov — https://polyhaven.com/a/GothicBed_01
+Letto in ferro — "Old Bed Frame" by Luca B — https://polyhaven.com/a/old_bed_frame
+Armadio rustico — "Painted Wooden Cabinet 02" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_cabinet_02
+Armadio cinese — "Chinese Cabinet" by Kirill Sannikov — https://polyhaven.com/a/chinese_cabinet
+Vetrina vintage — "Vintage Cabinet 01" by Rico Cilliers — https://polyhaven.com/a/vintage_cabinet_01
+Credenza gotica — "Gothic Cabinet 01" by Kirill Sannikov — https://polyhaven.com/a/GothicCabinet_01
+Credenza dipinta — "Painted Wooden Cabinet" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_cabinet
+Madia moderna — "Modern Wooden Cabinet" by Patrik Pangerl — https://polyhaven.com/a/modern_wooden_cabinet
+Credenza bassa — "Wooden Table 03" by Gabriel Radić — https://polyhaven.com/a/WoodenTable_03
+Comò gotico — "Gothic Commode 01" by Kirill Sannikov — https://polyhaven.com/a/GothicCommode_01
+Cassettiera alta — "Drawer Cabinet" by Ulan Cabanilla — https://polyhaven.com/a/drawer_cabinet
+Schedario in legno — "Vintage Wooden Drawer 01" by James Ray Cock — https://polyhaven.com/a/vintage_wooden_drawer_01
+Libreria consumata — "Wooden Bookshelf Worn" by Ulan Cabanilla — https://polyhaven.com/a/wooden_bookshelf_worn
+Libreria moderna — "Steel Frame Shelves 03" by Ulan Cabanilla — https://polyhaven.com/a/steel_frame_shelves_03
+Espositore a cubi — "Wooden Display Shelves 01" by James Ray Cock — https://polyhaven.com/a/wooden_display_shelves_01
+Scaffale in legno — "Shelf 01" by Gabriel Radić — https://polyhaven.com/a/Shelf_01
+Mensole dipinte — "Painted Wooden Shelves" by Kirill Sannikov — https://polyhaven.com/a/painted_wooden_shelves
+Scaffale in acciaio — "Steel Frame Shelves 01" by James Ray Cock — https://polyhaven.com/a/steel_frame_shelves_01
+Scaffale stretto in acciaio — "Steel Frame Shelves 02" by James Ray Cock — https://polyhaven.com/a/steel_frame_shelves_02
+Scaffale metallico arrugginito — "Worn Metal Rack" by Luca B — https://polyhaven.com/a/worn_metal_rack
+Cucina elettrica — "Electric Stove" by Kuutti Siitonen — https://polyhaven.com/a/electric_stove
+Microonde vintage — "Vintage Microwave" by Adam Nekola — https://polyhaven.com/a/vintage_microwave
+Bollitore — "Vintage Electric Kettle" by SV Garip — https://polyhaven.com/a/vintage_electric_kettle
+Carrello del caffè — "Coffee Cart 01" by Joe Seabuhr — https://polyhaven.com/a/CoffeeCart_01
+Stufa a barile — "Barrel Stove" by MP — https://polyhaven.com/a/barrel_stove
+Padella in rame — "Brass Pan 01" by Rico Cilliers — https://polyhaven.com/a/brass_pan_01
+Pentola in ottone — "Brass Pot 01" by Rico Cilliers — https://polyhaven.com/a/brass_pot_01
+Tegame in ottone — "Brass Pot 02" by Rico Cilliers — https://polyhaven.com/a/brass_pot_02
+Pentola in coccio — "Ceramic Pot" by Aron Łyczek — https://polyhaven.com/a/ceramic_pot
+Pentolino smaltato — "Pot Enamel 01" by Kuutti Siitonen — https://polyhaven.com/a/pot_enamel_01
+Tagliere — "Wooden Cutting Board" by Kuutti Siitonen — https://polyhaven.com/a/wooden_cutting_board
+Cucchiaio di legno — "Wooden Spoon" by Ronnie Barter — https://polyhaven.com/a/wooden_spoon
+Paperella di gomma — "Rubber Duck Toy" by Plat251 — https://polyhaven.com/a/rubber_duck_toy
+Sturalavandini — "Plunger" by James Ray Cock — https://polyhaven.com/a/plunger
+Flacone di candeggina — "Bleach Bottle" by James Ray Cock — https://polyhaven.com/a/bleach_bottle
+Spray detergente — "Multi Cleaner Bottle" by James Ray Cock — https://polyhaven.com/a/multi_cleaner_bottle
+Enciclopedia — "Book Encyclopedia Set 01" by John Malcolm — https://polyhaven.com/a/book_encyclopedia_set_01
+Agenda in pelle — "Binder Notebook" by DaDrood — https://polyhaven.com/a/binder_notebook
+Blocchi per appunti — "Office Notepads" by Ulan Cabanilla — https://polyhaven.com/a/office_notepads
+Portablocco — "Clipboard" by ProgrammerOnCoffee — https://polyhaven.com/a/clipboard
+Pinzatrice — "Vintage Stapler" by Mateusz Sadek — https://polyhaven.com/a/vintage_stapler
+Penne e matite — "Stationery Supplies" by Mateusz Sadek — https://polyhaven.com/a/stationery_supplies
+Cartoline — "Postcard Set 01" by James Ray Cock, Jurita Burger — https://polyhaven.com/a/postcard_set_01
+Lavagna da cavalletto — "Standing Chalkboard 01" by ParzivalCG — https://polyhaven.com/a/standing_chalkboard_01
+Televisore vintage in legno — "Television 01" by Gabriel Radić — https://polyhaven.com/a/Television_01
+Televisore a tubo — "Television 02" by Benny Weimer — https://polyhaven.com/a/television_02
+Stereo portatile — "Boombox" by Thomas Paul Mouilleron — https://polyhaven.com/a/boombox
+Registratore a cassette — "Portable Cassette Player" by Mateusz Sadek — https://polyhaven.com/a/portable_cassette_player
+Walkman — "Cassette Player" by Oday Abuzaeed — https://polyhaven.com/a/cassette_player
+Radio militare — "Vintage Radio Transceiver" by Mateusz Sadek — https://polyhaven.com/a/vintage_radio_transceiver
+Portatile anni ’90 — "Classic Laptop" by Arrangemonk — https://polyhaven.com/a/classic_laptop
+Console per videogiochi — "Gaming Console" by Sean Buckley — https://polyhaven.com/a/gaming_console
+Joypad — "Gamepad" by Josh Dean — https://polyhaven.com/a/gamepad
+Scheda elettronica — "Circuit Board" by Benny Weimer — https://polyhaven.com/a/circuit_board
+Macchina fotografica antica — "Camera 01" by Rajil Jose Macatangay — https://polyhaven.com/a/Camera_01
+Cinepresa — "Vintage Video Camera" by James Ray Cock, Jenelle van Heerden — https://polyhaven.com/a/vintage_video_camera
+Proiettore 8 mm — "Filmstrip Projector 8mm" by PeterM — https://polyhaven.com/a/filmstrip_projector_8mm
+Schermo per proiezioni — "Projector Screen" by PeterM — https://polyhaven.com/a/projector_screen
+Registratore di cassa — "Cash Register 01" by Joe Seabuhr — https://polyhaven.com/a/CashRegister_01
+Megafono — "Megaphone 01" by Ethan Simon-Law — https://polyhaven.com/a/Megaphone_01
+Sveglia — "Alarm Clock 01" by Yann Kervran, James Ray Cock — https://polyhaven.com/a/alarm_clock_01
+Ventilatore da soffitto — "Ceiling Fan" by Ulan Cabanilla — https://polyhaven.com/a/ceiling_fan
+Lampadario classico — "Chandelier 01" by Kirill Sannikov — https://polyhaven.com/a/Chandelier_01
+Lampadario elegante — "Chandelier 02" by Kirill Sannikov — https://polyhaven.com/a/Chandelier_02
+Lampadario a candele — "Chandelier 03" by Kirill Sannikov — https://polyhaven.com/a/Chandelier_03
+Lampadario a lanterna — "Lantern Chandelier 01" by Kirill Sannikov — https://polyhaven.com/a/lantern_chandelier_01
+Lanterna cinese da soffitto — "Chinese Chandelier" by Kirill Sannikov — https://polyhaven.com/a/chinese_chandelier
+Lampada a sospensione moderna — "Modern Ceiling Lamp 01" by James Ray Cock — https://polyhaven.com/a/modern_ceiling_lamp_01
+Lampada industriale a sospensione — "Hanging Industrial Lamp" by Kuutti Siitonen — https://polyhaven.com/a/hanging_industrial_lamp
+Plafoniera a gabbia — "Caged Hanging Light" by Ulan Cabanilla — https://polyhaven.com/a/caged_hanging_light
+Neon da soffitto — "Mounted Fluorescent Lights" by Ulan Cabanilla — https://polyhaven.com/a/mounted_fluorescent_lights
+Lampada da tavolo snodata — "Desk Lamp Arm 01" by Yann Kervran, Kuutti Siitonen — https://polyhaven.com/a/desk_lamp_arm_01
+Lampada a tubi — "Industrial Pipe Lamp" by Mateusz Sadek — https://polyhaven.com/a/industrial_pipe_lamp
+Lume a petrolio — "Vintage Oil Lamp" by Monsta3D — https://polyhaven.com/a/vintage_oil_lamp
+Candelabri in ottone — "Brass Candleholders" by Tina — https://polyhaven.com/a/brass_candleholders
+Candeliere in legno — "Wooden Candlestick" by Josh Dean — https://polyhaven.com/a/wooden_candlestick
+Applique industriale — "Industrial Wall Lamp" by Kuutti Siitonen — https://polyhaven.com/a/industrial_wall_lamp
+Applique antica — "Industrial Wall Sconce" by Ulan Cabanilla — https://polyhaven.com/a/industrial_wall_sconce
+Lanterna — "Lantern 01" by Rajil Jose Macatangay — https://polyhaven.com/a/Lantern_01
+Lanterna in legno — "Wooden Lantern 01" by James Ray Cock — https://polyhaven.com/a/wooden_lantern_01
+Lanterna orientale — "Brass Diya Lantern" by Bhargav Kubal — https://polyhaven.com/a/brass_diya_lantern
+Torcia vintage — "Vintage Flashlight" by Omar M. El-Safy — https://polyhaven.com/a/vintage_flashlight
+Lampadina — "Lightbulb 01" by Josh Dean — https://polyhaven.com/a/lightbulb_01
+Quadro moderno — "Hanging Picture Frame 01" by James Ray Cock — https://polyhaven.com/a/hanging_picture_frame_01
+Quadro con cornice in legno — "Hanging Picture Frame 02" by James Ray Cock — https://polyhaven.com/a/hanging_picture_frame_02
+Foto d’epoca — "Hanging Picture Frame 03" by James Ray Cock — https://polyhaven.com/a/hanging_picture_frame_03
+Dipinto antico — "Fancy Picture Frame 01" by Rob Tuytel, Rico Cilliers — https://polyhaven.com/a/fancy_picture_frame_01
+Cornice dorata — "Fancy Picture Frame 02" by Rob Tuytel, Rico Cilliers — https://polyhaven.com/a/fancy_picture_frame_02
+Portafoto moderno — "Standing Picture Frame 01" by James Ray Cock — https://polyhaven.com/a/standing_picture_frame_01
+Portafoto in legno — "Standing Picture Frame 02" by James Ray Cock — https://polyhaven.com/a/standing_picture_frame_02
+Specchio decorato — "Ornate Mirror 01" by James Ray Cock — https://polyhaven.com/a/ornate_mirror_01
+Vaso alto in ceramica — "Ceramic Vase 01" by James Ray Cock — https://polyhaven.com/a/ceramic_vase_01
+Vaso in ceramica — "Ceramic Vase 02" by James Ray Cock — https://polyhaven.com/a/ceramic_vase_02
+Vaso dipinto — "Ceramic Vase 03" by James Ray Cock — https://polyhaven.com/a/ceramic_vase_03
+Vaso decorato — "Ceramic Vase 04" by James Ray Cock — https://polyhaven.com/a/ceramic_vase_04
+Vaso antico — "Antique Ceramic Vase 01" by James Ray Cock — https://polyhaven.com/a/antique_ceramic_vase_01
+Vaso in ottone — "Brass Vase 01" by Rico Cilliers — https://polyhaven.com/a/brass_vase_01
+Anfora in ottone — "Brass Vase 02" by Rico Cilliers — https://polyhaven.com/a/brass_vase_02
+Busto in marmo — "Marble Bust 01" by Rico Cilliers — https://polyhaven.com/a/marble_bust_01
+Statuina cavallo — "Horse Statue 01" by Rico Cilliers — https://polyhaven.com/a/horse_statue_01
+Elefante intagliato — "Carved Wooden Elephant" by Greg Zaal — https://polyhaven.com/a/carved_wooden_elephant
+Statua squalo in bronzo — "Bronze Shark Statue" by Tina — https://polyhaven.com/a/bronze_shark_statue
+Testa di leone intagliata — "Lion Head" by Tina — https://polyhaven.com/a/lion_head
+Statua gatto — "Concrete Cat Statue" by Rico Cilliers, Riley Queen — https://polyhaven.com/a/concrete_cat_statue
+Nano da giardino — "Garden Gnome" by Bhargav Kubal — https://polyhaven.com/a/garden_gnome
+Orologio da parete — "Wall Clock" by PierreB3D — https://polyhaven.com/a/wall_clock
+Orologio a telefono — "Vintage Telephone Wall Clock" by Adrian C — https://polyhaven.com/a/vintage_telephone_wall_clock
+Orologio da camino — "Mantel Clock 01" by Yann Kervran, Rico Cilliers — https://polyhaven.com/a/mantel_clock_01
+Pendola — "Vintage Grandfather Clock 01" by Yann Kervran, James Ray Cock — https://polyhaven.com/a/vintage_grandfather_clock_01
+Cuscini decorativi — "Throw Pillows 01" by Serhii Khromov — https://polyhaven.com/a/throw_pillows_01
+Paravento — "Chinese Screen Panels" by Kirill Sannikov — https://polyhaven.com/a/chinese_screen_panels
+Supporto per katana — "Katana Stand 01" by Rico Cilliers — https://polyhaven.com/a/katana_stand_01
+Bussola nautica — "Seadogs Compass" by Benny Weimer — https://polyhaven.com/a/seadogs_compass
+Conchiglia — "Lambis Shell" by Kuutti Siitonen — https://polyhaven.com/a/lambis_shell
+Pianta in vaso di terracotta — "Potted Plant 01" by Rico Cilliers — https://polyhaven.com/a/potted_plant_01
+Pianta in vaso — "Potted Plant 02" by Rico Cilliers — https://polyhaven.com/a/potted_plant_02
+Aloe in vasetto — "Potted Plant 04" by James Ray Cock — https://polyhaven.com/a/potted_plant_04
+Vaso di terracotta — "Planter Pot Clay" by Amal Kumar — https://polyhaven.com/a/planter_pot_clay
+Mela — "Food Apple 01" by Oliver Harries — https://polyhaven.com/a/food_apple_01
+Banane — "Bananas" by Alexander Shulha — https://polyhaven.com/a/bananas
+Limone — "Lemon" by Kuutti Siitonen — https://polyhaven.com/a/lemon
+Lime — "Food Lime 01" by Oliver Harries — https://polyhaven.com/a/food_lime_01
+Avocado — "Food Avocado 01" by Oliver Harries — https://polyhaven.com/a/food_avocado_01
+Kiwi — "Food Kiwi 01" by Oliver Harries — https://polyhaven.com/a/food_kiwi_01
+Melograno — "Food Pomegranate 01" by Oliver Harries — https://polyhaven.com/a/food_pomegranate_01
+Pere — "Pears Asian 01" by Amal Kumar — https://polyhaven.com/a/food_pears_asian_01
+Cipolla — "Yellow Onion" by Kuutti Siitonen — https://polyhaven.com/a/yellow_onion
+Patata dolce — "Sweet Potato" by Jan Martens — https://polyhaven.com/a/sweet_potato
+Zenzero — "Food Ginger 01" by Oliver Harries — https://polyhaven.com/a/food_ginger_01
+Cornetto — "Croissant" by Greg Zaal, Dario Barresi — https://polyhaven.com/a/croissant
+Panini — "Hamburger Buns" by Alexander Shulha — https://polyhaven.com/a/hamburger_buns
+Torta di carote — "Carrot Cake" by Greg Zaal, James Ray Cock — https://polyhaven.com/a/carrot_cake
+Torta al cioccolato — "Strawberry Chocolate Cake" by Kuutti Siitonen — https://polyhaven.com/a/strawberry_chocolate_cake
+Servizio da tè — "Tea Set 01" by James Ray Cock, Rico Cilliers, Jurita Burger — https://polyhaven.com/a/tea_set_01
+Brocca in ceramica — "Jug 01" by Kuutti Siitonen — https://polyhaven.com/a/jug_01
+Bricco in metallo — "Metal Jug" by Anzor Lezhava — https://polyhaven.com/a/metal_jug
+Ciotola in legno — "Wooden Bowl 01" by Oliver Harries — https://polyhaven.com/a/wooden_bowl_01
+Ciotolina intagliata — "Wooden Bowl 02" by Kuutti Siitonen — https://polyhaven.com/a/wooden_bowl_02
+Piatto in legno — "Carved Wooden Plate" by Jan Martens — https://polyhaven.com/a/carved_wooden_plate
+Calici in ottone — "Brass Goblets" by Tina — https://polyhaven.com/a/brass_goblets
+Bottiglie di vino — "Wine Bottles 01" by Rico Cilliers, Jurita Burger — https://polyhaven.com/a/wine_bottles_01
+Thermos — "Plastic Thermos" by PierreB3D — https://polyhaven.com/a/plastic_thermos
+Spesa a lunga conservazione — "Long Life Food" by Mia Pecina Zorko — https://polyhaven.com/a/long_life_food
+Scatolette — "Russian Food Cans 01" by Kosan Aziz — https://polyhaven.com/a/russian_food_cans_01
+Scatola di cartone — "Cardboard Box 01" by Rahul Chaudhary — https://polyhaven.com/a/cardboard_box_01
+Contenitore di plastica — "Plastic Container" by PierreB3D — https://polyhaven.com/a/plastic_container
+Cassa industriale — "Industrial Plastic Container" by Galo Benivegna — https://polyhaven.com/a/industrial_pastic_container
+Scatola di legno — "CheeseBox_01" by Gabriel Radić — https://polyhaven.com/a/CheeseBox_01
+Cassetta metallica — "Ammo Box" by DanKit — https://polyhaven.com/a/ammo_box
+Cassa di legno — "Wooden Crate 01" by James Ray Cock — https://polyhaven.com/a/wooden_crate_01
+Cassa di legno grande — "Wooden Crate 02" by James Ray Cock, Jurita Burger — https://polyhaven.com/a/wooden_crate_02
+Cassa militare — "Wooden Military Crate" by Prabhjinder Singh — https://polyhaven.com/a/wooden_military_crate
+Cassa da trasporto — "Old Military Crate" by Jack Mava — https://polyhaven.com/a/old_military_crate
+Forziere del tesoro — "Treasure Chest" by Rico Cilliers — https://polyhaven.com/a/treasure_chest
+Cassetta per bottiglie — "Plastic Crate 01" by PierreB3D — https://polyhaven.com/a/plastic_crate_01
+Cassetta di plastica — "Plastic Crate 02" by Fabi_G — https://polyhaven.com/a/plastic_crate_02
+Fusto rosso — "Barrel_01" by Jorge Camacho — https://polyhaven.com/a/Barrel_01
+Fusto metallico — "Barrel 03" by Serhii Khromov — https://polyhaven.com/a/barrel_03
+Fusto di plastica — "Barrel 02" by Jorge Camacho — https://polyhaven.com/a/Barrel_02
+Botte di vino — "Wine Barrel 01" by James Ray Cock — https://polyhaven.com/a/wine_barrel_01
+Cesto da picnic — "Wicker Basket 01" by Kuutti Siitonen — https://polyhaven.com/a/wicker_basket_01
+Cesto in rattan — "Wicker Basket 02" by Kuutti Siitonen — https://polyhaven.com/a/wicker_basket_02
+Secchio di legno — "Wooden Bucket 01" by James Ray Cock — https://polyhaven.com/a/wooden_bucket_01
+Mastello di legno — "Wooden Bucket 02" by James Ray Cock — https://polyhaven.com/a/wooden_bucket_02
+Sacco della spazzatura — "Trashbag" by Benny Weimer — https://polyhaven.com/a/trashbag
+Tanica di metallo — "Metal Jerrycan" by Sean Buckley — https://polyhaven.com/a/metal_jerrycan
+Tanica di plastica — "Plastic Jerrycan" by Ulan Cabanilla — https://polyhaven.com/a/plastic_jerrycan
+Bombola del gas — "Propane Tank" by Slinc — https://polyhaven.com/a/propane_tank
+Valigia vintage — "Vintage Suitcase" by Maximilian Schuster — https://polyhaven.com/a/vintage_suitcase
+Cassetta degli attrezzi — "Metal Toolbox" by Mateusz Sadek — https://polyhaven.com/a/metal_toolbox
+Cassettiera attrezzi — "Metal Tool Chest" by Yann Kervran, John Hutcheson — https://polyhaven.com/a/metal_tool_chest
+Carrello attrezzi — "Tool Cart" by Savva Zakharov — https://polyhaven.com/a/tool_cart
+Morsa da banco — "Bench Vice 01" by Yann Kervran, Antanas Kep — https://polyhaven.com/a/bench_vice_01
+Trapano a colonna — "Old Drill Press" by Harsh Vardhan Singh — https://polyhaven.com/a/old_drill_press
+Carrello portapacchi — "Hand Truck" by Mutanzom3D — https://polyhaven.com/a/hand_truck
+Estintore — "Korean Fire Extinguisher 01" by UM JOORIN — https://polyhaven.com/a/korean_fire_extinguisher_01
+Cartello pavimento bagnato — "Wet Floor Sign 01" by Fran Calvente — https://polyhaven.com/a/WetFloorSign_01
+Trapano — "Drill 01" by Fernando Quinn — https://polyhaven.com/a/Drill_01
+Martello — "Cross Pein Hammer" by Tics — https://polyhaven.com/a/cross_pein_hammer
+Mazza — "Sledgehammer 01" by Dylan Guzman — https://polyhaven.com/a/sledgehammer_01
+Accetta — "Hatchet" by James Ray Cock, Ulan Cabanilla — https://polyhaven.com/a/hatchet
+Ascia — "Wooden Axe" by Ulan Cabanilla — https://polyhaven.com/a/wooden_axe
+Sega — "Handsaw Wood" by Konrad Szałankiewicz — https://polyhaven.com/a/handsaw_wood
+Chiave inglese — "Adjustable Wrench" by Mateusz Sadek — https://polyhaven.com/a/adjustable_wrench
+Giratubi — "Pipe Wrench" by Will Evarts — https://polyhaven.com/a/pipe_wrench
+Pinze — "Pliers" by PierreB3D — https://polyhaven.com/a/pliers
+Cacciaviti — "Screwdrivers 02" by BKS — https://polyhaven.com/a/screwdrivers_02
+Piede di porco — "Crowbar 01" by Alexander Otterbeck — https://polyhaven.com/a/crowbar_01
+Tronchesi — "Bolt Cutters 01" by Yann Kervran, Antanas Kep — https://polyhaven.com/a/bolt_cutters_01
+Metro a nastro — "Measuring Tape 01" by Kuutti Siitonen — https://polyhaven.com/a/measuring_tape_01
+Lente d’ingrandimento — "Magnifying Glass 01" by Nazar Borodavka — https://polyhaven.com/a/magnifying_glass_01
+Vanga — "Rusted Spade 01" by Blemonade — https://polyhaven.com/a/rusted_spade_01
+Annaffiatoio — "Watering Can Metal 01" by Charles Nderitu — https://polyhaven.com/a/watering_can_metal_01
+Scopa di saggina — "Wooden Broom" by Balen — https://polyhaven.com/a/wooden_broom
+Scopa — "Plastic Broom" by L — https://polyhaven.com/a/plastic_broom
+Paletta — "Dustpan" by Balen — https://polyhaven.com/a/dustpan
+Scaleo in legno — "Wooden Ladder 02" by JN_3DPRINTINGNERD — https://polyhaven.com/a/wooden_ladder_02
+Scala in alluminio — "Ladder Sectioned 01" by MP — https://polyhaven.com/a/ladder_sectioned_01
+Microscopio — "Vintage Microscope" by Luis José Fernández Rodríguez — https://polyhaven.com/a/vintage_microscope
+Set da chimica — "Chemistry Set" by Jiří Ptáček — https://polyhaven.com/a/chemistry_set
+Becco Bunsen — "Bunsen Burner" by BKS — https://polyhaven.com/a/bunsen_burner
+Binocolo — "Binoculars" by Derek Wight — https://polyhaven.com/a/binoculars
+Katana — "Antique Katana 01" by Tal Swicegood — https://polyhaven.com/a/antique_katana_01
+Sciabola — "Wooden Handle Saber" by Ulan Cabanilla — https://polyhaven.com/a/wooden_handle_saber
+Stocco — "Antique Estoc" by James Ray Cock, Ulan Cabanilla — https://polyhaven.com/a/antique_estoc
+Pugnale — "Ornate Medieval Dagger" by Sofia Pahaoja — https://polyhaven.com/a/ornate_medieval_dagger
+Machete — "Machete" by Ulan Cabanilla — https://polyhaven.com/a/machete
+Mazza ferrata — "Ornate Medieval Mace" by Ulan Cabanilla — https://polyhaven.com/a/ornate_medieval_mace
+Martello da guerra — "Ornate War Hammer" by James Ray Cock, Ulan Cabanilla — https://polyhaven.com/a/ornate_war_hammer
+Scudo a goccia — "Kite Shield" by Ulan Cabanilla — https://polyhaven.com/a/kite_shield
+Pistola — "Service Pistol" by Mateusz Sadek — https://polyhaven.com/a/service_pistol
+Fucile — "Bolt Action Rifle 7.62" by Mateusz Sadek — https://polyhaven.com/a/bolt_action_rifle_7_62
+Pallone da calcio — "Football" by Amal Kumar — https://polyhaven.com/a/football
+Palla da football — "American Football" by Riley Queen — https://polyhaven.com/a/american_football
+Palla da baseball — "Baseball 01" by Rico Cilliers — https://polyhaven.com/a/baseball_01
+Mazza da baseball — "Baseball Bat" by Enrique Martín — https://polyhaven.com/a/baseball_bat
+Scacchiera — "Chess Set" by Riley Queen — https://polyhaven.com/a/chess_set
+Bersaglio per freccette — "Dartboard" by Satyaki Mandal — https://polyhaven.com/a/dartboard
+Ukulele — "Ukulele 01" by Joseph Burgan — https://polyhaven.com/a/Ukulele_01
+Stivali di gomma — "Rubber Boots" by L — https://polyhaven.com/a/rubber_boots
+Occhiali tondi — "Round Spectacles" by Sean Buckley — https://polyhaven.com/a/round_spectacles
+Orologio da taschino — "Pocket Watch" by PierreB3D — https://polyhaven.com/a/pocket_watch
+Orologio digitale — "Digital Wrist Watch" by Adrian C — https://polyhaven.com/a/digital_wrist_watch
+Cappello da pescatore — "Fishermans Hat" by PierreB3D — https://polyhaven.com/a/fishermans_hat
+Guanti da lavoro — "Garden Gloves 01" by Satyaki Mandal — https://polyhaven.com/a/garden_gloves_01
+Maschera antigas — "Old Gas Mask" by Michał Wiśniewski — https://polyhaven.com/a/old_gas_mask
+Accendino — "Vintage Lighter" by Slinc — https://polyhaven.com/a/vintage_lighter
+Pacchetto di sigarette — "Cigarette Pack" by Ulrich Büch — https://polyhaven.com/a/cigarette_pack

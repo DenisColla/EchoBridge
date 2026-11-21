@@ -16,6 +16,10 @@
 // (tone mapping, environment, outlines, AO, background); materials only know
 // how a surface should shade in each style.
 import * as THREE from 'three';
+import { softSkin, injectSoftSkin } from './softskin.js';
+import { anatomyTexture } from './anatomy.js';
+
+export { softSkin };
 
 export const STYLES = [
   { id: 'realistic', label: 'Realistico' },
@@ -101,6 +105,13 @@ function addHook(material, key, fn) {
  * ink line width before each screen frame / capture so both match.
  */
 export const inkLinePx = { value: 2 };
+/** Ink colour (linear RGB) of the lines drawn by materials (anatomical creases); set by the pipeline. */
+export const inkColorLinear = { value: new THREE.Color(0x141414) };
+/**
+ * Anatomical crease lines drawn by the skin in the toon / lines styles:
+ * x = strength threshold of a groove (> 1: off), y = opacity. Set by the render module.
+ */
+export const anatomyLines = { value: new THREE.Vector2(2, 1) };
 
 /**
  * Wrapped diffuse for direct lights (cheap subsurface approximation): light
@@ -122,6 +133,119 @@ function wrapDiffuseHook(material, wrap, key) {
   });
   material.userData.wrap = uWrap;
   return material;
+}
+
+// ---------------------------------------------------------------- anatomy (skin)
+/**
+ * normalScale of the anatomical skin normal map per style, per unit of
+ * spec.definition (0..1). Clay reads the relief the most (mannequin look), toon
+ * a softened, blurred version (cel bands bend along the muscles, no speckles).
+ */
+const DEFINITION_K = { realistic: 4.4, clay: 5.6, toon: 2.6, lines: 4.0 };
+/** Toon skin samples the normal map this many mip levels blurrier (big muscle shapes only). */
+const TOON_NORMAL_BIAS = 1.6;
+
+/**
+ * Anatomy shading of the skin (realistic / clay), from the anatomy map (cavity,
+ * convexity) built from the normal map — see render/anatomy.js:
+ *  - creases get contact shadow and, in the realistic style, the warm, saturated
+ *    tint of light scattered under the skin (subsurface warmth);
+ *  - muscle bellies get a slight lift; specular is occluded in the creases (no
+ *    plastic shine inside the grooves).
+ *  - form shading: diffuse falls off as the (normal-mapped) surface turns away
+ *    from the eye, like a sculptor's clay material. Muscles stay readable even
+ *    under flat frontal light, which otherwise erases them.
+ * cfg: {cavity (darkening strength), tint (RGB at full cavity), lift, specOcc, form}
+ */
+function anatomyHook(material, anat, cfg, definition) {
+  const k = 0.45 + 0.55 * definition; // more muscle definition = deeper creases
+  const u = {
+    pvAnat: { value: anat },
+    pvAnatK: { value: new THREE.Vector4(cfg.cavity * k, cfg.lift * k, cfg.specOcc, cfg.form || 0) },
+    pvCavTint: { value: new THREE.Vector3(...cfg.tint) },
+  };
+  return addHook(material, 'pv-anat', (shader) => {
+    Object.assign(shader.uniforms, u);
+    shader.fragmentShader = 'uniform sampler2D pvAnat;\nuniform vec4 pvAnatK;\nuniform vec3 pvCavTint;\n' + patch(shader.fragmentShader, '#include <aomap_fragment>', `
+      #ifdef USE_NORMALMAP
+      {
+        vec4 pvA = texture2D( pvAnat, vNormalMapUv );
+        // only the marked grooves: the soft floor of the muscle separations stays clean
+        // a light accent of the deepest grooves only (the relief itself carries the anatomy;
+        // the baked map's fine detail is blob-shaped and would read as dirt if pushed)
+        float pvCv = smoothstep( 0.2, 0.9, pvA.r ) * pvAnatK.x;
+        float pvNv = clamp( dot( normal, geometryViewDir ), 0.0, 1.0 );
+        vec3 pvOcc = mix( vec3( 1.0 ), pvCavTint, pvCv ) * ( 1.0 + pvAnatK.y * pvA.g ) * ( 1.0 - pvAnatK.w * ( 1.0 - pvNv * pvNv ) );
+        reflectedLight.directDiffuse *= pvOcc;
+        reflectedLight.indirectDiffuse *= pvOcc;
+        float pvSo = 1.0 - pvAnatK.z * pvCv;
+        reflectedLight.directSpecular *= pvSo;
+        reflectedLight.indirectSpecular *= pvSo;
+      }
+      #endif
+      #include <aomap_fragment>`, 'anat-shade');
+  });
+}
+
+/** GLSL: anatomical crease line coverage at uv (anatomy map B = distance, A = groove strength). */
+const ANAT_LINE_FN = /* glsl */`
+  uniform sampler2D pvAnat;
+  uniform vec2 pvAnatLine;
+  uniform float pvAnatSize, pvInkPx;
+  uniform vec3 pvInkCol;
+  float pvAnatInk( vec2 uv ) {
+    if ( pvAnatLine.x > 1.0 ) return 0.0;
+    vec4 l = textureLod( pvAnat, uv, 0.0 );
+    vec2 fw = fwidth( uv ) * pvAnatSize;
+    float tpp = max( max( fw.x, fw.y ), 1e-4 );     // texels per pixel
+    float dpx = l.b * 8.0 / tpp;                    // pixels to the groove centre line
+    float s = smoothstep( pvAnatLine.x, pvAnatLine.x + 0.22, l.a );
+    float hw = 0.5 * pvInkPx * mix( 0.3, 1.0, s );  // tapered brush stroke
+    float cov = clamp( hw + 0.5 - dpx, 0.0, 1.0 ) * smoothstep( 0.0, 0.12, s );
+    // far away the grooves are sub-pixel: fade out instead of smudging
+    return cov * ( 1.0 - smoothstep( 1.6, 4.0, tpp ) ) * pvAnatLine.y;
+  }
+`;
+
+/**
+ * Anatomical crease lines drawn by the skin itself (toon / lines): constant
+ * screen width (inner ink width), tapered ends, only grooves stronger than the
+ * threshold ('Linee anatomiche'). uvVar: varying holding the body UV.
+ */
+function anatomyLineHook(material, anat, uvVar) {
+  const u = {
+    pvAnat: { value: anat }, pvAnatLine: anatomyLines, pvInkPx: inkLinePx, pvInkCol: inkColorLinear,
+    pvAnatSize: { value: anat.image?.width || 1024 },
+  };
+  return addHook(material, 'pv-anat-line-' + uvVar, (shader) => {
+    Object.assign(shader.uniforms, u);
+    shader.fragmentShader = ANAT_LINE_FN + patch(shader.fragmentShader, '#include <opaque_fragment>', `
+      outgoingLight = mix( outgoingLight, pvInkCol, pvAnatInk( ${uvVar} ) );
+      #include <opaque_fragment>`, 'anat-line');
+  });
+}
+
+/** Toon skin: blurrier normal map lookup (mip bias) so the cel bands follow the big muscle shapes only. */
+function normalBiasHook(material, bias) {
+  return addHook(material, 'pv-nbias', (shader) => {
+    shader.fragmentShader = patch(shader.fragmentShader, '#include <normal_fragment_maps>',
+      THREE.ShaderChunk.normal_fragment_maps.replace('texture2D( normalMap, vNormalMapUv )', `texture( normalMap, vNormalMapUv, ${bias.toFixed(2)} )`), 'normal-bias');
+  });
+}
+
+/**
+ * Skin normal map options from spec.definition: the anatomical map (spec.normalMap,
+ * else materials.textures.skinNormal) at normalScale = definition × k(style).
+ * Without definition the spec's own normalScale is used.
+ */
+function skinNormals(s, style, lib) {
+  const def = typeof s.definition === 'number' ? Math.max(0, Math.min(1, s.definition)) : null;
+  const map = s.normalMap || (def ? lib.textures.skinNormal : null);
+  if (!map || def === 0) return { o: {}, map: null, def: def ?? 0 };
+  const o = { normalMap: map };
+  if (def !== null) o.normalScale = new THREE.Vector2(def * DEFINITION_K[style], def * DEFINITION_K[style]);
+  else { const ns = vec2Of(s.normalScale); if (ns) o.normalScale = ns; }
+  return { o, map, def: def ?? 0.5 };
 }
 
 /**
@@ -232,6 +356,10 @@ const toonResolve = /* glsl */`
   {
     float pvE = dot( pvDirSum, PV_LUM );
     float pvF = pvKey > 1e-6 ? pvE / pvKey : 0.0;
+    #ifdef PV_TOON_ANAT
+      // muscle separations (blurred cavity) fall into the darker band first: painted anatomy shapes
+      pvF *= 1.0 - pvToonCav * smoothstep( 0.1, 0.6, textureLod( pvAnat, vNormalMapUv, 1.5 ).r );
+    #endif
     // hue of the incoming light; in the shadow of every light it falls back to the key colour
     vec3 pvHue = ( pvDirSum + pvKeyCol * 0.05 ) / max( pvE + pvKey * 0.05, 1e-6 );
     float pvAA = min( fwidth( pvF ) * 0.7, 0.1 ) + pvToonSoft;
@@ -248,7 +376,7 @@ function toonHook(material, cfg) {
   const u = {
     pvTone0: { value: new THREE.Vector3(...cfg.tones[0]) }, pvTone1: { value: new THREE.Vector3(...cfg.tones[1]) },
     pvTone2: { value: new THREE.Vector3(...cfg.tones[2]) }, pvToonT: { value: new THREE.Vector2(...cfg.t) },
-    pvToonSoft: { value: cfg.soft }, pvToonWrap: { value: cfg.wrap || 0 },
+    pvToonSoft: { value: cfg.soft }, pvToonWrap: { value: cfg.wrap || 0 }, pvToonCav: { value: cfg.cav || 0 },
   };
   return addHook(material, 'pv-toon', (shader) => {
     Object.assign(shader.uniforms, u);
@@ -256,7 +384,7 @@ function toonHook(material, cfg) {
     const begin = THREE.ShaderChunk.lights_fragment_begin.replace(/(get(?:Point|Spot|Sun|Directional)LightInfo\([^;]*directLight \);)/g, '$1\n\t\tpvC0 = directLight.color;');
     if (begin === THREE.ShaderChunk.lights_fragment_begin && !_warned.has('toon-c0')) { _warned.add('toon-c0'); console.warn('[render] toon light patch not applied (three.js chunk changed?)'); }
     let fs = shader.fragmentShader;
-    fs = patch(fs, '#include <lights_toon_pars_fragment>', 'uniform vec3 pvTone0, pvTone1, pvTone2;\nuniform vec2 pvToonT;\nuniform float pvToonSoft, pvToonWrap;\n' + toonParsChunk(), 'toon-pars');
+    fs = patch(fs, '#include <lights_toon_pars_fragment>', 'uniform vec3 pvTone0, pvTone1, pvTone2;\nuniform vec2 pvToonT;\nuniform float pvToonSoft, pvToonWrap, pvToonCav;\n' + toonParsChunk(), 'toon-pars');
     fs = patch(fs, '#include <lights_fragment_begin>', begin, 'toon-begin');
     fs = patch(fs, '#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + toonResolve, 'toon-resolve');
     shader.fragmentShader = fs;
@@ -320,6 +448,12 @@ const TOON_SKIN = { tones: [[0.56, 0.40, 0.38], [0.86, 0.74, 0.70], [1, 1, 1]], 
 const TOON_BASE = { tones: [[0.46, 0.46, 0.48], [0.75, 0.75, 0.76], [1, 1, 1]], t: [0.2, 0.74], soft: 0.02, wrap: 0 };
 const TOON_EYE = { tones: [[0.62, 0.62, 0.64], [0.85, 0.85, 0.86], [1, 1, 1]], t: [0.08, 0.4], soft: 0.04, wrap: 0.3 };
 
+/** Anatomy shading of the skin per style (see anatomyHook). */
+const ANAT_REAL = { cavity: 0.35, tint: [0.74, 0.5, 0.43], lift: 0.04, specOcc: 0.7, form: 0.14 };
+const ANAT_CLAY = { cavity: 0.3, tint: [0.50, 0.47, 0.45], lift: 0.06, specOcc: 0.7, form: 0.4 };
+
+const dqHook = (shader) => { shader.vertexShader = injectSoftSkin(shader.vertexShader); };
+
 // ---------------------------------------------------------------- library
 class MaterialLibrary extends THREE.EventDispatcher {
   constructor() {
@@ -331,6 +465,38 @@ class MaterialLibrary extends THREE.EventDispatcher {
     this.textures = {};
     /** extra per-style factories (fn(spec) -> Material, `this` = library) may be registered by modules */
     this.factories = {};
+    /** renderer used to derive the anatomy maps (set by the render module) */
+    this.renderer = null;
+    /** UV island coverage of the body skin (seams handling of the anatomy maps), set with setRenderer */
+    this.uvMask = null;
+    /** dual-quaternion skinning switch ('Deformazione morbida'), see softskin.js */
+    this.softSkin = softSkin;
+  }
+
+  /** Gives the library a renderer: GPU-derived maps (anatomy) become available. */
+  setRenderer(renderer, uvMask = this.uvMask) {
+    if (this.renderer === renderer && this.uvMask === uvMask) return;
+    this.renderer = renderer;
+    this.uvMask = uvMask;
+    softSkin.checkSupport(renderer);
+    const old = this.cache;
+    this.cache = new Map();
+    this.refreshAll();
+    this._disposeUnused(old);
+  }
+
+  /** Anatomy map (cavity, convexity, crease lines) of a skin normal map, or null. */
+  anatomyFor(normalMap) {
+    if (!normalMap || !this.renderer) return null;
+    try { return anatomyTexture(this.renderer, normalMap, this.uvMask); } catch (e) { console.warn('[render] anatomy map failed', e); return null; }
+  }
+
+  /** Drops every cached material (rebuilt lazily, e.g. after a context loss). */
+  rebuildAll() {
+    const old = this.cache;
+    this.cache = new Map();
+    this.refreshAll();
+    this._disposeUnused(old);
   }
 
   setTexture(name, tex) {
@@ -388,6 +554,9 @@ class MaterialLibrary extends THREE.EventDispatcher {
       const f = this.factories[this.style] || defaultFactories[this.style];
       m = f.call(this, spec);
       m.userData.kind = spec.kind;
+      // volume-preserving skinning (active when the PV_DQS define is on, see softskin.js)
+      addHook(m, 'pv-dq', dqHook);
+      softSkin.register(m, true);
       // wrinkle normal maps also drive the ink outlines, even in styles that do not shade with them
       if (spec.normalMap) { m.userData.pvNormalMap = spec.normalMap; m.userData.pvNormalScale = vec2Of(spec.normalScale) || new THREE.Vector2(1, 1); }
       m.name = `pv:${this.style}:${spec.kind}`;
@@ -425,12 +594,17 @@ const defaultFactories = {
     const c = common(s);
     switch (s.kind) {
       case 'skin': {
+        // soft, satin skin: broad low specular (no wet plastic shine), warm velvet sheen at grazing
+        // angles, light bleeding past the terminator, anatomy creases with subsurface warmth
+        const sn = skinNormals(s, 'realistic', this);
         const m = new THREE.MeshPhysicalMaterial({
-          ...c, color, map: s.map || this.textures.skinDetail || null, ...normals(s),
-          roughness: s.roughness ?? 0.48, metalness: 0, specularIntensity: 0.6,
-          sheen: s.sheen ?? 0.22, sheenRoughness: 0.42, sheenColor: new THREE.Color('#ffb39a'),
+          ...c, color, map: s.map || this.textures.skinDetail || null, ...sn.o,
+          roughness: s.roughness ?? 0.6, metalness: 0, specularIntensity: 0.42,
+          sheen: s.sheen ?? 0.2, sheenRoughness: 0.62, sheenColor: new THREE.Color('#ff9c80'),
         });
-        return wrapDiffuseHook(m, [0.40, 0.21, 0.15], 'pv-wrap-skin');
+        wrapDiffuseHook(m, [0.42, 0.22, 0.15], 'pv-wrap-skin');
+        const anat = this.anatomyFor(sn.map);
+        return anat ? anatomyHook(m, anat, ANAT_REAL, sn.def) : m;
       }
       case 'eye': {
         if (s.cornea) return corneaMaterial('realistic');
@@ -479,6 +653,18 @@ const defaultFactories = {
     if (s.kind === 'cloth' || s.kind === 'hair' || s.kind === 'brows' || s.kind === 'prop') color.lerp(colorOf(s.color, '#999999'), s.kind === 'hair' || s.kind === 'brows' ? 0.3 : 0.26);
     const c = common(s, { colors: false });
     if (s.kind === 'eye') return s.cornea ? corneaMaterial('clay') : eyeHook(new THREE.MeshStandardMaterial({ ...c, map: s.map || this.textures.eye || null, roughness: 0.35 }), s.color, 1);
+    if (s.kind === 'skin') {
+      // sculpted mannequin: matte satin surface, soft terminator, a faint rim sheen that
+      // separates the silhouette, anatomy creases as contact shadow, muscle bellies lifted
+      const sn = skinNormals(s, 'clay', this);
+      const m = new THREE.MeshPhysicalMaterial({
+        ...c, color, ...sn.o, roughness: 0.72, metalness: 0, specularIntensity: 0.24,
+        sheen: 0.18, sheenRoughness: 0.75, sheenColor: new THREE.Color('#e9e3da'),
+      });
+      wrapDiffuseHook(m, [0.17, 0.15, 0.14], 'pv-wrap-clay');
+      const anat = this.anatomyFor(sn.map);
+      return anat ? anatomyHook(m, anat, ANAT_CLAY, sn.def) : m;
+    }
     const cut = !!(s.map && (s.alphaTest || s.transparent));
     const m = new THREE.MeshStandardMaterial({
       ...c, color, ...normals(s), map: cut ? s.map : null,
@@ -492,7 +678,16 @@ const defaultFactories = {
     const color = colorOf(s.color);
     const c = common(s);
     if (s.kind === 'eye') return s.cornea ? corneaMaterial('toon') : eyeHook(toonHook(new THREE.MeshToonMaterial({ ...c, map: s.map || this.textures.eye || null }), TOON_EYE), s.color, 0);
-    if (s.kind === 'skin') return toonHook(new THREE.MeshToonMaterial({ ...c, color, ...normals(s) }), TOON_SKIN);
+    if (s.kind === 'skin') {
+      // muscles as a softened (mip-biased) relief: bands bend along them without speckles;
+      // the muscle separations reach the shadow band first; optional anatomical ink lines
+      const sn = skinNormals(s, 'toon', this);
+      const anat = this.anatomyFor(sn.map);
+      const m = toonHook(new THREE.MeshToonMaterial({ ...c, color, ...sn.o }), { ...TOON_SKIN, cav: anat ? 0.24 : 0 });
+      if (sn.map) normalBiasHook(m, TOON_NORMAL_BIAS);
+      if (anat) { m.defines = { ...(m.defines || {}), PV_TOON_ANAT: '' }; anatomyLineHook(m, anat, 'vNormalMapUv'); }
+      return m;
+    }
     if (s.kind === 'tongue') color.multiplyScalar(MOUTH_CAVITY);
     return toonHook(new THREE.MeshToonMaterial({
       ...c, color, ...normals(s),
@@ -511,6 +706,15 @@ const defaultFactories = {
       const m = new THREE.MeshBasicMaterial({ ...common(s, { colors: false }), map: s.map || this.textures.eye || null });
       m.toneMapped = false;
       return eyeHook(m, s.color, 2, s.iris);
+    }
+    if (s.kind === 'skin') {
+      // white paper skin; anatomical crease lines above the 'Linee anatomiche' threshold. The
+      // anatomy map rides on aoMap (intensity 0 = no shading effect) only to get the body UVs.
+      const sn = skinNormals(s, 'lines', this);
+      const anat = this.anatomyFor(sn.map);
+      const m = new THREE.MeshBasicMaterial({ ...common(s, { colors: false }), color: 0xffffff, aoMap: anat || null, aoMapIntensity: 0 });
+      m.toneMapped = false;
+      return anat ? anatomyLineHook(m, anat, 'vAoMapUv') : m;
     }
     // brow hairs keep their per-hair tone (vertex colours) so they read as pencil strokes
     const c = common(s, { colors: s.kind === 'brows' });
