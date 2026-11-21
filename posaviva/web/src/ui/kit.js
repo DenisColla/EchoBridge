@@ -170,17 +170,265 @@ export function chips(opts) {
   return el;
 }
 
-/** Transient message at the bottom of the screen. */
-export function toast(message, ms = 2200) {
-  let host = document.getElementById('pv-toasts');
-  if (!host) { host = h('div', { id: 'pv-toasts' }); document.body.appendChild(host); }
-  const t = h('div', { class: 'pv-toast' }, message);
-  host.appendChild(t);
-  requestAnimationFrame(() => t.classList.add('show'));
-  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, ms);
+
+/** Round icon-only button (>= 40px target). opts: {icon, title, onClick, variant, active} -> el.setActive(b), el.setDisabled(b) */
+export function iconButton(opts) {
+  const b = h('button', { type: 'button', class: `pv-icon-btn ${opts.variant || ''}`.trim(), title: opts.title || '', 'aria-label': opts.title || '' }, icon(opts.icon, opts.size || 22));
+  if (opts.onClick) b.addEventListener('click', opts.onClick);
+  b.setActive = (on) => b.classList.toggle('active', !!on);
+  b.setDisabled = (on) => { b.disabled = !!on; };
+  b.setIcon = (name) => b.replaceChildren(icon(name, opts.size || 22));
+  if (opts.active) b.setActive(true);
+  return b;
 }
 
-/** Light haptic feedback through the Android bridge (no-op on web). */
+// ---------------------------------------------------------------- haptics
+// One switch for the whole app (Impostazioni > Vibrazione). Read once from the
+// persisted settings so it is honored before the io module boots.
+const HAPTIC_MS = { tick: 8, light: 12, medium: 22, heavy: 40, success: 18, warning: 30, error: 45 };
+let hapticsOn = true;
+try { hapticsOn = JSON.parse(localStorage.getItem('posaviva.settings') || '{}').haptics !== false; } catch { /* private mode */ }
+
+/** Enables / disables every haptic() call. */
+export function setHapticsEnabled(on) { hapticsOn = !!on; }
+export function hapticsEnabled() { return hapticsOn; }
+
+/**
+ * Short haptic feedback through the Android bridge (navigator.vibrate in
+ * browsers that support it). ms: number or 'tick'|'light'|'medium'|'heavy'|'success'|'warning'|'error'.
+ */
 export function haptic(ms = 12) {
-  try { window.AndroidBridge?.vibrate?.(ms); } catch { /* ignore */ }
+  if (!hapticsOn) return;
+  const d = typeof ms === 'string' ? HAPTIC_MS[ms] || 12 : ms;
+  try {
+    if (window.AndroidBridge?.vibrate) window.AndroidBridge.vibrate(d);
+    else if (navigator.vibrate && navigator.userActivation?.isActive) navigator.vibrate(d);
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------- toasts
+const TOAST_ICONS = { ok: 'checkCircle', error: 'warning', warning: 'warning', info: 'info' };
+
+/**
+ * Transient message near the bottom of the free area (above the tool sheet).
+ * toast(message, ms = 2200) or toast(message, {ms, kind:'ok'|'error'|'warning'|'info', icon, action:{label, onClick}}).
+ * An identical message already on screen is refreshed instead of stacked. Returns the element.
+ */
+export function toast(message, opts = 2200) {
+  const o = typeof opts === 'number' ? { ms: opts } : { ...opts };
+  const ms = o.ms ?? (o.action ? 4500 : 2200);
+  let host = document.getElementById('pv-toasts');
+  if (!host) { host = h('div', { id: 'pv-toasts', role: 'status', 'aria-live': 'polite' }); document.body.appendChild(host); }
+  const text = String(message);
+  for (const t of host.children) {
+    if (t._text === text && !t._leaving) { clearTimeout(t._timer); t._timer = setTimeout(t._dismiss, ms); return t; }
+  }
+  const ic = o.icon || TOAST_ICONS[o.kind];
+  const t = h('div', { class: `pv-toast ${o.kind || ''}`.trim() }, ic ? icon(ic, 18) : null, h('span', { class: 'pv-toast-text' }, text));
+  t._text = text;
+  t._dismiss = () => {
+    if (t._leaving) return;
+    t._leaving = true;
+    t.classList.remove('show');
+    setTimeout(() => t.remove(), 260);
+  };
+  if (o.action) {
+    const a = h('button', { type: 'button', class: 'pv-toast-action' }, o.action.label);
+    a.addEventListener('click', () => { t._dismiss(); o.action.onClick?.(); });
+    t.appendChild(a);
+    t.classList.add('has-action');
+  }
+  host.appendChild(t);
+  while (host.children.length > 3) host.firstChild.remove();
+  requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
+  t._timer = setTimeout(t._dismiss, ms);
+  return t;
+}
+
+// ---------------------------------------------------------------- layers (dialogs, menus)
+// Every modal surface registers in one stack so the Android back button (and
+// Escape on desktop) closes the topmost one first.
+const layers = [];
+
+/** True while a dialog / menu / sheet created by the kit is open. */
+export function hasOpenLayer() { return layers.length > 0; }
+
+/** Closes (cancels) the topmost dialog or menu. Returns true if one was open. */
+export function closeTopLayer() {
+  const l = layers[layers.length - 1];
+  if (!l) return false;
+  if (l.dismissable === false) return true; // e.g. a blocking progress dialog: swallow back
+  l.close(null);
+  return true;
+}
+
+function layerHost() {
+  let host = document.getElementById('pv-layers');
+  if (!host) { host = h('div', { id: 'pv-layers' }); document.body.appendChild(host); }
+  return host;
+}
+
+/**
+ * Generic modal surface.
+ * opts: {title, subtitle, body: Node|Node[], actions:[{label, value, variant:'primary'|'danger'|'ghost', icon}],
+ *        kind:'dialog'|'sheet' (sheet = bottom sheet on phones, centered card on wide screens),
+ *        dismissable=true (backdrop tap / back), className, icon, onClose(value)}
+ * Returns {el, card, body, close(value), result: Promise<value|null>}.
+ */
+export function modal(opts = {}) {
+  const kind = opts.kind || 'dialog';
+  const body = h('div', { class: 'pv-modal-body' }, opts.body || null);
+  const head = opts.title ? h('div', { class: 'pv-modal-head' },
+    opts.icon ? h('div', { class: `pv-modal-icon ${opts.danger ? 'danger' : ''}`.trim() }, icon(opts.icon, 22)) : null,
+    h('div', { class: 'pv-modal-titles' }, h('div', { class: 'pv-modal-title' }, opts.title), opts.subtitle ? h('div', { class: 'pv-modal-subtitle' }, opts.subtitle) : null),
+    kind === 'sheet' && opts.dismissable !== false ? iconButton({ icon: 'close', title: 'Chiudi', onClick: () => api.close(null) }) : null) : null;
+  const actions = opts.actions?.length ? h('div', { class: 'pv-modal-actions' }) : null;
+  const card = h('div', { class: `pv-modal-card ${opts.className || ''}`.trim(), role: 'dialog', 'aria-modal': 'true' },
+    kind === 'sheet' ? h('div', { class: 'pv-modal-grip' }, h('span')) : null, head, body, actions);
+  const el = h('div', { class: `pv-modal pv-modal-${kind}` }, h('div', { class: 'pv-modal-backdrop' }), card);
+  let resolve;
+  const result = new Promise((r) => { resolve = r; });
+  let closed = false;
+  const layer = { dismissable: opts.dismissable !== false, close: (v) => api.close(v) };
+  const api = {
+    el, card, body, result,
+    close(value = null) {
+      if (closed) return;
+      closed = true;
+      const i = layers.indexOf(layer);
+      if (i >= 0) layers.splice(i, 1);
+      el.classList.remove('show');
+      el.classList.add('leaving');
+      setTimeout(() => el.remove(), 240);
+      opts.onClose?.(value);
+      resolve(value);
+    },
+  };
+  if (actions) for (const a of opts.actions) {
+    const b = button({ label: a.label, icon: a.icon, variant: a.variant });
+    b.addEventListener('click', () => { haptic('tick'); if (a.onClick?.() === false) return; api.close(a.value ?? a.label); });
+    actions.appendChild(b);
+  }
+  el.querySelector('.pv-modal-backdrop').addEventListener('click', () => { if (layer.dismissable) api.close(null); });
+  if (kind === 'sheet' && layer.dismissable) sheetDragToDismiss(card, () => api.close(null));
+  layers.push(layer);
+  layerHost().appendChild(el);
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('show')));
+  return api;
+}
+
+/** Bottom sheets: drag the grip / title row down to dismiss (phones only: wide screens show a card). */
+function sheetDragToDismiss(card, dismiss) {
+  let d = null;
+  const down = (e) => {
+    if (window.matchMedia('(min-width: 700px)').matches || e.target.closest('button, input')) return;
+    d = { id: e.pointerId, y0: e.clientY, t0: e.timeStamp, dy: 0 };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const move = (e) => {
+    if (!d || e.pointerId !== d.id) return;
+    d.dy = Math.max(0, e.clientY - d.y0);
+    card.style.transition = 'none';
+    card.style.transform = `translateY(${d.dy}px)`;
+  };
+  const up = (e) => {
+    if (!d || e.pointerId !== d.id) return;
+    const v = d.dy / Math.max(1, e.timeStamp - d.t0);
+    const go = d.dy > 110 || (d.dy > 30 && v > 0.6);
+    d = null;
+    card.style.transition = '';
+    card.style.transform = go ? 'translateY(100%)' : '';
+    if (go) dismiss();
+  };
+  for (const sel of ['.pv-modal-grip', '.pv-modal-head']) {
+    const el = card.querySelector(sel);
+    if (!el) continue;
+    el.style.touchAction = 'none';
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+}
+
+/** Yes/no question. opts: {title, okLabel='OK', cancelLabel='Annulla', danger, icon} -> Promise<boolean> */
+export function confirmDialog(text, opts = {}) {
+  const m = modal({
+    title: opts.title || (opts.danger ? 'Sei sicuro?' : 'Conferma'),
+    icon: opts.icon || (opts.danger ? 'warning' : null), danger: opts.danger,
+    body: h('p', { class: 'pv-modal-text' }, text),
+    actions: [
+      { label: opts.cancelLabel || 'Annulla', value: false, variant: 'ghost' },
+      { label: opts.okLabel || 'OK', value: true, variant: opts.danger ? 'danger-solid' : 'primary' },
+    ],
+  });
+  if (opts.danger) haptic('warning');
+  return m.result.then((v) => v === true);
+}
+
+/**
+ * Text input dialog. opts: {title, okLabel='OK', placeholder, maxLength=60, selectAll=true}
+ * -> Promise<string|null> (trimmed; null when cancelled or empty).
+ */
+export function promptDialog(label, value = '', opts = {}) {
+  const input = h('input', { type: 'text', class: 'pv-input', value: value ?? '', placeholder: opts.placeholder || '', maxlength: opts.maxLength || 60, enterkeyhint: 'done', autocomplete: 'off', spellcheck: 'false' });
+  const field = h('label', { class: 'pv-field' }, h('span', { class: 'pv-field-label' }, label), input);
+  let ok;
+  const m = modal({
+    title: opts.title || label, body: field,
+    actions: [
+      { label: 'Annulla', value: null, variant: 'ghost' },
+      { label: opts.okLabel || 'OK', variant: 'primary', onClick: () => { submit(); return false; } },
+    ],
+  });
+  ok = m.card.querySelector('.pv-modal-actions .primary');
+  const sync = () => { ok.disabled = !input.value.trim(); };
+  function submit() { const v = input.value.trim(); if (v) m.close(v); }
+  input.addEventListener('input', sync);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  sync();
+  // focus after the enter transition so the soft keyboard opens reliably
+  setTimeout(() => { input.focus({ preventScroll: true }); if (opts.selectAll !== false) input.select(); }, 60);
+  return m.result.then((v) => (typeof v === 'string' && v.trim() ? v.trim() : null));
+}
+
+/**
+ * Action list. items: [{id, label, icon, hint, danger, disabled, checked, onClick}] or {separator:true}.
+ * opts: {title, anchor: Element} — with an anchor on wide screens it opens as a
+ * popover next to it, otherwise as a bottom action sheet. -> Promise<id|null>
+ * (item.onClick runs after the menu has closed).
+ */
+export function sheetMenu(items, opts = {}) {
+  const wide = window.matchMedia('(min-width: 700px)').matches;
+  const asPopover = !!opts.anchor && (wide || opts.popover === true);
+  const list = h('div', { class: 'pv-menu', role: 'menu' });
+  let m;
+  for (const it of items) {
+    if (!it) continue;
+    if (it.separator) { list.appendChild(h('div', { class: 'pv-menu-sep' })); continue; }
+    if (it.header) { list.appendChild(h('div', { class: 'pv-menu-header' }, it.header)); continue; }
+    const b = h('button', { type: 'button', role: 'menuitem', class: `pv-menu-item ${it.danger ? 'danger' : ''} ${it.checked ? 'checked' : ''}`.trim(), disabled: it.disabled },
+      it.icon ? icon(it.icon, 21) : h('span', { class: 'pv-menu-noicon' }),
+      h('span', { class: 'pv-menu-label' }, it.label, it.hint ? h('small', {}, it.hint) : null),
+      it.checked ? icon('check', 18) : null);
+    b.addEventListener('click', () => { haptic('tick'); m.close(it.id); setTimeout(() => it.onClick?.(), 0); });
+    list.appendChild(b);
+  }
+  if (asPopover) {
+    m = modal({ body: list, kind: 'popover', className: 'pv-popover' });
+    const r = opts.anchor.getBoundingClientRect();
+    const card = m.card;
+    const W = window.innerWidth, H = window.innerHeight;
+    const w = 280;
+    const right = r.right > W / 2;
+    card.style.width = w + 'px';
+    card.style.top = Math.min(H - 80, r.bottom + 6) + 'px';
+    if (right) card.style.right = Math.max(8, W - r.right) + 'px';
+    else card.style.left = Math.max(8, r.left) + 'px';
+    card.style.maxHeight = `calc(100vh - ${Math.round(r.bottom + 16)}px - var(--safe-bottom))`;
+    card.style.transformOrigin = right ? 'top right' : 'top left';
+  } else {
+    m = modal({ title: opts.title, body: list, kind: 'sheet', className: 'pv-action-sheet' });
+  }
+  return m.result;
 }

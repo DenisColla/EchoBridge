@@ -1,0 +1,34 @@
+/* "Viso" tool (face module). Scoped under .pvf */
+.pvf.pvf-disabled { opacity: .4; pointer-events: none; }
+
+/* expression cards: compact, emoji-like icon + label */
+.pvf .pvf-grid { gap: 6px; }
+.pvf .pvf-grid .pv-card { min-height: 0; padding: 8px 2px 7px; gap: 4px; border-radius: 13px; }
+.pvf .pvf-grid .pv-card-visual img { width: 38px; height: 38px; max-height: none; border-radius: 0; }
+.pvf .pvf-grid .pv-card-label { font-size: 11.5px; line-height: 1.15; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+.pvf .pvf-grid .pv-card.active img { transform: scale(1.08); transition: transform .2s var(--ease); }
+
+.pvf .pvf-exprhead .pv-slider { margin-bottom: 8px; }
+.pvf .pvf-dim { opacity: .55; }
+.pvf .pvf-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.pvf .pvf-actions .pvf-state { flex: 1; font-size: 12px; color: var(--accent-hi); min-width: 0; }
+.pvf .pvf-actions .pv-btn.active { border-color: var(--accent); background: var(--accent-soft); }
+.pvf .pv-btn.pvf-picking { border-color: var(--accent); background: var(--accent); color: #fff; animation: pvfPulse 1.2s var(--ease) infinite; }
+@keyframes pvfPulse { 50% { box-shadow: 0 0 0 6px var(--accent-soft); } }
+
+.pvf .pvf-sub { font-size: 12.5px; font-weight: 600; color: var(--text); margin: 14px 0 6px; }
+.pvf .pvf-sub small { font-weight: 400; color: var(--faint); }
+.pvf .pv-section-body > .pvf-sub:first-child { margin-top: 2px; }
+.pvf .pvf-hint { font-size: 12px; color: var(--muted); text-align: center; margin: 2px 0 2px; }
+
+/* gaze pad */
+.pvf .pvf-pad { position: relative; width: 100%; max-width: 340px; margin: 0 auto 4px; aspect-ratio: 220 / 112; touch-action: none; cursor: grab;
+  border-radius: 18px; background: radial-gradient(120% 140% at 50% 30%, rgba(124,108,255,.16), rgba(255,255,255,.03)); border: 1px solid var(--line);
+  user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; transition: border-color .2s, box-shadow .2s; }
+.pvf .pvf-pad svg { width: 100%; height: 100%; display: block; padding: 6px 10px; box-sizing: border-box; }
+.pvf .pvf-pad.dragging { cursor: grabbing; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.pvf .pvf-pad:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px; }
+.pvf .pvf-pad .pvf-iris { transition: transform .08s linear; }
+.pvf .pvf-pad.dragging .pvf-iris { transition: none; }
+.pvf .pvf-pad.pvf-auto { opacity: .62; }
+.pvf .pvf-pad.pvf-auto::after { content: 'automatico'; position: absolute; right: 10px; bottom: 6px; font-size: 10.5px; color: var(--accent-hi); letter-spacing: .04em; }

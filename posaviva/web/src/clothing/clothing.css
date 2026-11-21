@@ -1,0 +1,21 @@
+/* "Vestiti" panel */
+.pv-clothes .pv-clothes-worn { padding-bottom: 2px; }
+.pv-clothes .pv-clothes-wornchip { min-height: 40px; }
+.pv-clothes .pv-clothes-dot { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.55); flex: none; }
+.pv-clothes .pv-clothes-none { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+.pv-clothes .pv-clothes-editor { margin-top: 10px; padding: 10px 12px 6px; border-radius: var(--radius); background: var(--elev); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.pv-clothes .pv-clothes-edhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pv-clothes .pv-clothes-edname { font-weight: 600; font-size: 15px; }
+.pv-clothes .pv-clothes-edstyle { font-size: 11.5px; color: var(--muted); }
+.pv-clothes .pv-clothes-colors .pv-swatches { flex-wrap: wrap; }
+.pv-clothes .pv-clothes-ends { display: flex; justify-content: space-between; margin-top: -6px; font-size: 11px; color: var(--faint); padding: 0 2px; }
+.pv-clothes .pv-clothes-dim { opacity: 0.45; }
+.pv-clothes .pv-clothes-grid .pv-card { min-height: 84px; padding: 8px 4px 6px; gap: 4px; }
+.pv-clothes .pv-clothes-grid .pv-card-visual img { height: 46px; width: 46px; max-height: 46px; }
+.pv-clothes .pv-clothes-grid .pv-card-label { font-size: 11.5px; line-height: 1.15; text-align: center; }
+.pv-clothes .pv-clothes-grid .pv-card-badge { color: var(--accent-hi); font-size: 12px; }
+.pv-clothes .pv-clothes-cards { margin-top: 10px; }
+.pv-clothes .pv-clothes-outfits { display: flex; flex-wrap: wrap; gap: 8px; }
+.pv-clothes .pv-clothes-outfit { min-height: 42px; }
+.pv-clothes .pv-clothes-actions { justify-content: flex-end; margin-top: 4px; }
+.pv-clothes .pv-clothes-empty { color: var(--muted); padding: 16px 4px; text-align: center; }
