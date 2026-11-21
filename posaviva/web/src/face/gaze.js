@@ -8,11 +8,15 @@
 //   free   : a virtual point 1.5 m away in the head's frame, from the pad (gx, gy)
 //   camera : the camera position (world)
 //   point  : a world point chosen by tapping the scene
-// so both eyes converge naturally. Per-eye limits: yaw +-35 deg, pitch +-25 deg.
+// so both eyes converge naturally. Per-eye limits: yaw +-35 deg, pitch -25..+18 deg
+// (the MakeHuman upper lid retracts little: beyond ~18 deg up the iris disappears
+// under it and the eyes look rolled back).
 import * as THREE from 'three';
 
 export const YAW_MAX = 35 * Math.PI / 180;
 export const PITCH_MAX = 25 * Math.PI / 180;
+/** upward limit (see above) */
+export const PITCH_UP = 18 * Math.PI / 180;
 /** focus distance of the free gaze (m): slight, natural convergence */
 const FREE_FOCUS = 1.5;
 
@@ -55,7 +59,7 @@ export function aimHeadLocal(ch, T) {
     _m.compose(ch.restLocalPos[i], ch.restLocalQuat[i], _one);
     _v.copy(T).applyMatrix4(_mi.copy(_m).invert());
     const yaw = Math.max(-YAW_MAX, Math.min(YAW_MAX, Math.atan2(_v.x, _v.y)));
-    const pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, Math.atan2(-_v.z, Math.hypot(_v.x, _v.y))));
+    const pitch = Math.max(-PITCH_MAX, Math.min(PITCH_UP, Math.atan2(-_v.z, Math.hypot(_v.x, _v.y))));
     gazeQuat(yaw, pitch, _q);
     if (Math.abs(_q.dot(ch.poseQuat[i])) < 0.9999999) {
       ch.setBoneRotationSilent(ch.bones[i].name, _q);
@@ -68,7 +72,7 @@ export function aimHeadLocal(ch, T) {
 /** Head-local target point of the free gaze (gx, gy in [-1, 1]: yaw / pitch fractions). */
 export function freeTarget(ch, gx, gy, out = new THREE.Vector3()) {
   const I = info(ch.model);
-  const yaw = gx * YAW_MAX, pitch = gy * PITCH_MAX;
+  const yaw = gx * YAW_MAX, pitch = gy * (gy > 0 ? PITCH_UP : PITCH_MAX);
   // mid-eye point and face axes in rig rest space (X left, Y up, Z forward)
   _e.setFromMatrixPosition(ch.restGlobal[I.eyes[0]]).add(_t.setFromMatrixPosition(ch.restGlobal[I.eyes[1]])).multiplyScalar(0.5);
   out.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)).multiplyScalar(FREE_FOCUS).add(_e);
@@ -98,7 +102,8 @@ export function currentPad(ch) {
   const I = info(ch.model);
   const q = ch.poseQuat[I.eyes[0]];
   _v.set(0, 1, 0).applyQuaternion(q);
-  return [Math.atan2(_v.x, _v.y) / YAW_MAX, Math.atan2(-_v.z, Math.hypot(_v.x, _v.y)) / PITCH_MAX];
+  const pitch = Math.atan2(-_v.z, Math.hypot(_v.x, _v.y));
+  return [Math.atan2(_v.x, _v.y) / YAW_MAX, pitch / (pitch > 0 ? PITCH_UP : PITCH_MAX)];
 }
 
 /** Mid-eye world position (fresh). */

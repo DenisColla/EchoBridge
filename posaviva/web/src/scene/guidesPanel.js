@@ -45,13 +45,15 @@ export function registerGuidesTool(app, shell, guides) {
       function describe() {
         const s = guides.state;
         if (!s.visible || s.mode === 0) return s.visible ? '' : 'Guide nascoste.';
-        const W = guides._cssW, H = guides._cssH;
+        // relative to the exported image (or the comic panel), not to the UI-shifted canvas
+        const A = guides.info.area || { x: 0, y: 0, w: guides._cssW, h: guides._cssH };
+        const x0 = A.x, y0 = A.y, x1 = A.x + A.w, y1 = A.y + A.h;
         const parts = guides.info.vps.map((vp) => {
           if (!vp.finite) return `${vp.label}: all'infinito (linee parallele)`;
-          if (vp.x >= 0 && vp.x <= W && vp.y >= 0 && vp.y <= H) return `${vp.label}: nell'inquadratura`;
+          if (vp.x >= x0 && vp.x <= x1 && vp.y >= y0 && vp.y <= y1) return `${vp.label}: nell'inquadratura`;
           const dir = [];
-          if (vp.y < 0) dir.push('sopra'); else if (vp.y > H) dir.push('sotto');
-          if (vp.x < 0) dir.push('a sinistra'); else if (vp.x > W) dir.push('a destra');
+          if (vp.y < y0) dir.push('sopra'); else if (vp.y > y1) dir.push('sotto');
+          if (vp.x < x0) dir.push('a sinistra'); else if (vp.x > x1) dir.push('a destra');
           return `${vp.label}: fuori, ${dir.join(' ')}`;
         });
         return parts.join(' · ');

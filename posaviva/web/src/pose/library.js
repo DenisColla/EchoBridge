@@ -55,6 +55,9 @@
 import * as THREE from 'three';
 import { HAND_DEFS } from './library-data/hands.js';
 import { POSE_DEFS } from './library-data/poses.js';
+import { ControlSet } from './controls.js';
+import { PoseRig } from './rig.js';
+import { IKSolver } from './ik.js';
 
 export const POSE_CATEGORIES = [
   { id: 'stand', label: 'In piedi' },
@@ -170,7 +173,7 @@ const CHAINS = {
   neck: [['neck01', [0.40, 0.36, 0.40]], ['neck02', [0.34, 0.34, 0.34]], ['neck03', [0.26, 0.30, 0.26]]],
 };
 const ALIAS = { clav: 'clavicle', sh: 'shoulder01' };
-const META = new Set(['id', 'label', 'cat', 'ground', 'air', 'offset', 'note', 'touch']);
+const META = new Set(['id', 'label', 'cat', 'ground', 'air', 'offset', 'note', 'touch', 'seat']);
 
 function vec3(v) { return typeof v === 'number' ? [v, 0, 0] : [v[0] || 0, v[1] || 0, v[2] || 0]; }
 /** optional 4th element of a joint value: Euler order ('ZXY' default, 'XZY') */
@@ -245,6 +248,7 @@ export const POSE_PRESETS = POSE_DEFS.map((def) => {
   const p = { id: def.id, label: def.label, category: def.cat, pose: compilePoseDef(def), ground: def.ground !== false };
   if (def.air) p.air = def.air;
   if (def.touch) p.touch = def.touch;
+  if (def.seat) p.seat = def.seat;
   return p;
 });
 const POSE_BY_ID = new Map(POSE_PRESETS.map((p) => [p.id, p]));
@@ -272,7 +276,8 @@ function updateBonesSilently(ch) {
   for (let i = 0; i < bones.length; i++) {
     const b = bones[i];
     b.position.copy(ch.restLocalPos[i]);
-    if (i === 0) b.position.add(ch.rootOffset);
+    // same as Character.applyPose: the root also carries the shoe ground clearance
+    if (i === 0) { b.position.add(ch.rootOffset); b.position.y += ch.groundClearance || 0; }
     b.quaternion.copy(ch.restLocalQuat[i]).multiply(ch.poseQuat[i]);
   }
   ch.root.updateMatrixWorld(true);
@@ -456,6 +461,231 @@ function reachTouches(ch, touch, mirror, scale) {
   }
 }
 
+// ---------------------------------------------------------------- body fitting
+// The presets are fixed angles authored on f_normal. Two corrections make them sit
+// right on every body type:
+//  - seat: chair / stool poses put the buttocks at the seat height of a real chair
+//    (props 'sedia' 0.45 m, 'sgabello' 0.65 m): the pelvis moves up or down and the
+//    legs whose feet stand on the floor are re-solved with the leg IK (feet planted),
+//    so a long-legged body raises its knees instead of floating above the chair.
+//  - collide: arms that would pass through a bulkier torso, bust, hips or thighs
+//    (arms crossed on a curvy body, hanging arms beside wide hips …) are pushed out:
+//    the upper arm swings away about the shoulder, the forearm / hand moves the wrist
+//    out with the two-bone arm IK.
+let _solver = null; // IK on top of the anatomical controls, one per model
+function solverFor(model) {
+  if (!_solver || _solver.model !== model) _solver = { model, ik: new IKSolver(new PoseRig(new ControlSet(model))) };
+  return _solver.ik;
+}
+
+const _bodyCache = new WeakMap(); // model -> vertex lists by dominant bone
+function bodyData(model) {
+  let d = _bodyCache.get(model);
+  if (d) return d;
+  const SI = model.skinIndex, SW = model.skinWeight, bi = model.boneIndex;
+  const body = model.groupVertices[0];
+  const dom = new Int16Array(model.vertexCount).fill(-1);
+  for (const v of body) {
+    let best = -1, bw = 0;
+    for (let k = 0; k < 4; k++) if (SW[v * 4 + k] > bw) { bw = SW[v * 4 + k]; best = SI[v * 4 + k]; }
+    dom[v] = best;
+  }
+  const byBones = (names) => {
+    const set = new Set(names.map((n) => bi.get(n)).filter((i) => i !== undefined));
+    const out = [];
+    for (const v of body) if (set.has(dom[v])) out.push(v);
+    return Int32Array.from(out);
+  };
+  const foot = (sd) => byBones([`foot.${sd}`, ...[1, 2, 3, 4, 5].map((t) => `toe${t}-1.${sd}`)]);
+  const cloud = [];
+  for (const v of body) if (dom[v] >= 0 && !ARM_RE.test(model.bones[dom[v]].name)) cloud.push(v);
+  d = {
+    seat: byBones(['root', 'pelvis.L', 'pelvis.R', 'spine05', 'upperleg01.L', 'upperleg01.R']),
+    foot: { L: foot('L'), R: foot('R') },
+    upper: { L: byBones(['upperarm01.L', 'upperarm02.L']), R: byBones(['upperarm01.R', 'upperarm02.R']) },
+    fore: { L: byBones(['lowerarm01.L', 'lowerarm02.L']), R: byBones(['lowerarm01.R', 'lowerarm02.R']) },
+    cloud: Int32Array.from(cloud), // torso, head, legs: what the arms must not enter
+  };
+  _bodyCache.set(model, d);
+  return d;
+}
+
+/**
+ * World positions (and optionally normals) of skinned body vertices, current bone
+ * matrices (call updateBonesSilently first). out: Float32Array(3n).
+ */
+function skinWorld(ch, verts, out, nOut = null) {
+  const M = ch.updateSkinMatrices();
+  const R = ch.restPositions, N = ch.restNormals, SI = ch.model.skinIndex, SW = ch.model.skinWeight;
+  const W = ch.rig.matrixWorld.elements;
+  for (let j = 0; j < verts.length; j++) {
+    const v = verts[j];
+    const x = R[v * 3], y = R[v * 3 + 1], z = R[v * 3 + 2];
+    const nx = N[v * 3], ny = N[v * 3 + 1], nz = N[v * 3 + 2];
+    let ox = 0, oy = 0, oz = 0, mx = 0, my = 0, mz = 0;
+    for (let k = 0; k < 4; k++) {
+      const w = SW[v * 4 + k];
+      if (!w) continue;
+      const o = SI[v * 4 + k] * 16;
+      ox += w * (M[o] * x + M[o + 4] * y + M[o + 8] * z + M[o + 12]);
+      oy += w * (M[o + 1] * x + M[o + 5] * y + M[o + 9] * z + M[o + 13]);
+      oz += w * (M[o + 2] * x + M[o + 6] * y + M[o + 10] * z + M[o + 14]);
+      if (nOut) {
+        mx += w * (M[o] * nx + M[o + 4] * ny + M[o + 8] * nz);
+        my += w * (M[o + 1] * nx + M[o + 5] * ny + M[o + 9] * nz);
+        mz += w * (M[o + 2] * nx + M[o + 6] * ny + M[o + 10] * nz);
+      }
+    }
+    out[j * 3] = W[0] * ox + W[4] * oy + W[8] * oz + W[12];
+    out[j * 3 + 1] = W[1] * ox + W[5] * oy + W[9] * oz + W[13];
+    out[j * 3 + 2] = W[2] * ox + W[6] * oy + W[10] * oz + W[14];
+    if (nOut) {
+      const ax = W[0] * mx + W[4] * my + W[8] * mz, ay = W[1] * mx + W[5] * my + W[9] * mz, az = W[2] * mx + W[6] * my + W[10] * mz;
+      const l = Math.hypot(ax, ay, az) || 1;
+      nOut[j * 3] = ax / l; nOut[j * 3 + 1] = ay / l; nOut[j * 3 + 2] = az / l;
+    }
+  }
+  return out;
+}
+
+let _scratch = new Float32Array(3 * 4096);
+function minWorldY(ch, verts) {
+  if (_scratch.length < verts.length * 3) _scratch = new Float32Array(verts.length * 3);
+  skinWorld(ch, verts, _scratch);
+  let m = Infinity;
+  for (let j = 0; j < verts.length; j++) if (_scratch[j * 3 + 1] < m) m = _scratch[j * 3 + 1];
+  return m;
+}
+
+/** world floor height of a character (its placement + shoe clearance) */
+function floorY(ch) { return ch.root.getWorldPosition(_v).y + (ch.groundClearance || 0) * ch.root.scale.y; }
+
+/** moves the root along world up by dy (world meters) */
+function liftRoot(ch, dy) {
+  _up.set(0, 1, 0).applyQuaternion(ch.root.getWorldQuaternion(_wq).invert());
+  ch.rootOffset.addScaledVector(_up, dy / (ch.root.scale.y || 1));
+  updateBonesSilently(ch);
+}
+
+/** Seat fitting (see above). seat = seat height in meters above the character's floor. */
+function fitSeat(ch, seat) {
+  const d = bodyData(ch.model), ik = solverFor(ch.model);
+  const sc = ch.root.scale.y || 1, floor = floorY(ch);
+  updateBonesSilently(ch);
+  // the body is grounded first: its lowest point (a foot) rests on the floor
+  liftRoot(ch, floor - lowestBodyY(ch));
+  // feet standing on the floor stay planted (ankle position + foot orientation)
+  const pins = [];
+  for (const sd of ['L', 'R']) {
+    if (minWorldY(ch, d.foot[sd]) - floor > 0.03 * sc) continue;
+    const chain = ik.chains['foot.' + sd];
+    pins.push({ chain, pos: ik.rig.worldPos(ch, chain.end, new THREE.Vector3()), quat: ik.rig.worldQuat(ch, chain.end, new THREE.Quaternion()) });
+  }
+  // the thighs turn about the hips while the pelvis moves, which moves the lowest
+  // seat point too: a few passes converge
+  for (let it = 0; it < 4; it++) {
+    const dy = floor + seat * sc - minWorldY(ch, d.seat);
+    if (Math.abs(dy) < 0.003 * sc) break;
+    liftRoot(ch, dy);
+    for (const p of pins) ik.solveLimb(ch, p.chain, p.pos, p.quat, 4);
+    updateBonesSilently(ch);
+  }
+}
+
+// arm samples: [segment, t along it] (upper arm: shoulder -> elbow, forearm: elbow -> wrist)
+// (the upper half of the upper arm is left out: under the armpit arm and torso always touch)
+const ARM_SAMPLES = [['u', 0.7], ['u', 0.88], ['f', 0.12], ['f', 0.32], ['f', 0.52], ['f', 0.72], ['f', 0.9], ['h', 0.55], ['h', 1]];
+const CLOTH_MARGIN = 0.004; // garments over the skin (meters, f_normal)
+const PEN_EPS = 0.01; // tolerated contact: soft tissue gives way a little (meters)
+const _ca = new THREE.Vector3(), _cb = new THREE.Vector3(), _cp = new THREE.Vector3(), _cn = new THREE.Vector3();
+
+/** mean distance of a bone group's vertices to its axis (rest pose): limb radius */
+function limbRadius(ch, verts, headBone, tailBone) {
+  if (!verts.length) return 0.03;
+  const a = ch.bones[headBone].getWorldPosition(_ca), b = ch.bones[tailBone].getWorldPosition(_cb);
+  if (_scratch.length < verts.length * 3) _scratch = new Float32Array(verts.length * 3);
+  skinWorld(ch, verts, _scratch);
+  const ab = _cn.subVectors(b, a), l2 = ab.lengthSq() || 1;
+  let sum = 0;
+  for (let j = 0; j < verts.length; j++) {
+    _cp.set(_scratch[j * 3] - a.x, _scratch[j * 3 + 1] - a.y, _scratch[j * 3 + 2] - a.z);
+    const t = Math.max(0, Math.min(1, _cp.dot(ab) / l2));
+    sum += _cp.addScaledVector(ab, -t).length();
+  }
+  return sum / verts.length;
+}
+
+/** Pushes the arms out of the torso / head / legs (see above). s = body scale vs f_normal. */
+function resolveArms(ch, s) {
+  const d = bodyData(ch.model);
+  const sc = s * (ch.root.scale.x || 1);
+  updateBonesSilently(ch);
+  const cloud = d.cloud;
+  const P = new Float32Array(cloud.length * 3), Nn = new Float32Array(cloud.length * 3);
+  skinWorld(ch, cloud, P, Nn); // the torso does not move while the arms are adjusted
+  const near = new Int32Array(cloud.length);
+  for (const sd of ['L', 'R']) {
+    const iU = boneIdx(ch, `upperarm01.${sd}`), iL = boneIdx(ch, `lowerarm01.${sd}`), iW = boneIdx(ch, `wrist.${sd}`), iK = boneIdx(ch, `finger3-1.${sd}`);
+    if (iU < 0 || iL < 0 || iW < 0 || iK < 0) continue;
+    // mean vertex distance from the bone axis (the bone runs off-center: a bit less is the true half-thickness)
+    const rU = 0.8 * limbRadius(ch, d.upper[sd], iU, iL), rF = 0.85 * limbRadius(ch, d.fore[sd], iL, iW), rH = 0.02 * sc;
+    // candidate body points near this arm (bounding sphere around the shoulder)
+    const S = bonePos(ch, iU, new THREE.Vector3());
+    const reach = (bonePos(ch, iL, _E).distanceTo(S) + bonePos(ch, iW, _W).distanceTo(_E)) + 0.2 * sc;
+    let nn = 0;
+    for (let j = 0; j < cloud.length; j++) {
+      const dx = P[j * 3] - S.x, dy = P[j * 3 + 1] - S.y, dz = P[j * 3 + 2] - S.z;
+      if (dx * dx + dy * dy + dz * dz < reach * reach) near[nn++] = j;
+    }
+    if (!nn) continue;
+    for (let it = 0; it < 6; it++) {
+      bonePos(ch, iU, _S); bonePos(ch, iL, _E); bonePos(ch, iW, _W); bonePos(ch, iK, _T);
+      let worst = 0, wSeg = '', wT = 0;
+      const wP = _P, wN = _nrm;
+      for (const [seg, t] of ARM_SAMPLES) {
+        let r;
+        if (seg === 'u') { _cp.copy(_S).lerp(_E, t); r = rU; }
+        else if (seg === 'f') { _cp.copy(_E).lerp(_W, t); r = rF * (1 - 0.25 * t); }
+        else { _cp.copy(_W).lerp(_T, t); r = rH; }
+        // nearest body point and its outward normal
+        let bj = -1, bd = Infinity;
+        for (let q = 0; q < nn; q++) {
+          const j = near[q];
+          const dx = P[j * 3] - _cp.x, dy = P[j * 3 + 1] - _cp.y, dz = P[j * 3 + 2] - _cp.z;
+          const dd = dx * dx + dy * dy + dz * dz;
+          if (dd < bd) { bd = dd; bj = j; }
+        }
+        const lim = r + CLOTH_MARGIN * sc;
+        if (bj < 0 || bd > (lim + 0.03 * sc) ** 2) continue;
+        _cn.set(Nn[bj * 3], Nn[bj * 3 + 1], Nn[bj * 3 + 2]);
+        const sd2 = (_cp.x - P[bj * 3]) * _cn.x + (_cp.y - P[bj * 3 + 1]) * _cn.y + (_cp.z - P[bj * 3 + 2]) * _cn.z;
+        const pen = lim - sd2;
+        if (pen > worst) { worst = pen; wSeg = seg; wT = t; wP.copy(_cp); wN.copy(_cn); }
+      }
+      if (worst < PEN_EPS * sc) break;
+      const push = worst - 0.5 * PEN_EPS * sc;
+      if (wSeg === 'u') {
+        // swing the upper arm away about the shoulder
+        const arm = _tv.subVectors(wP, _S);
+        const axis = _cb.crossVectors(arm, wN);
+        const len = axis.length();
+        if (len < 1e-6) break;
+        axis.multiplyScalar(1 / len);
+        _qb.setFromAxisAngle(axis, Math.min(0.5, push / Math.max(0.05, arm.length())));
+        ch.bones[iU].parent.getWorldQuaternion(_qa2).multiply(ch.restLocalQuat[iU]);
+        const F = _qa2, Fi = _q.copy(F).invert();
+        ch.poseQuat[iU].premultiply(Fi.multiply(_qb).multiply(F));
+        updateBonesSilently(ch);
+      } else {
+        // move the hand out: the wrist moves more than the sample point (lever from the elbow)
+        const lever = wSeg === 'f' ? Math.max(0.35, wT) : 1;
+        palmPoint(ch, sd, _ca);
+        reachArm(ch, sd, _ca.addScaledVector(wN, Math.min(0.15 * sc, push / lever)), sc);
+      }
+    }
+  }
+}
+
 /**
  * Applies a full-body preset (fires a single 'pose' event).
  * opts: {mirror=false, keepHands=false (leave the current finger poses untouched)}.
@@ -464,12 +694,13 @@ function reachTouches(ch, touch, mirror, scale) {
 export function applyPosePreset(ch, presetId, opts = {}) {
   const p = POSE_BY_ID.get(presetId);
   if (!p) return false;
-  return applyPoseObject(ch, p.pose, { ground: p.ground, air: p.air || 0, touch: p.touch, ...opts });
+  return applyPoseObject(ch, p.pose, { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, ...opts });
 }
 
 /**
  * Applies a pose in the contract format authored on f_normal (root offset scaled to
- * this body). opts: {ground=true, air=0, mirror=false, keepHands=false, touch=null}.
+ * this body). opts: {ground=true, air=0, mirror=false, keepHands=false, touch=null,
+ * seat=0 (chair height to fit, meters), collide=false (push the arms out of the body)}.
  * Fires a single 'pose' event.
  */
 export function applyPoseObject(ch, pose, opts = {}) {
@@ -488,10 +719,10 @@ export function applyPoseObject(ch, pose, opts = {}) {
   const s = rootY > 0 ? rootY / HIP_REF : 1;
   const r = pose.root || [0, 0, 0];
   ch.rootOffset.set(r[0] * s, r[1] * s, r[2] * s);
-  if (opts.touch) {
-    updateBonesSilently(ch);
-    reachTouches(ch, opts.touch, !!opts.mirror, s);
-  }
+  updateBonesSilently(ch);
+  if (opts.seat && ground) fitSeat(ch, opts.seat);
+  if (opts.touch) reachTouches(ch, opts.touch, !!opts.mirror, s);
+  if (opts.collide) resolveArms(ch, s);
   if (ground) {
     updateBonesSilently(ch);
     const parentY = ch.root.getWorldPosition(_v).y + (ch.groundClearance || 0) * ch.root.scale.y;

@@ -5,6 +5,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Character } from './core/Character.js';
 import { materials } from './render/materials.js';
 
+const IDLE_STOP_FRAMES = 45; // ~0.4-0.75 s without any work before the loop sleeps
+const HEARTBEAT_MS = 500;
+
 export class App extends THREE.EventDispatcher {
   /**
    * @param {HTMLElement} container element that will host the canvas
@@ -93,10 +96,56 @@ export class App extends THREE.EventDispatcher {
     this._setupTapRouter();
 
     materials.addEventListener('style', () => this.invalidate());
+    this._setupContextLoss();
     this._resize = this._resize.bind(this);
     new ResizeObserver(this._resize).observe(container);
     this._resize();
-    renderer.setAnimationLoop(() => this._frame());
+    // The frame loop stops itself when nothing has happened for a moment (an idle
+    // reference left on screen while drawing must not wake the phone 120 times a
+    // second) and restarts on invalidate(), on input, and on a slow heartbeat that
+    // lets polling render hooks ask for frames.
+    this._frameCb = () => this._frame();
+    this._looping = false;
+    this._idleFrames = 0;
+    this._beat = () => this._heartbeat();
+    this._heartbeatT = 0;
+    const wake = () => this._startLoop();
+    for (const ev of ['pointerdown', 'pointermove', 'wheel']) this.canvas.addEventListener(ev, wake, { passive: true });
+    this.controls.addEventListener('start', wake);
+    this._startLoop();
+  }
+
+  _startLoop() {
+    if (this._looping) return;
+    this._looping = true;
+    this._idleFrames = 0;
+    clearTimeout(this._heartbeatT);
+    this._heartbeatT = 0;
+    this._timer.reset(); // no giant first delta after a pause
+    this.renderer.setAnimationLoop(this._frameCb);
+  }
+
+  _stopLoop() {
+    this._looping = false;
+    this.renderer.setAnimationLoop(null);
+    this._heartbeatT = setTimeout(this._beat, HEARTBEAT_MS);
+  }
+
+  /** While stopped: run the render hooks once; resume the loop if any of them wants frames. */
+  _heartbeat() {
+    this._heartbeatT = 0;
+    if (this._looping) return;
+    if (!this.contextLost && (this._held || this._runHooks(0) || this._needsRender)) this._startLoop();
+    else this._heartbeatT = setTimeout(this._beat, HEARTBEAT_MS);
+  }
+
+  _runHooks(dt) {
+    let keep = false;
+    // hooks are isolated: a module that throws every frame must not freeze the viewport
+    for (const fn of this._renderHooks) {
+      try { keep = fn(dt) || keep; } catch (e) { this._hookFailed(fn, e); }
+    }
+    return keep;
   }
 
   // ------------------------------------------------------------ modules
@@ -104,15 +153,36 @@ export class App extends THREE.EventDispatcher {
   registerModule(name, module) {
     this.modules[name] = module;
     module.init?.(this);
-    for (const ch of this.characters) module.onCharacterAdded?.(ch);
+    for (const ch of this.characters) {
+      try { module.onCharacterAdded?.(ch); } catch (e) { console.error(`[PosaViva] module ${name}.onCharacterAdded failed`, e); }
+    }
     return module;
+  }
+
+  /**
+   * Calls hook `name` on every module that has it. Failures are isolated and
+   * logged: one broken module must not leave a character half added/removed or
+   * abort an undo for the others.
+   */
+  _moduleHook(name, ...args) {
+    for (const [id, m] of Object.entries(this.modules)) {
+      if (typeof m[name] !== 'function') continue;
+      try { m[name](...args); } catch (e) { console.error(`[PosaViva] module ${id}.${name} failed`, e); }
+    }
   }
 
   /** Called every frame while rendering; return true to keep rendering continuously. */
   addRenderHook(fn) { this._renderHooks.add(fn); return () => this._renderHooks.delete(fn); }
   addAfterRenderHook(fn) { this._afterRender.add(fn); return () => this._afterRender.delete(fn); }
 
-  invalidate() { this._needsRender = true; }
+  invalidate() { this._needsRender = true; if (!this._looping && this._frameCb && !this.contextLost) this._startLoop(); }
+
+  /**
+   * While held, the frame loop does nothing (no render hooks, no drawing). Boot
+   * holds it until the modules and the first scene are set up, so no frame is
+   * drawn (and no shader compiled) for a half-initialised scene behind the splash.
+   */
+  holdRendering(on) { this._held = !!on; if (!on) this.invalidate(); }
 
   // ------------------------------------------------------------ input
   /**
@@ -133,8 +203,10 @@ export class App extends THREE.EventDispatcher {
   _setupTapRouter() {
     const c = this.canvas;
     let down = null;
+    const pointers = new Set(); // pointers currently down anywhere (multi-touch never taps)
     c.addEventListener('pointerdown', (e) => {
-      if (down) { down.multi = true; return; }
+      pointers.add(e.pointerId);
+      if (down && pointers.size > 1) { down.multi = true; return; }
       down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId, multi: false };
     });
     const up = (e) => {
@@ -147,6 +219,40 @@ export class App extends THREE.EventDispatcher {
     };
     c.addEventListener('pointerup', up);
     c.addEventListener('pointercancel', up);
+    // a pointer released outside the canvas (no capture, e.g. a mouse dragged onto
+    // the toolbar) must not leave the router believing it is still down
+    const forget = (e) => {
+      pointers.delete(e.pointerId);
+      if (down && e.pointerId === down.id && e.target !== c) down = null;
+    };
+    window.addEventListener('pointerup', forget, true);
+    window.addEventListener('pointercancel', forget, true);
+  }
+
+  /**
+   * WebGL context loss (GPU reset, memory pressure on Android, app restored from
+   * the background). three.js rebuilds its GL state on restore and re-uploads every
+   * resource lazily, but rendering is on demand: without a new frame the canvas
+   * would stay black. App events 'contextlost' / 'contextrestored' let modules
+   * rebuild GPU-only state (e.g. cached render targets) if they keep any.
+   */
+  _setupContextLoss() {
+    this.contextLost = false;
+    this.canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault(); // allows the browser to restore the context
+      this.contextLost = true;
+      this.dispatchEvent({ type: 'contextlost' });
+    }, false);
+    // registered after three's own handler, so the renderer is already re-initialised here
+    this.canvas.addEventListener('webglcontextrestored', () => {
+      this.contextLost = false;
+      this.renderer.shadowMap.needsUpdate = true;
+      this._resize();
+      this.dispatchEvent({ type: 'contextrestored' });
+      this.invalidate();
+      // shaders recompile and textures re-upload over the next frames: draw once more after that
+      setTimeout(() => this.invalidate(), 300);
+    }, false);
   }
 
   // ------------------------------------------------------------ characters
@@ -162,8 +268,8 @@ export class App extends THREE.EventDispatcher {
     this.world.add(ch.root);
     this.characters.push(ch);
     for (const ev of ['shape', 'pose', 'expression', 'appearance', 'visibility']) ch.addEventListener(ev, () => this.invalidate());
-    for (const m of Object.values(this.modules)) m.onCharacterAdded?.(ch, opts);
-    if (opts.json) for (const m of Object.values(this.modules)) m.deserializeCharacter?.(ch);
+    this._moduleHook('onCharacterAdded', ch, opts);
+    if (opts.json) this._moduleHook('deserializeCharacter', ch);
     this.dispatchEvent({ type: 'characters' });
     this.invalidate();
     return ch;
@@ -178,7 +284,7 @@ export class App extends THREE.EventDispatcher {
   removeCharacter(ch) {
     const i = this.characters.indexOf(ch);
     if (i < 0) return;
-    for (const m of Object.values(this.modules)) m.onCharacterRemoved?.(ch);
+    this._moduleHook('onCharacterRemoved', ch);
     this.characters.splice(i, 1);
     ch.dispose();
     if (this.selection.character === ch) this.select(this.characters[0] || null);
@@ -205,7 +311,10 @@ export class App extends THREE.EventDispatcher {
   // ------------------------------------------------------------ serialization
   serialize() {
     const scene = {};
-    for (const [name, m] of Object.entries(this.modules)) if (m.serializeScene) scene[name] = m.serializeScene();
+    for (const [name, m] of Object.entries(this.modules)) {
+      if (!m.serializeScene) continue;
+      try { scene[name] = m.serializeScene(); } catch (e) { console.error(`[PosaViva] module ${name}.serializeScene failed`, e); }
+    }
     return {
       app: 'PosaViva', version: 1,
       characters: this.characters.map((c) => c.toJSON()),
@@ -220,13 +329,16 @@ export class App extends THREE.EventDispatcher {
     const ids = new Set(incoming.map((c) => c.id));
     for (const ch of [...this.characters]) if (!ids.has(ch.id)) this.removeCharacter(ch);
     const sceneOpts = { fromHistory: this.history.restoring };
-    for (const [name, m] of Object.entries(this.modules)) if (json.scene?.[name] !== undefined) m.deserializeScene?.(json.scene[name], sceneOpts);
+    for (const [name, m] of Object.entries(this.modules)) {
+      if (json.scene?.[name] === undefined || !m.deserializeScene) continue;
+      try { m.deserializeScene(json.scene[name], sceneOpts); } catch (e) { console.error(`[PosaViva] module ${name}.deserializeScene failed`, e); }
+    }
     const order = [];
     for (const cj of incoming) {
       let ch = this.characters.find((c) => c.id === cj.id);
       if (ch) {
         ch.fromJSON(cj);
-        for (const m of Object.values(this.modules)) m.deserializeCharacter?.(ch);
+        this._moduleHook('deserializeCharacter', ch);
       } else ch = this.addCharacter({ preset: cj.preset, json: cj, id: cj.id });
       order.push(ch);
     }
@@ -254,14 +366,31 @@ export class App extends THREE.EventDispatcher {
   }
 
   _frame() {
+    if (this._held) return;
     this._timer.update();
     const dt = Math.min(this._timer.getDelta(), 0.1);
     let keep = this.controls.update(dt) || false;
-    for (const fn of this._renderHooks) keep = fn(dt) || keep;
-    if (!this._needsRender && !keep) return;
+    keep = this._runHooks(dt) || keep;
+    if (!this._needsRender && !keep) {
+      if (++this._idleFrames >= IDLE_STOP_FRAMES) this._stopLoop();
+      return;
+    }
+    this._idleFrames = 0;
+    // nothing can be drawn without a context: keep the request and sleep until
+    // 'webglcontextrestored' (which invalidates)
+    if (this.contextLost) { this._needsRender = true; this._stopLoop(); return; }
     this._needsRender = false;
     this.renderNow();
-    for (const fn of this._afterRender) fn(dt);
+    for (const fn of this._afterRender) {
+      try { fn(dt); } catch (e) { this._hookFailed(fn, e); }
+    }
+  }
+
+  _hookFailed(fn, e) {
+    const seen = this._failedHooks || (this._failedHooks = new WeakSet());
+    if (seen.has(fn)) return; // logged once per hook
+    seen.add(fn);
+    console.error('[PosaViva] frame hook failed', e);
   }
 
   renderNow() {

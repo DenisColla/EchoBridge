@@ -311,22 +311,55 @@ export class PoseGizmo {
     }
     gr.ok = true;
     const yaw = ch.root.rotation.y;
-    _v2.set(C.x + Math.sin(yaw) * gr.r * 1.18, C.y, C.z + Math.cos(yaw) * gr.r * 1.18);
-    gr.knob.ok = this._project(_v2, gr.knob);
+    // facing direction: dashed line + arrow head on the ring
+    _v2.set(C.x + Math.sin(yaw) * gr.r, C.y, C.z + Math.cos(yaw) * gr.r);
+    const faceOk = this._project(_v2, _pa);
+    // turn knob: in the facing direction when that spot is visible, otherwise the
+    // closest visible spot of the ring (in portrait the feet are often near the
+    // bottom sheet, which would hide a knob drawn toward the camera)
+    gr.knob.ok = this._knobSpot(C, gr.r * 1.18, yaw, gr.knob);
     const hot = this.drag?.kind === 'move' || this.drag?.kind === 'turn';
     g.beginPath();
     for (let j = 0; j <= N_RING; j++) { const i = j % N_RING; if (j) g.lineTo(gr.pts[i * 2], gr.pts[i * 2 + 1]); else g.moveTo(gr.pts[0], gr.pts[1]); }
     g.fillStyle = hot ? 'rgba(79,209,197,.18)' : 'rgba(79,209,197,.1)'; g.fill();
     g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = 6; g.stroke();
     g.strokeStyle = '#4fd1c5'; g.lineWidth = 3; g.stroke();
-    if (gr.knob.ok) {
+    if (faceOk) {
       g.strokeStyle = '#4fd1c5'; g.lineWidth = 2.5; g.setLineDash(DASH2);
-      g.beginPath(); g.moveTo(gr.cx, gr.cy); g.lineTo(gr.knob.x, gr.knob.y); g.stroke(); g.setLineDash(NODASH);
+      g.beginPath(); g.moveTo(gr.cx, gr.cy); g.lineTo(_pa.x, _pa.y); g.stroke(); g.setLineDash(NODASH);
+      const ax = _pa.x - gr.cx, ay = _pa.y - gr.cy, al = Math.hypot(ax, ay);
+      if (al > 4) {
+        const ux = ax / al, uy = ay / al;
+        g.beginPath(); g.moveTo(_pa.x + ux * 9, _pa.y + uy * 9);
+        g.lineTo(_pa.x - uy * 6, _pa.y + ux * 6); g.lineTo(_pa.x + uy * 6, _pa.y - ux * 6); g.closePath();
+        g.fillStyle = '#4fd1c5'; g.fill(); g.lineWidth = 1.5; g.strokeStyle = 'rgba(0,0,0,.45)'; g.stroke();
+      }
+    }
+    if (gr.knob.ok) {
       g.beginPath(); g.arc(gr.knob.x, gr.knob.y, 14, 0, Math.PI * 2);
       g.fillStyle = '#7c6cff'; g.fill(); g.lineWidth = 2.5; g.strokeStyle = '#fff'; g.stroke();
       // rotate glyph
       g.beginPath(); g.arc(gr.knob.x, gr.knob.y, 6, -0.3, Math.PI * 1.35); g.strokeStyle = '#fff'; g.lineWidth = 2; g.stroke();
     }
+  }
+
+  /** screen spot of the turn knob on a ground circle (center C, radius r): see _drawGround */
+  _knobSpot(C, r, yaw, out) {
+    const rc = this._rect, ins = this.shell.getViewInsets?.() || { top: 0, right: 0, bottom: 0, left: 0 };
+    const m = 22;
+    const x0 = rc.left + ins.left + m, x1 = rc.right - ins.right - m, y0 = rc.top + ins.top + m, y1 = rc.bottom - ins.bottom - m;
+    const free = (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+    let best = false, bestD = Infinity;
+    for (let k = 0; k < 36; k++) {
+      // 0, +10°, -10°, +20° … : the first visible spot closest to the facing direction wins
+      const da = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (Math.PI / 18);
+      const a = yaw + da;
+      _v3.set(C.x + Math.sin(a) * r, C.y, C.z + Math.cos(a) * r);
+      if (!this._project(_v3, _pb)) continue;
+      if (k === 0) { out.x = _pb.x; out.y = _pb.y; best = true; } // fallback: facing spot
+      if (free(_pb) && Math.abs(da) < bestD) { bestD = Math.abs(da); out.x = _pb.x; out.y = _pb.y; best = true; break; }
+    }
+    return best;
   }
 
   _drawDots(ch) {
@@ -575,7 +608,7 @@ export class PoseGizmo {
     if (!d.moved && Math.hypot(x - d.x0, y - d.y0) < d.slop) return;
     const ch = d.ch;
     if (!this.app.characters.includes(ch)) return;
-    const { rig, ik, state } = this.ctx;
+    const { rig, ik } = this.ctx;
     d.moved = true;
     let limited = false;
     if (d.kind === 'ring') {

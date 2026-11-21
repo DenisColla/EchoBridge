@@ -39,6 +39,8 @@ export class SceneManager extends EventTarget {
     this._autosaveWarned = false;
     this._restoring = false;
     this.pristine = null; // default scene captured at startup ("Nuova scena")
+    /** module defaults without characters, captured before the autosave is restored */
+    this.baseScene = null;
 
     app.addEventListener('history', () => {
       const h = app.history;
@@ -162,9 +164,26 @@ export class SceneManager extends EventTarget {
 
   /** Default scene (one default character, default lights/camera/style). */
   newScene() {
-    const base = this.pristine ? JSON.parse(JSON.stringify(this.pristine)) : { characters: [{ preset: 'f_normal' }], selected: 0, scene: {} };
-    for (const c of base.characters) delete c.id; // fresh character ids
-    this.load(base, { id: null, name: 'Senza titolo', clean: true });
+    if (this.pristine) {
+      const base = JSON.parse(JSON.stringify(this.pristine));
+      for (const c of base.characters) delete c.id; // fresh character ids
+      this.load(base, { id: null, name: 'Senza titolo', clean: true });
+      return;
+    }
+    // the startup scene was a restored autosave: rebuild the defaults the same way
+    // main.js does (module defaults captured before the restore + a new default character)
+    const base = this.baseScene ? JSON.parse(JSON.stringify(this.baseScene)) : { scene: {} };
+    base.characters = []; base.selected = -1;
+    this._restoring = true;
+    try {
+      this.app.deserialize(base);
+      const ch = this.app.addCharacter({ preset: 'f_normal' });
+      this.app.select(ch);
+    } finally { this._restoring = false; }
+    this.current = { id: null, name: 'Senza titolo' };
+    this._resetHistory(true);
+    this._emit();
+    this.flushAutosave(true);
   }
 
   // ---------------------------------------------------------------- files

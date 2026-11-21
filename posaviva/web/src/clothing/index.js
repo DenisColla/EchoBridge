@@ -26,6 +26,8 @@ export function create(app, shell) {
     setIntensity: (k) => mgr.setIntensity(k),
     get intensity() { return mgr.intensity; },
     whenIdle: () => mgr.whenIdle(),
+    /** Float32Array(body vertices): outer garment surface height over the rest body (m), or null. */
+    outerOffsets: (ch) => mgr.outerOffsets(ch),
   };
   app.clothing = api;
 

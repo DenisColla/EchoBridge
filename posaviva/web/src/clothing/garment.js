@@ -6,6 +6,7 @@ import { buildSkirtDraft, skirtOccupancy, ribbon } from './skirt.js';
 import { hemExtras, collarExtras, discExtras, newExtras } from './edges.js';
 import { assemble, FOLD_GAIN } from './assemble.js';
 import { quadNormals } from './mesh.js';
+import { referenceSkin } from './wrinkles.js';
 
 /** occupancy value of body vertices with no garment below (occupancy = signed outer height over the body) */
 export const NO_LAYER = -1;
@@ -25,6 +26,8 @@ export function buildGarment(ctx, def, item) {
   const { topo, bi } = ctx;
   const fit = item.fit ?? 0.5;
   const occ = ctx.occ ? ctx.occ.slice() : new Float32Array(topo.nv).fill(NO_LAYER);
+  // outer cloth surface height over each body vertex (like occ, without the room for folds)
+  const surf = ctx.surf ? ctx.surf.slice() : new Float32Array(topo.nv);
   const pieces = [];
   let hidden = null;
   for (const pdef of partsOf(def, ctx.sex)) {
@@ -47,18 +50,30 @@ export function buildGarment(ctx, def, item) {
     hardware(draft, pdef, bi, extras);
     if (pdef.straps) extras.push(...straps(bi, topo));
     let faceGroup = null;
-    if (pdef.sole) faceGroup = soleGroups(draft, pdef.sole);
+    if (pdef.sole) { levelSoleLine(draft, pdef.sole); faceGroup = soleGroups(draft, pdef.sole); }
     pieces.push({ draft, extras, wrinkle: pdef.wrinkle, folds: pdef.folds, faceGroup });
     // layering for the next part / garment
-    if (draft.kind === 'skirt') skirtOccupancy(draft, bi, topo, occ);
+    if (draft.kind === 'skirt') { skirtOccupancy(draft, bi, topo, occ); skirtOccupancy(draft, bi, topo, surf); }
     else {
       bodyOccupancy(draft, occ, pdef);
+      bodySurface(draft, surf);
       if (pdef.hide !== false) hidden = coverage(topo, draft, hidden);
     }
   }
   if (!pieces.length) return null;
-  const runtime = assemble(pieces, bi);
-  return { runtime, hidden, occ, pieces };
+  const runtime = assemble(pieces, bi, { refM: ctx.ch ? referenceSkin(ctx.ch) : null });
+  return { runtime, hidden, occ, surf, pieces };
+}
+
+/** Height of the garment's outer face over each covered body vertex (rest pose). */
+function bodySurface(draft, surf) {
+  const c = draft.coarse, G = c.G, P0 = c.P0, N0 = c.N0;
+  for (let i = 0; i < c.n; i++) {
+    const v = c.body[i], o = i * 3;
+    const d = (G[o] - P0[o]) * N0[o] + (G[o + 1] - P0[o + 1]) * N0[o + 1] + (G[o + 2] - P0[o + 2]) * N0[o + 2];
+    const val = Math.min(0.08, d + draft.thick * 0.5);
+    if (val > surf[v]) surf[v] = val;
+  }
 }
 
 /** Normal offset of the garment over each covered body vertex (+ room for its folds). */
@@ -168,6 +183,23 @@ function applySole(draft, sole, bi) {
     if (N[i * 3 + 1] < -0.5 || y < 0.004) P[i * 3 + 1] = -below;
   }
   draft.room.fill(0.0005);
+}
+
+/**
+ * The sole / upper border follows the mesh faces: on a coarse foot mesh it is a
+ * staircase. Vertices shared by sole and upper faces are moved to one height
+ * (the top of the midsole), so the border reads as a clean horizontal line.
+ */
+function levelSoleLine(draft, sole) {
+  const P = draft.P, Q = draft.quads, nq = Q.length >> 2, line = sole.top * 0.8;
+  const inSole = new Uint8Array(draft.nf), inUpper = new Uint8Array(draft.nf);
+  for (let f = 0; f < nq; f++) {
+    let y = 0;
+    for (let k = 0; k < 4; k++) y += P[Q[f * 4 + k] * 3 + 1];
+    const mark = y / 4 < line ? inSole : inUpper;
+    for (let k = 0; k < 4; k++) mark[Q[f * 4 + k]] = 1;
+  }
+  for (let i = 0; i < draft.nf; i++) if (inSole[i] && inUpper[i] && P[i * 3 + 1] > 0) P[i * 3 + 1] = line;
 }
 
 function soleGroups(draft, sole) {

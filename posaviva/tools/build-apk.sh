@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Builds the PosaViva release APK:
-#   1. npm ci (or npm install) + npm run build in posaviva/web   -> posaviva/web/dist
-#   2. copies dist/* into android/app/src/main/assets/www/        (folder cleaned first)
-#   3. ./gradlew assembleRelease (signed with android/keystore/posaviva-dev.jks)
-#   4. copies the APK to posaviva/release/PosaViva.apk and prints apksigner/aapt2 summaries
+#   1. npm ci (skipped when node_modules is current) + npm run build in posaviva/web -> web/dist
+#   2. copies dist/* into android/app/src/main/assets/www/ (folder cleaned first) and checks
+#      that the data files exist, every local reference resolves and nothing loads remote URLs
+#   3. ./gradlew assembleRelease (R8-shrunk, signed with android/keystore/posaviva-dev.jks)
+#   4. copies the APK to posaviva/release/PosaViva.apk, runs apksigner verify, prints the
+#      aapt2 badging and checks that every assets/www file made it into the APK
 #
 # Usage: tools/build-apk.sh [--skip-web] [--www DIR]
 #   --skip-web   don't run npm; package the existing posaviva/web/dist
 #   --www DIR    package DIR (must contain index.html) instead of posaviva/web/dist
 # Env:   ANDROID_HOME (default ~/android-sdk; installed via tools/setup-android-sdk.sh if missing)
 #        POSAVIVA_VERSION_CODE / POSAVIVA_VERSION_NAME  override versionCode/versionName
+#        POSAVIVA_NPM_CI=1  always reinstall node_modules with npm ci
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +34,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --skip-web) SKIP_WEB=1 ;;
     --www) [ $# -ge 2 ] || die "--www needs a directory"; DIST="$(cd "$2" && pwd)"; SKIP_WEB=1; shift ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
   shift
@@ -58,7 +61,14 @@ else
   log "Building web app (posaviva/web)"
   (
     cd "$WEB"
-    if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+    # npm keeps a copy of the installed tree in node_modules/.package-lock.json. When neither
+    # package.json nor package-lock.json is newer, the install is current: skip it (npm ci
+    # would delete node_modules, which breaks a running dev server and needs the network).
+    if [ -f node_modules/.package-lock.json ] && [ -f package-lock.json ] \
+       && ! [ package-lock.json -nt node_modules/.package-lock.json ] \
+       && ! [ package.json -nt node_modules/.package-lock.json ] && [ "${POSAVIVA_NPM_CI:-0}" != 1 ]; then
+      echo "    node_modules up to date (POSAVIVA_NPM_CI=1 forces a clean install)"
+    elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
       npm ci --no-audit --no-fund || { warn "npm ci failed, falling back to npm install"; npm install --no-audit --no-fund; }
     else
       npm install --no-audit --no-fund
@@ -79,6 +89,36 @@ elif [ -f "$WWW/index.html" ]; then
   warn "$DIST/index.html not found: packaging the existing content of assets/www unchanged."
 else
   die "Nothing to package: no $DIST/index.html and assets/www is empty. Build the web app first (or use --www DIR)."
+fi
+
+# Packaging sanity check: the runtime data files exist, every "./x.js|css|png|..." that
+# index.html and the chunks reference exists (refs starting with "./assets/" resolve
+# against the page, others against the referencing file), and no remote URL is loaded:
+# the APK has no INTERNET permission, so a font or CDN link would simply fail on the phone.
+if command -v node >/dev/null 2>&1; then
+  node - "$WWW" <<'NODE' || die "assets/www is incomplete (see above)."
+const fs = require('fs'), path = require('path');
+const www = process.argv[2];
+const files = [];
+(function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else files.push(p); } })(www);
+const missing = [], remote = new Set();
+for (const req of ['index.html', 'assets/human.json', 'assets/human.bin', 'assets/eye.png', 'assets/skin.png']) {
+  if (!fs.existsSync(path.join(www, req))) missing.push(`${req} (required)`);
+}
+for (const f of files.filter((p) => /\.(html|js|css)$/.test(p))) {
+  const src = fs.readFileSync(f, 'utf8');
+  for (const m of src.matchAll(/["'`(]\.\/([\w@./-]+\.(?:js|css|png|jpe?g|webp|svg|bin|json|woff2?|ttf))["'`)]/g)) {
+    const base = m[1].startsWith('assets/') ? www : path.dirname(f);
+    if (!fs.existsSync(path.join(base, m[1]))) missing.push(`${path.relative(www, f)} -> ./${m[1]}`);
+  }
+  for (const m of src.matchAll(/(?:https?:|["'`(])\/\/(?!www\.w3\.org\/)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?=[\/:"'`)?#]|$)[^\s"'`)]*/gi)) remote.add(`${path.relative(www, f)}: ${m[0].replace(/^["'`(]/, '')}`);
+}
+if (remote.size) console.warn('\x1b[1;33m[warn]\x1b[0m remote URLs in the web build (no network in the APK):\n  ' + [...remote].slice(0, 20).join('\n  '));
+if (missing.length) { console.error('\x1b[1;31m[error]\x1b[0m missing files:\n  ' + missing.join('\n  ')); process.exit(1); }
+console.log(`    checked ${files.length} files: data files present, all local references resolve`);
+NODE
+else
+  warn "node not found: skipping the assets/www reference check."
 fi
 
 # --- 3. Gradle ---------------------------------------------------------------------
@@ -124,6 +164,22 @@ echo "$VERIFY_OUT" | grep -E '^Verifies|^Verified using v[1-4] |Signer #1 certif
 log "aapt2 dump badging"
 "$BT/aapt2" dump badging "$APK_OUT" \
   | grep -E "^ *(package|minSdkVersion|targetSdkVersion|application-label:|uses-permission|launchable-activity|uses-gl-es|densities)" || true
+
+log "APK contents"
+# Every file of assets/www must be in the APK (aapt2's ignore pattern silently drops some names).
+WWW_LIST="$(cd "$WWW" && find . -type f ! -name '.*' | sed 's#^\./#assets/www/#' | sort)"
+APK_LIST="$(unzip -Z1 "$APK_OUT" 'assets/www/*' 2>/dev/null | sort)"
+DROPPED="$(comm -23 <(echo "$WWW_LIST") <(echo "$APK_LIST"))"
+[ -z "$DROPPED" ] || die "files of assets/www missing from the APK:
+$DROPPED"
+unzip -lv "$APK_OUT" | awk '
+  / assets\/www\// { n++; raw += $1; packed += $3; if ($3 > 150000) big = big sprintf("      %-44s %7.0f KB -> %7.0f KB (%s)\n", substr($8, 12), $1/1024, $3/1024, $2) }
+  / classes[0-9]*\.dex$/ { dex += $3 }
+  END {
+    printf "    web assets: %d files, %.1f MB -> %.1f MB in the APK\n", n, raw/1048576, packed/1048576
+    printf "%s", big
+    printf "    dex: %.0f KB\n", dex/1024
+  }'
 
 log "Done: $APK_OUT ($(du -h "$APK_OUT" | cut -f1))"
 echo "    Install/update on a USB-connected phone:  adb install -r \"$APK_OUT\""

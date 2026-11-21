@@ -187,6 +187,14 @@ export function openExport(ctx, { share = false } = {}) {
   const guides = app.sceneTools?.guides;
   const frameRect = guides?.getFrameRectNormalized?.() || null;
   let crop = frameRect ? settings.get('exportCrop') !== false : false;
+  // perspective guides drawn into the picture (only offered while some guide is shown)
+  const guidesShown = !!guides?.active && typeof guides.drawOnCapture === 'function';
+  let withGuides = guidesShown && settings.get('exportGuides') === true;
+  /** capture -> optional guides -> optional crop to the comic panel */
+  const compose = (canvas) => {
+    if (withGuides) guides.drawOnCapture(canvas, { crop: crop && !!frameRect });
+    return crop && frameRect ? exporter.crop(canvas, frameRect) : canvas;
+  };
 
   const preview = h('div', { class: 'pv-io-export-preview' }, h('span', { class: 'pv-io-spinner' }));
   const sizeLabel = h('div', { class: 'pv-io-export-size' });
@@ -199,12 +207,16 @@ export function openExport(ctx, { share = false } = {}) {
     onChange: (v) => { haptic('tick'); scale = +v; settings.set('exportScale', scale); updateSize(); } });
   const transpToggle = toggle({ label: 'Sfondo trasparente', value: transparent, onChange: (v) => { transparent = v; settings.set('exportTransparent', v); updateSize(); renderPreview(); } });
   const cropToggle = frameRect ? toggle({ label: 'Ritaglia alla vignetta', value: crop, onChange: (v) => { crop = v; settings.set('exportCrop', v); updateSize(); renderPreview(); } }) : null;
+  const guidesToggle = guidesShown ? toggle({ label: 'Includi le guide prospettiche', value: withGuides, onChange: (v) => { withGuides = v; settings.set('exportGuides', v); renderPreview(); } }) : null;
+  const note = h('p', { class: 'pv-io-note' }, guidesShown
+    ? 'Maniglie, selezione e altri strumenti a schermo non compaiono nell\'immagine.'
+    : 'Gli strumenti a schermo non compaiono nell\'immagine. Le guide prospettiche si attivano in Camera › Guide.');
 
   const body = h('div', { class: 'pv-io-export' },
     preview,
     h('div', { class: 'pv-io-export-opts' },
       section('Risoluzione', [scaleSeg, sizeLabel]),
-      section('Opzioni', [transpToggle, cropToggle, h('p', { class: 'pv-io-note' }, 'Le guide prospettiche e gli strumenti a schermo non compaiono nell\'immagine.')])));
+      section('Opzioni', [transpToggle, cropToggle, guidesToggle, note])));
   const m = modal({
     title: share ? 'Condividi immagine' : 'Esporta immagine', icon: share ? 'share' : 'image', kind: 'sheet', body, className: 'pv-io-export-sheet',
     actions: share
@@ -220,7 +232,7 @@ export function openExport(ctx, { share = false } = {}) {
       const c = app.canvas;
       const big = await exporter.capture({ height: Math.min(360, Math.round((c.clientHeight || 360) * 0.6)), transparent });
       if (tok !== prevToken) return;
-      const out = crop && frameRect ? exporter.crop(big, frameRect) : big;
+      const out = compose(big);
       out.className = 'pv-io-export-canvas';
       preview.classList.toggle('checker', transparent);
       preview.replaceChildren(out);
@@ -237,8 +249,7 @@ export function openExport(ctx, { share = false } = {}) {
     const b = busy('Preparo l\'immagine…');
     try {
       await new Promise((r) => setTimeout(r, 30)); // let the progress dialog paint
-      let canvas = await exporter.capture({ scale, transparent });
-      if (crop && frameRect) canvas = exporter.crop(canvas, frameRect);
+      const canvas = compose(await exporter.capture({ scale, transparent }));
       const name = stamp();
       const r = doShare ? await exporter.shareImage(canvas, name) : await exporter.saveImage(canvas, name);
       b.close();

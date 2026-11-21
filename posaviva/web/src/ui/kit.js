@@ -53,15 +53,29 @@ export function slider(opts) {
     input.style.setProperty('--fa', a + '%'); input.style.setProperty('--fb', b + '%');
     out.textContent = format ? format(v) : (Math.abs(max - min) <= 2 ? v.toFixed(2) : String(Math.round(v)));
   };
-  input.addEventListener('input', () => { fill(); onInput?.(+input.value); });
-  input.addEventListener('change', () => onChange?.(+input.value));
-  // double tap resets to the default value
-  let lastTap = 0;
-  input.addEventListener('pointerdown', () => {
+  // Double tap resets to the default value. The reset is applied when the second tap
+  // ends: the browser moves the thumb to the finger on pointerdown, which would
+  // otherwise overwrite a value set there. A second tap that turns into a drag is a drag.
+  let lastTap = 0, resetting = null, skipChange = false;
+  const doReset = () => {
+    resetting = null;
+    input.value = opts.defaultValue ?? (center ? 0 : value);
+    fill(); onInput?.(+input.value); onChange?.(+input.value);
+    // the browser may still fire 'change' for this gesture: report the reset once
+    skipChange = true; setTimeout(() => { skipChange = false; }, 0);
+  };
+  input.addEventListener('pointerdown', (e) => {
     const now = performance.now();
-    if (now - lastTap < 280) { input.value = opts.defaultValue ?? (center ? 0 : value); fill(); onInput?.(+input.value); onChange?.(+input.value); }
-    lastTap = now;
+    resetting = now - lastTap < 320 ? { x: e.clientX, y: e.clientY, v: input.value } : null;
+    lastTap = resetting ? 0 : now;
   });
+  input.addEventListener('pointermove', (e) => {
+    if (resetting && Math.hypot(e.clientX - resetting.x, e.clientY - resetting.y) > 8) { resetting = null; fill(); onInput?.(+input.value); }
+  });
+  input.addEventListener('pointerup', () => { if (resetting) doReset(); });
+  input.addEventListener('pointercancel', () => { if (resetting) { input.value = resetting.v; resetting = null; fill(); } });
+  input.addEventListener('input', () => { if (resetting) return; fill(); onInput?.(+input.value); });
+  input.addEventListener('change', () => { if (resetting) return doReset(); if (skipChange) return; onChange?.(+input.value); });
   const el = h('label', { class: 'pv-slider' }, h('div', { class: 'pv-slider-head' }, h('span', { class: 'pv-slider-label' }, label), out), input);
   el.setValue = (v) => { input.value = v; fill(); };
   el.getValue = () => +input.value;
@@ -104,7 +118,11 @@ export function button(opts) {
   return b;
 }
 
-/** Color swatches. opts: {colors:[hex], value, onChange(hex), allowCustom} -> el.setValue(hex) */
+/**
+ * Color swatches. opts: {colors:[hex], value, onChange(hex), onInput(hex), allowCustom} -> el.setValue(hex)
+ * The custom picker reports live changes through onInput (when given; onChange otherwise)
+ * and the final color through onChange, so a picker drag records one undo step.
+ */
 export function swatches(opts) {
   const el = h('div', { class: 'pv-swatches' });
   const items = opts.colors.map((c) => {
@@ -117,7 +135,8 @@ export function swatches(opts) {
   let custom = null;
   if (opts.allowCustom !== false) {
     custom = h('input', { type: 'color', class: 'pv-swatch custom', value: opts.value || '#888888' });
-    custom.addEventListener('input', () => { el.setValue(custom.value); opts.onChange?.(custom.value); });
+    custom.addEventListener('input', () => { el.setValue(custom.value); (opts.onInput || opts.onChange)?.(custom.value); });
+    if (opts.onInput) custom.addEventListener('change', () => { el.setValue(custom.value); opts.onChange?.(custom.value); });
     el.appendChild(custom);
   }
   el.setValue = (v) => {
@@ -421,11 +440,13 @@ export function sheetMenu(items, opts = {}) {
     const W = window.innerWidth, H = window.innerHeight;
     const w = 280;
     const right = r.right > W / 2;
+    // short screens (landscape phone): open over the anchor so the whole menu fits
+    const top = H < 520 ? Math.max(8, r.top) : Math.min(H - 80, r.bottom + 6);
     card.style.width = w + 'px';
-    card.style.top = Math.min(H - 80, r.bottom + 6) + 'px';
+    card.style.top = top + 'px';
     if (right) card.style.right = Math.max(8, W - r.right) + 'px';
     else card.style.left = Math.max(8, r.left) + 'px';
-    card.style.maxHeight = `calc(100vh - ${Math.round(r.bottom + 16)}px - var(--safe-bottom))`;
+    card.style.maxHeight = `calc(100vh - ${Math.round(top + 8)}px - var(--safe-bottom))`;
     card.style.transformOrigin = right ? 'top right' : 'top left';
   } else {
     m = modal({ title: opts.title, body: list, kind: 'sheet', className: 'pv-action-sheet' });

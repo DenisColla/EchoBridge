@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 
 const _inv = new THREE.Matrix4();
-const _o = new THREE.Vector3(), _d = new THREE.Vector3(), _p = new THREE.Vector3();
+const _p = new THREE.Vector3();
 const _ray = new THREE.Ray();
 
 export class Picker {

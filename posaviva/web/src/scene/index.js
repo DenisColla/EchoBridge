@@ -36,9 +36,9 @@ export function create(app, shell) {
   app.sceneTools = { lights, camera, guides };
 
   // after OrbitControls.update(): tweens, floor clamp, roll, shadow fitting, handles
-  app.addRenderHook(() => {
+  app.addRenderHook((dt) => {
     const now = performance.now();
-    const animating = camera.onFrame(now);
+    const animating = camera.onFrame(now, dt);
     lights.onFrame(now);
     return animating;
   });

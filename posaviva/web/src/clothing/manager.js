@@ -121,6 +121,21 @@ export class ClothingManager extends THREE.EventDispatcher {
     return new Promise((r) => this._idle.push(r));
   }
 
+  /**
+   * Height (m, along the rest normal) of the outermost garment surface over each
+   * body vertex of the character's rest shape (0 where no garment covers it),
+   * or null while nothing is built.
+   * Used by the hair to drape over the clothes.
+   */
+  outerOffsets(ch) {
+    const st = this.states.get(ch);
+    if (!st) return null;
+    // build order is inner -> outer and the heights accumulate: the last one has them all
+    let surf = null;
+    for (const g of st.garments) if (g.runtime && g.surfOut) surf = g.surfOut;
+    return surf;
+  }
+
   // ------------------------------------------------------------ diff & queue
   /** Brings the built garments in line with ch.data.clothing (cheap when unchanged). */
   sync(ch) {
@@ -142,7 +157,7 @@ export class ClothingManager extends THREE.EventDispatcher {
         if (g.geoKey !== geoKey || !g.runtime) { g.geoKey = geoKey; g.stale = true; dirtyFrom = Math.min(dirtyFrom, i); }
         next.push(g);
       } else {
-        next.push({ item: { ...it }, def: GARMENT_BY_ID.get(it.id), geoKey, stale: true, mesh: null, runtime: null, hidden: null, occOut: null });
+        next.push({ item: { ...it }, def: GARMENT_BY_ID.get(it.id), geoKey, stale: true, mesh: null, runtime: null, hidden: null, occOut: null, surfOut: null });
         dirtyFrom = Math.min(dirtyFrom, i);
       }
     });
@@ -179,9 +194,13 @@ export class ClothingManager extends THREE.EventDispatcher {
       let changed = false;
       const M = st.garments.some((g) => g.runtime) ? st.ch.updateSkinMatrices() : null;
       const covered = coveredIds(st.garments);
+      // inner layers first: a garment is pushed out by the layers below it
+      let innerMoved = false;
       for (const g of st.garments) {
         if (!g.runtime || covered.has(g.item.id)) continue;
-        changed = g.runtime.update(st.ch, this.intensity * (g.item.wrinkles ?? 1), M) || changed;
+        const c = g.runtime.update(st.ch, this.intensity * (g.item.wrinkles ?? 1), M, true, innerMoved);
+        innerMoved = innerMoved || c;
+        changed = c || changed;
       }
       if (changed) this.app.invalidate();
     }
@@ -192,26 +211,33 @@ export class ClothingManager extends THREE.EventDispatcher {
   _build(st, i) {
     const g = st.garments[i];
     const prevOcc = i > 0 ? st.garments[i - 1].occOut : null;
+    const prevSurf = i > 0 ? st.garments[i - 1].surfOut : null;
     let res = null;
     try {
-      res = buildGarment({ topo: this.topo, bi: st.bi, occ: prevOcc, sex: st.ch.sex, ch: st.ch }, g.def, g.item);
+      res = buildGarment({ topo: this.topo, bi: st.bi, occ: prevOcc, surf: prevSurf, sex: st.ch.sex, ch: st.ch }, g.def, g.item);
     } catch (e) {
       console.error('[clothing] build failed', g.item.id, e);
     }
     g.stale = false;
     this._dropMesh(st, g);
-    if (!res) { g.occOut = prevOcc ? prevOcc.slice() : new Float32Array(this.topo.nv).fill(-1); return; }
+    if (!res) { g.occOut = prevOcc ? prevOcc.slice() : new Float32Array(this.topo.nv).fill(-1); g.surfOut = prevSurf ? prevSurf.slice() : new Float32Array(this.topo.nv); return; }
     g.runtime = res.runtime;
     g.hidden = res.hidden;
     g.occOut = res.occ;
+    g.surfOut = res.surf;
     const mesh = new THREE.SkinnedMesh(res.runtime.geometry, []);
     mesh.name = 'garment:' + g.item.id;
     mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.garment = g.item.id;
     mesh.userData.clothing = true;
+    // shoes are what touches the floor (see ARCHITECTURE: groundContact)
+    if (g.def.sole) mesh.userData.groundContact = true;
     g.mesh = mesh;
     this._applyMaterials(g);
     st.ch.addAttachment(mesh);
+    // stay over the garments below (shoes are rigid: never pushed; underwear is
+    // skin tight with the body's own weights: nothing to correct, not worth the cost)
+    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear').map((x) => x.runtime));
     g.runtime.update(st.ch, this.intensity * (g.item.wrinkles ?? 1), st.ch.updateSkinMatrices());
     // outer layers must be rebuilt over this one
     for (let j = i + 1; j < st.garments.length; j++) if (st.garments[j].def.layer > g.def.layer) st.garments[j].stale = true;

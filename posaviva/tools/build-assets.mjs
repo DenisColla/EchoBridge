@@ -5,8 +5,12 @@
 //   node tools/build-assets.mjs [path/to/makehuman/data]
 //
 // Output: web/public/assets/human.json (metadata) + human.bin (typed arrays)
-//         web/public/assets/eye.png
+//         web/public/assets/eye.png, skin.png
 // All positions are emitted in METERS, Y up, character facing +Z.
+// Format v2 (~3.6 MB instead of 8.2): preset positions as 0.1 mm steps from the
+// base mesh and slider deltas as varint streams (see encodeStream), UVs and skin
+// weights as 16-bit fractions; decoded by web/src/core/HumanModel.js.
+// Verified: every preset and slider reproduces the v1 shapes within 0.09 mm.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -81,6 +85,31 @@ for (const f of base.faces) {
 }
 console.log(`render verts: ${rv2v.length}, faces kept: ${faceG.length}`);
 if (rv2v.length >= 65535) throw new Error('too many render verts for Uint16');
+
+// Vertices the app uses: faces of every group except the MakeHuman proxy helpers
+// (tights, skirt, hair: never drawn or read), skeleton joint vertices and the eye
+// proxy anchors. Slider deltas skip the others (they keep the preset shape).
+const NEEDED = (() => {
+  const need = new Uint8Array(NV);
+  const unused = new Set([1, 2, 3]);
+  for (let f = 0; f < faceG.length; f++) {
+    if (unused.has(faceG[f])) continue;
+    for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff) need[v] = 1; }
+  }
+  const sk = JSON.parse(fs.readFileSync(path.join(DATA, 'rigs/default.mhskel'), 'utf8'));
+  for (const list of Object.values(sk.joints)) for (const v of list) need[v] = 1;
+  let inVerts = false;
+  for (const raw of fs.readFileSync(path.join(DATA, 'eyes/high-poly/high-poly.mhclo'), 'utf8').split('\n')) {
+    const p = raw.trim().split(/\s+/);
+    if (p[0] === 'verts') { inVerts = true; continue; }
+    if (!inVerts || !p[0] || p[0].startsWith('#')) continue;
+    if (!/^\d/.test(p[0])) { inVerts = false; continue; }
+    for (const s of p.length === 1 ? [p[0]] : p.slice(0, 3)) need[+s] = 1;
+  }
+  let n = 0; for (const x of need) n += x;
+  console.log(`vertices used by the app: ${n} of ${NV}`);
+  return need;
+})();
 
 // ---------------------------------------------------------------- targets
 const targetCache = new Map();
@@ -192,21 +221,53 @@ function emit(arr) {
   return ref;
 }
 const Q = 1e4; // sparse delta quantization: 0.1 mm
-function emitSparse(deltaDm) {
+function sparseOf(deltaDm, mask = null) {
   const idx = [], val = [];
   for (let i = 0; i < NV; i++) {
+    if (mask && !mask[i]) continue;
     const x = deltaDm[i * 3] * DM2M, y = deltaDm[i * 3 + 1] * DM2M, z = deltaDm[i * 3 + 2] * DM2M;
     if (Math.abs(x) < 5e-5 && Math.abs(y) < 5e-5 && Math.abs(z) < 5e-5) continue;
     idx.push(i); val.push(Math.round(x * Q), Math.round(y * Q), Math.round(z * Q));
   }
   for (const q of val) if (Math.abs(q) > 32767) throw new Error('delta overflow');
+  return { idx, val };
+}
+/** Plain typed arrays (Uint16 idx + Int16 xyz): expression units, read and patched by the face module. */
+function emitSparse(deltaDm) {
+  const { idx, val } = sparseOf(deltaDm);
   return { idx: emit(Uint16Array.from(idx)), val: emit(Int16Array.from(val)), count: idx.length };
+}
+
+// Compact varint streams (format v2), decoded by HumanModel on first use:
+//   idx: gap to the previous index - 1, LEB128 (dense runs cost 1 byte per vertex)
+//   val: per component, difference to the previous entry's value (neighbouring
+//        vertices move alike), zigzag + LEB128. Lossless for the 0.1 mm grid.
+function varints(out, ints) {
+  for (const x of ints) {
+    let z = x >= 0 ? x * 2 : -x * 2 - 1;
+    while (z >= 128) { out.push(0x80 | (z & 127)); z = Math.floor(z / 128); }
+    out.push(z);
+  }
+}
+function encodeStream(idx, val) {
+  const bytes = [];
+  if (idx) { let prev = -1; varints(bytes, idx.map((i) => { const g = i - prev - 1; prev = i; return g; })); }
+  const idxBytes = bytes.length;
+  const d = new Array(val.length);
+  for (let k = 0; k < val.length; k++) d[k] = val[k] - (k >= 3 ? val[k - 3] : 0);
+  varints(bytes, d);
+  return { enc: emit(Uint8Array.from(bytes)), idxBytes };
+}
+/** Slider delta as a compact stream; vertices outside `mask` are left out. */
+function emitSparseV2(deltaDm, mask) {
+  const { idx, val } = sparseOf(deltaDm, mask);
+  return { ...encodeStream(idx, val), count: idx.length };
 }
 function diff(a, b) { const d = new Float64Array(a.length); for (let i = 0; i < a.length; i++) d[i] = a[i] - b[i]; return d; }
 const toM = a => Float32Array.from(a, x => x * DM2M);
 
 const meta = {
-  version: 1,
+  version: 2,
   units: 'meters',
   source: 'MakeHuman hm08 base mesh, targets, default skeleton & weights (CC0 1.0) — makehumancommunity.org',
   vertexCount: NV,
@@ -214,27 +275,34 @@ const meta = {
   quantization: 1 / Q,
 };
 
+const basePosM = toM(base.v);
 meta.topology = {
   faceV: emit(Uint16Array.from(faceV)),
   faceRV: emit(Uint16Array.from(faceRV)),
   faceGroup: emit(Uint8Array.from(faceG)),
   rv2v: emit(Uint16Array.from(rv2v)),
-  rvUV: emit(Float32Array.from(rvUV)),
-  basePositions: emit(toM(base.v)),
+  // UVs are in [0, 1]: 16-bit normalized (1/65535 = 0.016 px on a 1024 map)
+  rvUV: { ...emit(Uint16Array.from(rvUV, (u) => Math.round(Math.min(1, Math.max(0, u)) * 65535))), normalized: true },
+  basePositions: emit(basePosM),
 };
 
-// presets + macro slider deltas
+// presets (positions as 0.1 mm steps from the base mesh) + macro slider deltas
 meta.presets = [];
 for (const pr of PRESETS) {
   const pos = evalShape(pr.p);
-  const entry = { id: pr.id, label: pr.label, sex: pr.sex, params: pr.p, positions: emit(toM(pos)), deltas: {} };
+  const q = new Array(NV * 3);
+  for (let i = 0; i < NV * 3; i++) {
+    q[i] = Math.round((pos[i] * DM2M - basePosM[i]) * Q);
+    if (Math.abs(q[i]) > 32767) throw new Error('preset offset overflow');
+  }
+  const entry = { id: pr.id, label: pr.label, sex: pr.sex, params: pr.p, positions: { ...encodeStream(null, q), count: NV, fromBase: true }, deltas: {} };
   for (const s of SLIDERS.filter(s => s.kind === 'macro')) {
     if (s.sex && s.sex !== pr.sex) continue;
     const v0 = pr.p[s.param] ?? 0.5;
     const up = Math.min(1, v0 + s.range), dn = Math.max(0, v0 - s.range);
     const pu = evalShape({ ...pr.p, [s.param]: up });
     const pd = evalShape({ ...pr.p, [s.param]: dn });
-    entry.deltas[s.id] = { pos: emitSparse(diff(pu, pos)), neg: emitSparse(diff(pd, pos)) };
+    entry.deltas[s.id] = { pos: emitSparseV2(diff(pu, pos), NEEDED), neg: emitSparseV2(diff(pd, pos), NEEDED) };
   }
   meta.presets.push(entry);
   console.log(`preset ${pr.id} done`);
@@ -243,7 +311,7 @@ meta.sliders = SLIDERS.map(s => ({ id: s.id, label: s.label, kind: s.kind, sex: 
 meta.targetDeltas = {};
 for (const s of SLIDERS.filter(s => s.kind === 'target')) {
   const sum = list => { const d = new Float64Array(NV * 3); for (const rel of list) addTarget(d, rel, 1); return d; };
-  meta.targetDeltas[s.id] = { pos: emitSparse(sum(s.pos)), neg: emitSparse(sum(s.neg)) };
+  meta.targetDeltas[s.id] = { pos: emitSparseV2(sum(s.pos), NEEDED), neg: emitSparseV2(sum(s.neg), NEEDED) };
 }
 
 // expression units (morph based facial expressions)
@@ -311,7 +379,8 @@ for (let i = 0; i < NV; i++) {
   e.forEach(([b, w], k) => { skinIndex[i * 4 + k] = b; skinWeight[i * 4 + k] = w / sum; });
 }
 console.log(`bones kept: ${boneNames.length}, unweighted verts: ${unweighted}`);
-meta.skin = { index: emit(skinIndex), weight: emit(skinWeight) };
+// weights as 16-bit fractions (renormalized to sum 1 when loaded)
+meta.skin = { index: emit(skinIndex), weight: { ...emit(Uint16Array.from(skinWeight, (w) => Math.round(w * 65535))), normalized: true } };
 
 // ---------------------------------------------------------------- eyes proxy
 {

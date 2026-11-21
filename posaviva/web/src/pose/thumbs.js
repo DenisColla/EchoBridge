@@ -6,12 +6,16 @@ import { Character } from '../core/Character.js';
 import { materials } from '../render/materials.js';
 import { applyPosePreset, applyHandPreset } from './library.js';
 
-const STORE_KEY = 'posaviva.pose.thumbs.v1';
+const STORE_KEY = 'posaviva.pose.thumbs.v2';
+const OLD_KEYS = ['posaviva.pose.thumbs.v1'];
 const D = Math.PI / 180;
-// thumbnail arm pose (raw bone Euler degrees, left side): arm forward, elbow almost straight
-const HAND_ARM = [['upperarm01.L', -75, 0, 30], ['lowerarm01.L', 30, 0, 0], ['lowerarm02.L', 0, -20, 0]];
-const HAND_VIEW = new THREE.Vector3(-0.25, 0.25, 1);
-const MAX_ENTRIES = 300;
+// thumbnail arm pose (raw bone Euler degrees 'ZXY', left side, as the 'wave' preset):
+// hand raised beside the head, palm to the front, fingers up — hand signs read at a glance
+const HAND_ARM = [['upperarm01.L', -5, -34, -49], ['upperarm02.L', 0, -28, 0], ['lowerarm01.L', -35, -1, 0], ['lowerarm02.L', 0, -1, 0], ['wrist.L', 11, 0, -30]];
+// seen from the front, a little from the thumb side and from below the hand
+const HAND_VIEW = new THREE.Vector3(-0.3, -0.05, 1);
+// 48 poses x 2 sexes + 22 hands x 2 sexes, with some margin
+const MAX_ENTRIES = 180;
 
 let _shared = null;
 /** One renderer per app (private mannequins + render target are shared by the panels). */
@@ -26,7 +30,7 @@ function hash(str) {
 export class ThumbRenderer {
   constructor(app) {
     this.app = app;
-    this.W = 120; this.H = 160; // output size (CSS px of the card at 2x density)
+    this.W = 150; this.H = 200; // output size: cards are ~120 CSS px wide, shown on ~3x screens
     this.SS = 2; // supersampling
     this.rt = new THREE.WebGLRenderTarget(this.W * this.SS, this.H * this.SS, { depthBuffer: true });
     this.rt.texture.colorSpace = THREE.SRGBColorSpace; // GPU encodes to sRGB on write
@@ -46,6 +50,7 @@ export class ThumbRenderer {
     this.mem = new Map();
     this.store = {};
     try { this.store = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch { this.store = {}; }
+    try { for (const k of OLD_KEYS) localStorage.removeItem(k); } catch { /* private mode */ }
     this._dirty = false;
     this._canvas = document.createElement('canvas');
     this._canvas.width = this.W * this.SS; this._canvas.height = this.H * this.SS;
@@ -95,7 +100,7 @@ export class ThumbRenderer {
     const ch = this._char(sex);
     ch.resetPose();
     // left arm reaching forward so the hand is isolated against the background
-    for (const [b, x, y, z] of HAND_ARM) ch.poseQuat[this.app.model.boneIndex.get(b)].setFromEuler(new THREE.Euler(x * D, y * D, z * D, 'XZY'));
+    for (const [b, x, y, z] of HAND_ARM) ch.poseQuat[this.app.model.boneIndex.get(b)].setFromEuler(new THREE.Euler(x * D, y * D, z * D, 'ZXY'));
     applyHandPreset(ch, preset.id, 'L');
     const { verts, hidden } = this._handMask();
     // only the hand is drawn (any view angle stays clean)
@@ -112,14 +117,22 @@ export class ThumbRenderer {
   _handMask() {
     if (this._hand) return this._hand;
     const m = this.app.model;
-    const hand = new Set();
-    m.bones.forEach((b, i) => { if (b.name.endsWith('.L') && (b.name.startsWith('finger') || b.name.startsWith('metacarpal') || b.name.startsWith('wrist'))) hand.add(i); });
+    const hand = new Set(), arm = new Set();
+    m.bones.forEach((b, i) => {
+      if (!b.name.endsWith('.L')) return;
+      if (b.name.startsWith('finger') || b.name.startsWith('metacarpal') || b.name.startsWith('wrist')) hand.add(i);
+      else if (b.name.startsWith('lowerarm')) arm.add(i);
+    });
     const wv = new Float32Array(m.vertexCount);
     const verts = [];
     for (const v of m.groupVertices[0]) {
-      let s = 0;
-      for (let q = 0; q < 4; q++) if (hand.has(m.skinIndex[v * 4 + q])) s += m.skinWeight[v * 4 + q];
-      wv[v] = s;
+      let s = 0, a = 0;
+      for (let q = 0; q < 4; q++) {
+        const b = m.skinIndex[v * 4 + q], w = m.skinWeight[v * 4 + q];
+        if (hand.has(b)) s += w; else if (arm.has(b)) a += w;
+      }
+      // the forearm is drawn too (it leaves the frame: no ragged cut at the wrist), framing uses the hand only
+      wv[v] = s + a;
       if (s > 0.5) verts.push(v);
     }
     const hidden = new Uint8Array(m.faceCount).fill(1);

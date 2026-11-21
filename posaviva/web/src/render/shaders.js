@@ -44,8 +44,13 @@ export function makePrepassMaterial(src, id) {
     const cut = src.map && (src.alphaTest > 0 || src.transparent);
     if (cut) { m.map = src.map; m.alphaTest = src.alphaTest > 0 ? src.alphaTest : 0.5; }
     m.flatShading = !!src.flatShading;
-    // lash strips are drawn solid dark anyway; inking their tiny cards only produces scribbles
-    m.visible = src.visible !== false && src.userData?.kind !== 'lashes';
+    // lashes and brow hairs are fine dark strokes already: outlining each hair only
+    // produces hatching scribbles (and they never occlude anything worth a line)
+    const k = src.userData?.kind;
+    // semi-transparent hair shells (stubble) are a tone over the skin, not a shape: in the
+    // G-buffer they only produce a beard outline and speckles where the shell meets the skin
+    const shell = k === 'hair' && src.transparent && src.opacity < 0.95;
+    m.visible = src.visible !== false && k !== 'lashes' && k !== 'brows' && !shell && !src.userData?.pvNoInk;
   }
   const uId = { value: id / 255 };
   m.onBeforeCompile = (shader) => {

@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
@@ -48,20 +49,24 @@ import java.util.Locale;
  * JS contract:
  *   window.AndroidBridge.{saveImage, saveTextFile, shareImage, vibrate, getDeviceInfo}
  *   window.__onAndroidBack()  -> return true if the page consumed the back gesture
- *   window.__onInsets({top,right,bottom,left})  + CSS vars --safe-top/right/bottom/left
+ *   window.__onInsets({top,right,bottom,left,gestureLeft,gestureRight})
+ *     + CSS vars --safe-top/right/bottom/left and --gesture-left/right
+ *     (gesture* = width of the system back-gesture zones at the screen edges, 0 with
+ *      3-button navigation: a horizontal drag that starts there is taken by the system)
  */
 public class MainActivity extends Activity {
     private static final String TAG = "PosaViva";
     private static final int REQUEST_FILE_CHOOSER = 1001;
-    private static final int BACKGROUND = 0xFF121318;
+    private static final int BACKGROUND = 0xFF0E0F13;   // = web --bg / theme-color
 
-    /** Sets the CSS variables, remembers the insets and notifies the page. Argument: {top,right,bottom,left} in CSS px. */
+    /** Sets the CSS variables, remembers the insets and notifies the page. Argument: {top,right,bottom,left,gestureLeft,gestureRight} in CSS px. */
     private static final String INSETS_JS =
             "(function(i){"
             + "window.__androidInsets=i;"
             + "function apply(){var d=document.documentElement;if(!d)return false;var s=d.style;"
             + "s.setProperty('--safe-top',i.top+'px');s.setProperty('--safe-right',i.right+'px');"
-            + "s.setProperty('--safe-bottom',i.bottom+'px');s.setProperty('--safe-left',i.left+'px');return true;}"
+            + "s.setProperty('--safe-bottom',i.bottom+'px');s.setProperty('--safe-left',i.left+'px');"
+            + "s.setProperty('--gesture-left',(i.gestureLeft||0)+'px');s.setProperty('--gesture-right',(i.gestureRight||0)+'px');return true;}"
             + "if(!apply()){var mo=new MutationObserver(function(){if(apply())mo.disconnect();});"
             + "mo.observe(document,{childList:true});}"
             + "try{window.__onInsets&&window.__onInsets(i);}catch(e){console.error(e);}"
@@ -76,7 +81,7 @@ public class MainActivity extends Activity {
     private ScriptHandler insetsStartScript;
     private OnBackInvokedCallback backCallback;
     private ValueCallback<Uri[]> pendingFileCallback;
-    private String insetsJson = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0}";
+    private String insetsJson = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0,\"gestureLeft\":0,\"gestureRight\":0}";
     private int imePaddingPx = -1;
 
     // ---------------------------------------------------------------------------------
@@ -386,10 +391,14 @@ public class MainActivity extends Activity {
      * Safe area = visible system bars + display cutout (the punch-hole), in CSS px.
      * While the bars are hidden only the cutout counts; transient (swiped-in) bars overlay
      * the page without changing the insets. The keyboard (IME) shrinks the WebView instead.
+     * gestureLeft/Right: the side back-gesture zones of gesture navigation (they stay active
+     * in immersive mode), so the page can keep horizontal sliders out of them.
      */
     private WindowInsets onApplyInsets(View v, WindowInsets insets) {
         Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
         Insets ime = insets.getInsets(WindowInsets.Type.ime());
+        // the edge swipes keep working while the bars are hidden: ignore the bars' visibility
+        Insets gestures = insets.getInsetsIgnoringVisibility(WindowInsets.Type.systemGestures());
 
         if (ime.bottom != imePaddingPx) {
             imePaddingPx = ime.bottom;
@@ -398,9 +407,11 @@ public class MainActivity extends Activity {
 
         float density = getResources().getDisplayMetrics().density;
         int bottom = Math.max(0, safe.bottom - ime.bottom);
-        String json = String.format(Locale.US, "{\"top\":%d,\"right\":%d,\"bottom\":%d,\"left\":%d}",
+        String json = String.format(Locale.US,
+                "{\"top\":%d,\"right\":%d,\"bottom\":%d,\"left\":%d,\"gestureLeft\":%d,\"gestureRight\":%d}",
                 cssPx(safe.top, density), cssPx(safe.right, density),
-                cssPx(bottom, density), cssPx(safe.left, density));
+                cssPx(bottom, density), cssPx(safe.left, density),
+                cssPx(gestures.left, density), cssPx(gestures.right, density));
         if (!json.equals(insetsJson)) {
             insetsJson = json;
             updateInsetsStartScript();
@@ -430,25 +441,42 @@ public class MainActivity extends Activity {
                 webView, INSETS_JS + "(" + insetsJson + ");", Collections.singleton(AssetServer.ORIGIN));
     }
 
-    /** Picks the fastest mode at the current resolution (e.g. 120 Hz) for this window. */
-    private void applyHighestRefreshRate(WindowManager.LayoutParams lp) {
+    /**
+     * Asks for the fastest refresh rate available at the current resolution (120 Hz on the
+     * S25 Ultra). Only the rate is requested, never a display mode id: a mode id also pins
+     * the resolution, so after the user switches FHD+/QHD+ in Settings (the activity is
+     * kept, see configChanges) the window would force the old resolution back.
+     * Returns true when the window attributes changed.
+     */
+    private boolean applyHighestRefreshRate(WindowManager.LayoutParams lp) {
         try {
             Display display = getDisplay();
-            if (display == null) return;
+            if (display == null) return false;
             Display.Mode current = display.getMode();
-            Display.Mode best = current;
+            float best = current.getRefreshRate();
             for (Display.Mode m : display.getSupportedModes()) {
                 if (m.getPhysicalWidth() == current.getPhysicalWidth()
-                        && m.getPhysicalHeight() == current.getPhysicalHeight()
-                        && m.getRefreshRate() > best.getRefreshRate() + 0.5f) {
-                    best = m;
+                        && m.getPhysicalHeight() == current.getPhysicalHeight()) {
+                    best = Math.max(best, m.getRefreshRate());
                 }
             }
-            lp.preferredDisplayModeId = best.getModeId();
-            lp.preferredRefreshRate = best.getRefreshRate();
+            if (lp.preferredDisplayModeId == 0 && Math.abs(lp.preferredRefreshRate - best) < 0.01f) return false;
+            lp.preferredDisplayModeId = 0;
+            lp.preferredRefreshRate = best;
+            return true;
         } catch (RuntimeException e) {
             Log.w(TAG, "Cannot select refresh rate", e);
+            return false;
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // Resolution, density or display changes keep this activity (configChanges):
+        // re-pick the refresh rate for the new mode list.
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (applyHighestRefreshRate(lp)) getWindow().setAttributes(lp);
     }
 
     private String versionName() {

@@ -90,14 +90,19 @@ export class Character extends THREE.EventDispatcher {
     this._rNor = new Float32Array(NR * 3);
     geo.setAttribute('position', new THREE.BufferAttribute(this._rPos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('normal', new THREE.BufferAttribute(this._rNor, 3).setUsage(THREE.DynamicDrawUsage));
-    geo.setAttribute('uv', new THREE.BufferAttribute(m.rvUV, 2));
-    const si = new Uint16Array(NR * 4), sw = new Float32Array(NR * 4);
-    for (let r = 0; r < NR; r++) {
-      const v = m.rv2v[r];
-      for (let k = 0; k < 4; k++) { si[r * 4 + k] = m.skinIndex[v * 4 + k]; sw[r * 4 + k] = m.skinWeight[v * 4 + k]; }
-    }
-    geo.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4));
-    geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+    // uv / skin index / skin weights are the same for every character: one set of
+    // attributes (and GPU buffers) shared by all bodies (~0.6 MB each saved)
+    const shared = m._bodyStaticAttrs || (m._bodyStaticAttrs = (() => {
+      const si = new Uint16Array(NR * 4), sw = new Float32Array(NR * 4);
+      for (let r = 0; r < NR; r++) {
+        const v = m.rv2v[r];
+        for (let k = 0; k < 4; k++) { si[r * 4 + k] = m.skinIndex[v * 4 + k]; sw[r * 4 + k] = m.skinWeight[v * 4 + k]; }
+      }
+      return { uv: new THREE.BufferAttribute(m.rvUV, 2), skinIndex: new THREE.BufferAttribute(si, 4), skinWeight: new THREE.BufferAttribute(sw, 4) };
+    })());
+    geo.setAttribute('uv', shared.uv);
+    geo.setAttribute('skinIndex', shared.skinIndex);
+    geo.setAttribute('skinWeight', shared.skinWeight);
     // draw groups: 0 skin(body) 1 eyelashes 2 teeth 3 tongue
     const order = [[0], [6], [7, 8], [9]];
     const idx = [];
@@ -110,9 +115,12 @@ export class Character extends THREE.EventDispatcher {
       }
       geo.addGroup(start, idx.length - start, mi);
     });
-    this._bodyIndexFull = Uint32Array.from(idx);
+    // 16-bit indices while the render vertices fit (half the memory / bandwidth;
+    // 0xffff is the WebGL 2 primitive-restart index, so it must stay unused)
+    this._IndexArray = NR < 0xffff ? Uint16Array : Uint32Array;
+    this._bodyIndexFull = this._IndexArray.from(idx);
     this._bodySkinIndexCount = geo.groups[0].count;
-    geo.setIndex(new THREE.BufferAttribute(Uint32Array.from(idx), 1));
+    geo.setIndex(new THREE.BufferAttribute(this._IndexArray.from(idx), 1));
     const mesh = new THREE.SkinnedMesh(geo, []);
     mesh.name = 'body';
     mesh.frustumCulled = false;
@@ -266,53 +274,95 @@ export class Character extends THREE.EventDispatcher {
       if (!this.model.expressions[k]) continue;
       if (w) this.expression[k] = Math.max(-1, Math.min(1.5, w)); else delete this.expression[k];
     }
-    this._applyExpressionMorphs();
+    this._applyExpressionMorphs(false);
     this.dispatchEvent({ type: 'expression' });
   }
 
-  _applyExpressionMorphs() {
-    const R = this.restPositions;
-    R.set(this.shapePositions);
-    for (const [k, w] of Object.entries(this.expression)) {
-      const d = this.model.expressions[k];
-      if (d) HumanModel.addSparse(R, d, w);
+  /**
+   * rest = shape + expression morphs, then normals and GPU upload. When only the
+   * expression changed since the last full pass (shape unchanged), only the
+   * face region the expression units can move is recomputed and uploaded
+   * (~1/6 of the mesh): expression sliders and gaze-driven lids stay cheap.
+   */
+  _applyExpressionMorphs(full = true) {
+    const m = this.model, R = this.restPositions, S = this.shapePositions;
+    const region = full || !this._faceN || this._exprRegionV !== (m.expressionVersion || 0) ? null : m.expressionRegion;
+    if (region) {
+      const V = region.verts;
+      for (let k = 0; k < V.length; k++) { const i = V[k] * 3; R[i] = S[i]; R[i + 1] = S[i + 1]; R[i + 2] = S[i + 2]; }
+    } else R.set(S);
+    for (const k in this.expression) {
+      const d = m.expressions[k];
+      if (d) HumanModel.addSparse(R, d, this.expression[k]);
     }
-    this._computeNormals();
-    this._uploadBody();
+    this._computeNormals(region);
+    this._uploadBody(region);
+    this._exprRegionV = m.expressionVersion || 0;
     this._skinnedDirty = true;
   }
 
-  _computeNormals() {
-    const m = this.model, P = this.restPositions, N = this.restNormals;
-    N.fill(0);
-    const F = m.faceV;
-    for (let f = 0; f < m.faceCount; f++) {
-      const a = F[f * 4], b = F[f * 4 + 1], c = F[f * 4 + 2], d = F[f * 4 + 3];
-      const quad = d !== 0xffff;
-      // quad normal via diagonals (robust for non-planar quads)
-      const p = quad ? [a, c, b, d] : [a, b, a, c];
-      const ux = P[p[1] * 3] - P[p[0] * 3], uy = P[p[1] * 3 + 1] - P[p[0] * 3 + 1], uz = P[p[1] * 3 + 2] - P[p[0] * 3 + 2];
-      const vx = P[p[3] * 3] - P[p[2] * 3], vy = P[p[3] * 3 + 1] - P[p[2] * 3 + 1], vz = P[p[3] * 3 + 2] - P[p[2] * 3 + 2];
-      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      const verts = quad ? [a, b, c, d] : [a, b, c];
-      for (const v of verts) { N[v * 3] += nx; N[v * 3 + 1] += ny; N[v * 3 + 2] += nz; }
+  /** Area-weighted vertex normals of restPositions (all of them, or only an expression region). */
+  _computeNormals(region = null) {
+    const m = this.model, P = this.restPositions, N = this.restNormals, F = m.faceV;
+    const topo = m.normalTopology;
+    const FN = this._faceN || (this._faceN = new Float32Array(m.faceCount * 3));
+    const faces = region ? region.faces : topo.faces;
+    for (let i = 0; i < faces.length; i++) {
+      const f = faces[i], o = f * 4;
+      const a = F[o] * 3, b = F[o + 1] * 3, c = F[o + 2] * 3, dv = F[o + 3];
+      let ux, uy, uz, vx, vy, vz;
+      if (dv !== 0xffff) {
+        // quad normal via diagonals (robust for non-planar quads)
+        const d = dv * 3;
+        ux = P[c] - P[a]; uy = P[c + 1] - P[a + 1]; uz = P[c + 2] - P[a + 2];
+        vx = P[d] - P[b]; vy = P[d + 1] - P[b + 1]; vz = P[d + 2] - P[b + 2];
+      } else {
+        ux = P[b] - P[a]; uy = P[b + 1] - P[a + 1]; uz = P[b + 2] - P[a + 2];
+        vx = P[c] - P[a]; vy = P[c + 1] - P[a + 1]; vz = P[c + 2] - P[a + 2];
+      }
+      FN[f * 3] = uy * vz - uz * vy; FN[f * 3 + 1] = uz * vx - ux * vz; FN[f * 3 + 2] = ux * vy - uy * vx;
     }
-    for (let i = 0; i < N.length; i += 3) {
-      const l = Math.hypot(N[i], N[i + 1], N[i + 2]) || 1;
-      N[i] /= l; N[i + 1] /= l; N[i + 2] /= l;
+    const off = topo.vfOff, list = topo.vfList;
+    const verts = region ? region.nverts : null;
+    const n = verts ? verts.length : m.vertexCount;
+    for (let k = 0; k < n; k++) {
+      const v = verts ? verts[k] : k;
+      let x = 0, y = 0, z = 0;
+      for (let j = off[v], e = off[v + 1]; j < e; j++) { const q = list[j] * 3; x += FN[q]; y += FN[q + 1]; z += FN[q + 2]; }
+      const l = Math.sqrt(x * x + y * y + z * z) || 1;
+      const i = v * 3;
+      N[i] = x / l; N[i + 1] = y / l; N[i + 2] = z / l;
     }
   }
 
-  _uploadBody() {
-    const m = this.model, P = this.restPositions, N = this.restNormals;
-    for (let r = 0; r < m.renderVertexCount; r++) {
-      const v = m.rv2v[r] * 3, o = r * 3;
-      this._rPos[o] = P[v]; this._rPos[o + 1] = P[v + 1]; this._rPos[o + 2] = P[v + 2];
-      this._rNor[o] = N[v]; this._rNor[o + 1] = N[v + 1]; this._rNor[o + 2] = N[v + 2];
+  /** Copies rest positions/normals into the render buffers (all, or an expression region's runs). */
+  _uploadBody(region = null) {
+    const m = this.model, P = this.restPositions, N = this.restNormals, rv2v = m.rv2v, RP = this._rPos, RN = this._rNor;
+    const g = this.body.geometry, pa = g.attributes.position, na = g.attributes.normal;
+    const runs = region ? region.rranges : null;
+    const nr = runs ? runs.length : 2;
+    for (let s = 0; s < nr; s += 2) {
+      const r0 = runs ? runs[s] : 0, r1 = runs ? r0 + runs[s + 1] : m.renderVertexCount;
+      for (let r = r0; r < r1; r++) {
+        const v = rv2v[r] * 3, o = r * 3;
+        RP[o] = P[v]; RP[o + 1] = P[v + 1]; RP[o + 2] = P[v + 2];
+        RN[o] = N[v]; RN[o + 1] = N[v + 1]; RN[o + 2] = N[v + 2];
+      }
     }
-    const g = this.body.geometry;
-    g.attributes.position.needsUpdate = true;
-    g.attributes.normal.needsUpdate = true;
+    // partial GPU upload unless a full one is still pending (onUpload clears the flag)
+    if (!this._bodyUploadHooked) {
+      this._bodyUploadHooked = true;
+      pa.onUpload(() => { this._fullUploadPending = false; });
+    }
+    // (a hidden body is never uploaded: do not let ranges pile up)
+    if (runs && !this._fullUploadPending && pa.updateRanges.length < 512) {
+      for (let s = 0; s < runs.length; s += 2) { pa.addUpdateRange(runs[s] * 3, runs[s + 1] * 3); na.addUpdateRange(runs[s] * 3, runs[s + 1] * 3); }
+    } else {
+      pa.clearUpdateRanges(); na.clearUpdateRanges();
+      this._fullUploadPending = true;
+    }
+    pa.needsUpdate = true;
+    na.needsUpdate = true;
   }
 
   /**
@@ -328,7 +378,7 @@ export class Character extends THREE.EventDispatcher {
       idx.push(a, b, c); if (d !== 0xffff) idx.push(a, c, d);
     }
     const rest = this._bodyIndexFull.subarray(this._bodySkinIndexCount);
-    const all = new Uint32Array(idx.length + rest.length);
+    const all = new this._IndexArray(idx.length + rest.length);
     all.set(idx); all.set(rest, idx.length);
     const oldGroups = this._groupCounts || (this._groupCounts = g.groups.map((gr) => gr.count));
     g.setIndex(new THREE.BufferAttribute(all, 1));
@@ -539,7 +589,7 @@ export class Character extends THREE.EventDispatcher {
     }
     if (JSON.stringify(this.appearance) !== appKey) { this._applyMaterials(); this.dispatchEvent({ type: 'appearance' }); }
     if (JSON.stringify([this.presetId, this.sliders]) !== shapeKey) this.rebuildShape();
-    else if (JSON.stringify(this.expression) !== exprKey) { this._applyExpressionMorphs(); this.dispatchEvent({ type: 'expression' }); }
+    else if (JSON.stringify(this.expression) !== exprKey) { this._applyExpressionMorphs(false); this.dispatchEvent({ type: 'expression' }); }
     if (j.pose) this.setPose(j.pose);
   }
 
@@ -550,5 +600,8 @@ export class Character extends THREE.EventDispatcher {
     this.eyeMesh.geometry.dispose();
     materials.release?.(this.body);
     materials.release?.(this.eyeMesh);
+    // the bone matrices live in a GPU data texture owned by the skeleton
+    this.skeleton.dispose();
+    this._disposed = true;
   }
 }

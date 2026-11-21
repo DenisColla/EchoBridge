@@ -37,8 +37,12 @@ android {
 
     buildTypes {
         release {
-            minifyEnabled = false
-            shrinkResources = false
+            // R8: the shell is ~5 small classes, but androidx.webkit pulls in androidx.core
+            // and the Kotlin stdlib (~2.7 MB of uncompressed dex). Shrinking keeps only what
+            // is used. The JS bridge methods are kept by proguard-rules.pro.
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             debuggable = false
             signingConfig = signingConfigs.dev
         }
@@ -57,6 +61,14 @@ android {
         // Default pattern minus "<dir>_*", so web build folders starting with "_"
         // are packaged too. Dot-files (e.g. assets/www/.gitkeep) stay excluded.
         ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+    }
+
+    packaging {
+        resources {
+            // Kotlin reflection metadata and per-library version markers: the app is plain
+            // Java and never reads them.
+            excludes += ['kotlin/**', 'META-INF/*.version', 'META-INF/*.kotlin_module', 'DebugProbesKt.bin']
+        }
     }
 
     // Sideloaded app: no Play-only dependency metadata block in the APK signature.

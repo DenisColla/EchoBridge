@@ -24,8 +24,9 @@
 
 /** Presets: id, Italian label, unit weights at 100% intensity. */
 export const PRESETS = [
-  { id: 'neutral', label: 'Neutro', w: { 'mouth-compression': 0.12 } },
-  { id: 'smile', label: 'Sorriso', w: { 'mouth-corner-puller': 0.85, 'eye-left-slit': 0.18, 'eye-right-slit': 0.18, 'eyebrows-left-up': 0.12, 'eyebrows-right-up': 0.12 } },
+  // lips meet only with some compression: below ~0.4 the upper teeth show through the lip line
+  { id: 'neutral', label: 'Neutro', w: { 'mouth-compression': 0.45 } },
+  { id: 'smile', label: 'Sorriso', w: { 'mouth-corner-puller': 0.85, 'mouth-compression': 0.3, 'eye-left-slit': 0.18, 'eye-right-slit': 0.18, 'eyebrows-left-up': 0.12, 'eyebrows-right-up': 0.12 } },
   {
     id: 'laugh', label: 'Risata', w: {
       'mouth-upward-retraction': 0.85, 'mouth-open': 0.38, 'mouth-corner-puller': 0.55, 'eye-left-slit': 0.6, 'eye-right-slit': 0.6,
@@ -40,7 +41,7 @@ export const PRESETS = [
   },
   {
     id: 'sad', label: 'Triste', w: {
-      'mouth-depression': 0.75, 'mouth-compression': 0.2, 'eyebrows-left-inner-up': 0.85, 'eyebrows-right-inner-up': 0.85,
+      'mouth-depression': 0.75, 'mouth-compression': 0.4, 'eyebrows-left-inner-up': 0.85, 'eyebrows-right-inner-up': 0.85,
       'eye-left-slit': 0.2, 'eye-right-slit': 0.2,
     },
   },
@@ -62,7 +63,7 @@ export const PRESETS = [
     id: 'rage', label: 'Furioso', w: {
       'eyebrows-left-down': 1, 'eyebrows-right-down': 1, 'eye-left-opened-up': 0.25, 'eye-right-opened-up': 0.25,
       'mouth-open': 0.6, 'mouth-part-later': 0.55, 'mouth-elevation': 0.45, 'neck-platysma': 0.6,
-      'nose-left-elevation': 0.6, 'nose-right-elevation': 0.6, 'nose-left-dilatation': 0.5, 'nose-right-dilatation': 0.5,
+      'nose-left-elevation': 0.3, 'nose-right-elevation': 0.3, 'nose-left-dilatation': 0.5, 'nose-right-dilatation': 0.5,
     },
   },
   {
@@ -80,13 +81,13 @@ export const PRESETS = [
   },
   {
     id: 'disgust', label: 'Disgustato', w: {
-      'nose-left-elevation': 0.85, 'nose-right-elevation': 0.85, 'mouth-elevation': 0.55, 'mouth-depression': 0.35,
+      'nose-left-elevation': 0.55, 'nose-right-elevation': 0.55, 'mouth-elevation': 0.55, 'mouth-depression': 0.35,
       'eyebrows-left-down': 0.55, 'eyebrows-right-down': 0.55, 'eye-left-slit': 0.35, 'eye-right-slit': 0.35,
     },
   },
   {
     id: 'contempt', label: 'Sprezzante', w: {
-      'nose-left-elevation': 1, 'mouth-corner-puller': 0.35, 'mouth-compression': 0.35,
+      'nose-left-elevation': 0.7, 'mouth-corner-puller': 0.35, 'mouth-compression': 0.45,
       'eyebrows-left-up': 0.6, 'eyebrows-right-down': 0.4, 'eye-right-slit': 0.4, 'eye-left-slit': 0.1,
     },
   },
@@ -103,7 +104,7 @@ export const PRESETS = [
   },
   {
     id: 'wink', label: 'Occhiolino', w: {
-      'eye-left-closure': 1, 'mouth-corner-puller': 0.7, 'eyebrows-left-down': 0.35, 'eyebrows-right-up': 0.3,
+      'eye-left-closure': 1, 'mouth-corner-puller': 0.7, 'mouth-compression': 0.3, 'eyebrows-left-down': 0.35, 'eyebrows-right-up': 0.3,
       'nose-left-elevation': 0.3, 'eye-right-slit': 0.12,
     },
   },
@@ -121,12 +122,13 @@ export const PRESETS = [
   },
   {
     id: 'kiss', label: 'Bacio', w: {
-      'mouth-pursing': 1, 'eye-left-closure': 0.55, 'eye-right-closure': 0.55, 'eyebrows-left-inner-up': 0.25, 'eyebrows-right-inner-up': 0.25,
+      // full pursing alone pushes out a blocky lower lip and shows the teeth: pressed lips read as a kiss
+      'mouth-pursing': 0.8, 'mouth-compression': 0.35, 'eye-left-closure': 0.55, 'eye-right-closure': 0.55, 'eyebrows-left-inner-up': 0.25, 'eyebrows-right-inner-up': 0.25,
     },
   },
   {
     id: 'bored', label: 'Annoiato', w: {
-      'eye-left-closure': 0.38, 'eye-right-closure': 0.38, 'mouth-depression': 0.3, 'mouth-compression': 0.25,
+      'eye-left-closure': 0.38, 'eye-right-closure': 0.38, 'mouth-depression': 0.3, 'mouth-compression': 0.4,
       'eyebrows-left-up': 0.1, 'eyebrows-right-up': 0.1,
     },
   },
@@ -134,7 +136,7 @@ export const PRESETS = [
     id: 'pain', label: 'Dolore', w: {
       'eyebrows-left-inner-up': 0.7, 'eyebrows-right-inner-up': 0.7, 'eyebrows-left-down': 0.5, 'eyebrows-right-down': 0.5,
       'eye-left-slit': 0.75, 'eye-right-slit': 0.75, 'mouth-part-later': 0.5, 'mouth-elevation': 0.35,
-      'nose-left-elevation': 0.5, 'nose-right-elevation': 0.5, 'neck-platysma': 0.45,
+      'nose-left-elevation': 0.3, 'nose-right-elevation': 0.3, 'neck-platysma': 0.45,
     },
   },
 ];
@@ -193,7 +195,8 @@ export function mirrorUnit(u) {
 
 /** Lid units added at full down / up free gaze (lids follow the eyeballs). */
 const LID_DOWN = { 'eye-left-closure': 0.36, 'eye-right-closure': 0.36 };
-const LID_UP = { 'eye-left-opened-up': 0.3, 'eye-right-opened-up': 0.3 };
+// the MakeHuman upper lid retracts little: a strong coupling keeps the iris visible when looking up
+const LID_UP = { 'eye-left-opened-up': 0.55, 'eye-right-opened-up': 0.55 };
 
 /** Core limits of a unit weight (Character.setExpression clamps to [-1, 1.5]). */
 const W_MIN = -1, W_MAX = 1.5;

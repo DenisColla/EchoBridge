@@ -171,6 +171,20 @@ function shadowResolution(size, soft, maxRes, maxRadius, forcedRes = 0) {
   return { res, texel, radius: Math.max(1, Math.min(maxRadius, blur / texel)) };
 }
 
+/**
+ * Normal offset of the shadow lookup (meters). It must cover the PCF footprint
+ * on sloped receivers, but every millimetre also erases small cast shadows
+ * (nose, brow ridge, lips, hair on the forehead): a sample pushed 2 cm off the
+ * cheek is outside the nose shadow. The body casts from its back faces
+ * (three.js FrontSide -> BackSide shadow pass), so about one texel plus half
+ * the filter radius is enough (checked for acne from grazing to frontal light
+ * on skin, cloth, hair and the floor).
+ */
+export function normalBiasFor(texel, radius) { return texel * (1 + 0.5 * radius); }
+
+/** Fill from the environment map (render module) relative to the rig's ambient: 0.8 = as styled. */
+const ENV_REF_AMBIENT = 0.8, ENV_MAX_SCALE = 1.5;
+
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _dir = new THREE.Vector3();
 const _box = new THREE.Box3(), _m = new THREE.Matrix4(), _sphere = new THREE.Sphere();
 const _ndc = new THREE.Vector2(), _plane = new THREE.Plane();
@@ -213,6 +227,10 @@ export class LightRig extends THREE.EventDispatcher {
     this._forcedRes = { d2: 0, point: 0 };
     this._viewKey = new Float64Array(13);
     this._viewVals = new Float64Array(13);
+    /** environment (IBL) intensity chosen by the render style, scaled by the ambient level */
+    this._envBase = null;
+    this._envLast = NaN;
+    app.addEventListener('renderstyle', () => this._syncEnv());
     this._setupInput();
   }
 
@@ -405,6 +423,25 @@ export class LightRig extends THREE.EventDispatcher {
     if (a.ground) this.hemi.groundColor.set(a.ground);
     else this.hemi.groundColor.copy(this.hemi.color).multiplyScalar(0.18).add(_v.set(0.05, 0.04, 0.035));
     this.hemi.intensity = a.intensity;
+    this._syncEnv();
+  }
+
+  /**
+   * The render style adds image-based fill (scene.environment) on top of the
+   * hemisphere ambient. Unscaled, it lifts every shadow by the same amount and
+   * flattens low-key setups (Rembrandt, horror, night). Its intensity follows
+   * the rig's ambient level instead: the style's value is the base (re-read
+   * whenever the render module writes a new one, see the 'renderstyle' event).
+   */
+  _syncEnv() {
+    const sc = this.app.scene;
+    if (!sc.environment) { this._envBase = null; return; }
+    const cur = sc.environmentIntensity;
+    if (this._envBase === null || Math.abs(cur - this._envLast) > 1e-6) this._envBase = cur;
+    const k = Math.max(0, Math.min(ENV_MAX_SCALE, (this.state.ambient.intensity ?? ENV_REF_AMBIENT) / ENV_REF_AMBIENT));
+    const v = this._envBase * k;
+    this._envLast = v;
+    if (sc.environmentIntensity !== v) { sc.environmentIntensity = v; this.app.invalidate(); }
   }
 
   _disposeEntry(id) {
@@ -521,7 +558,7 @@ export class LightRig extends THREE.EventDispatcher {
     const s = L.shadow;
     s.radius = radius;
     s.bias = -0.0015 / (far - near);
-    s.normalBias = texel * (2.2 + radius * 1.1);
+    s.normalBias = normalBiasFor(texel, radius);
     s.needsUpdate = true;
   }
 
@@ -536,7 +573,7 @@ export class LightRig extends THREE.EventDispatcher {
     this._setShadowResolution(e, res);
     s.radius = radius;
     s.bias = -0.0004;
-    s.normalBias = texel * (2.2 + s.radius * 1.1);
+    s.normalBias = normalBiasFor(texel, s.radius);
     s.camera.near = 0.05;
     s.camera.far = d.dist + 8;
     s.camera.updateProjectionMatrix();

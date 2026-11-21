@@ -24,27 +24,57 @@ const _v = new THREE.Vector3(), _p0 = new THREE.Vector3();
 const _chest = [0, 0, 0];
 
 const ARM = /^(upperarm|lowerarm|wrist|finger|metacarpal|shoulder01)/;
+/** Angular sectors of a torso band cross-section. */
+const NSECT = 32;
+const TWO_PI = Math.PI * 2;
+/** continuous sector coordinate (0..NSECT) of direction (x, z): 0 = front */
+const sectorF = (x, z) => { let a = Math.atan2(x, z) / TWO_PI; if (a < 0) a += 1; const f = a * NSECT; return f >= NSECT ? 0 : f; };
+const sectorOf = (x, z) => Math.min(NSECT - 1, Math.floor(sectorF(x, z) + 0.5) % NSECT);
+/** Empty sectors (arm cut-outs) are interpolated from their nearest filled neighbours, then lightly smoothed (never shrunk). */
+function fillSectors(R) {
+  const n = R.length, src = Float32Array.from(R);
+  for (let a = 0; a < n; a++) {
+    if (src[a] > 0) continue;
+    let l = 1, r = 1;
+    while (l < n && !(src[(a - l + n) % n] > 0)) l++;
+    while (r < n && !(src[(a + r) % n] > 0)) r++;
+    const A = src[(a - l + n) % n], B = src[(a + r) % n];
+    R[a] = A + (B - A) * (l / (l + r));
+  }
+  const T = Float32Array.from(R);
+  for (let a = 0; a < n; a++) R[a] = Math.max(T[a], (T[(a + n - 1) % n] + 2 * T[a] + T[(a + 1) % n]) / 4);
+}
+/** Extra height over garments (m): pose folds rise above the rest cloth surface. */
+const CLOTH_MARGIN = 0.003;
 
 export class BodyColliders {
-  /** @param {import('../core/Character.js').Character} ch @param {object} frame headFrame */
   /**
    * @param {import('../core/Character.js').Character} ch
    * @param {object} frame headFrame
    * @param {THREE.Mesh[]} garments skinned garment meshes (rest-space geometry): hair rests on clothes
+   * @param {Float32Array|null} outer outer garment surface height over each body vertex (clothing
+   *   module, app.clothing.outerOffsets): when given, every fit is made on the DRESSED body (body
+   *   vertices raised by it) instead of the garment meshes
    */
-  constructor(ch, frame, garments = []) {
+  constructor(ch, frame, garments = [], outer = null) {
     this.ch = ch;
     const m = ch.model, s = frame.s;
     const J = (n) => ch.jointPositions.get(n + '____head');
     const bi = (n) => m.boneIndex.get(n);
     const caps = []; // {a:[x,y,z], ba, b:[x,y,z], bb, r}
-    // sample points: body vertices + garment vertices, with their skin weights
+    // sample points: body vertices (dressed) + garment vertices, with their skin weights
     const bodyV = m.groupVertices[0];
+    if (outer && outer.length < bodyV.length) outer = null;
+    if (outer) garments = [];
+    const dressed = !!outer && outer.some((h) => h > 0);
     let count = bodyV.length;
     for (const g of garments) count += g.geometry.attributes.position.count;
     const P = new Float32Array(count * 3), SI = new Uint16Array(count * 4), SW = new Float32Array(count * 4);
+    const RN = ch.restNormals;
     bodyV.forEach((v, i) => {
-      for (let q = 0; q < 3; q++) P[i * 3 + q] = ch.shapePositions[v * 3 + q];
+      // cloth surface (+ an allowance for its pose folds) over the skin
+      const h = outer && outer[i] > 0 ? outer[i] + CLOTH_MARGIN : 0;
+      for (let q = 0; q < 3; q++) P[i * 3 + q] = ch.shapePositions[v * 3 + q] + RN[v * 3 + q] * h;
       for (let q = 0; q < 4; q++) { SI[i * 4 + q] = m.skinIndex[v * 4 + q]; SW[i * 4 + q] = m.skinWeight[v * 4 + q]; }
     });
     let o = bodyV.length;
@@ -87,33 +117,53 @@ export class BodyColliders {
       const ua = J('upperarm01.' + side), la = J('lowerarm01.' + side);
       const A = new THREE.Vector3(0.045 * s * sg, n0.y - 0.03 * s, n0.z - 0.006 * s);
       const torsoV = (v) => boneW(v, armBones) < 0.3;
-      const r = fitR(A, ua, torsoV, 0.45, 0.1, 0.9, true);
-      caps.push({ a: A.toArray(), ba: bi('clavicle.' + side), b: [ua.x, ua.y, ua.z], bb: bi('clavicle.' + side), r: Math.max(0.03 * s, r * 0.95) });
+      // over clothes the colliders must reach the cloth surface (hair rests ON it):
+      // fitted higher in the distance distribution of the dressed body
+      const r = fitR(A, ua, torsoV, dressed ? 0.62 : 0.45, 0.1, 0.9, true);
+      caps.push({ a: A.toArray(), ba: bi('clavicle.' + side), b: [ua.x, ua.y, ua.z], bb: bi('clavicle.' + side), r: Math.max(0.03 * s, r * (dressed ? 1 : 0.95)) });
       const upSet = new Set([bi('upperarm01.' + side), bi('upperarm02.' + side)]);
-      const ra = fitR(ua, la, (v) => boneW(v, upSet) > 0.5, 0.5, 0.15, 0.85);
-      caps.push({ a: [ua.x, ua.y, ua.z], ba: bi('upperarm01.' + side), b: [la.x, la.y, la.z], bb: bi('upperarm02.' + side), r: ra * 0.95 });
+      const ra = fitR(ua, la, (v) => boneW(v, upSet) > 0.5, dressed ? 0.72 : 0.5, 0.15, 0.85);
+      caps.push({ a: [ua.x, ua.y, ua.z], ba: bi('upperarm01.' + side), b: [la.x, la.y, la.z], bb: bi('upperarm02.' + side), r: ra * (dressed ? 1 : 0.95) });
     }
-    // torso: generalized cylinder (stack of measured cross-sections, superellipse p = 3),
-    // each band bound to the spine bone at its height
+    // torso: generalized cylinder (stack of measured cross-sections), each band bound
+    // to the spine bone at its height
     const spines = ['spine01', 'spine02', 'spine03', 'spine04', 'spine05'].map((n) => ({ n, i: bi(n), y: J(n).y }));
     // from the neck base (upper back / collar region) down to the hips
     const yTop = Math.max(J('upperarm01.L').y + 0.01 * s, n0.y - 0.015 * s), yBot = J('spine05').y - 0.12 * s;
     const nb = Math.max(4, Math.round((yTop - yBot) / (0.035 * s)));
     const bands = [];
+    // the back and front of the armpit (scapula, pectoral fold) are partly arm
+    // weighted: keep them inside the shoulder line, where long hair falls
+    const xIn = Math.abs(J('upperarm01.L').x) - 0.02 * s;
+    // cross-section of each band: radius per angle around the band centre (star shaped,
+    // the max over the band's vertices in each sector), fitted to the dressed body, so
+    // the front of the shoulders, the bust and the shoulder blades are all enclosed
     for (let k = 0; k <= nb; k++) {
       const y = yTop - ((yTop - yBot) * k) / nb;
-      let xmax = 0, zf = -1e9, zb = 1e9, cnt = 0;
+      let zf = -1e9, zb = 1e9, cnt = 0;
+      const sel = [];
       for (let v = 0; v < count; v++) {
-        if (Math.abs(P[v * 3 + 1] - y) > 0.01 * s || boneW(v, armBones) > 0.25) continue;
-        const x = Math.abs(P[v * 3]), z = P[v * 3 + 2];
-        if (x > xmax) xmax = x;
+        if (Math.abs(P[v * 3 + 1] - y) > 0.01 * s) continue;
+        const aw = boneW(v, armBones);
+        if (aw > 0.6 || (aw > 0.25 && Math.abs(P[v * 3]) > xIn)) continue;
+        const z = P[v * 3 + 2];
         if (z > zf) zf = z;
         if (z < zb) zb = z;
+        sel.push(v);
         cnt++;
       }
       if (cnt < 8) { if (bands.length) bands.push({ ...bands[bands.length - 1], y }); continue; }
+      const cz = (zf + zb) / 2, R = new Float32Array(NSECT);
+      for (const v of sel) {
+        const x = P[v * 3], z = P[v * 3 + 2] - cz;
+        const r = Math.hypot(x, z), a = sectorOf(x, z);
+        if (r > R[a]) R[a] = r;
+      }
+      fillSectors(R);
       const sp = spines.find((q) => q.y <= y + 0.02 * s) || spines[spines.length - 1];
-      bands.push({ y, cz: (zf + zb) / 2, ax: xmax * 0.98, az: ((zf - zb) / 2) * 0.98, bone: sp.i });
+      let Rmax = 0;
+      for (let a = 0; a < NSECT; a++) if (R[a] > Rmax) Rmax = R[a];
+      bands.push({ y, cz, R, Rmax, bone: sp.i });
     }
     this.bands = bands;
     this.nb = bands.length;
@@ -252,6 +302,7 @@ export class BodyColliders {
       hit = true;
     }
     // torso (quick reject above the shoulders / below the hips in the top / bottom band frames)
+    // (radius per angle, interpolated between the two bands around the point)
     const M = this.bandM, bands = this.bands, nb = this.nb;
     const yTop = M[1] * x + M[5] * y + M[9] * z + M[13];
     const ob = (nb - 1) * 16;
@@ -268,18 +319,17 @@ export class BodyColliders {
       const t = (b0.y - qy) / (b0.y - b1.y);
       // the top band is rounded off (dome) so points entering from above are pushed smoothly
       const dome = k === 0 ? Math.sqrt(0.15 + 0.85 * t) : 1;
-      const cz = b0.cz + (b1.cz - b0.cz) * t, ax = (b0.ax + (b1.ax - b0.ax) * t) * dome + r, az = (b0.az + (b1.az - b0.az) * t) * dome + r;
-      const X = qx / ax, Z = (qz - cz) / az;
-      const aX = Math.abs(X), aZ = Math.abs(Z);
-      const f = Math.cbrt(aX * aX * aX + aZ * aZ * aZ);
-      if (f >= 1) break;
-      // radial projection onto the superellipse (in normalised coordinates)
-      const sc = f > 1e-6 ? 1 / f : 1;
-      const px = f > 1e-6 ? qx * sc : 0, pz = f > 1e-6 ? cz + (qz - cz) * sc : cz - az;
-      // normal: gradient of |X|^3 + |Z|^3
-      const PX = px / ax, PZ = (pz - cz) / az;
-      let nx = Math.sign(PX) * PX * PX / ax, nz = Math.sign(PZ) * PZ * PZ / az;
-      const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+      const cz = b0.cz + (b1.cz - b0.cz) * t;
+      const dz = qz - cz, rr = Math.hypot(qx, dz);
+      if (rr >= Math.max(b0.Rmax, b1.Rmax) * dome + r) break; // clearly outside
+      const f = sectorF(qx, dz), a0 = f | 0, a1 = (a0 + 1) % NSECT, fa = f - a0;
+      const Rb0 = b0.R[a0] + (b0.R[a1] - b0.R[a0]) * fa, Rb1 = b1.R[a0] + (b1.R[a1] - b1.R[a0]) * fa;
+      const Rs = (Rb0 + (Rb1 - Rb0) * t) * dome + r;
+      if (rr >= Rs) break;
+      // radial projection onto the section
+      let nx = 0, nz = -1;
+      if (rr > 1e-6) { nx = qx / rr; nz = dz / rr; }
+      const px = nx * Rs, pz = cz + nz * Rs;
       const Mi = this.bandMi;
       x = Mi[o] * px + Mi[o + 4] * qy + Mi[o + 8] * pz + Mi[o + 12];
       y = Mi[o + 1] * px + Mi[o + 5] * qy + Mi[o + 9] * pz + Mi[o + 13];

@@ -13,7 +13,7 @@
 //   shell.addEventListener('layout', e => e.live)  fired on open/close/snap/drag/resize (live = while dragging)
 //   app event 'uilayout' {insets, live}            same, on the app
 // CSS vars on <html>: --cover-top/right/bottom/left (px), --pv-free-cx (center of the free area, px).
-import { h, icon, iconButton, hasOpenLayer, closeTopLayer, haptic } from './kit.js';
+import { h, icon, iconButton, hasOpenLayer, closeTopLayer, haptic, toast } from './kit.js';
 
 /** Toolbar groups. A tool declares `group`; a group with several tools shows sub-tabs. */
 export const TOOL_GROUPS = [
@@ -49,11 +49,16 @@ export class Shell extends EventTarget {
     this.topBar = h('div', { class: 'pv-topbar' }, this.topLeft, this.topRight);
     this.panelTitle = h('div', { class: 'pv-panel-title' });
     this.panelBody = h('div', { class: 'pv-panel-body' });
-    const closeBtn = iconButton({ icon: 'close', title: 'Chiudi', variant: 'ghost', onClick: () => { haptic('tick'); this.closePanel(); } });
+    const closeBtn = iconButton({ icon: 'close', title: 'Chiudi', variant: 'ghost', onClick: () => { if (this._suppressClick) return; haptic('tick'); this.closePanel(); } });
     this.handle = h('div', { class: 'pv-panel-handle', 'aria-hidden': 'true' }, h('span'));
-    this.panelHead = h('div', { class: 'pv-panel-head' }, this.panelTitle, closeBtn);
-    this.subTabs = h('div', { class: 'pv-chips pv-subtabs' });
-    this.panel = h('div', { class: 'pv-panel', role: 'region', 'aria-label': 'Strumenti' }, this.handle, this.panelHead, this.subTabs, this.panelBody);
+    // A group with several tools shows its sub-tabs in the header row, in place of
+    // the title (the active tab names the tool): one row less above the content.
+    this.subTabs = h('div', { class: 'pv-chips pv-subtabs', role: 'tablist' });
+    this.subTabs.addEventListener('scroll', () => this._subTabsFade(), { passive: true });
+    // a hairline under the header once the content scrolls beneath it
+    this.panelBody.addEventListener('scroll', () => this.panel.classList.toggle('scrolled', this.panelBody.scrollTop > 2), { passive: true });
+    this.panelHead = h('div', { class: 'pv-panel-head' }, this.panelTitle, this.subTabs, closeBtn);
+    this.panel = h('div', { class: 'pv-panel', role: 'region', 'aria-label': 'Strumenti' }, this.handle, this.panelHead, this.panelBody);
     this.toolbar = h('nav', { class: 'pv-toolbar', 'aria-label': 'Strumenti' });
     // measures env(safe-area-inset-*) / the --safe-* vars injected by the Android shell
     this._probe = h('div', { class: 'pv-safe-probe', 'aria-hidden': 'true' });
@@ -118,25 +123,45 @@ export class Shell extends EventTarget {
       });
       this.toolbar.appendChild(b);
     }
-    // sub-tabs for the active group
+    // sub-tabs for the active group (in the header row, replacing the title)
     this.subTabs.replaceChildren();
     const ag = groups.find((g) => g.id === activeGroup);
     const show = !!ag && ag.tools.length > 1;
     this.subTabs.style.display = show ? '' : 'none';
+    this.panelTitle.style.display = show ? 'none' : '';
+    this.panelHead.classList.toggle('tabs', show);
     if (show) {
       for (const t of ag.tools) {
         const on = this.active.tool === t;
-        const c = h('button', { type: 'button', class: 'pv-chip' + (on ? ' active' : ''), 'aria-pressed': on ? 'true' : 'false' }, icon(t.icon, 18), t.label);
-        c.addEventListener('click', () => { haptic('tick'); this.openTool(t.id); });
+        const c = h('button', { type: 'button', role: 'tab', class: 'pv-chip' + (on ? ' active' : ''), 'aria-selected': on ? 'true' : 'false', title: t.title || t.label }, icon(t.icon, 18), t.label);
+        c.addEventListener('click', () => { if (this._suppressClick) return; haptic('tick'); this.openTool(t.id); });
         this.subTabs.appendChild(c);
         // horizontal scroll only (scrollIntoView could also scroll overflow-hidden ancestors)
         if (on) requestAnimationFrame(() => {
+          this._fitSubTabs();
           const st = this.subTabs, l = c.offsetLeft - st.offsetLeft, r = l + c.offsetWidth;
-          if (l < st.scrollLeft) st.scrollLeft = l - 16;
-          else if (r > st.scrollLeft + st.clientWidth) st.scrollLeft = r - st.clientWidth + 16;
+          if (l < st.scrollLeft + 8) st.scrollLeft = l - 24;
+          else if (r > st.scrollLeft + st.clientWidth - 8) st.scrollLeft = r - st.clientWidth + 24;
+          this._subTabsFade();
         });
       }
     }
+  }
+
+  /** Drops the tab icons when the labels would not all fit in the header row. */
+  _fitSubTabs() {
+    const st = this.subTabs;
+    if (st.style.display === 'none') return;
+    st.classList.remove('compact');
+    if (st.scrollWidth > st.clientWidth + 1) st.classList.add('compact');
+    this._subTabsFade();
+  }
+
+  /** Fades the edge of the sub-tab row where more tabs are hidden. */
+  _subTabsFade() {
+    const st = this.subTabs;
+    st.classList.toggle('more-l', st.scrollLeft > 2);
+    st.classList.toggle('more-r', st.scrollLeft + st.clientWidth < st.scrollWidth - 2);
   }
 
   openTool(id) {
@@ -153,10 +178,12 @@ export class Shell extends EventTarget {
     }
     this.panelBody.replaceChildren(tool._container);
     this.panelBody.scrollTop = 0;
+    this.panel.classList.remove('scrolled');
     tool._container.classList.remove('pv-enter');
     void tool._container.offsetWidth; // restart the enter animation
     tool._container.classList.add('pv-enter');
     this.panelTitle.textContent = tool.title || tool.label;
+    this.panel.setAttribute('aria-label', tool.title || tool.label);
     this.active = { tool, ctrl: tool._ctrl };
     this._lastInGroup[this._groupOf(tool)] = tool.id;
     this.root.classList.add('panel-open');
@@ -250,8 +277,14 @@ export class Shell extends EventTarget {
     ds.setProperty('--cover-right', ins.right + 'px');
     ds.setProperty('--cover-bottom', ins.bottom + 'px');
     ds.setProperty('--cover-left', ins.left + 'px');
-    const W = this.root.clientWidth || window.innerWidth;
+    const W = this.root.clientWidth || window.innerWidth, H = this.root.clientHeight || window.innerHeight;
     ds.setProperty('--pv-free-cx', Math.round(ins.left + (W - ins.left - ins.right) / 2) + 'px');
+    // toasts sit just above the sheet; when the sheet leaves no room for them (full
+    // height) they float over its lower edge instead of covering the top bar
+    const topBarBottom = this.topBar.offsetTop + this.topBar.offsetHeight;
+    const roomy = H - ins.bottom - topBarBottom >= 120;
+    const tb = this.mode === 'sheet' ? this.toolbar.offsetHeight : this.safeInsets().bottom;
+    ds.setProperty('--pv-toast-bottom', Math.round((roomy ? Math.max(ins.bottom, tb) : tb) + 14) + 'px');
     const ev = new Event('layout');
     ev.live = live; ev.insets = ins;
     this.dispatchEvent(ev);
@@ -262,7 +295,7 @@ export class Shell extends EventTarget {
     let raf = 0;
     const relayout = () => {
       if (raf) return;
-      raf = requestAnimationFrame(() => { raf = 0; this.root.classList.toggle('pv-side', this.mode === 'side'); this._applySheetHeight(); this._emitLayout(false); });
+      raf = requestAnimationFrame(() => { raf = 0; this.root.classList.toggle('pv-side', this.mode === 'side'); this._applySheetHeight(); this._fitSubTabs(); this._emitLayout(false); });
     };
     this.root.classList.toggle('pv-side', this.mode === 'side');
     this._mq.addEventListener?.('change', relayout);
@@ -280,19 +313,29 @@ export class Shell extends EventTarget {
     let drag = null;
     let raf = 0;
     const samples = [];
+    // The grip and the whole header row drag the sheet, sub-tabs and the close
+    // button included: a tap still activates them, a vertical drag moves the sheet
+    // (the pointer is captured only once the drag starts, so taps keep their target),
+    // a horizontal drag scrolls the sub-tabs.
     const start = (e) => {
-      if (this.mode !== 'sheet' || !this.active) return;
-      if (e.target.closest('button, input, select, a') && e.currentTarget !== this.handle) return;
-      drag = { id: e.pointerId, y0: e.clientY, h0: this._sheetPx, moved: false, el: e.currentTarget };
+      if (this.mode !== 'sheet' || !this.active || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, h0: this._sheetPx, moved: false, el: e.currentTarget };
       samples.length = 0;
       samples.push([e.clientY, e.timeStamp]);
-      e.currentTarget.setPointerCapture(e.pointerId);
+      if (drag.el === this.handle) drag.el.setPointerCapture(e.pointerId);
     };
     const move = (e) => {
       if (!drag || e.pointerId !== drag.id) return;
-      const dy = e.clientY - drag.y0;
-      if (!drag.moved && Math.abs(dy) < 6) return;
-      if (!drag.moved) { drag.moved = true; this.panel.classList.add('dragging'); }
+      const dy = e.clientY - drag.y0, dx = e.clientX - drag.x0;
+      if (!drag.moved) {
+        if (Math.abs(dy) < 6 || Math.abs(dy) < Math.abs(dx)) {
+          if (Math.abs(dx) > 10 && drag.el !== this.handle) drag = null; // horizontal: sub-tab scroll
+          return;
+        }
+        drag.moved = true;
+        this.panel.classList.add('dragging');
+        try { drag.el.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+      }
       const hs = this.snapHeights();
       let nh = drag.h0 - dy;
       // rubber band above 'full' and below 'peek'
@@ -307,6 +350,11 @@ export class Shell extends EventTarget {
       if (!drag || e.pointerId !== drag.id) return;
       const d = drag; drag = null;
       this.panel.classList.remove('dragging');
+      if (d.moved) {
+        // the click that may follow a drag must not activate a tab or close the panel
+        this._suppressClick = true;
+        setTimeout(() => { this._suppressClick = false; }, 0);
+      }
       if (!d.moved) {
         // tap on the grip cycles peek -> half -> full -> peek
         if (d.el === this.handle && e.type === 'pointerup') { haptic('tick'); this.setSheetSnap(SNAP_ORDER[(SNAP_ORDER.indexOf(this.sheetSnap) + 1) % SNAP_ORDER.length]); }
@@ -333,17 +381,29 @@ export class Shell extends EventTarget {
 
   // ------------------------------------------------------------ back button
   _setupBack() {
-    // Android back: dialogs/menus first, then temporary modes, then the panel; false lets the app exit
-    window.__onAndroidBack = () => {
+    // Android back: dialogs/menus first, then temporary modes, then the panel. With
+    // nothing left to close, a first back only warns and a second one within 2 s
+    // exits (false lets the Android shell finish the activity).
+    const back = () => {
       if (hasOpenLayer()) { closeTopLayer(); return true; }
       const bh = this.app?._backHandlers;
       if (bh?.length) { const fn = bh[bh.length - 1]; if (fn() !== false) return true; }
       if (this.active) { this.closePanel(); return true; }
       return false;
     };
+    let armed = -Infinity;
+    window.__onAndroidBack = () => {
+      if (back()) { armed = -Infinity; return true; }
+      const now = performance.now();
+      if (now - armed < 2000) return false;
+      armed = now;
+      haptic('tick');
+      toast('Premi di nuovo Indietro per uscire', { ms: 2000 });
+      return true;
+    };
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
-      if (window.__onAndroidBack()) e.preventDefault();
+      if (back()) e.preventDefault();
     });
   }
 }

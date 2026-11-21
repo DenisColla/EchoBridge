@@ -83,7 +83,9 @@ export function create(app, shell) {
   // microtask so every module's 'ready' listener and main.js's history.reset() have run
   // (no frame is drawn in between, so the default scene never flashes).
   app.addEventListener('ready', () => queueMicrotask(() => {
-    try { scenes.pristine = app.serialize(); } catch { scenes.pristine = null; }
+    // "Nuova scena" template: the default startup scene. When the autosave replaced it,
+    // the scene on screen is the user's: newScene() then rebuilds from scenes.baseScene.
+    if (!earlyRestored) { try { scenes.pristine = app.serialize(); } catch { scenes.pristine = null; } }
     // the render module owns quality when present; otherwise apply our own cap
     if (!app.modules.render && settings.get('quality')) S.applyQuality(ctx, settings.get('quality'));
     const restored = earlyRestored || scenes.restoreAutosave();
@@ -102,6 +104,8 @@ export function create(app, shell) {
   const mod = {
     /** main.js asks modules for the initial scene before creating the default character */
     provideInitialScene() {
+      // module defaults (lights, camera, guides, style, no props), before anything is restored
+      try { scenes.baseScene = app.serialize(); } catch { scenes.baseScene = null; }
       earlyRestored = scenes.restoreAutosave();
       return earlyRestored;
     },

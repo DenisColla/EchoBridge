@@ -19,6 +19,8 @@ export const ROLL_LIMIT = 45;
 export const MAX_VIEWS = 6;
 /** lowest camera height (m). Just above the floor: the ground is single-sided. */
 export const CAMERA_FLOOR = 0.02;
+/** OrbitControls damping per 60 Hz frame; rescaled to the real frame time (120 Hz displays) */
+const DAMPING_60HZ = 0.1;
 
 export const QUICK_ANGLES = [
   { id: 'eye', label: 'Altezza occhi' },
@@ -76,7 +78,7 @@ export class CameraRig extends THREE.EventDispatcher {
   _tune() {
     const c = this.controls;
     c.enableDamping = true;
-    c.dampingFactor = 0.1;
+    c.dampingFactor = DAMPING_60HZ;
     c.rotateSpeed = 0.85;
     c.zoomSpeed = 1.1;
     c.panSpeed = 0.9;
@@ -106,6 +108,8 @@ export class CameraRig extends THREE.EventDispatcher {
       this._startTween({ focal: f, radius: d1 }, { duration: 420, commit: commit ? 'obiettivo' : null, mode: 'orbit' });
       return;
     }
+    // a direct change wins over a running transition (which would overwrite it next frame)
+    if (this.tween) this._endTween(false);
     if (keepFraming) {
       const t = this.controls.target, p = this.camera.position;
       const d0 = p.distanceTo(t);
@@ -128,14 +132,22 @@ export class CameraRig extends THREE.EventDispatcher {
 
   // ---------------------------------------------------------------- roll
   setRoll(deg, { commit = false } = {}) {
+    if (this.tween) this._endTween(false);
     this.roll = Math.max(-ROLL_LIMIT, Math.min(ROLL_LIMIT, deg));
     this._changed();
     if (commit) this.commit('olandese');
   }
 
   // ---------------------------------------------------------------- per frame
-  /** Called after OrbitControls.update(). Returns true while animating. */
-  onFrame(now) {
+  /**
+   * Called after OrbitControls.update(). Returns true while animating.
+   * dt (s): frame time, used to keep the orbit inertia frame-rate independent.
+   */
+  onFrame(now, dt = 1 / 60) {
+    // OrbitControls applies dampingFactor once per update(): at 120 Hz the inertia
+    // would die out twice as fast. Same decay per second as 0.1 at 60 Hz.
+    const f = 1 - Math.pow(1 - DAMPING_60HZ, Math.max(1 / 240, Math.min(0.1, dt || 1 / 60)) * 60);
+    if (Math.abs(this.controls.dampingFactor - f) > 1e-4) this.controls.dampingFactor = f;
     let animating = false;
     if (this.tween) animating = this._stepTween(now);
     this._clampFloor();
@@ -223,6 +235,9 @@ export class CameraRig extends THREE.EventDispatcher {
     this.controls.update();
     this._changed();
     if (tw.commit) this.commit(tw.commit);
+    // framing actions compose the full canvas (= the export); while a tool panel
+    // covers part of it, let the UI view offset bring the subject back into the free area
+    if (completed) this.app.modules?.ui?.viewOffset?.update?.({ keepIfVisible: true });
   }
 
   get animating() { return !!this.tween; }
@@ -264,7 +279,12 @@ export class CameraRig extends THREE.EventDispatcher {
     d = this._clampDist(d);
     _v2.subVectors(cam.position, this.controls.target).normalize();
     const P = C.clone().addScaledVector(_v2, d);
-    if (!animate) { this.controls.target.copy(C); cam.position.copy(P); this.controls.update(); this._changed(); if (commit) this.commit('inquadra'); return; }
+    if (!animate) {
+      if (this.tween) this._endTween(false);
+      this.controls.target.copy(C); cam.position.copy(P); this.controls.update(); this._changed();
+      if (commit) this.commit('inquadra');
+      return;
+    }
     this._startTween({ target: C, position: P }, { duration: 520, commit: commit ? 'inquadra' : null, mode: 'linear' });
   }
 
@@ -370,19 +390,31 @@ export class CameraRig extends THREE.EventDispatcher {
   }
 
   // ---------------------------------------------------------------- saved views
+  /**
+   * Small JPEG of the current view for the saved-view slot. Rendered with the
+   * plain camera projection (never the UI view offset used while a panel is
+   * open) and keeping the canvas aspect, so it shows the real framing.
+   */
   _captureThumb() {
-    try {
-      const app = this.app, src = app.canvas;
-      app.renderNow(); // drawing buffer is valid until the end of this task
-      const W = 120, H = 80;
+    const app = this.app, src = app.canvas;
+    const draw = () => {
+      app.renderNow(); // the drawing buffer stays valid until the end of this task
+      const sw = src.width, sh = src.height;
+      const k = 120 / Math.max(sw, sh);
+      const W = Math.max(8, Math.round(sw * k)), H = Math.max(8, Math.round(sh * k));
       const c = document.createElement('canvas');
       c.width = W; c.height = H;
       const g = c.getContext('2d');
-      const sw = src.width, sh = src.height;
-      const s = Math.min(sw / W, sh / H);
       g.fillStyle = '#2a2c33'; g.fillRect(0, 0, W, H);
-      g.drawImage(src, (sw - W * s) / 2, (sh - H * s) / 2, W * s, H * s, 0, 0, W, H);
+      g.imageSmoothingQuality = 'high';
+      g.drawImage(src, 0, 0, sw, sh, 0, 0, W, H);
       return c.toDataURL('image/jpeg', 0.72);
+    };
+    try {
+      const vo = app.modules?.ui?.viewOffset;
+      const url = vo?.without ? vo.without(draw) : draw();
+      app.invalidate(); // back to the on-screen projection on the next frame
+      return url;
     } catch { return null; }
   }
 

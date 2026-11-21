@@ -9,12 +9,13 @@
 import './face.css';
 import * as THREE from 'three';
 import { faceLandmarks } from './landmarks.js';
-import { createEyeTexture } from './eyeTexture.js';
+import { createEyeTexture, IRIS_UV, PUPIL_UV } from './eyeTexture.js';
 import { Lashes } from './lashes.js';
 import { Brows, BROW_BY_ID } from './brows.js';
 import { composeExpression, sameWeights, PRESET_BY_ID, FINE_BY_ID } from './expressions.js';
 import { aimHeadLocal, freeTarget, headWorldMatrix } from './gaze.js';
 import { buildFacePanel } from './panel.js';
+import { tongueFollowsJaw } from './mouth.js';
 
 export const DEFAULT_FACE = Object.freeze({
   preset: 'neutral', intensity: 1, fine: {}, mirror: false,
@@ -26,6 +27,8 @@ export const DEFAULT_HAIR = '#3a2819';
 
 /** Material spec that hides the MakeHuman eyelash helper (draw group 1 of ch.body). */
 const HIDDEN_LASH_SPEC = Object.freeze({ kind: 'lashes', color: '#000000', opacity: 0, alphaTest: 0.5, pvFaceHidden: true });
+/** Glossy cornea shells over the irises (catchlights in the right place, see render/materials.js). */
+const CORNEA_SPEC = Object.freeze({ kind: 'eye', cornea: true });
 const CORE_BODY_SPEC = (ch) => [
   { kind: 'skin', color: ch.appearance.skin, lips: ch.appearance.lips },
   { kind: 'lashes', color: '#1a1410' }, { kind: 'teeth', color: '#efe9dc' }, { kind: 'tongue', color: '#b4545a' },
@@ -52,6 +55,35 @@ export function faceState(ch) {
   return st;
 }
 
+/**
+ * Cornea shells: the MakeHuman eye proxy has a bulging cornea over each (concave)
+ * iris, UV-mapped into a corner of the eye texture that the eyeball material
+ * cuts away. They become a separate mesh sharing the eye mesh's attributes
+ * (positions follow the eye fit, skinning follows the eye bones).
+ */
+function buildCornea(ch) {
+  const eg = ch.eyeMesh?.geometry;
+  if (!eg?.index || !eg.attributes.uv) return null;
+  const UV = eg.attributes.uv.array, I = eg.index.array;
+  const isCornea = (i) => UV[i * 2] > 0.85 && UV[i * 2 + 1] < 0.15;
+  const tris = [];
+  for (let t = 0; t < I.length; t += 3) if (isCornea(I[t]) && isCornea(I[t + 1]) && isCornea(I[t + 2])) tris.push(I[t], I[t + 1], I[t + 2]);
+  if (!tris.length) return null;
+  if (!eg.attributes.normal) eg.computeVertexNormals();
+  const g = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal', 'uv', 'skinIndex', 'skinWeight']) if (eg.attributes[name]) g.setAttribute(name, eg.attributes[name]);
+  g.setIndex(tris);
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10);
+  const mesh = new THREE.SkinnedMesh(g, []);
+  mesh.name = 'face:cornea';
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.renderOrder = 1; // after the opaque eyeballs and lids
+  mesh.userData.faceModule = 'cornea';
+  mesh.userData.pickable = false;
+  return mesh;
+}
+
 // ====================================================================== per character
 class FaceRig {
   constructor(ctl, ch) {
@@ -60,6 +92,8 @@ class FaceRig {
     const L = ctl.landmarks(ch);
     this.lashes = new Lashes(ch, L.lashGrids);
     ch.addAttachment(this.lashes.mesh);
+    this.cornea = buildCornea(ch);
+    if (this.cornea) ch.addAttachment(this.cornea);
     this.brows = new Brows(ch, L);
     this.boundStyle = null; // brow style / body preset currently bound
     this.boundPreset = null;
@@ -81,6 +115,12 @@ class FaceRig {
     for (const [k, fn] of Object.entries(this._on)) this.ch.removeEventListener(k, fn);
     this.ch.removeAttachment(this.lashes.mesh);
     if (this.brows.mesh) this.ch.removeAttachment(this.brows.mesh);
+    if (this.cornea) {
+      // the attributes belong to the eye mesh: only the cornea's own index buffer goes
+      const g = this.cornea.geometry;
+      for (const name of Object.keys(g.attributes)) g.deleteAttribute(name);
+      this.ch.removeAttachment(this.cornea);
+    }
     this.lashes.dispose();
     this.brows.dispose();
   }
@@ -94,9 +134,11 @@ class FaceRig {
     const ch = this.ch, mats = this.ctl.materials, ap = ch.appearance;
     const eyeTex = this.ctl.eyeTexture;
     if (eyeTex && (force || ch.eyeMesh.material?.map !== eyeTex || this._eyeColor !== ap.eyes)) {
-      mats.apply(ch.eyeMesh, { kind: 'eye', color: ap.eyes, map: eyeTex });
+      // iris: exact iris / pupil circles of the procedural texture (crisp ink eyes in 'lines')
+      mats.apply(ch.eyeMesh, { kind: 'eye', color: ap.eyes, map: eyeTex, iris: this.ctl.irisGeo });
       this._eyeColor = ap.eyes;
     }
+    if (this.cornea && (force || !mats.isTracked?.(this.cornea))) mats.apply(this.cornea, CORNEA_SPEC);
     const bm = ch.body.material;
     if (force || !Array.isArray(bm) || !bm[1]?.userData?.pvFaceHidden) {
       const cur = mats.tracked?.get(ch.body);
@@ -110,7 +152,8 @@ class FaceRig {
       this.matKey = key;
       const c = hairColors(ap.hair);
       mats.apply(this.lashes.mesh, { kind: 'lashes', color: c.lash });
-      if (this.brows.mesh) mats.apply(this.brows.mesh, { kind: 'hair', color: c.brow, roughness: 0.6, sheen: 0.2, vertexColors: true });
+      // kind 'brows': shaded like hair, never outlined by the ink pass (no hatching scribbles)
+      if (this.brows.mesh) mats.apply(this.brows.mesh, { kind: 'brows', color: c.brow, roughness: 0.6, sheen: 0.2, vertexColors: true });
     }
   }
 
@@ -189,6 +232,8 @@ class FaceController extends THREE.EventDispatcher {
     this._pendingExpr = new Set();
     this._raf = 0;
     this.onGaze = null; // panel callback (character) while visible
+    // open-mouth expressions: the tongue must drop with the jaw (see mouth.js)
+    try { tongueFollowsJaw(app.model); } catch (e) { console.warn('[face] tongue fix skipped', e); }
     app.addRenderHook(() => {
       let changed = false;
       for (const rig of this.rigs.values()) changed = rig.flush() || changed;
@@ -205,7 +250,11 @@ class FaceController extends THREE.EventDispatcher {
     // texture shows meanwhile); every rig picks it up in its next flush
     if (!this.eyeTexture && !this._texPending) {
       this._texPending = true;
-      const build = () => { this.eyeTexture = createEyeTexture(L.eyeUV, 1024); this.app.invalidate(); };
+      const build = () => {
+        this.irisGeo = [...L.eyeUV[0], ...L.eyeUV[1], IRIS_UV, PUPIL_UV].map((x) => Math.round(x * 1e5) / 1e5);
+        this.eyeTexture = createEyeTexture(L.eyeUV, 1024);
+        this.app.invalidate();
+      };
       if (window.requestIdleCallback) requestIdleCallback(build, { timeout: 600 }); else setTimeout(build, 60);
     }
     return L;

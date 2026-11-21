@@ -143,7 +143,7 @@ export function buildSkirtDraft(ctx, def, spec) {
     const blend = loose * below;
     for (let j = 0; j < segs; j++) { const o = (k * segs + j) * nb; for (let b = 0; b < nb; b++) W[o + b] = W[o + b] * (1 - blend) + pel[b] * blend; }
     // angular diffusion grows towards the hem
-    const iters = Math.round(2 + 14 * below * (0.5 + loose));
+    const iters = Math.round(3 + 36 * below * (0.5 + loose));
     for (let it = 0; it < iters; it++) {
       row.set(W.subarray(k * segs * nb, (k + 1) * segs * nb));
       for (let j = 0; j < segs; j++) {

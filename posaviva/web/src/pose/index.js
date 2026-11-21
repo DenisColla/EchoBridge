@@ -7,7 +7,7 @@
 // Public API: app.posing (see the bottom of create()).
 import './pose.css';
 import * as THREE from 'three';
-import { haptic, toast } from '../ui/kit.js';
+import { haptic } from '../ui/kit.js';
 import { ControlSet } from './controls.js';
 import { PoseRig } from './rig.js';
 import { IKSolver } from './ik.js';
@@ -105,9 +105,13 @@ export function create(app, shell) {
     },
     mirrorPose(ch) {
       const keep = PRESERVED_BONES.map((n) => [n, ch.getBoneRotation(n)?.clone()]);
+      const grounded = isGrounded(ch);
       const p = mirrorPose(ch.getPose());
       ch.setPose(p, false);
       for (const [n, q] of keep) if (q) ch.setBoneRotation(n, q, false);
+      ch.applyPose();
+      // the mesh is not perfectly symmetric: a grounded pose stays on the floor
+      if (grounded) settle(ch);
       ctx.edited(ch, true, 'specchia posa');
     },
     resetPose(ch) {
@@ -218,6 +222,20 @@ export function create(app, shell) {
     if (ch) { ch.addEventListener('pose', onPose); ch.addEventListener('shape', onPose); }
   }
   app.addEventListener('selection', () => { watch(); syncHighlight(); notify('selection'); });
+
+  // Undo / redo restore the scene through app.deserialize(), which re-selects the
+  // character without a part: keep posing the same part (same character object,
+  // restored in place) instead of making the user tap it again after every undo.
+  let lastSel = { character: null, part: null };
+  app.addEventListener('selection', (e) => {
+    const restoring = !!app.history?.restoring;
+    if (!restoring) { lastSel = { character: e.character, part: e.part }; return; }
+    const { character: ch, part } = lastSel;
+    if (!ch || !part || e.character !== ch || e.part) return;
+    queueMicrotask(() => {
+      if (app.selection.character === ch && !app.selection.part && app.characters.includes(ch) && controls.get(part)) app.select(ch, part);
+    });
+  });
   app.addEventListener('tool', () => { syncHighlight(); app.invalidate(); });
   app.addEventListener('characters', () => notify('characters'));
 

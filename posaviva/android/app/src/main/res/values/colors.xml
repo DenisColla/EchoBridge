@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Window / WebView background: matches the web app, so there is never a white flash. -->
-    <color name="posaviva_background">#FF121318</color>
+    <color name="posaviva_background">#FF0E0F13</color>
     <color name="posaviva_primary">#FF3B3FD8</color>
 </resources>

@@ -20,7 +20,7 @@ export const LIGHT_PRESETS = [
     id: 'rembrandt', label: 'Rembrandt',
     ambient: { intensity: 0.22, kelvin: 6000, ground: '#2b2622' },
     lights: [
-      { role: 'key', type: 'sun', relAz: 50, el: 42, intensity: 3.0, kelvin: 4600, shadow: true, soft: 0.22 },
+      { role: 'key', type: 'sun', relAz: 55, el: 45, intensity: 3.0, kelvin: 4600, shadow: true, soft: 0.14 },
       { role: 'rim', ...OFF, type: 'sun', relAz: -150, el: 30, intensity: 1.2, kelvin: 6500 },
     ],
   },
@@ -37,7 +37,7 @@ export const LIGHT_PRESETS = [
     id: 'top', label: 'Drammatica dall\'alto',
     ambient: { intensity: 0.2, kelvin: 6500, ground: '#26221f' },
     lights: [
-      { role: 'key', type: 'spot', relAz: 14, el: 72, dist: 3.4, angle: 48, penumbra: 0.5, intensity: 4.0, kelvin: 5000, shadow: true, soft: 0.2 },
+      { role: 'key', type: 'spot', relAz: 14, el: 72, dist: 3.4, angle: 48, penumbra: 0.5, intensity: 4.0, kelvin: 5000, shadow: true, soft: 0.14 },
       { role: 'rim', ...OFF, type: 'sun', relAz: -150, el: 30, intensity: 1.2, kelvin: 6500 },
     ],
   },
@@ -45,7 +45,7 @@ export const LIGHT_PRESETS = [
     id: 'horror', label: 'Dal basso (horror)',
     ambient: { intensity: 0.07, color: '#5a7a66', ground: '#0c100d' },
     lights: [
-      { role: 'key', type: 'sun', relAz: 6, el: -32, intensity: 3.0, color: '#b4f5c8', shadow: true, soft: 0.2 },
+      { role: 'key', type: 'sun', relAz: 6, el: -58, intensity: 3.2, color: '#b4f5c8', shadow: true, soft: 0.12 },
       { role: 'rim', type: 'spot', relAz: 180, el: 12, dist: 2.6, angle: 40, penumbra: 0.6, intensity: 1.8, color: '#ff4a3d', shadow: false },
     ],
   },

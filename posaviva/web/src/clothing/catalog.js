@@ -5,6 +5,7 @@
 // character. Torso heights use the body coordinate T (body.js):
 //   0 crotch, 1 hip joint, 2 waist, 3 bust/chest, 4 shoulder joint, 5 neck base
 // limb params: arm 0 shoulder .. 1 elbow .. 2 wrist, leg 0 hip .. 1 knee .. 2 ankle .. 3 toes.
+import { PART, NPART } from './body.js';
 
 export const CATEGORIES = [
   { id: 'top', label: 'Sopra' },
@@ -37,8 +38,20 @@ const ARMS = (k) => k.exclude('arms', ['armL', 'handL', 'armR', 'handR'], 0.45);
 const FEET = (k) => k.exclude('feet', ['footL', 'footR'], 0.5);
 const sleeves = (k, len) => [k.sleeve('sleeveL', 'L', len), k.sleeve('sleeveR', 'R', len)];
 const legs = (k, len) => [k.legMax('legL', 'L', len), k.legMax('legR', 'R', len)];
-/** keep only the lower legs/feet below leg param `min` (both sides) */
-const lowerLegs = (k, min) => k.custom('cuff', (v) => Math.max((k.bi.param[2][v] - min) * k.bi.limbs[3].L[1], (k.bi.param[3][v] - min) * k.bi.limbs[4].L[1]));
+/**
+ * keep only the lower legs/feet below leg param `min` (both sides). heel: also keep
+ * the vertices weighted to the foot above this (the back of the heel projects onto
+ * the shin with a param below the ankle: low shoes would be open at the back)
+ */
+const lowerLegs = (k, min, heel = 0) => {
+  const W = k.bi.topo.partW;
+  return k.custom('cuff', (v) => {
+    const c = Math.max((k.bi.param[2][v] - min) * k.bi.limbs[3].L[1], (k.bi.param[3][v] - min) * k.bi.limbs[4].L[1]);
+    if (!heel) return c;
+    const fw = Math.max(W[v * NPART + PART.footL], W[v * NPART + PART.footR]);
+    return Math.max(c, (fw - heel) * 0.12);
+  });
+};
 const crew = (k, front = 0.065, back = 0.02, extra = 0.018) => k.neckline('neck', { front, back, width: k.bi.neckRadius + extra });
 
 /** Static fold presets */
@@ -257,7 +270,7 @@ export const GARMENTS = [
   {
     id: 'miniskirt', label: 'Gonna corta', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual'], icon: 'miniskirt', kind: 'skirt',
     fabric: 'denim', color: '#2a3a55', palette: PAL.denim.concat(PAL.basic.slice(0, 2)),
-    skirt: (bi, fit) => ({ top: bi.yOfT(1.75), hem: bi.land.hipJoint - 0.33 * (bi.land.hipJoint - bi.joint('lowerleg01.L')[1]) - 0.06, ease: 0.003 + fit * 0.012, flare: 0.25 + fit * 0.35, taper: 0.05, drape: { count: 9, amp: 0.004 + fit * 0.004 }, loose: 0.55, band: 0.035 }),
+    skirt: (bi, fit) => ({ top: bi.yOfT(1.75), hem: bi.land.hipJoint - 0.33 * (bi.land.hipJoint - bi.joint('lowerleg01.L')[1]) - 0.06, ease: 0.003 + fit * 0.012, flare: 0.25 + fit * 0.35, taper: 0.05, drape: { count: 9, amp: 0.004 + fit * 0.004 }, loose: 0.3, band: 0.035 }),
     edges: { default: { type: 'hem', r: 0.0028 } },
     wrinkle: { k: 0.7, wl: 0.06 },
     details: 'skirt',
@@ -265,7 +278,7 @@ export const GARMENTS = [
   {
     id: 'pencilskirt', label: 'Gonna a tubino', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['formal'], icon: 'pencilskirt', kind: 'skirt',
     fabric: 'wool', color: '#22252b', palette: PAL.formal,
-    skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.035, ease: 0.002 + fit * 0.01, flare: 0, taper: 0.22 - fit * 0.15, drape: { count: 6, amp: 0.0015 }, loose: 0.3, band: 0.03 }),
+    skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.035, ease: 0.002 + fit * 0.01, flare: 0, taper: 0.22 - fit * 0.15, drape: { count: 6, amp: 0.0015 }, loose: 0.2, band: 0.03 }),
     edges: { default: { type: 'hem', r: 0.003, depth: 0.03 } },
     wrinkle: { k: 0.6, wl: 0.06 },
     details: 'pencil',
@@ -273,7 +286,7 @@ export const GARMENTS = [
   {
     id: 'flaredskirt', label: 'Gonna svasata midi', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'formal'], icon: 'flaredskirt', kind: 'skirt',
     fabric: 'crepe', color: '#7b2d2d', palette: PAL.basic,
-    skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] - 0.17, ease: 0.003 + fit * 0.008, flare: 0.12 + fit * 0.22, taper: 0.0, drape: { count: 8, amp: 0.026 + fit * 0.012 }, loose: 0.75, band: 0.03, segs: 96 }),
+    skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] - 0.17, ease: 0.003 + fit * 0.008, flare: 0.12 + fit * 0.22, taper: 0.0, drape: { count: 8, amp: 0.026 + fit * 0.012 }, loose: 0.35, band: 0.03, segs: 96 }),
     edges: { default: { type: 'hem', r: 0.0022 } },
     wrinkle: { k: 0.8, wl: 0.08 },
     details: 'skirt',
@@ -298,7 +311,7 @@ export const GARMENTS = [
       },
       {
         kind: 'skirt',
-        skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.02, ease: 0.004 + fit * 0.01, flare: 0.08 + fit * 0.2, taper: 0.0, drape: { count: 9, amp: 0.016 + fit * 0.01 }, loose: 0.65, band: 0.0, segs: 96 }),
+        skirt: (bi, fit) => ({ top: bi.yOfT(2.0), hem: bi.joint('lowerleg01.L')[1] + 0.02, ease: 0.004 + fit * 0.01, flare: 0.08 + fit * 0.2, taper: 0.0, drape: { count: 9, amp: 0.016 + fit * 0.01 }, loose: 0.35, band: 0.0, segs: 96 }),
         edges: { waist: { type: 'none' }, default: { type: 'hem', r: 0.0022 } },
         wrinkle: { k: 0.7, wl: 0.075 },
       },
@@ -310,7 +323,7 @@ export const GARMENTS = [
   {
     id: 'sneakers', label: 'Sneakers', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['casual', 'sport'], icon: 'sneakers',
     fabric: 'sneaker', color: '#f2f2f0', palette: PAL.shoes, sole: { color: '#cdc9c0', top: 0.026, below: 0.006, welt: 0.006 },
-    mask: (k) => [lowerLegs(k, 1.93), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5)],
+    mask: (k) => [lowerLegs(k, 1.93, 0.6), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5)],
     edges: { default: { type: 'hem', r: 0.004, depth: 0.012 } },
     fit: { thickness: 0.003, ease: [0.003, 0.008], loose: [0, 0], bridge: 30, wSmooth: 4, smooth: 24, offset: toeBox(0.007, 0.004), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
@@ -320,7 +333,7 @@ export const GARMENTS = [
   {
     id: 'dressshoes', label: 'Scarpe eleganti', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['formal'], icon: 'dressshoes',
     fabric: 'leather', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
-    mask: (k) => [lowerLegs(k, 2.03), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
+    mask: (k) => [lowerLegs(k, 2.03, 0.75), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
     edges: { default: { type: 'hem', r: 0.0022, depth: 0.01 } },
     fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
     subdiv: 0,

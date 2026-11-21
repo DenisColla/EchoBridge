@@ -88,11 +88,16 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
     this._horizon = { a: 0, b: 0, c: 0, angle: 0, p: [0, 0], d: [0, 0] };
     this._frame = { x: 0, y: 0, w: 0, h: 0 };
     this._full = { x: 0, y: 0, w: 0, h: 0 };
+    this._area = { x: 0, y: 0, w: 0, h: 0 }; // exported image on the canvas (moves with the UI view offset)
+    this._free = { x: 0, y: 0, w: 0, h: 0 }; // canvas area not covered by opaque UI (markers)
+    this._exportCam = null;
     this._L = new Float64Array(3);
     this._fonts = new Map();
     /** last computed geometry (CSS pixels): {vps:[{label,x,y,finite,onScreen}], horizon, frame} */
     this.info = { vps: [], horizon: null, frame: null };
     app.addEventListener('resize', () => { this._resize(); this.redraw(); });
+    // the off-screen VP indicators stay in the area not covered by the tool sheet / panel
+    app.addEventListener('uilayout', () => this.redraw());
     this._resize();
   }
 
@@ -178,8 +183,65 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     if (!this.active) { this.info.vps.length = 0; this.info.horizon = this.info.frame = null; return; }
     ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
-    this.info = this.drawTo(ctx, this._cssW, this._cssH, 1);
+    this.info = this.drawTo(ctx, this._cssW, this._cssH, 1, { area: this._screenArea(cam), markers: this._freeArea() });
     this.dispatchEvent(_drawnEvent);
+  }
+
+  /**
+   * Where the exported image lies on the canvas (CSS px). While a tool panel is
+   * open the UI shifts / zooms the projection with camera.setViewOffset (io
+   * module): the export (rendered without offset) then maps to this rectangle.
+   */
+  _screenArea(cam) {
+    const A = this._area, W = this._cssW, H = this._cssH, v = cam.view;
+    if (v && v.enabled && v.width > 0 && v.height > 0) {
+      const kx = W / v.width, ky = H / v.height;
+      A.x = -v.offsetX * kx; A.y = -v.offsetY * ky; A.w = v.fullWidth * kx; A.h = v.fullHeight * ky;
+    } else { A.x = 0; A.y = 0; A.w = W; A.h = H; }
+    return A;
+  }
+
+  /** Canvas area not covered by opaque UI (top bar, sheet, side panel, toolbar). */
+  _freeArea() {
+    const F = this._free, W = this._cssW, H = this._cssH;
+    let ins = null;
+    try { ins = this.shell.getViewInsets?.(); } catch { ins = null; }
+    // the floating top bar (character chip, undo, menu) always covers the top edge
+    const tb = this.shell.topBar;
+    const tbBottom = tb && tb.offsetHeight ? tb.offsetTop + tb.offsetHeight : 0;
+    const t = Math.max(ins?.top || 0, tbBottom), r = ins?.right || 0, b = ins?.bottom || 0, l = ins?.left || 0;
+    F.x = Math.min(l, W - 60); F.y = Math.min(t, H - 60);
+    F.w = Math.max(60, W - l - r); F.h = Math.max(60, H - t - b);
+    return F;
+  }
+
+  /**
+   * Draws the guides onto a captured image (app.capture output, the plain camera
+   * view at any resolution). opts.crop: the image will be cropped to the comic
+   * panel afterwards (indicators are kept inside it, no mask or border).
+   */
+  drawOnCapture(canvas, { crop = false } = {}) {
+    if (!this.active) return canvas;
+    const src = this.app.camera;
+    const cam = this._exportCam || (this._exportCam = new THREE.PerspectiveCamera());
+    cam.copy(src, false);
+    cam.view = null; // the export never carries the UI view offset
+    cam.aspect = canvas.width / canvas.height;
+    cam.updateProjectionMatrix();
+    cam.matrixWorld.copy(src.matrixWorld);
+    cam.matrixWorldInverse.copy(src.matrixWorldInverse);
+    const W = canvas.width, H = canvas.height;
+    const px = H / (this._cssH || H); // the vertical field of view is preserved: scale with the height
+    const ctx = canvas.getContext('2d');
+    ctx.save();
+    const frame = this.state.frame ? this.frameRect(W, H, px) : null;
+    try {
+      this.drawTo(ctx, W, H, px, { camera: cam, mask: false, frameBorder: !crop, markers: crop && frame ? frame : null });
+    } finally {
+      ctx.restore();
+      this.redraw(); // `info` (shared records) now describes the export: recompute the on-screen geometry
+    }
+    return canvas;
   }
 
   /** Frame rect (pixels) for a canvas of W×H, or null when no frame ratio is set. */
@@ -194,6 +256,14 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
     return out;
   }
 
+  /** Frame rect inside `area` (the exported image as shown on a W×H canvas). */
+  _frameIn(area, W, H, px, out) {
+    const k = area.w / W; // zoom of the exported image on the canvas
+    if (!this.frameRect(W, H, px, this.state.frame, out)) return null;
+    out.x = area.x + out.x * k; out.y = area.y + out.y * k; out.w *= k; out.h *= k;
+    return out;
+  }
+
   /** Normalized (0..1) frame rect of the canvas — for exporters that crop to the comic panel. */
   getFrameRectNormalized() {
     const W = this._cssW, H = this._cssH;
@@ -205,19 +275,26 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
    * Draws the guides for the current camera into any 2D context of W×H
    * pixels (px = line-width scale; e.g. an exporter drawing on a larger
    * canvas). Uses the matrices of the last rendered frame (roll included).
+   * opts: camera (default app.camera), area (rect where the exported image lies,
+   * default the whole canvas), markers (rect that holds the off-screen VP
+   * indicators, default the whole canvas), mask / frameBorder (comic panel
+   * decorations, default true).
    * Returns the computed geometry (a reused object).
    */
-  drawTo(ctx, W, H, px = 1) {
-    const s = this.state, cam = this.app.camera, info = this.info;
+  drawTo(ctx, W, H, px = 1, opts = {}) {
+    const s = this.state, cam = opts.camera || this.app.camera, info = this.info;
     const e = _M.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).elements;
     info.vps.length = 0; info.horizon = null; info.frame = null;
-    const full = this._full; full.w = W; full.h = H;
-    const F = this.frameRect(W, H, px, s.frame, this._frame) || full;
+    const full = this._full; full.x = 0; full.y = 0; full.w = W; full.h = H;
+    const area = opts.area || full;
+    const F = (s.frame && this._frameIn(area, W, H, px, this._frame)) || full;
     if (s.frame) info.frame = F;
+    info.area = s.frame ? F : area;
+    const M = opts.markers || full;
     const alpha = Math.max(0.05, Math.min(1, s.opacity));
 
     // mask outside the comic panel frame
-    if (s.frame) {
+    if (s.frame && opts.mask !== false) {
       ctx.globalAlpha = 1;
       if (this._maskKey !== s.mask) { this._maskKey = s.mask; this._maskStyle = `rgba(8,9,12,${s.mask})`; }
       ctx.fillStyle = this._maskStyle;
@@ -296,17 +373,18 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
       }
     }
 
-    // rule of thirds
+    // rule of thirds (of the panel, else of the exported image)
     if (s.thirds) {
+      const T = s.frame ? F : area;
       ctx.globalAlpha = 0.55;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1 * px;
       ctx.setLineDash(px === 1 ? DASH_1 : [6 * px, 5 * px]);
       ctx.beginPath();
       for (let i = 1; i <= 2; i++) {
-        const x = F.x + (F.w * i) / 3, y = F.y + (F.h * i) / 3;
-        ctx.moveTo(x, F.y); ctx.lineTo(x, F.y + F.h);
-        ctx.moveTo(F.x, y); ctx.lineTo(F.x + F.w, y);
+        const x = T.x + (T.w * i) / 3, y = T.y + (T.h * i) / 3;
+        ctx.moveTo(x, T.y); ctx.lineTo(x, T.y + T.h);
+        ctx.moveTo(T.x, y); ctx.lineTo(T.x + T.w, y);
       }
       ctx.stroke();
       ctx.setLineDash(NO_DASH);
@@ -314,10 +392,10 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
     ctx.restore();
 
     // vanishing point markers (on screen) or edge indicators (off screen)
-    for (let i = 0; i < info.vps.length; i++) this._drawMarker(ctx, info.vps[i], W, H, px);
+    for (let i = 0; i < info.vps.length; i++) this._drawMarker(ctx, info.vps[i], M, px);
 
     // frame border + label
-    if (s.frame) {
+    if (s.frame && opts.frameBorder !== false) {
       ctx.globalAlpha = 0.9;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5 * px;
@@ -386,10 +464,11 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
     return res;
   }
 
-  _drawMarker(ctx, vp, W, H, px) {
+  /** VP marker, or an arrow on the edge of rect M pointing at an off-screen VP. */
+  _drawMarker(ctx, vp, M, px) {
     ctx.globalAlpha = 1;
     if (!vp.finite) return; // parallel lines: nothing to point at
-    const onScreen = vp.x >= 0 && vp.x <= W && vp.y >= 0 && vp.y <= H;
+    const onScreen = vp.x >= M.x && vp.x <= M.x + M.w && vp.y >= M.y && vp.y <= M.y + M.h;
     vp.onScreen = onScreen;
     if (onScreen) {
       ctx.lineWidth = 2 * px;
@@ -403,10 +482,10 @@ export class PerspectiveGuides extends THREE.EventDispatcher {
       this._label(ctx, vp.label, vp.x + 11 * px, vp.y - 10 * px, vp.color, px, 'left');
       return;
     }
-    // off-screen: arrow on the screen edge, on the line from the center toward the VP
-    const cx = W / 2, cy = H / 2, m = 18 * px;
+    // off-screen: arrow on the edge of M, on the line from its center toward the VP
+    const cx = M.x + M.w / 2, cy = M.y + M.h / 2, m = 18 * px;
     const dx = vp.x - cx, dy = vp.y - cy;
-    const k = Math.min(Math.abs((W / 2 - m) / (dx || 1e-9)), Math.abs((H / 2 - m) / (dy || 1e-9)));
+    const k = Math.min(Math.abs((M.w / 2 - m) / (dx || 1e-9)), Math.abs((M.h / 2 - m) / (dy || 1e-9)));
     const ex = cx + dx * k, ey = cy + dy * k, a = Math.atan2(dy, dx);
     ctx.save();
     ctx.translate(ex, ey); ctx.rotate(a);

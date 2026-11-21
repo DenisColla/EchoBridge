@@ -16,9 +16,17 @@
 // the profile has broad rounded crests and sharp valleys. Per frame only the
 // four direction weights x amplitude are computed per COARSE vertex (cheap),
 // interpolated to the fine vertices and combined with the static fields:
-//   disp = static * k + amp * sum_p a_p * (field_p - 0.3), clamped to the
-// inward room (never into the body or a lower layer). GPU skinning moves the
-// displaced rest surface; normals are recomputed on the CPU.
+//   disp = k * (static + amp * sum_p a_p * (field_p - bias)) (+ lift)
+// where the valleys would go deeper than the inward room (body or lower layer)
+// the whole fold pattern is lifted outwards instead of being flattened.
+// Strain is measured against a fold-free reference (rest pose with straight
+// arms: the A-pose elbows are already bent), the strain tensor is smoothed
+// before its decomposition (coherent ridges) and fold wavelengths are kept
+// above ~5.5 vertex spacings (assemble.js) so folds never alias into lumps.
+// GPU skinning moves the displaced rest surface; normals are recomputed on the
+// CPU. Layering (garments pushed over the ones below) and the skirt / leg
+// collision are applied on top of it by GarmentRuntime (assemble.js).
+import * as THREE from 'three';
 import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
 import { foldProfile } from './build.js';
 
@@ -27,6 +35,13 @@ const noiseGen = new ImprovedNoise();
 export const noise3 = (x, y, z) => noiseGen.noise(x, y, z) * 1.6;
 
 const SQ2 = Math.SQRT1_2;
+/** fold field centre: crests rise by (1 - bias), valleys sink by bias (x amplitude) */
+export const FOLD_BIAS = 0.5;
+/** compression where folds start / where they reach full depth (fraction of the length) */
+const COMP_MIN = 0.012, COMP_FULL = 0.18;
+/** depth of fully developed folds relative to the garment fold amplitude (peak to valley ~ 0.5 wavelength) */
+const RESPONSE = 0.45;
+const TEN_MIN = 0.04, TEN_FULL = 0.26;
 
 /**
  * Wrinkle runtime of one garment part.
@@ -51,6 +66,7 @@ export class WrinklePart {
     this.kc = src.kc ?? 1;
     this.kt = src.kt ?? 0.35;
     this.spread = src.spread ?? 4;
+    this.bias = src.bias ?? FOLD_BIAS;
     this.Q = new Float32Array(this.n * 3);
     this.A = new Float32Array(this.n * 4); // per coarse vertex direction amplitudes
     this.A2 = new Float32Array(this.n * 4);
@@ -59,11 +75,18 @@ export class WrinklePart {
     // bones influencing this part: their skin matrices are compared every
     // frame, an unchanged set means unchanged folds (posing a finger never
     // re-evaluates the trousers)
+    this._basis = c.basis;
+    this._refM = src.refM;
+    this.rebind();
+  }
+
+  /** (Re)derives everything that depends on the skin weights (after they changed). */
+  rebind() {
     const used = new Set();
     for (let i = 0; i < this.skinW.length; i++) if (this.skinW[i] > 0) used.add(this.skinIdx[i]);
     this.bones = Int32Array.from([...used]);
     this.lastM = new Float32Array(this.bones.length * 16).fill(NaN);
-    this._precompute(c.basis);
+    this._precompute(this._basis, this._refM);
   }
 
   /** True when the skin matrices of this part's bones changed since the last update. */
@@ -100,7 +123,7 @@ export class WrinklePart {
   }
 
   /** Rest tangent frames, 2D neighbour coords and the inverse second moments. */
-  _precompute(basis) {
+  _precompute(basis, refM) {
     const { n, G, adj } = this;
     const deg = adj.off[n];
     this.R2 = new Float32Array(deg * 2);
@@ -121,8 +144,29 @@ export class WrinklePart {
       const det = m11 * m22 - m12 * m12;
       if (det > 1e-14) { this.Minv[i * 3] = m22 / det; this.Minv[i * 3 + 1] = -m12 / det; this.Minv[i * 3 + 2] = m11 / det; }
     }
-    // rest tensor (curvature makes it slightly != identity): subtracted later
-    this._tensors(G, this.Crest, null);
+    // fold-free reference tensor, subtracted later. The reference is the rest
+    // pose with straightened elbows (see referenceSkin): the A-pose elbows are
+    // ~40 deg flexed, a sleeve built there would show no folds when sitting
+    // with bent arms and pulled ones on a straight arm.
+    if (refM) { this._skin(refM); this._tensors(this.Q, this.Crest, null); } else this._tensors(G, this.Crest, null);
+  }
+
+  /** Laplacian smoothing of the per-vertex strain tensors (in place). */
+  _smoothTensor(C, passes) {
+    const { n, adj } = this;
+    const T = this._Ct || (this._Ct = new Float32Array(n * 3));
+    for (let p = 0; p < passes; p++) {
+      for (let i = 0; i < n; i++) {
+        let a = 0, b = 0, c = 0;
+        const j0 = adj.off[i], j1 = adj.off[i + 1];
+        for (let j = j0; j < j1; j++) { const u = adj.adj[j] * 3; a += C[u]; b += C[u + 1]; c += C[u + 2]; }
+        const o = i * 3, d = j1 - j0;
+        if (!d) { T[o] = C[o]; T[o + 1] = C[o + 1]; T[o + 2] = C[o + 2]; continue; }
+        const h = 0.5 / d;
+        T[o] = C[o] * 0.5 + a * h; T[o + 1] = C[o + 1] * 0.5 + b * h; T[o + 2] = C[o + 2] * 0.5 + c * h;
+      }
+      C.set(T);
+    }
   }
 
   /** C = F^T F per coarse vertex from positions X. out: n*3 (c11, c12, c22). */
@@ -157,6 +201,9 @@ export class WrinklePart {
     this._skin(M);
     const C = this._C || (this._C = new Float32Array(n * 3));
     this._tensors(this.Q, C, this.Crest);
+    // the strain of a skinned mesh is noisy at the vertex scale: smoothing the
+    // tensor (not the amplitudes) gives coherent fold directions, hence long ridges
+    this._smoothTensor(C, 2);
     const kc = this.kc, kt = this.kt;
     let maxA = 0;
     for (let i = 0; i < n; i++) {
@@ -165,14 +212,18 @@ export class WrinklePart {
       const l1 = Math.sqrt(Math.max(0, tr - dd)), l2 = Math.sqrt(Math.max(0, tr + dd));
       const comp = 1 - l1, ten = l2 - 1;
       let amp = 0;
-      // response saturates: beyond ~35% compression fabric stacks into the same folds
-      if (comp > 0.015) amp += kc * Math.sqrt(Math.min(comp, 0.35) - 0.015);
-      if (ten > 0.04) amp += kt * Math.sqrt(Math.min(ten, 0.3) - 0.04);
+      // response (fraction of the full fold depth): a few % of compression already
+      // buckles the fabric visibly; beyond ~30% it stacks into the same folds
+      if (comp > COMP_MIN) amp += kc * RESPONSE * Math.sqrt(Math.min(1, (comp - COMP_MIN) / COMP_FULL));
+      if (ten > TEN_MIN) amp += kt * RESPONSE * 0.6 * Math.sqrt(Math.min(1, (ten - TEN_MIN) / TEN_FULL));
       // direction of the smallest stretch: cos/sin of twice its angle
       let c2 = 1, s2 = 0;
       if (dd > 1e-6) { c2 = -(a - c) * 0.5 / dd; s2 = -b / dd; }
-      const w0 = c2 > 0 ? c2 * c2 : 0, w90 = c2 < 0 ? c2 * c2 : 0;
-      const w45 = s2 > 0 ? s2 * s2 : 0, w135 = s2 < 0 ? s2 * s2 : 0;
+      // direction weights (sum 1), sharpened so that one fold field dominates:
+      // blending two orientations gives lumps instead of ridges
+      const cc = c2 * c2 * c2 * c2, ss = s2 * s2 * s2 * s2, nw = 1 / (cc + ss || 1);
+      const w0 = c2 > 0 ? cc * nw : 0, w90 = c2 < 0 ? cc * nw : 0;
+      const w45 = s2 > 0 ? ss * nw : 0, w135 = s2 < 0 ? ss * nw : 0;
       A[i * 4] = amp * w0; A[i * 4 + 1] = amp * w90; A[i * 4 + 2] = amp * w45; A[i * 4 + 3] = amp * w135;
       if (amp > maxA) maxA = amp;
     }
@@ -195,7 +246,7 @@ export class WrinklePart {
       const t = src; src = dst; dst = t;
     }
     const AF = src;
-    const { pIdx, pW, prof, amp, room, stat, disp } = this;
+    const { pIdx, pW, prof, amp, room, stat, disp, bias } = this;
     for (let i = 0; i < nf; i++) {
       let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
       const o4 = i * 4;
@@ -205,8 +256,13 @@ export class WrinklePart {
         const p = pIdx[o4 + q] * 4;
         a0 += w * AF[p]; a1 += w * AF[p + 1]; a2 += w * AF[p + 2]; a3 += w * AF[p + 3];
       }
-      let d = stat[i] + amp[i] * (a0 * prof[o4] + a1 * prof[o4 + 1] + a2 * prof[o4 + 2] + a3 * prof[o4 + 3]);
-      d *= k;
+      const ai = amp[i] * k;
+      let d = stat[i] * k + ai * (a0 * prof[o4] + a1 * prof[o4 + 1] + a2 * prof[o4 + 2] + a3 * prof[o4 + 3]);
+      // the fabric cannot fold into the body: where the inward room is smaller
+      // than the valleys, the whole fold pattern rises (it buckles outwards)
+      // instead of being flattened against the body
+      const lift = ai * (a0 + a1 + a2 + a3) * bias - room[i];
+      if (lift > 0) d += lift;
       const r = -room[i];
       disp[i] = d < r ? r : d;
     }
@@ -224,19 +280,52 @@ export class WrinklePart {
   }
 }
 
+const _ma = new THREE.Matrix4(), _mb = new THREE.Matrix4(), _q = new THREE.Quaternion();
+const _p0 = new THREE.Vector3(), _p1 = new THREE.Vector3(), _p2 = new THREE.Vector3(), _ax = new THREE.Vector3();
+/** Residual elbow flexion of the fold-free reference arm (rad). */
+const REF_ELBOW = 0.14;
+
+/**
+ * Skin matrices (rig space, 16 per bone) of the fold-free reference pose: the
+ * rest pose with the forearms swung about the elbow until the arm is almost
+ * straight. Folds are measured against it.
+ */
+export function referenceSkin(ch) {
+  const NB = ch.bones.length, M = new Float32Array(NB * 16), model = ch.model;
+  for (let i = 0; i < NB; i++) M[i * 16] = M[i * 16 + 5] = M[i * 16 + 10] = M[i * 16 + 15] = 1;
+  for (const side of ['L', 'R']) {
+    const ua = model.boneIndex.get('upperarm01.' + side), la = model.boneIndex.get('lowerarm01.' + side), wr = model.boneIndex.get('wrist.' + side);
+    if (ua === undefined || la === undefined || wr === undefined) continue;
+    _p0.setFromMatrixPosition(ch.restGlobal[ua]); _p1.setFromMatrixPosition(ch.restGlobal[la]); _p2.setFromMatrixPosition(ch.restGlobal[wr]);
+    const u = _p1.clone().sub(_p0).normalize(), f = _p2.clone().sub(_p1).normalize();
+    const ang = Math.acos(Math.max(-1, Math.min(1, u.dot(f)))) - REF_ELBOW;
+    if (!(ang > 0.02)) continue;
+    _ax.crossVectors(f, u).normalize();
+    _q.setFromAxisAngle(_ax, ang);
+    // rotation about the elbow joint: T(p1) R T(-p1)
+    _ma.makeTranslation(_p1.x, _p1.y, _p1.z).multiply(_mb.makeRotationFromQuaternion(_q)).multiply(_mb.makeTranslation(-_p1.x, -_p1.y, -_p1.z));
+    const below = new Uint8Array(NB);
+    for (let b = 0; b < NB; b++) {
+      below[b] = b === la || (model.bones[b].parent >= 0 && below[model.bones[b].parent]) ? 1 : 0;
+      if (below[b]) _ma.toArray(M, b * 16);
+    }
+  }
+  return M;
+}
+
 /**
  * Precomputes the four fold fields of a fine vertex set.
  * coords {wT, limb, sT, thT, sL, thL}; frames: {kT, NT, MT, kL[r], NL[r], ML[r]}
  * Returns Float32Array(nf*4) centered fields.
  */
-export function foldFields(nf, coords, P, frames, bias = 0.3) {
+export function foldFields(nf, coords, P, frames, bias = FOLD_BIAS) {
   const out = new Float32Array(nf * 4);
   const f = [0, 0, 0, 0];
   const eval4 = (s, th, kAx, N, M, x, y, z, w, acc) => {
     const n1 = noise3(x * 7.3, y * 7.3, z * 7.3), n2 = noise3(x * 7.3 + 31, y * 7.3 + 7, z * 7.3 - 11);
     const n3 = noise3(x * 4.1 - 5, y * 4.1 + 13, z * 4.1 + 2);
     // gently wavy rings (chevrons) + jittered diagonals
-    const ring = kAx * s + 1.7 * n1 + 0.55 * Math.sin(th * 2 + 2.5 * n3);
+    const ring = kAx * s + 1.3 * n1 + 0.5 * Math.sin(th * 2 + 2.5 * n3);
     acc[0] += w * (foldProfile(ring) - bias);
     acc[1] += w * (foldProfile(N * th + 1.5 * n2 + 0.8 * Math.sin(kAx * 0.35 * s)) - bias);
     acc[2] += w * (foldProfile(kAx * SQ2 * s + M * th + 1.6 * n3) - bias);

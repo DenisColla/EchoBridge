@@ -57,10 +57,19 @@ export function registerPresetsTool(ctx) {
         if (!ch) { toast('Seleziona un personaggio', { kind: 'warning' }); return; }
         haptic('tick');
         if (!applyPosePreset(ch, p.id, { mirror })) return;
-        lastApplied = p.id;
+        applying = true;
+        try { ctx.edited(ch, true, 'posa: ' + p.label.toLowerCase()); } finally { applying = false; }
+        lastApplied = p.id; lastChar = ch;
         markActive();
-        ctx.edited(ch, true, 'posa: ' + p.label.toLowerCase());
       }
+      // the 'active' mark means "this character has this pose": any other edit, undo or
+      // another selected character clears it
+      let applying = false, lastChar = null;
+      ctx.onChange((reason) => {
+        if (applying || !lastApplied) return;
+        if (reason === 'pose-final' || (reason === 'selection' && app.selection.character !== lastChar)) { lastApplied = null; markActive(); }
+      });
+      app.addEventListener('loaded', () => { if (lastApplied) { lastApplied = null; markActive(); } }); // undo / redo / scene load
 
       // thumbnails: render visible cards first, one per frame
       let io = null;

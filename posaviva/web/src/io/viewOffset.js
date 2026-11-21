@@ -46,6 +46,19 @@ export class ViewOffset {
     app.addEventListener('capture', (e) => {
       if (e.phase === 'before') this.suspend(); else this.resume();
     });
+    // the selected prop (and its rotation ring / height knob) joins the subject in the
+    // Oggetti tool: refit when another prop is selected (props are created after us)
+    const hookProps = () => {
+      if (this._propsHooked || !app.props?.addEventListener) return;
+      this._propsHooked = true;
+      app.props.addEventListener('select', () => {
+        if (!this.shell.panelOpen || this.shell.activeToolId !== 'props') return;
+        clearTimeout(this._selT);
+        this._selT = setTimeout(() => this.update({ keepIfVisible: true }), 60);
+      });
+    };
+    app.addEventListener('ready', hookProps);
+    app.addEventListener('tool', hookProps);
     app.addRenderHook(() => this._tick());
   }
 
@@ -140,7 +153,7 @@ export class ViewOffset {
     let s, cx, cy;
     // a subject not larger than the screen is fitted (even when partly off-screen);
     // a bigger one means the user zoomed on a detail
-    if (B && B.h <= H * 1.8 && B.w <= W * 1.8) {
+    if (B && (B.prop || (B.h <= H * 1.8 && B.w <= W * 1.8))) {
       // fit the subject (zoom out only), centered in the free area
       s = Math.min(1, (F.w * 0.92) / B.w, (F.h * 0.9) / B.h);
       s = Math.max(S_MIN, s);
@@ -157,13 +170,18 @@ export class ViewOffset {
 
   /**
    * Screen rect (CSS px, un-offset projection) of the selected character, or of all
-   * visible characters when none is selected. visible = fraction of it inside the canvas.
+   * visible characters when none is selected, or of the prop being edited in the
+   * Oggetti tool (prop: true). visible = fraction of it inside the canvas.
    */
   _subjectRect(W, H) {
     const app = this.app;
     const sel = app.selection?.character;
-    const list = sel ? [sel] : app.characters.filter((c) => c.root.visible);
-    if (!list.length) return null;
+    // editing a free prop (Oggetti tool): the prop and its handles are the subject
+    // (a held prop follows its character, which stays the subject)
+    let prop = this.shell.activeToolId === 'props' ? app.props?.selected : null;
+    if (prop && (prop.hold || !prop.root.visible || !prop.worldCorners)) prop = null;
+    const list = prop ? [] : sel ? [sel] : app.characters.filter((c) => c.root.visible);
+    if (!list.length && !prop) return null;
     const cam = this.camera;
     cam.updateMatrixWorld();
     // un-offset projection matrix
@@ -189,11 +207,23 @@ export class ViewOffset {
         n++;
       }
     }
+    if (prop) {
+      for (const c of prop.worldCorners()) {
+        const w = e[3] * c.x + e[7] * c.y + e[11] * c.z + e[15];
+        if (w <= cam.near) continue;
+        const sx = ((e[0] * c.x + e[4] * c.y + e[8] * c.z + e[12]) / w * 0.5 + 0.5) * W;
+        const sy = (0.5 - (e[1] * c.x + e[5] * c.y + e[9] * c.z + e[13]) / w * 0.5) * H;
+        if (sx < x0) x0 = sx; if (sx > x1) x1 = sx; if (sy < y0) y0 = sy; if (sy > y1) y1 = sy;
+        n++;
+      }
+    }
     if (!n || x1 - x0 < 2 || y1 - y0 < 2) return null;
-    const pad = 0.04 * (y1 - y0); // hair / hands between sampled vertices
+    // characters: hair / hands between sampled vertices; props: the rotation ring
+    // around the base and the height knob above the top
+    const pad = prop ? 0.1 * Math.max(x1 - x0, y1 - y0) + 40 : 0.04 * (y1 - y0);
     x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
     const ix = Math.max(0, Math.min(W, x1) - Math.max(0, x0)), iy = Math.max(0, Math.min(H, y1) - Math.max(0, y0));
     const visible = (ix * iy) / ((x1 - x0) * (y1 - y0));
-    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, visible };
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, visible, prop: !!prop };
   }
 }

@@ -53,7 +53,7 @@
 .pv-sc-view { position: relative; aspect-ratio: 3 / 2; border-radius: 12px; border: 1px dashed rgba(255,255,255,.22); background: rgba(255,255,255,.03);
   color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 0; overflow: hidden; font-size: 11px; min-height: 56px; }
 .pv-sc-view.filled { border-style: solid; border-color: var(--line); color: var(--text); }
-.pv-sc-view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.pv-sc-view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #1d1f25; }
 .pv-sc-view.filled .pv-sc-view-label { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 6px; background: linear-gradient(transparent, rgba(0,0,0,.75)); text-align: left; }
 .pv-sc-view-del { position: absolute; top: 0; right: 0; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; }
 .pv-sc-view-del svg { background: rgba(0,0,0,.6); border-radius: 50%; padding: 3px; width: 22px; height: 22px; }

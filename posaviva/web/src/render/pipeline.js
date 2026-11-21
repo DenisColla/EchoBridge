@@ -22,6 +22,7 @@ import {
   MAX_INK_RADIUS, makePrepassMaterial, makeEdgeMaterial, makeHDistMaterial, makeInkMaterial,
   makeAOMultiplyMaterial, makeBackgroundMaterial, makeOutputMaterial, setOutputToneMapping,
 } from './shaders.js';
+import { inkLinePx } from './materials.js';
 
 const _size = new THREE.Vector2();
 const _color = new THREE.Color();
@@ -178,13 +179,15 @@ export class RenderPipeline {
 
   /**
    * Object ids encode which inner lines an object gets (see the edge shader):
-   *   1..95    regular  — contours + sharp creases (bodies, props, hair)
+   *   1..95    regular  — contours + sharp creases (bodies, props)
    *   96..127  folds    — also curvature "valley" lines (garment wrinkles, geometric or normal-mapped)
-   *   128..254 contour  — outline only (eyeballs: the concave iris must not draw lines)
+   *   128..254 contour  — outlines and overlaps only: eyeballs (the concave iris must not draw
+   *                       lines) and hair (creases between strand cards only make short,
+   *                       flickering dashes; clump overlaps are still inked)
    */
   _allocId(kind) {
     const c = this._ids;
-    if (kind === 'eye') return 128 + (c.contour++ % 127);
+    if (kind === 'eye' || kind === 'hair') return 128 + (c.contour++ % 127);
     if (kind === 'cloth') return 96 + (c.folds++ % 32);
     return 1 + (c.regular++ % 95);
   }
@@ -287,9 +290,9 @@ export class RenderPipeline {
     u.nStep.value = Math.max(1, Math.min(3, Math.round(pxScale)));
     // valley (fold) curvature threshold in 1/m: 0..1 slider -> fold radius ~0.6 cm .. 5 cm
     u.valleyK.value = o.crease > 0.001 ? THREE.MathUtils.lerp(170, 20, o.crease) : -1;
-    u.pxWorld.value = camera.isOrthographicCamera
-      ? (camera.top - camera.bottom) / camera.zoom / set.h
-      : (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / camera.zoom / set.h;
+    // world size of one pixel (at distance 1 in perspective): from the projection matrix,
+    // so zoom, view offsets (UI panel framing) and capture aspects are all accounted for
+    u.pxWorld.value = 2 / camera.projectionMatrix.elements[5] / set.h;
     this._pass(renderer, this.edgeMat, set.edge);
 
     const { rS, rC } = this._inkRadii(pxScale);
@@ -337,8 +340,10 @@ export class RenderPipeline {
     set.ensure(_size.x, _size.y);
     const pxScale = renderer.getPixelRatio();
     this._classify(scene);
+    inkLinePx.value = 2 * this._inkRadii(pxScale).rC; // lines drawn by materials (ink eyes)
 
-    const useAO = o.ao && !this.suspendAO;
+    // GTAO needs half-float targets: without color-buffer-float support AO is skipped
+    const useAO = o.ao && !this.suspendAO && this.floatTargets;
     const usePre = o.ink || useAO;
     const transparent = o.bg.type === 'transparent';
     renderer.autoClear = false;
@@ -441,8 +446,9 @@ export class RenderPipeline {
   _renderCapture(renderer, scene, camera, { w, h, pxScale, transparent, toneMapping, exposure }, state, set, color, out) {
     const o = this.opts;
     this._classify(scene);
+    inkLinePx.value = 2 * this._inkRadii(pxScale).rC;
 
-    const useAO = o.ao;
+    const useAO = o.ao && this.floatTargets;
     const usePre = o.ink || useAO;
     renderer.autoClear = false;
     renderer.shadowMap.autoUpdate = false; // G-buffer passes never need shadow maps

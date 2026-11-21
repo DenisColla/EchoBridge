@@ -94,7 +94,7 @@ export class HairRig {
       this.map.build(ch.model, ch.shapePositions, this.frame);
       this._analysedShape = this.shapeVersion;
     }
-    this.colliders = new BodyColliders(ch, this.frame, this.garments());
+    this.colliders = new BodyColliders(ch, this.frame, this.garments(), this.ctl.app.clothing?.outerOffsets?.(ch) || null);
     this._analysedKey = key;
     return true;
   }
@@ -340,10 +340,10 @@ export class HairRig {
         }
         x /= ws; y /= ws; z /= ws;
         x = rest[q] + (x - rest[q]) * beta; y = rest[q + 1] + (y - rest[q + 1]) * beta; z = rest[q + 2] + (z - rest[q + 2]) * beta;
-        // blended clumps between diverging guides must not cut through the body (when the
-        // guides agree the clump inherits their collision-free placement)
-        if (agree < 0.92) colliders.push(x, y, z, b.rad * 0.7, out, q);
-        else { out[q] = x; out[q + 1] = y; out[q + 2] = z; }
+        // clumps must not cut through the body or the clothes: their lateral offset
+        // from the guides (and blending between diverging guides) can reach inside
+        // even when the guides themselves rest on the colliders
+        colliders.push(x, y, z, b.rad * (agree < 0.92 ? 0.7 : 0.6), out, q);
       }
       hg.writeStrand(b.strand, out, 0, ax);
     }

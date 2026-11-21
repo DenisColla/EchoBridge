@@ -11,7 +11,6 @@ const PI = Math.PI, TAU = Math.PI * 2;
 const _e = new THREE.Euler();
 const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion();
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
-const _m1 = new THREE.Matrix4();
 const _s = new THREE.Vector3();
 const UNIT = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
 
@@ -268,7 +267,8 @@ export class PoseRig {
   refreshBone(ch, i) {
     const bone = ch.bones[i];
     bone.quaternion.copy(ch.restLocalQuat[i]).multiply(ch.poseQuat[i]);
-    if (i === 0) bone.position.copy(ch.restLocalPos[0]).add(ch.rootOffset);
+    // (as Character.applyPose: the root also carries the shoe ground clearance)
+    if (i === 0) { bone.position.copy(ch.restLocalPos[0]).add(ch.rootOffset); bone.position.y += ch.groundClearance || 0; }
     bone.updateMatrixWorld(true);
   }
 

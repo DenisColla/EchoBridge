@@ -16,6 +16,8 @@
 //   hand   hand preset id from hands.js, or [id, amount]
 //   value[3]: optional Euler order: 'XZY' flexes first and then abducts about the
 //          flexed bone (e.g. thighs of a cross-legged sit: knees out to the sides).
+// Raw bone names (e.g. 'upperarm01.R', 'lowerarm02.LR') take plain local Euler degrees
+// too: used for arms solved with the arm IK (hand position + palm direction).
 // Arm tips: raise an arm forward with Z ≈ +40 first (arm vertical), then X (a smaller Z
 // tilts the swing plane and the arms converge); with a bent elbow add some external
 // rotation (Y-) so the forearm does not fold toward the face.
@@ -23,8 +25,10 @@
 // applying; air: meters above the floor after the drop (jumps, falls).
 // touch: {L|R: [bodyVertex, standoff]} hand contacts re-targeted on every body type
 // (measured on f_normal with measureTouch(); see library.js).
-// Chair poses are tuned so the seat (buttocks) lands at ~0.45 m on f_normal with
-// the feet on the floor; floor poses rest on y = 0.
+// seat: chair / stool poses are fitted at apply time so the buttocks rest at this
+// height (meters above the floor: props 'sedia' / 'panca' 0.45, 'sgabello' 0.65) on
+// every body type, the feet that stand on the floor staying planted (leg IK);
+// floor poses rest on y = 0.
 
 export const POSE_DEFS = [
   // ================================================================ In piedi
@@ -76,7 +80,10 @@ export const POSE_DEFS = [
     root: [0, 3, 0],
     spine: [2, 6, 4], head: [0, -6, -6],
     'clav.R': [0, 0, -8], 'sh.R': [0, 0, -10],
-    'arm.R': [-20, -42, -32], 'fore.R': [-62, -30, 0], 'wrist.R': [0, 0, -10], 'hand.R': 'wave',
+    // raw bone rotations (solved with the arm IK on f_normal): hand beside the head,
+    // palm to the front, fingers up, elbow out and down
+    'upperarm01.R': [-5, -34, -49], 'upperarm02.R': [0, -28, 0], 'lowerarm01.R': [-35, -1, 0], 'lowerarm02.R': [0, -1, 0],
+    'wrist.R': [11, 0, -30], 'hand.R': 'wave',
     'arm.L': [-2, 6, 38], 'fore.L': [20, 8, 0], 'hand.L': 'relaxed',
     'thigh.L': [0, -6, -4], 'thigh.R': [8, -14, 4], 'knee.R': -12,
   },
@@ -174,7 +181,10 @@ export const POSE_DEFS = [
     root: [-34, 0, 0],
     spine: [8, 0, 0], neck: [14, 0, 0], head: [12, 0, 0],
     'clav.LR': [-12, 0, -4],
-    'arm.LR': [-100, 0, 30], 'fore.LR': [22, -20, 0], 'wrist.LR': [0, 0, -56], 'hand.LR': 'open',
+    // raw bone rotations (solved with the arm IK on f_normal): hands at shoulder width in
+    // front of the chest, palms to the front, fingers up (wrists bent back)
+    'upperarm01.LR': [-61, -122, -105], 'upperarm02.LR': [0, -16, 0], 'lowerarm01.LR': [35, 30, 0], 'lowerarm02.LR': [0, 55, 0],
+    'wrist.LR': [11, 0, -70], 'hand.LR': 'open',
     'thigh.L': [64, -6, 0], 'knee.L': -24, 'foot.L': [16, 0, 0],
     'thigh.R': [6, -6, 0], 'knee.R': -16, 'foot.R': [-10, 0, 0], 'toes.R': 30,
   },
@@ -249,27 +259,27 @@ export const POSE_DEFS = [
   },
 
   // ================================================================ Seduti
-  { id: 'sit_chair', label: 'Sedia composta', cat: 'sit',
+  { id: 'sit_chair', label: 'Sedia composta', cat: 'sit', seat: 0.45,
     touch: { L: [11154, 0.025], R: [4536, 0.025] }, // on the thighs
     spine: [-2, 0, 0], neck: [-2, 0, 0], head: [2, 0, 0],
     'arm.LR': [-26, 12, 34], 'fore.LR': [-14, 30, 0], 'wrist.LR': [0, 0, 6], 'hand.LR': 'relaxed',
     'thigh.LR': [76, -4, 2], 'knee.LR': -66, 'foot.LR': [-10, 0, 0],
   },
-  { id: 'sit_relaxed', label: 'Sedia rilassata', cat: 'sit',
+  { id: 'sit_relaxed', label: 'Sedia rilassata', cat: 'sit', seat: 0.45,
     root: [14, 0, 0],
     spine: [-12, 0, 0], neck: [-6, 0, 0], head: [-4, 8, 6],
     'arm.L': [6, 20, 30], 'fore.L': [-20, 10, 0], 'arm.R': [-10, 10, 34], 'fore.R': [-30, 20, 0], 'hand.LR': 'relaxed',
     'thigh.L': [53, -14, 8], 'knee.L': -30, 'foot.L': [6, 0, 0],
     'thigh.R': [62, -8, 4], 'knee.R': -56, 'foot.R': [-6, 0, 0],
   },
-  { id: 'sit_legs_crossed', label: 'Gambe accavallate', cat: 'sit',
+  { id: 'sit_legs_crossed', label: 'Gambe accavallate', cat: 'sit', seat: 0.45,
     touch: { L: [11223, 0.03], R: [11154, 0.03] }, // on the crossed knee
     spine: [-2, 0, 0], head: [0, 6, 4],
     'arm.LR': [-34, 30, 30], 'fore.LR': [-30, 20, 0], 'hand.LR': 'relaxed',
     'thigh.L': [98, 4, -22], 'knee.L': -70, 'foot.L': [-20, 0, 0],
     'thigh.R': [76, -4, 2], 'knee.R': -66, 'foot.R': [-10, 0, 0],
   },
-  { id: 'sit_stool', label: 'Sgabello alto', cat: 'sit',
+  { id: 'sit_stool', label: 'Sgabello alto', cat: 'sit', seat: 0.65,
     touch: { L: [11154, 0.025], R: [4536, 0.025] }, // on the thighs
     spine: [-4, 0, 0], head: [2, 0, 0],
     'arm.LR': [-26, 12, 34], 'fore.LR': [-14, 30, 0], 'hand.LR': 'relaxed',
