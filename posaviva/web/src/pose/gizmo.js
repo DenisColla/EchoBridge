@@ -467,6 +467,8 @@ export class PoseGizmo {
       try { c.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
       this.shell.hint('');
       this._end(d);
+      // a quick tap on a handle (no drag): select what is under the finger instead
+      if (!d.moved && e.type === 'pointerup' && e.timeStamp - d.t0 < 450 && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 10) this.ctx.routeTap?.(e);
       app.invalidate();
     };
     c.addEventListener('pointerdown', down, { capture: true });
@@ -482,6 +484,8 @@ export class PoseGizmo {
       pointerId: e.pointerId, kind: hit.kind, ch, moved: false, raf: 0,
       x0: e.clientX, y0: e.clientY, lastX: e.clientX, lastY: e.clientY, px: e.clientX, py: e.clientY,
       controlsWasEnabled: app.controls.enabled, atLimit: false,
+      // touch slop: a finger tap jitters a few px, it must not nudge the pose
+      t0: e.timeStamp, slop: e.pointerType === 'touch' ? 7 : 3,
     };
     app.controls.enabled = false;
     if (hit.kind === 'ring' || hit.kind === 'ball') {
@@ -568,7 +572,7 @@ export class PoseGizmo {
 
   _update(d) {
     const x = d.lastX, y = d.lastY;
-    if (!d.moved && Math.hypot(x - d.x0, y - d.y0) < 2) return;
+    if (!d.moved && Math.hypot(x - d.x0, y - d.y0) < d.slop) return;
     const ch = d.ch;
     if (!this.app.characters.includes(ch)) return;
     const { rig, ik, state } = this.ctx;

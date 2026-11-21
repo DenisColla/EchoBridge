@@ -159,7 +159,7 @@ export function create(app, shell) {
   }
 
   // ---------------------------------------------------------------- picking (tap)
-  app.addTapHandler(({ ndc, x, y }) => {
+  function onTap({ ndc, x, y }) {
     const tool = shell.activeToolId;
     const posing = ctx.isActive();
     const mode = ctx.mode();
@@ -181,7 +181,19 @@ export function create(app, shell) {
     }
     if (posing && app.selection.part) { app.select(app.selection.character, null); return true; }
     return false;
-  }, 10);
+  }
+  app.addTapHandler(onTap, 10);
+  /**
+   * A tap that landed on a gizmo handle without dragging it (e.g. on a ring that
+   * crosses another body part): route it like a normal tap so the part under the
+   * finger gets selected (props and other handlers keep their priority).
+   */
+  ctx.routeTap = (e) => {
+    const ev = { ndc: app.pointerToNDC(e), event: e, x: e.clientX, y: e.clientY };
+    const hs = app._tapHandlers; // App internals: same order as its own tap router
+    if (Array.isArray(hs) && hs.length) { for (const h of hs) if (h.fn(ev)) return; }
+    else onTap(ev);
+  };
 
   // ---------------------------------------------------------------- highlight & UI sync
   function syncHighlight() {
