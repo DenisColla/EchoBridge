@@ -392,6 +392,8 @@ const SEAT_FLEX = [35, 80];
 const SEAT_PAD = 0.01;
 /** Excess (m) the pressed seat keeps at most (soft saturation: no hard crease). */
 const SEAT_SOFT = 0.005;
+/** Change of the seat frames (m, unit vectors) below which the pressed seat is kept as it is. */
+const SEAT_STILL = 2e-4;
 /** Most height over the body (m) a vertex counts as its own layer thickness in the seat pass. */
 const SEAT_HMAX = 0.012;
 
@@ -656,6 +658,15 @@ export class GarmentRuntime {
       this.s3.fill(0);
       return true;
     }
+    // thighs and pelvis where they were (an arm or the head moves on a seated figure):
+    // the pressed seat stays as it is
+    const sig = S.sig || (S.sig = new Float32Array(S.frames.length * 10).fill(NaN));
+    let same = S.on;
+    S.posed.forEach((ps, q) => {
+      const o = q * 10, v = [ps.A[0], ps.A[1], ps.A[2], ps.u[0], ps.u[1], ps.u[2], ps.b[0], ps.b[1], ps.b[2], ps.w];
+      for (let k = 0; k < 10; k++) { if (!(Math.abs(v[k] - sig[o + k]) < SEAT_STILL)) same = false; sig[o + k] = v[k]; }
+    });
+    if (same) return false;
     const s3 = this.s3 || (this.s3 = new Float32Array(disp.length * 3));
     const dq = softSkin.active ? boneDQs(M) : null;
     let changed = !S.on;
