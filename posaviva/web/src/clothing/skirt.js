@@ -230,6 +230,37 @@ export function skirtOccupancy(draft, bi, topo, occ) {
   }
 }
 
+/** Body faces this far above the skirt hem (m, rest) and inside it are hidden (see skirtCoverage). */
+const HIDE_ABOVE_HEM = 0.07;
+
+/**
+ * Body faces hidden under a skirt: every vertex inside the skirt tube at its
+ * height (rest), at least HIDE_ABOVE_HEM above the hem and below the waist ring,
+ * no arm or hand. Seated or with a raised knee the buttocks and thighs then
+ * never show through the pressed or stretched skirt (the skin under it cannot be
+ * seen; near the hem it stays, for the view up the skirt and the legs below it).
+ */
+export function skirtCoverage(topo, bi, draft, hidden) {
+  const { rings, segs, ys, R } = draft.ring;
+  const P = bi.P, W = topo.partW, Q = topo.quads;
+  const yTop = ys[0] - 0.01, yLow = ys[rings - 1] + HIDE_ABOVE_HEM, dy = (ys[0] - ys[rings - 1]) / (rings - 1);
+  if (!(yTop > yLow)) return hidden;
+  const inside = new Uint8Array(topo.nv);
+  for (let v = 0; v < topo.nv; v++) {
+    const y = P[v * 3 + 1];
+    if (y < yLow || y > yTop) continue;
+    const o = v * NPART;
+    if (W[o + PART.armL] + W[o + PART.handL] + W[o + PART.armR] + W[o + PART.handR] > 0.05) continue;
+    const cz = bi.cz(y), x = P[v * 3], z = P[v * 3 + 2] - cz;
+    const k = Math.min(rings - 1, Math.max(0, Math.round((ys[0] - y) / dy)));
+    const j = ((Math.round(((Math.atan2(-x, z) + PI) / (2 * PI)) * segs) % segs) + segs) % segs;
+    if (R[k * segs + j] - len2(x, z) > 0.002) inside[v] = 1;
+  }
+  const out = hidden || new Uint8Array(topo.model.faceCount);
+  for (let f = 0; f < topo.nf; f++) if (inside[Q[f * 4]] && inside[Q[f * 4 + 1]] && inside[Q[f * 4 + 2]] && inside[Q[f * 4 + 3]]) out[topo.faceIds[f]] = 1;
+  return out;
+}
+
 /**
  * Ribbon (strap) following the body surface through control points.
  * Returns extras-like data with its own skin weights: {pos, nrm, skinIdx, skinW, tris, uv}

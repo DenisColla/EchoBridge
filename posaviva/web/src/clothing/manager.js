@@ -164,13 +164,15 @@ export class ClothingManager extends THREE.EventDispatcher {
     st.seenData = ch.data;
     // a dress hides the bra straps (they would show beside its own straps)
     const full = want.some((it) => GARMENT_BY_ID.get(it.id).slot === 'full');
+    // a sports bra (replacesBra) is worn instead of the bra: no cups or straps under it
+    const noBra = want.some((it) => GARMENT_BY_ID.get(it.id).replacesBra);
     const old = st.garments;
     const next = [];
     let dirtyFrom = Infinity;
     const job = st.job;
     want.forEach((it, i) => {
       const def = GARMENT_BY_ID.get(it.id);
-      const geoKey = `${it.id}|${it.fit.toFixed(3)}|${ch.sex}|${st.shapeV}${full && def.slot === 'underwear' ? '|full' : ''}`;
+      const geoKey = `${it.id}|${it.fit.toFixed(3)}|${ch.sex}|${st.shapeV}${full && def.slot === 'underwear' ? '|full' : ''}${noBra && def.slot === 'underwear' ? '|nobra' : ''}`;
       const prev = old.find((g) => g.item.id === it.id);
       if (prev) {
         const g = prev;
@@ -192,6 +194,8 @@ export class ClothingManager extends THREE.EventDispatcher {
     for (const g of next) if (g.def.layer > minLayer) g.stale = true;
     st.garments = next;
     st.noStraps = full;
+    st.noBra = noBra;
+    seatFlags(next);
     st.covered = coveredIds(next);
     // a build in flight that is now out of date (its garment, its key or a layer below it
     // changed) restarts from the first stale garment; colour edits do not interrupt it
@@ -232,7 +236,9 @@ export class ClothingManager extends THREE.EventDispatcher {
       // inner layers first: a garment is pushed out by the layers below it
       let innerMoved = false;
       for (const g of st.garments) {
-        if (!g.runtime || covered.has(g.item.id)) continue;
+        if (!g.runtime) continue;
+        // hidden under other layers: no folds, but seated it is pressed like the layers over it
+        if (covered.has(g.item.id)) { const c = g.runtime.updateSeat(M); innerMoved = innerMoved || c; changed = c || changed; continue; }
         const c = g.runtime.update(st.ch, this.intensity * (g.item.wrinkles ?? 1), M, true, innerMoved);
         innerMoved = innerMoved || c;
         changed = c || changed;
@@ -259,7 +265,7 @@ export class ClothingManager extends THREE.EventDispatcher {
     const g = st.garments[i];
     const prevOcc = i > 0 ? st.garments[i - 1].occOut : null;
     const prevSurf = i > 0 ? st.garments[i - 1].surfOut : null;
-    const ctx = { topo: this.topo, bi: st.bi, occ: prevOcc, surf: prevSurf, sex: st.ch.sex, ch: st.ch, noStraps: st.noStraps };
+    const ctx = { topo: this.topo, bi: st.bi, occ: prevOcc, surf: prevSurf, sex: st.ch.sex, ch: st.ch, noStraps: st.noStraps, noBra: st.noBra };
     return { g, i, geoKey: g.geoKey, prevOcc, prevSurf, gen: buildGarmentSteps(ctx, g.def, g.item) };
   }
 
@@ -304,10 +310,11 @@ export class ClothingManager extends THREE.EventDispatcher {
     // instead of staying where the old body was
     mesh.bind(new THREE.Skeleton(ch.bones, ch.skeleton.boneInverses.map((m) => m.clone())), new THREE.Matrix4());
     mesh.userData.ownSkeleton = true;
-    // stay over the garments below (shoes are rigid: never pushed). Close-fitting
-    // trousers and skirts also keep clear of the underwear while posing (it rides
-    // the skin with the body's own weights, they do not quite)
-    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear' || g.def.slot === 'bottom' || g.def.slot === 'full').map((x) => x.runtime));
+    // stay over the garments below (shoes are rigid: never pushed), the underwear
+    // included: it rides the skin with the body's own weights, the layers over it do
+    // not quite (molded bra cups would show through a T-shirt in single pixels)
+    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).map((x) => x.runtime));
+    seatFlags(st.garments);
     // fine adjacency is only needed by the layer pass
     if (!g.runtime.layers && g.runtime.fine) g.runtime.fine.adj = null;
     // loose fabric lies on the floor (shoes define the contact themselves)
@@ -381,6 +388,16 @@ export class ClothingManager extends THREE.EventDispatcher {
     }
     this.app.materials.apply(g.mesh, [main, trim, hw]);
   }
+}
+
+/**
+ * Seated correction (GarmentRuntime seat pass): every garment but the underwear
+ * when nothing covers its seat (the skin around it would show through the pressed
+ * briefs; under trousers the skin is hidden).
+ */
+function seatFlags(garments) {
+  const covered = garments.some((x) => x.def.slot === 'bottom' || x.def.slot === 'full');
+  for (const g of garments) if (g.runtime?.seat) g.runtime.seatClamp = g.def.slot !== 'underwear' || covered;
 }
 
 /** Garments fully hidden by outer layers: their folds are never seen, skip the update. */

@@ -449,15 +449,24 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
     for (let i = 0; i < n; i++) fade[i] = 1 - zone[i];
     if (fit.looseFade) for (let i = 0; i < n; i++) fade[i] *= fit.looseFade(coords, i, cvals, cons);
     const slope = geo(fit.slope?.[0] ?? 0.8, fit.slope?.[1] ?? 0.3, fitT);
-    // sleeves / trouser legs may drape differently from the body of the garment
-    const limb = (spec, def) => (spec ? {
-      loose: lerp(spec.loose?.[0] ?? 0, spec.loose?.[1] ?? 0, fitT), slope: geo(spec.slope?.[0] ?? 0.8, spec.slope?.[1] ?? 0.3, fitT),
-      slopeUpper: spec.slopeUpper ? geo(spec.slopeUpper[0], spec.slopeUpper[1], fitT) : undefined, bridgeSlope: spec.bridgeSlope ?? def.bridgeSlope,
-    } : null);
-    const torso = { loose, slope, bridgeSlope: fit.bridgeSlope ?? 0.8 };
+    // sleeves / trouser legs may drape differently from the body of the garment;
+    // a limb block may shift the Vestibilità per sex (sexShift: women's jeans are cut slimmer)
+    const limb = (spec, def) => {
+      if (!spec) return null;
+      const t = clamp(fitT + (spec.sexShift?.[ctx.sex] ?? 0), 0, 1);
+      return {
+        loose: lerp(spec.loose?.[0] ?? 0, spec.loose?.[1] ?? 0, t), slope: geo(spec.slope?.[0] ?? 0.8, spec.slope?.[1] ?? 0.3, t),
+        slopeUpper: spec.slopeUpper ? geo(spec.slopeUpper[0], spec.slopeUpper[1], t) : undefined, bridgeSlope: spec.bridgeSlope ?? def.bridgeSlope,
+      };
+    };
+    // stiffness and horizontal bridging may follow the Vestibilità too: a knit that
+    // clings when fitted ([at 0, at 1] pairs), a woven drape when oversize
+    const bridgeSlope = Array.isArray(fit.bridgeSlope) ? geo(fit.bridgeSlope[0], fit.bridgeSlope[1], fitT) : fit.bridgeSlope ?? 0.8;
+    const hull = Array.isArray(fit.hull) ? lerp(fit.hull[0], fit.hull[1], fitT) : fit.hull ?? (bridgeSlope >= 1.9 ? 0 : 0.85);
+    const torso = { loose, slope, bridgeSlope };
     hangFit(c, bi, {
-      loose, slope, innerSlope: fit.innerSlope ?? 1.4, fade, bridgeSlope: torso.bridgeSlope, hullAmount: fit.hull ?? (fit.bridgeSlope >= 1.9 ? 0 : 0.85),
-      arm: limb(fit.sleeve, torso), leg: limb(fit.leg, torso),
+      loose, slope, innerSlope: fit.innerSlope ?? 1.4, fade, bridgeSlope, hullAmount: hull,
+      arm: limb(fit.sleeve, torso), leg: limb(fit.leg, torso), membrane: byFit(fit.membrane, fitT, 0), tension: fit.tension, seatBridge: byFit(fit.seatBridge, fitT, 0),
     });
   }
   bridgeSmooth(c, fit.bridge ?? 12);
@@ -478,7 +487,7 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   // no small bumps in the fabric itself either (a bra apex, a nipple, the navel
   // rim show through as points): spatial bump removal, then the hard clearances
   if (!fit.envelope) {
-    flattenBumps(G, N0s, n, 0.01, 0.8);
+    flattenBumps(G, N0s, n, fit.bumpSigma ?? 0.01, 0.8);
     enforceOffset(n, G, P0, N0, offMin);
   }
   // shoes / socks: cross-section hull around the foot axis (one toe box, no
@@ -601,6 +610,8 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
+/** A fit parameter given as a number or as [at Vestibilità 0, at 1] (linear). */
+const byFit = (v, t, d) => (Array.isArray(v) ? lerp(v[0], v[1], t) : v ?? d);
 /** Geometric interpolation (slopes: equal steps in ratio, so "Normale" sits between a cling and a hang). */
 const geo = (a, b, t) => (a > 0 && b > 0 ? a * Math.pow(b / a, t) : lerp(a, b, t));
 /**

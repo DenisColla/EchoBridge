@@ -2,7 +2,7 @@
 // treatments, hardware, straps, shoe soles, assembly, plus the information the
 // outfit manager needs for layering (occupancy) and skin hiding (coverage).
 import { buildBodyDraftSteps } from './build.js';
-import { buildSkirtDraft, skirtOccupancy, ribbon } from './skirt.js';
+import { buildSkirtDraft, skirtOccupancy, skirtCoverage, ribbon } from './skirt.js';
 import { hemExtras, collarExtras, discExtras, newExtras } from './edges.js';
 import { assemble, FOLD_GAIN } from './assemble.js';
 import { quadNormals, len2, len3 } from './mesh.js';
@@ -45,6 +45,8 @@ export function* buildGarmentSteps(ctx, def, item) {
   const pieces = [];
   let hidden = null;
   for (const pdef of partsOf(def, ctx.sex)) {
+    // the bra (the part with straps) is left out under a sports bra
+    if (ctx.noBra && pdef.straps) continue;
     // later parts of the same garment may hug the earlier ones (dress skirt over its bodice)
     const pctx = { ...ctx, occ, surf };
     let draft = null;
@@ -72,7 +74,10 @@ export function* buildGarmentSteps(ctx, def, item) {
     if (pdef.sole) { levelSoleLine(draft, pdef.sole); faceGroup = soleGroups(draft, pdef.sole); }
     pieces.push({ draft, extras, wrinkle: pdef.wrinkle, folds: pdef.folds, faceGroup, ampScale: foldFade(draft, pdef.foldFade) });
     // layering for the next part / garment
-    if (draft.kind === 'skirt') { skirtOccupancy(draft, bi, topo, occ); skirtOccupancy(draft, bi, topo, surf); }
+    if (draft.kind === 'skirt') {
+      skirtOccupancy(draft, bi, topo, occ); skirtOccupancy(draft, bi, topo, surf);
+      if (pdef.hide !== false) hidden = skirtCoverage(topo, bi, draft, hidden);
+    }
     else {
       bodyOccupancy(draft, occ, pdef, extras);
       ribbonOccupancy(extras, bi, topo, occ);
@@ -82,7 +87,7 @@ export function* buildGarmentSteps(ctx, def, item) {
     yield 'part';
   }
   if (!pieces.length) return null;
-  const runtime = assemble(pieces, bi, { refM: ctx.ch ? referenceSkin(ctx.ch) : null });
+  const runtime = assemble(pieces, bi, { refM: ctx.ch ? referenceSkin(ctx.ch) : null, hemLift: def.hemLift });
   if (!runtime) return null;
   return { runtime, hidden, occ, surf };
 }
@@ -153,10 +158,12 @@ function bodyOccupancy(draft, occ, pdef, extras = null) {
   const w = pdef.wrinkle || {};
   const full = (w.k ?? 0.8) * (0.6 + 0.8 * (draft.fitT ?? 0.5)) * (2 / Math.PI) * FOLD_GAIN * (w.wl ?? 0.05) * 0.45 * 0.7;
   const crest = Math.min(CREST_MAX, full * 0.3) + 0.0008;
+  // where the folds are faded out (a tucked shirt under the waistband) no room is reserved for them
+  const fade = foldFade(draft, pdef.foldFade);
   for (let i = 0; i < c.n; i++) {
     const v = c.body[i], o = i * 3;
     const d = (G[o] - P0[o]) * N0[o] + (G[o + 1] - P0[o + 1]) * N0[o + 1] + (G[o + 2] - P0[o + 2]) * N0[o + 2];
-    const val = Math.min(0.08, d + draft.thick * 0.5 + crest + lift[i]);
+    const val = Math.min(0.08, d + draft.thick * 0.5 + crest * (fade ? fade(i) : 1) + lift[i]);
     if (val > occ[v]) occ[v] = val;
   }
 }

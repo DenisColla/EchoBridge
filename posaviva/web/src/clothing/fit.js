@@ -26,7 +26,7 @@ export function hangFit(c, bi, opts) {
   const base = { loose: opts.loose ?? 0, slope: opts.slope ?? 0.4, bridgeSlope: opts.bridgeSlope ?? 0.8 };
   const optsOf = (R) => (R === 0 ? base : (R <= 2 ? opts.arm : opts.leg) || base);
   const idle = (o) => o.loose <= 0.001 && o.bridgeSlope >= 1.9;
-  if (idle(base) && hullAmount <= 0 && (!opts.arm || idle(opts.arm)) && (!opts.leg || idle(opts.leg))) return;
+  if (idle(base) && hullAmount <= 0 && !(opts.membrane > 0) && !(opts.seatBridge > 0) && (!opts.arm || idle(opts.arm)) && (!opts.leg || idle(opts.leg))) return;
   const { n, P0, off, G, coords } = c;
   const span = c.span || null;
   const tmp = new Float32Array(9);
@@ -187,7 +187,9 @@ export function hangFit(c, bi, opts) {
       G[i * 3] += ux * t; G[i * 3 + 2] += uz * t;
     }
   }
-  depthHang(c, bi, { ...base, torsoStartY, fade, span });
+  if (opts.seatBridge > 0) seatHull(c, bi, opts.seatBridge, fade);
+  const membrane = opts.membrane || 0, tension = opts.tension;
+  depthHang(c, bi, { ...base, torsoStartY, fade, span, membrane, tension });
   // A bridged span (under the bust, over the lumbar hollow) is a near-vertical
   // sheet, but the body surface it was made from wraps around the crease below
   // the protrusion: projected onto the sheet its vertices come out folded over
@@ -212,7 +214,54 @@ export function hangFit(c, bi, opts) {
         }
         for (let i = 0; i < n; i++) if (k[i]) { G[i * 3] = tmp[i * 2]; G[i * 3 + 1] = tmp[i * 2 + 1]; }
       }
-      depthHang(c, bi, { ...base, torsoStartY, fade, span: null });
+      depthHang(c, bi, { ...base, torsoStartY, fade, span: null, membrane, tension });
+    }
+  }
+}
+
+/** Seat bridge band in torso coordinates T: fades in above the crotch, out over the waist. */
+const SEAT_T = [0.12, 0.45, 1.35, 1.8];
+/** Most a vertex moves out to the seat hull (m): the gluteal cleft, the groin V. */
+const SEAT_MAX = 0.03;
+
+/**
+ * Trousers bridge the seat and the crotch with their seat / crotch seams: per
+ * horizontal row between the crotch and the waist, every garment vertex (torso
+ * and legs alike: the gluteal cleft and the groin lie on leg-weighted vertices of
+ * two limbs, which no per-limb envelope spans) moves out towards the convex hull
+ * of the row, radially from the torso axis. Downward-facing vertices (the
+ * perineum) are left alone; amount 0..1.
+ */
+function seatHull(c, bi, amount, fade) {
+  const { n, G, N0 } = c;
+  const y0 = bi.yOfT(SEAT_T[0]), y1 = bi.yOfT(SEAT_T[3]);
+  const rows = Math.max(1, Math.ceil((y1 - y0) / DS));
+  const lists = Array.from({ length: rows }, () => []);
+  for (let i = 0; i < n; i++) {
+    const y = G[i * 3 + 1];
+    if (y < y0 || y >= y1 || c.bnd[i]) continue;
+    if (Math.abs(N0[i * 3 + 1]) > 0.7) continue;
+    lists[Math.min(rows - 1, Math.floor((y - y0) / DS))].push(i);
+  }
+  const ramp = (t) => {
+    const a = Math.min(1, Math.max(0, (t - SEAT_T[0]) / (SEAT_T[1] - SEAT_T[0]))), b = Math.min(1, Math.max(0, (SEAT_T[3] - t) / (SEAT_T[3] - SEAT_T[2])));
+    return a * a * (3 - 2 * a) * b * b * (3 - 2 * b);
+  };
+  for (let r = 0; r < rows; r++) {
+    const L = lists[r];
+    if (L.length < 12) continue;
+    const yc = y0 + (r + 0.5) * DS, cz = bi.cz(yc), k = amount * ramp(bi.T(yc));
+    if (k <= 0) continue;
+    const pts = [];
+    for (const i of L) pts.push(G[i * 3], G[i * 3 + 2] - cz);
+    const h = hull2(pts);
+    if (h.length < 3) continue;
+    for (const i of L) {
+      const x = G[i * 3], z = G[i * 3 + 2] - cz, rr = len2(x, z);
+      if (rr < 0.02) continue;
+      const push = Math.min(SEAT_MAX, hullRadius(h, x / rr, z / rr) - rr) * k * (fade ? fade[i] : 1);
+      if (push <= 0) continue;
+      G[i * 3] += (x / rr) * push; G[i * 3 + 2] += (z / rr) * push;
     }
   }
 }
@@ -231,7 +280,7 @@ const SPAN_RELAX = 12;
 function depthHang(c, bi, o) {
   const { n, G, N0, coords } = c;
   const { loose, slope, bridgeSlope, torsoStartY, fade, span } = o;
-  if (loose <= 0.001 && bridgeSlope >= 1.9) return;
+  if (loose <= 0.001 && bridgeSlope >= 1.9 && !(o.membrane > 0)) return;
   const DX = 0.01, DY = 0.01, X0 = -0.5, NX = 100;
   let ymin = Infinity, ymax = -Infinity;
   for (let i = 0; i < n; i++) if (coords.wT[i] >= 0.3) { const y = G[i * 3 + 1]; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
@@ -278,6 +327,7 @@ function depthHang(c, bi, o) {
       if (b > MB[k]) MB[k] = b;
       if (d > MD[k]) MD[k] = d;
     }
+    if (o.membrane > 0) membraneEnvelope(MB, rows, NX, Math.max(0, Math.floor((ymax - bi.land.armpit - MEMBRANE_ABOVE) / DY)), o.membrane, o.tension ?? MEMBRANE_TENSION);
     for (let i = 0; i < n; i++) {
       if (coords.wT[i] < 0.3) continue;
       const fz = facing(i);
@@ -300,6 +350,50 @@ function depthHang(c, bi, o) {
       G[i * 3 + 2] += dz * side;
     }
   }
+}
+
+/** Rows above the armpit where the membrane starts (the clavicles anchor it), m. */
+const MEMBRANE_ABOVE = 0.1;
+/** Sag of the membrane over a span: K * (half span)^2 (m; 2 cm over a 20 cm span). */
+const MEMBRANE_TENSION = 2.0;
+/** Half spans (cells) and directions of the membrane relaxation. */
+const MEMBRANE_STEPS = [1, 2, 3, 4, 6, 8, 11];
+const MEMBRANE_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
+
+/**
+ * 2-D membrane over a depth map (in place): fabric stretched over the bust, the
+ * belly, the shoulder blades spans the hollows between them in every direction
+ * (cleavage, upper slope of the bust, spine groove, between the scapulae) instead
+ * of following each dome. Each cell rises to the midpoint of any pair of cells
+ * around it, minus a sag growing with the square of the span (a tensioned sheet,
+ * not a rigid hull), a few Gauss-Seidel sweeps; the result is blended in by amount.
+ * M: depth per cell (NaN = no fabric), rows x NX, rows >= rowStart may move.
+ */
+function membraneEnvelope(M, rows, NX, rowStart, amount, K) {
+  const E = M.slice();
+  const pairs = [];
+  for (const [dx, dy] of MEMBRANE_DIRS) for (const s of MEMBRANE_STEPS) {
+    const d = s * 0.01 * Math.hypot(dx, dy);
+    pairs.push(dx * s, dy * s, K * d * d);
+  }
+  for (let it = 0; it < 8; it++) {
+    for (let r = rowStart; r < rows; r++) for (let x = 0; x < NX; x++) {
+      const k = r * NX + x;
+      let best = E[k];
+      if (best !== best) continue;
+      for (let q = 0; q < pairs.length; q += 3) {
+        const ox = pairs[q], oy = pairs[q + 1];
+        const xa = x - ox, xb = x + ox, ra = r - oy, rb = r + oy;
+        if (xa < 0 || xb < 0 || xa >= NX || xb >= NX || ra < 0 || rb < 0 || ra >= rows || rb >= rows) continue;
+        const a = E[ra * NX + xa], b = E[rb * NX + xb];
+        if (a !== a || b !== b) continue;
+        const cand = (a + b) * 0.5 - pairs[q + 2];
+        if (cand > best) best = cand;
+      }
+      E[k] = best;
+    }
+  }
+  for (let k = 0; k < M.length; k++) if (M[k] === M[k]) M[k] += (E[k] - M[k]) * amount;
 }
 
 /**

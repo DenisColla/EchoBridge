@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { quadNormals, buildAdjacency, buildEdges, len3 } from './mesh.js';
 import { WrinklePart, foldFields, noise3, FOLD_BIAS, scratch } from './wrinkles.js';
 import { staticFolds } from './build.js';
+import { softSkin } from '../render/softskin.js';
 
 /** Atlas rects [x0, y0, w, h] per region (0 torso, 1 arm L, 2 arm R, 3 leg L, 4 leg R). */
 export const ATLAS = [
@@ -293,7 +294,14 @@ export function assemble(pieces, bi, opts = {}) {
       coarse: { n: coarse.n, G: coarse.G, adj: coarse.adj || buildAdjacency(coarse.n, buildEdges(coarse.n, coarse.quads)), skin: coarse.skin, basis },
       nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 4,
     });
-    parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
+    // height of the fabric over the body (seat pass: the layers keep their order when pressed)
+    const hgt = new Float32Array(nf);
+    if (d.B) for (let i = 0; i < nf; i++) { const o = i * 3; hgt[i] = (P[o] - d.B[o]) * d.BN[o] + (P[o + 1] - d.B[o + 1]) * d.BN[o + 1] + (P[o + 2] - d.B[o + 2]) * d.BN[o + 2]; }
+    else if (d.room) for (let i = 0; i < nf; i++) hgt[i] = d.room[i] + (d.thick || 0.0025) + 0.002;
+    // torso (not sleeve / trouser leg) vertices: the hem lift moves them
+    const trs = new Uint8Array(nf);
+    for (let i = 0; i < nf; i++) trs[i] = C.limb[i] && C.wT[i] < 0.5 ? 0 : 1;
+    parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, hgt, trs, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
     fineOffset += nf;
     nslot = extraSlot;
   }
@@ -321,10 +329,12 @@ export function assemble(pieces, bi, opts = {}) {
   const dirN = new Float32Array(fineOffset * 3), disp = new Float32Array(fineOffset);
   // fine (undisplaced) rest surface + skin weights: used by the layer pass
   const fineP = new Float32Array(fineOffset * 3), fineSI = new Uint16Array(fineOffset * 4), fineSW = new Float32Array(fineOffset * 4);
-  const fineLift = new Float32Array(fineOffset), fineCoarse = new Uint8Array(fineOffset);
+  const fineLift = new Float32Array(fineOffset), fineCoarse = new Uint8Array(fineOffset), fineH = new Float32Array(fineOffset), fineTorso = new Uint8Array(fineOffset);
   for (const p of parts) {
+    fineTorso.set(p.trs, p.offset); delete p.trs;
     fineCoarse.fill(1, p.offset, p.offset + p.wp.n); // fine vertex c < n is coarse vertex c
     fineLift.set(p.lift, p.offset); delete p.lift;
+    fineH.set(p.hgt, p.offset); delete p.hgt;
     dirN.set(p.N, p.offset * 3); p.wp.disp = disp.subarray(p.offset, p.offset + p.nf); delete p.N;
     fineP.set(p.P.subarray(0, p.nf * 3), p.offset * 3);
     fineSI.set(p.skin.idx.subarray(0, p.nf * 4), p.offset * 4); fineSW.set(p.skin.w.subarray(0, p.nf * 4), p.offset * 4);
@@ -344,31 +354,72 @@ export function assemble(pieces, bi, opts = {}) {
   for (const p of lists) { const a = p.adj; for (let i = 0; i < p.nf; i++) for (let k = a.off[i], o = deg[p.offset + i]; k < a.off[i + 1]; k++, o++) adjL[o] = a.adj[k] + p.offset; delete p.adj; }
   rt.fine = { P: fineP, si: fineSI, sw: fineSW, n: fineOffset, adj: { off: deg, adj: adjL }, lift: fineLift, coarse: fineCoarse };
   if (parts.some((p) => p.ring)) rt.setLegs(legColliders(bi));
+  if (!opts.noSeat) rt.setSeat(seatFrames(bi), fineH);
+  if (opts.hemLift) rt.setHemLift(bi, opts.hemLift, fineTorso);
   return rt;
 }
 
 /**
- * Leg colliders for skirts: per leg a thigh (hip -> knee) and a shin (knee ->
- * ankle) tapered capsule in rest space, each end bound to the bone it moves with.
- * Radii are the 85th percentile of the leg's body vertices around the axis.
+ * Seat frames: per leg the rest hip joint and knee, the back of the thigh
+ * (posterior direction perpendicular to the thigh axis) and the depth of the
+ * back of the thigh below the axis at mid-thigh (rest body), with the bones
+ * the frame moves with (thigh) and is measured against (pelvis).
+ */
+function seatFrames(bi) {
+  const topo = bi.topo, model = topo.model, P = bi.P, out = [];
+  for (const [r, side, sg] of [[3, 'L', 1], [4, 'R', -1]]) {
+    const L = bi.limbs[r], A = bi.param[r - 1], J = L.J;
+    const a0 = [J[0], J[1], J[2]], k0 = [J[3], J[4], J[5]];
+    const u = [k0[0] - a0[0], k0[1] - a0[1], k0[2] - a0[2]], len = Math.hypot(u[0], u[1], u[2]) || 1;
+    u[0] /= len; u[1] /= len; u[2] /= len;
+    const b = [-u[0] * -u[2], -u[1] * -u[2], -1 - u[2] * -u[2]], bl = Math.hypot(b[0], b[1], b[2]) || 1;
+    b[0] /= bl; b[1] /= bl; b[2] /= bl;
+    let dm = 0.05;
+    for (let v = 0; v < topo.nv; v++) {
+      if (topo.limb[v] !== r || A[v] < 0.4 || A[v] > 0.6) continue;
+      const d = (P[v * 3] - a0[0]) * b[0] + (P[v * 3 + 1] - a0[1]) * b[1] + (P[v * 3 + 2] - a0[2]) * b[2];
+      if (d > dm) dm = d;
+    }
+    const bone = (n) => model.boneIndex.get(n);
+    out.push({ sg, a0, k0, u0: u, b0: b, len, dm, ba: bone('upperleg01.' + side), bb: bone('lowerleg01.' + side), bp: bone('pelvis.' + side) ?? bone('root') });
+  }
+  return out;
+}
+
+/** Hip flexion (deg) over which the seat correction fades in. */
+const SEAT_FLEX = [35, 80];
+/** Extra depth (m) of the seat below the back-of-thigh line near the hip (gluteal pad). */
+const SEAT_PAD = 0.01;
+/** Excess (m) the pressed seat keeps at most (soft saturation: no hard crease). */
+const SEAT_SOFT = 0.005;
+/** Most height over the body (m) a vertex counts as its own layer thickness in the seat pass. */
+const SEAT_HMAX = 0.012;
+
+/**
+ * Leg colliders for skirts: per leg two thigh capsules (hip -> mid-thigh -> knee:
+ * the quadriceps bulge is wider than a straight taper from hip to knee) and a
+ * shin capsule (knee -> ankle), tapered, in rest space, each end bound to the
+ * bone it moves with. Radii: the 92nd percentile of the leg's body vertices
+ * around the axis in each band.
  */
 function legColliders(bi) {
   const topo = bi.topo, model = topo.model, P = bi.P, out = [], tmp = new Float32Array(9);
   for (const [r, side] of [[3, 'L'], [4, 'R']]) {
     const L = bi.limbs[r], A = bi.param[r - 1];
-    const bins = [[], [], [], []]; // around the hip, knee (thigh side), knee (shin side), ankle
+    const bins = [[], [], [], [], []]; // around the hip, mid-thigh, knee (thigh side), knee (shin side), ankle
     for (let v = 0; v < topo.nv; v++) {
       const a = A[v];
       if (a < 0.08 || a > 1.92 || topo.limb[v] !== r) continue;
       L.cyl(a, P[v * 3], P[v * 3 + 1], P[v * 3 + 2], tmp);
-      const b = a < 0.35 ? 0 : a < 1 ? (a > 0.75 ? 1 : -1) : a < 1.25 ? 2 : a > 1.7 ? 3 : -1;
+      const b = a < 0.3 ? 0 : a < 0.7 ? (a > 0.35 ? 1 : -1) : a < 1 ? (a > 0.78 ? 2 : -1) : a < 1.25 ? 3 : a > 1.7 ? 4 : -1;
       if (b >= 0) bins[b].push(tmp[1]);
     }
-    const pct = (v, d) => { if (!v.length) return d; v.sort((x, y) => x - y); return v[Math.floor(v.length * 0.85)]; };
-    const rHip = pct(bins[0], 0.08), rKnee = Math.max(pct(bins[1], 0.05), pct(bins[2], 0.05)), rAnkle = pct(bins[3], 0.035);
+    const pct = (v, d) => { if (!v.length) return d; v.sort((x, y) => x - y); return v[Math.floor(v.length * 0.92)]; };
+    const rHip = pct(bins[0], 0.08), rMid = pct(bins[1], 0.065), rKnee = Math.max(pct(bins[2], 0.05), pct(bins[3], 0.05)), rAnkle = pct(bins[4], 0.035);
     const bone = (n) => model.boneIndex.get(n + '.' + side);
-    const J = L.J;
-    out.push({ a: [J[0], J[1], J[2]], b: [J[3], J[4], J[5]], ba: bone('upperleg01'), bb: bone('lowerleg01'), ra: rHip, rb: rKnee });
+    const J = L.J, mid = [(J[0] + J[3]) / 2, (J[1] + J[4]) / 2, (J[2] + J[5]) / 2];
+    out.push({ a: [J[0], J[1], J[2]], b: mid, ba: bone('upperleg01'), bb: bone('upperleg01'), ra: rHip, rb: Math.max(rMid, (rHip + rKnee) / 2) });
+    out.push({ a: mid, b: [J[3], J[4], J[5]], ba: bone('upperleg01'), bb: bone('lowerleg01'), ra: Math.max(rMid, (rHip + rKnee) / 2), rb: rKnee });
     out.push({ a: [J[3], J[4], J[5]], b: [J[6], J[7], J[8]], ba: bone('lowerleg01'), bb: bone('foot'), ra: rKnee, rb: rAnkle });
   }
   return out;
@@ -417,6 +468,86 @@ function xform(M, b, p, out) {
   return out;
 }
 
+/** Linear part of the skin matrix of bone b applied to direction d -> out. */
+function lin(M, b, d, out) {
+  const o = b * 16, x = d[0], y = d[1], z = d[2];
+  out[0] = M[o] * x + M[o + 4] * y + M[o + 8] * z;
+  out[1] = M[o + 1] * x + M[o + 5] * y + M[o + 9] * z;
+  out[2] = M[o + 2] * x + M[o + 6] * y + M[o + 10] * z;
+  return out;
+}
+const _pb = new Float32Array(3), _pc = new Float32Array(3), _dq = new Float32Array(9);
+const FWD = [0, 0, 1], DOWN = [0, -1, 0];
+/** Arm elevation (deg, from hanging down) over which a top's hem lift fades in. */
+const LIFT_ELEV = [70, 165];
+const ss = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+/**
+ * Unit dual quaternions of every bone's skin matrix (rotation r, dual part d,
+ * uniform scale s; 9 floats per bone), as the GPU skins with 'Deformazione
+ * morbida' (render/softskin.js), so the CPU passes see the surface that is drawn.
+ */
+let _bdq = new Float32Array(0);
+function boneDQs(M) {
+  const nb = M.length >> 4;
+  if (_bdq.length < nb * 9) _bdq = new Float32Array(nb * 9);
+  for (let b = 0; b < nb; b++) {
+    const o = b * 16, q = b * 9;
+    const s = Math.hypot(M[o], M[o + 1], M[o + 2]);
+    if (s < 1e-6) { _bdq.fill(0, q, q + 9); _bdq[q + 3] = 1; continue; }
+    const is = 1 / s;
+    const m00 = M[o] * is, m10 = M[o + 1] * is, m20 = M[o + 2] * is, m01 = M[o + 4] * is, m11 = M[o + 5] * is, m21 = M[o + 6] * is, m02 = M[o + 8] * is, m12 = M[o + 9] * is, m22 = M[o + 10] * is;
+    let x, y, z, w;
+    const tr = m00 + m11 + m22;
+    if (tr > 0) { const k = 0.5 / Math.sqrt(tr + 1); w = 0.25 / k; x = (m21 - m12) * k; y = (m02 - m20) * k; z = (m10 - m01) * k; } else if (m00 > m11 && m00 > m22) { const k = 2 * Math.sqrt(1 + m00 - m11 - m22); w = (m21 - m12) / k; x = 0.25 * k; y = (m01 + m10) / k; z = (m02 + m20) / k; } else if (m11 > m22) { const k = 2 * Math.sqrt(1 + m11 - m00 - m22); w = (m02 - m20) / k; x = (m01 + m10) / k; y = 0.25 * k; z = (m12 + m21) / k; } else { const k = 2 * Math.sqrt(1 + m22 - m00 - m11); w = (m10 - m01) / k; x = (m02 + m20) / k; y = (m12 + m21) / k; z = 0.25 * k; }
+    const l = Math.hypot(x, y, z, w) || 1;
+    x /= l; y /= l; z /= l; w /= l;
+    const tx = M[o + 12] * is, ty = M[o + 13] * is, tz = M[o + 14] * is;
+    // d = 0.5 * (t * w + t x r, -t . r)
+    _bdq[q] = x; _bdq[q + 1] = y; _bdq[q + 2] = z; _bdq[q + 3] = w;
+    _bdq[q + 4] = 0.5 * (tx * w + (ty * z - tz * y)); _bdq[q + 5] = 0.5 * (ty * w + (tz * x - tx * z)); _bdq[q + 6] = 0.5 * (tz * w + (tx * y - ty * x)); _bdq[q + 7] = -0.5 * (tx * x + ty * y + tz * z);
+    _bdq[q + 8] = s;
+  }
+  return _bdq;
+}
+/** Blended unit dual quaternion of fine vertex i (antipodality against its first bone) -> out[9]. */
+function dqBlend(D, si, sw, i, out) {
+  out.fill(0);
+  let ws = 0, ax = 0, ay = 0, az = 0, aw = 0;
+  for (let k = 0; k < 4; k++) {
+    const w = sw[i * 4 + k];
+    if (!w && k) continue;
+    const q = si[i * 4 + k] * 9;
+    if (!k) { ax = D[q]; ay = D[q + 1]; az = D[q + 2]; aw = D[q + 3]; }
+    const kk = D[q] * ax + D[q + 1] * ay + D[q + 2] * az + D[q + 3] * aw < 0 ? -w : w;
+    for (let c = 0; c < 8; c++) out[c] += kk * D[q + c];
+    out[8] += w * D[q + 8]; ws += w;
+  }
+  const l = Math.hypot(out[0], out[1], out[2], out[3]);
+  if (l < 1e-6) { out.fill(0); out[3] = 1; out[8] = 1; return out; }
+  for (let c = 0; c < 8; c++) out[c] /= l;
+  out[8] /= ws || 1;
+  return out;
+}
+/** Applies a blended dual quaternion to rest point (x, y, z) -> out. */
+function dqApply(q, x, y, z, out) {
+  const rx = q[0], ry = q[1], rz = q[2], rw = q[3], dx = q[4], dy = q[5], dz = q[6], dw = q[7];
+  const cx = ry * z - rz * y + rw * x, cy = rz * x - rx * z + rw * y, cz = rx * y - ry * x + rw * z;
+  let ox = x + 2 * (ry * cz - rz * cy), oy = y + 2 * (rz * cx - rx * cz), oz = z + 2 * (rx * cy - ry * cx);
+  ox += 2 * (rw * dx - dw * rx + (ry * dz - rz * dy));
+  oy += 2 * (rw * dy - dw * ry + (rz * dx - rx * dz));
+  oz += 2 * (rw * dz - dw * rz + (rx * dy - ry * dx));
+  out[0] = ox * q[8]; out[1] = oy * q[8]; out[2] = oz * q[8];
+  return out;
+}
+/** Posed offset (x, y, z) back to rest space through a blended dual quaternion (inverse rotation and scale). */
+function dqUnrotate(q, x, y, z, out) {
+  const rx = -q[0], ry = -q[1], rz = -q[2], rw = q[3], is = 1 / (q[8] || 1);
+  const cx = ry * z - rz * y + rw * x, cy = rz * x - rx * z + rw * y, cz = rx * y - ry * x + rw * z;
+  out[0] = (x + 2 * (ry * cz - rz * cy)) * is; out[1] = (y + 2 * (rz * cx - rx * cz)) * is; out[2] = (z + 2 * (rx * cy - ry * cx)) * is;
+  return out;
+}
+
 /** Solves A v = (x, y, z) for the 3x3 linear part of a blended matrix a (column major). */
 function inv3(a, x, y, z, out) {
   const a00 = a[0], a10 = a[1], a20 = a[2], a01 = a[3], a11 = a[4], a21 = a[5], a02 = a[6], a12 = a[7], a22 = a[8];
@@ -451,6 +582,168 @@ export class GarmentRuntime {
     /** free 3D offsets (rest space) of skirt vertices pushed off the legs */
     this.off3 = null;
     this.legs = null;
+  }
+
+  /**
+   * Seated correction (see _seatPass): frames from seatFrames(bi), h = height of
+   * each fine vertex over the body (rest). Candidates: fine vertices behind the hip
+   * joints, from a little above them down to the knees.
+   */
+  setSeat(frames, h) {
+    const P = this.fine.P, n = this.fine.n, idx = [], fr = [];
+    for (let i = 0; i < n; i++) {
+      const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+      let best = -1;
+      for (let f = 0; f < frames.length; f++) {
+        const F = frames[f];
+        if (y > F.a0[1] + 0.1 || y < F.k0[1] + 0.04 || z > F.a0[2] + 0.05 || x * F.sg < -0.03) continue;
+        if (best < 0 || Math.abs(x - F.a0[0]) < Math.abs(x - frames[best].a0[0])) best = f;
+      }
+      if (best >= 0) { idx.push(i); fr.push(best); }
+    }
+    if (!idx.length) return;
+    const hh = new Float32Array(idx.length);
+    for (let k = 0; k < idx.length; k++) hh[k] = Math.min(SEAT_HMAX, Math.max(0, h[idx[k]]));
+    this.seat = { frames, idx: Int32Array.from(idx), fr: Uint8Array.from(fr), h: hh, on: false, posed: frames.map(() => ({ A: new Float32Array(3), u: new Float32Array(3), b: new Float32Array(3), w: 0, len: 1 })) };
+    this.s3 = null;
+    /** the seat pass is applied (the manager turns it off for underwear that is the outer layer) */
+    this.seatClamp = true;
+  }
+
+  /**
+   * Seated: at a strong hip flexion the skinned buttocks roll into two round lobes
+   * below the line of the thighs (blended skinning of the gluteal fold, no seat to
+   * press them flat). Every candidate vertex deeper below the back of its posed
+   * thigh than the back-of-thigh line (+ a gluteal pad near the hip, + its own
+   * height over the body so the layers keep their order) is pressed back towards
+   * it, with a soft saturation; rest-space offsets through the inverse of the
+   * vertex's skinning (dual quaternion or linear, as the renderer skins it).
+   * Returns true when the offsets changed.
+   */
+  _seatPass(M) {
+    const S = this.seat, F = this.fine, P = F.P, si = F.si, sw = F.sw, N = this.dirN, disp = this.disp, push = this.push;
+    let any = false;
+    S.frames.forEach((fr, q) => {
+      const ps = S.posed[q];
+      xform(M, fr.ba, fr.a0, _pa); ps.A.set(_pa);
+      xform(M, fr.bb, fr.k0, _pb);
+      let ux = _pb[0] - _pa[0], uy = _pb[1] - _pa[1], uz = _pb[2] - _pa[2];
+      const l = Math.hypot(ux, uy, uz) || 1;
+      ux /= l; uy /= l; uz /= l;
+      ps.u[0] = ux; ps.u[1] = uy; ps.u[2] = uz; ps.len = l;
+      // the thigh's posterior direction, turned with the thigh
+      lin(M, fr.ba, fr.b0, _pc);
+      let d = _pc[0] * ux + _pc[1] * uy + _pc[2] * uz;
+      const bx = _pc[0] - d * ux, by = _pc[1] - d * uy, bz = _pc[2] - d * uz;
+      const bl = Math.hypot(bx, by, bz) || 1;
+      ps.b[0] = bx / bl; ps.b[1] = by / bl; ps.b[2] = bz / bl;
+      // hip flexion: the thigh against its rest direction carried by the pelvis
+      lin(M, fr.bp, fr.u0, _pc);
+      const cl = Math.hypot(_pc[0], _pc[1], _pc[2]) || 1;
+      d = (_pc[0] * ux + _pc[1] * uy + _pc[2] * uz) / cl;
+      lin(M, fr.bp, FWD, _pb);
+      const fwd = (ux - _pc[0] / cl) * _pb[0] + (uy - _pc[1] / cl) * _pb[1] + (uz - _pc[2] / cl) * _pb[2];
+      const ang = fwd > 0 ? Math.acos(Math.max(-1, Math.min(1, d))) * 57.29578 : 0;
+      const t = Math.min(1, Math.max(0, (ang - SEAT_FLEX[0]) / (SEAT_FLEX[1] - SEAT_FLEX[0])));
+      ps.w = t * t * (3 - 2 * t);
+      if (ps.w > 0) any = true;
+    });
+    if (!any || !this.seatClamp) {
+      if (!S.on) return false;
+      S.on = false;
+      this.s3.fill(0);
+      return true;
+    }
+    const s3 = this.s3 || (this.s3 = new Float32Array(disp.length * 3));
+    const dq = softSkin.active ? boneDQs(M) : null;
+    let changed = !S.on;
+    S.on = true;
+    for (let k = 0, m = S.idx.length; k < m; k++) {
+      const i = S.idx[k], ps = S.posed[S.fr[k]], fr = S.frames[S.fr[k]], o = i * 3;
+      let rx = 0, ry = 0, rz = 0;
+      if (ps.w > 0) {
+        const dd = disp[i] + push[i];
+        let x = P[o] + N[o] * dd, y = P[o + 1] + N[o + 1] * dd, z = P[o + 2] + N[o + 2] * dd;
+        if (this.off3) { x += this.off3[o]; y += this.off3[o + 1]; z += this.off3[o + 2]; }
+        // posed position (and the frame to map a posed offset back to rest space)
+        let px, py, pz;
+        if (dq) { dqBlend(dq, si, sw, i, _dq); dqApply(_dq, x, y, z, _pa); px = _pa[0]; py = _pa[1]; pz = _pa[2]; } else {
+          const a = blendMatrix(M, si, sw, i, _ma);
+          px = a[0] * x + a[3] * y + a[6] * z + a[9]; py = a[1] * x + a[4] * y + a[7] * z + a[10]; pz = a[2] * x + a[5] * y + a[8] * z + a[11];
+        }
+        const ex = px - ps.A[0], ey = py - ps.A[1], ez = pz - ps.A[2];
+        const ta = ex * ps.u[0] + ey * ps.u[1] + ez * ps.u[2], t = ta / ps.len;
+        const g = ss(-0.7, -0.4, t) * (1 - ss(0.88, 1.04, t));
+        if (g > 0) {
+          const qd = ex * ps.b[0] + ey * ps.b[1] + ez * ps.b[2];
+          const wx = ex - ta * ps.u[0] - qd * ps.b[0], wy = ey - ta * ps.u[1] - qd * ps.b[1], wz = ez - ta * ps.u[2] - qd * ps.b[2];
+          const lat = 1 - ss(0.13, 0.2, Math.hypot(wx, wy, wz));
+          const D = fr.dm + SEAT_PAD * (1 - ss(0.12, 0.55, t)) + S.h[k];
+          const e = qd - D;
+          if (e > 0 && lat > 0) {
+            const keep = SEAT_SOFT * (1 - Math.exp(-e / SEAT_SOFT));
+            const c = (keep - e) * ps.w * g * lat;
+            const vx = ps.b[0] * c, vy = ps.b[1] * c, vz = ps.b[2] * c;
+            if (dq) { dqUnrotate(_dq, vx, vy, vz, _pa); rx = _pa[0]; ry = _pa[1]; rz = _pa[2]; } else {
+              inv3(blendMatrix(M, si, sw, i, _ma), vx, vy, vz, _pa); rx = _pa[0]; ry = _pa[1]; rz = _pa[2];
+            }
+          }
+        }
+      }
+      if (Math.abs(rx - s3[o]) > 1e-5 || Math.abs(ry - s3[o + 1]) > 1e-5 || Math.abs(rz - s3[o + 2]) > 1e-5) changed = true;
+      s3[o] = rx; s3[o + 1] = ry; s3[o + 2] = rz;
+    }
+    return changed;
+  }
+
+  /**
+   * Hem lift of tops: raising the arms pulls the fabric up from the shoulders and
+   * the side seams, so the lower part of a top rises with them (up to `amount` m
+   * at the hem with both arms straight up; one arm lifts its own side). Rest-space
+   * offsets along the torso axis of the torso vertices below the armpits.
+   */
+  setHemLift(bi, amount, torso) {
+    const P = this.fine.P, n = this.fine.n, ya = bi.land.armpit - 0.03, idx = [], sv = [];
+    for (let i = 0; i < n; i++) {
+      if (!torso[i] || P[i * 3 + 1] > ya) continue;
+      idx.push(i); sv.push(ss(ya, ya - 0.15, P[i * 3 + 1]));
+    }
+    if (!idx.length) return;
+    const model = bi.topo.model, arm = (r, side) => {
+      const J = bi.limbs[r].J;
+      return { a: [J[0], J[1], J[2]], b: [J[3], J[4], J[5]], ba: model.boneIndex.get('upperarm01.' + side), bb: model.boneIndex.get('lowerarm01.' + side) };
+    };
+    this.hemLift = { amount, idx: Int32Array.from(idx), s: Float32Array.from(sv), arms: [arm(1, 'L'), arm(2, 'R')], chest: model.boneIndex.get('spine03') ?? 0, raise: [0, 0] };
+    this.liftY = new Float32Array(this.disp.length);
+  }
+
+  /** Arm raise of both sides (0..1) -> liftY. Returns true when the lift changed. */
+  _liftPass(M) {
+    const H = this.hemLift;
+    lin(M, H.chest, DOWN, _pc);
+    const dl = Math.hypot(_pc[0], _pc[1], _pc[2]) || 1;
+    let moved = false;
+    H.arms.forEach((a, q) => {
+      xform(M, a.ba, a.a, _pa); xform(M, a.bb, a.b, _pb);
+      const ux = _pb[0] - _pa[0], uy = _pb[1] - _pa[1], uz = _pb[2] - _pa[2], ul = Math.hypot(ux, uy, uz) || 1;
+      const elev = Math.acos(Math.max(-1, Math.min(1, (ux * _pc[0] + uy * _pc[1] + uz * _pc[2]) / (ul * dl)))) * 57.29578;
+      const r = ss(LIFT_ELEV[0], LIFT_ELEV[1], elev);
+      if (Math.abs(r - H.raise[q]) > 0.01 || (r === 0) !== (H.raise[q] === 0)) { H.raise[q] = r; moved = true; }
+    });
+    if (!moved) return false;
+    const P = this.fine.P, L = this.liftY, [rl, rr] = H.raise;
+    for (let k = 0; k < H.idx.length; k++) {
+      const i = H.idx[k], wl = ss(-0.08, 0.08, P[i * 3]);
+      L[i] = H.amount * H.s[k] * (rl * wl + rr * (1 - wl));
+    }
+    return true;
+  }
+
+  /** Seat pass only (a garment hidden under other layers keeps no folds). Returns true if the geometry changed. */
+  updateSeat(M) {
+    if (!this.seat || !this._seatPass(M)) return false;
+    this.write();
+    return true;
   }
 
   /** Enables the leg collision of the skirt parts (see legColliders). */
@@ -726,6 +1019,8 @@ export class GarmentRuntime {
       let ox = 0, oy = 0, oz = 0;
       if (r.off3) { ox = r.off3[q]; oy = r.off3[q + 1]; oz = r.off3[q + 2]; }
       if (r.floorOn) { ox += r.fl3[q]; oy += r.fl3[q + 1]; oz += r.fl3[q + 2]; }
+      if (r.seat?.on) { ox += r.s3[q]; oy += r.s3[q + 1]; oz += r.s3[q + 2]; }
+      if (r.liftY) oy += r.liftY[j];
       const qx = b[0] * (ux + ox) + b[3] * (uy + oy) + b[6] * (uz + oz) + b[9], qy = b[1] * (ux + ox) + b[4] * (uy + oy) + b[7] * (uz + oz) + b[10], qz = b[2] * (ux + ox) + b[5] * (uy + oy) + b[8] * (uz + oz) + b[11];
       const v = L.gap[p] - ((px - qx) * nx + (py - qy) * ny + (pz - qz) * nz);
       if (v > need[i]) need[i] = v;
@@ -763,6 +1058,7 @@ export class GarmentRuntime {
     }
     if (this.k !== k) changed = true;
     this.k = k;
+    if (this.hemLift && posed) changed = this._liftPass(M) || changed;
     if (this.layers && (changed || innerMoved || this._layersDirty)) {
       this._layersDirty = false;
       changed = this._layerPass(M) || changed;
@@ -771,6 +1067,8 @@ export class GarmentRuntime {
       if (changed) this._legsDirty = true;
       changed = this._legPass(M) || changed;
     }
+    // after the leg pass: a skirt pushed off the thighs is then pressed onto the seat
+    if (this.seat && (posed || this.seat.on)) changed = this._seatPass(M) || changed;
     if (this.floor && (changed || innerMoved || this._floorDirty !== false)) {
       this._floorDirty = false;
       changed = this._floorPass(M) || changed;
@@ -827,6 +1125,8 @@ export class GarmentRuntime {
         const d = disp[i] + push[i], o = i * 3;
         let x = P[o] + N[o] * d, y = P[o + 1] + N[o + 1] * d, z = P[o + 2] + N[o + 2] * d;
         if (off3) { x += off3[o]; y += off3[o + 1]; z += off3[o + 2]; }
+        if (this.seat?.on) { x += this.s3[o]; y += this.s3[o + 1]; z += this.s3[o + 2]; }
+        if (this.liftY) y += this.liftY[i];
         const py = a[1] * x + a[4] * y + a[7] * z + a[10];
         let rx = 0, ry = 0, rz = 0;
         if (py < FLOOR_Y) {
@@ -850,13 +1150,15 @@ export class GarmentRuntime {
     const posAttr = this.geometry.attributes.position, nrmAttr = this.geometry.attributes.normal;
     const P = posAttr.array, NR = nrmAttr.array;
     const n = rv2v.length;
-    const off3 = this.off3, fl3 = this.floorOn ? this.fl3 : null;
+    const off3 = this.off3, fl3 = this.floorOn ? this.fl3 : null, s3 = this.seat?.on ? this.s3 : null, liftY = this.liftY;
     for (let r = 0; r < n; r++) {
       const v = rv2v[r], o = r * 3;
       if (v < 0) { P[o] = base[o]; P[o + 1] = base[o + 1]; P[o + 2] = base[o + 2]; continue; }
       const d = disp[v], q = v * 3;
       P[o] = base[o] + dirN[q] * d; P[o + 1] = base[o + 1] + dirN[q + 1] * d; P[o + 2] = base[o + 2] + dirN[q + 2] * d;
       if (off3) { P[o] += off3[q]; P[o + 1] += off3[q + 1]; P[o + 2] += off3[q + 2]; }
+      if (s3) { P[o] += s3[q]; P[o + 1] += s3[q + 1]; P[o + 2] += s3[q + 2]; }
+      if (liftY) P[o + 1] += liftY[v];
       if (fl3) { P[o] += fl3[q]; P[o + 1] += fl3[q + 1]; P[o + 2] += fl3[q + 2]; }
     }
     nacc.fill(0, 0, this.nslot * 3);
