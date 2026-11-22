@@ -429,7 +429,8 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   const offMin = new Float32Array(n), offBody = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const v = body[i];
-    const lower = occ && occ[v] > -0.5 ? occ[v] + thick * 0.4 + 0.0006 : -1;
+    // (1.2 mm of air over the layer below: its skinning differs a little while posing, no pinholes)
+    const lower = occ && occ[v] > -0.5 ? occ[v] + thick * 0.4 + 0.0012 : -1;
     // (a little extra near edges: skinning differences while posing)
     const bodyMin = edgeZone(i) ? thick * 0.7 + 0.0015 + (snapClear[i] >= 0 ? snapClear[i] : bi.clearance[v]) : -1;
     offBody[i] = bodyMin;

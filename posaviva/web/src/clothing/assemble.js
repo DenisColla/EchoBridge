@@ -597,6 +597,8 @@ export class GarmentRuntime {
       for (let f = 0; f < frames.length; f++) {
         const F = frames[f];
         if (y > F.a0[1] + 0.1 || y < F.k0[1] + 0.04 || z > F.a0[2] + 0.05 || x * F.sg < -0.03) continue;
+        // the back half of the thigh and the seat only: a front or side vertex is never pressed
+        if ((x - F.a0[0]) * F.b0[0] + (y - F.a0[1]) * F.b0[1] + (z - F.a0[2]) * F.b0[2] < 0.01) continue;
         if (best < 0 || Math.abs(x - F.a0[0]) < Math.abs(x - frames[best].a0[0])) best = f;
       }
       if (best >= 0) { idx.push(i); fr.push(best); }
@@ -739,10 +741,14 @@ export class GarmentRuntime {
     return true;
   }
 
-  /** Seat pass only (a garment hidden under other layers keeps no folds). Returns true if the geometry changed. */
+  /**
+   * Seat pass only (a garment hidden under other layers keeps no folds; its
+   * shading is never seen, so the normals are not recomputed). Returns true if the
+   * geometry changed.
+   */
   updateSeat(M) {
     if (!this.seat || !this._seatPass(M)) return false;
-    this.write();
+    this.write(false);
     return true;
   }
 
@@ -1142,7 +1148,7 @@ export class GarmentRuntime {
     return changed;
   }
 
-  write() {
+  write(normals = true) {
     const { rv2v, base, dirN, nid, index } = this;
     // scratch shared by every garment (writes never overlap)
     const nacc = scratch(0, this.nslot * 3), disp = scratch(1, this.disp.length);
@@ -1161,6 +1167,7 @@ export class GarmentRuntime {
       if (liftY) P[o + 1] += liftY[v];
       if (fl3) { P[o] += fl3[q]; P[o + 1] += fl3[q + 1]; P[o + 2] += fl3[q + 2]; }
     }
+    if (!normals) { posAttr.needsUpdate = true; return; }
     nacc.fill(0, 0, this.nslot * 3);
     // a triangle facing against the rest normal of a main-surface vertex (a fold
     // turned inside out: shoe toe gaps, extreme poses) does not darken its shading

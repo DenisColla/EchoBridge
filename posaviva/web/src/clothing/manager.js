@@ -313,7 +313,8 @@ export class ClothingManager extends THREE.EventDispatcher {
     // stay over the garments below (shoes are rigid: never pushed), the underwear
     // included: it rides the skin with the body's own weights, the layers over it do
     // not quite (molded bra cups would show through a T-shirt in single pixels)
-    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).map((x) => x.runtime));
+    // (an outer layer rests on the top under it: the underwear is not its business)
+    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear' || g.def.slot !== 'outer').map((x) => x.runtime));
     seatFlags(st.garments);
     // fine adjacency is only needed by the layer pass
     if (!g.runtime.layers && g.runtime.fine) g.runtime.fine.adj = null;

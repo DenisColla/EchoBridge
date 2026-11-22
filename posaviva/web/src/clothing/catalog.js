@@ -59,7 +59,13 @@ const PAL = {
 
 const HEAD = (k) => k.exclude('head', ['head'], 0.5);
 const ARMS = (k) => k.exclude('arms', ['armL', 'handL', 'armR', 'handR'], 0.45);
-const FEET = (k) => k.exclude('feet', ['footL', 'footR'], 0.5);
+const FEET = (k, thr = 0.5) => k.exclude('feet', ['footL', 'footR'], thr);
+/**
+ * Leg length of full-length trousers down to the shoe: `len` at the sides, lower
+ * at the back over the heel, shorter over the instep (the hem rests on the shoe
+ * with a little break instead of hovering above it as a horizontal ring).
+ */
+const shoeHem = (len) => (front) => len + 0.06 * Math.max(0, -front) + 0.01 * Math.max(0, front);
 const sleeves = (k, len) => [k.sleeve('sleeveL', 'L', len), k.sleeve('sleeveR', 'R', len)];
 const legs = (k, len) => [k.legMax('legL', 'L', len), k.legMax('legR', 'R', len)];
 /**
@@ -326,7 +332,7 @@ export const GARMENTS = [
   {
     id: 'jeans', label: 'Jeans', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual'], icon: 'jeans',
     fabric: 'denim', color: '#3b5577', palette: PAL.denim,
-    mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, 1.97), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, shoeHem(2.03)), ARMS(k), FEET(k, 0.75)],
     bands: { waist: { h: 0.038 } },
     edges: { default: { type: 'hem', r: 0.0028, depth: 0.02 } },
     // Vestibilità: skinny (hugs to the ankle) .. slim .. regular (straight from
@@ -336,7 +342,7 @@ export const GARMENTS = [
       loose: [0.0, 0.3], slope: [1.6, 0.35], bridgeSlope: 1.1, bridge: 4,
       // at Normale a straight leg tapering a little to the hem (~39 cm round on a man);
       // women's jeans are cut a step slimmer at the same Vestibilità
-      leg: { loose: [0.1, 0.95], slope: [0.6, 0.012], slopeUpper: [1.4, 0.04], bridgeSlope: 0.9, sexShift: { F: -0.15 } },
+      leg: { loose: [0.1, 0.95], slope: [0.6, 0.012], slopeUpper: [1.4, 0.04], bridgeSlope: 0.9, sexShift: { F: -0.1 } },
       seatBridge: [0.7, 1],
     },
     wrinkle: { k: 0.8, wl: 0.058, wlLeg: 0.046, kt: 0.3 },
@@ -347,7 +353,7 @@ export const GARMENTS = [
   {
     id: 'trousers', label: 'Pantaloni eleganti', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['formal'], icon: 'trousers',
     fabric: 'wool', color: '#2a2d33', palette: PAL.formal,
-    mask: (k) => [k.below('waist', k.y(1.75)), ...legs(k, 2.02), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.75)), ...legs(k, shoeHem(2.08)), ARMS(k), FEET(k, 0.8)],
     bands: { waist: { h: 0.036 } },
     edges: { default: { type: 'hem', r: 0.0025, depth: 0.03 } },
     fit: {
@@ -383,7 +389,7 @@ export const GARMENTS = [
   {
     id: 'cargo', label: 'Pantaloni cargo', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'sport'], icon: 'cargo',
     fabric: 'canvas', color: '#5b5e45', palette: ['#5b5e45', '#2a2d2a', '#8a7a5a', '#3f4a3c', '#6b6e72', '#c2b28f', '#2b3a55', '#4a3a2a'],
-    mask: (k) => [k.below('waist', k.y(1.5)), ...legs(k, 1.98), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.5)), ...legs(k, shoeHem(2.02)), ARMS(k), FEET(k, 0.7)],
     bands: { waist: { h: 0.04 } },
     edges: { default: { type: 'hem', r: 0.003, depth: 0.025 } },
     fit: {
@@ -491,7 +497,7 @@ export const GARMENTS = [
   {
     id: 'dressshoes', label: 'Scarpe eleganti', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['formal'], icon: 'dressshoes',
     fabric: 'leather', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
-    mask: (k) => [lowerLegs(k, 2.03, 0.75), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
+    mask: (k) => [lowerLegs(k, 2.0, 0.6), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
     edges: { default: { type: 'hem', r: 0.0022, depth: 0.01 } },
     fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
@@ -618,7 +624,7 @@ function instepOpening(k) {
       // height above the sole and distance along the foot from the ankle
       const along = (a - 2) * bi.limbs[r].L[2];
       const h = y - 0.035;
-      const e = (along / 0.075) ** 2 + Math.max(0, -h / 0.035) ** 2;
+      const e = (along / 0.06) ** 2 + Math.max(0, -h / 0.035) ** 2;
       best = Math.min(best, e - 1 + (h < 0 ? 1 : 0));
     }
     return best * 0.05;

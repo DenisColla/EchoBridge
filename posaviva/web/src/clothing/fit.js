@@ -214,7 +214,7 @@ export function hangFit(c, bi, opts) {
         }
         for (let i = 0; i < n; i++) if (k[i]) { G[i * 3] = tmp[i * 2]; G[i * 3 + 1] = tmp[i * 2 + 1]; }
       }
-      depthHang(c, bi, { ...base, torsoStartY, fade, span: null, membrane, tension });
+      depthHang(c, bi, { ...base, torsoStartY, fade, span: null });
     }
   }
 }
@@ -267,7 +267,7 @@ function seatHull(c, bi, amount, fade) {
 }
 
 /** Relaxation passes over bridged spans (see hangFit). */
-const SPAN_RELAX = 12;
+const SPAN_RELAX = 20;
 
 /**
  * Front / back depth maps of the torso (z per x column and height, as seen from
@@ -356,9 +356,11 @@ function depthHang(c, bi, o) {
 const MEMBRANE_ABOVE = 0.1;
 /** Sag of the membrane over a span: K * (half span)^2 (m; 2 cm over a 20 cm span). */
 const MEMBRANE_TENSION = 2.0;
-/** Half spans (cells) and directions of the membrane relaxation. */
-const MEMBRANE_STEPS = [1, 2, 3, 4, 6, 8, 11];
+/** Half spans (2 cm cells) and directions of the membrane relaxation. */
+const MEMBRANE_STEPS = [1, 2, 3, 4, 6];
 const MEMBRANE_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
+/** Gauss-Seidel sweeps of the membrane (each sweep reaches the next span). */
+const MEMBRANE_SWEEPS = 4;
 
 /**
  * 2-D membrane over a depth map (in place): fabric stretched over the bust, the
@@ -370,22 +372,29 @@ const MEMBRANE_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
  * M: depth per cell (NaN = no fabric), rows x NX, rows >= rowStart may move.
  */
 function membraneEnvelope(M, rows, NX, rowStart, amount, K) {
-  const E = M.slice();
-  const pairs = [];
+  // on a 2 cm grid (max of each 2 x 2 block): the hollows it spans are wider than
+  // that, and the cost is a quarter; the fill is interpolated back onto the 1 cm map
+  const R2 = Math.ceil(rows / 2), N2 = NX >> 1, C = new Float32Array(R2 * N2).fill(NaN);
+  for (let r = 0; r < rows; r++) for (let x = 0; x < N2 * 2; x++) {
+    const v = M[r * NX + x], k = (r >> 1) * N2 + (x >> 1);
+    if (v === v && !(C[k] >= v)) C[k] = v;
+  }
+  const E = C.slice(), pairs = [];
   for (const [dx, dy] of MEMBRANE_DIRS) for (const s of MEMBRANE_STEPS) {
-    const d = s * 0.01 * Math.hypot(dx, dy);
+    const d = s * 0.02 * Math.hypot(dx, dy);
     pairs.push(dx * s, dy * s, K * d * d);
   }
-  for (let it = 0; it < 8; it++) {
-    for (let r = rowStart; r < rows; r++) for (let x = 0; x < NX; x++) {
-      const k = r * NX + x;
+  const r0 = rowStart >> 1;
+  for (let it = 0; it < MEMBRANE_SWEEPS; it++) {
+    for (let r = r0; r < R2; r++) for (let x = 0; x < N2; x++) {
+      const k = r * N2 + x;
       let best = E[k];
       if (best !== best) continue;
       for (let q = 0; q < pairs.length; q += 3) {
         const ox = pairs[q], oy = pairs[q + 1];
         const xa = x - ox, xb = x + ox, ra = r - oy, rb = r + oy;
-        if (xa < 0 || xb < 0 || xa >= NX || xb >= NX || ra < 0 || rb < 0 || ra >= rows || rb >= rows) continue;
-        const a = E[ra * NX + xa], b = E[rb * NX + xb];
+        if (xa < 0 || xb < 0 || xa >= N2 || xb >= N2 || ra < 0 || rb < 0 || ra >= R2 || rb >= R2) continue;
+        const a = E[ra * N2 + xa], b = E[rb * N2 + xb];
         if (a !== a || b !== b) continue;
         const cand = (a + b) * 0.5 - pairs[q + 2];
         if (cand > best) best = cand;
@@ -393,7 +402,17 @@ function membraneEnvelope(M, rows, NX, rowStart, amount, K) {
       E[k] = best;
     }
   }
-  for (let k = 0; k < M.length; k++) if (M[k] === M[k]) M[k] += (E[k] - M[k]) * amount;
+  // fill (envelope - block max) per coarse cell, bilinear at the fine cell centres
+  const F = new Float32Array(R2 * N2);
+  for (let k = 0; k < F.length; k++) F[k] = C[k] === C[k] ? E[k] - C[k] : 0;
+  for (let r = rowStart; r < rows; r++) for (let x = 0; x < NX; x++) {
+    const k = r * NX + x;
+    if (M[k] !== M[k]) continue;
+    const fy = Math.min(R2 - 1.001, Math.max(0, (r - 0.5) / 2)), fx = Math.min(N2 - 1.001, Math.max(0, (x - 0.5) / 2));
+    const y0 = Math.floor(fy), x0 = Math.floor(fx), ay = fy - y0, ax = fx - x0;
+    const f = (F[y0 * N2 + x0] * (1 - ax) + F[y0 * N2 + x0 + 1] * ax) * (1 - ay) + (F[(y0 + 1) * N2 + x0] * (1 - ax) + F[(y0 + 1) * N2 + x0 + 1] * ax) * ay;
+    if (f > 0) M[k] += f * amount;
+  }
 }
 
 /**
