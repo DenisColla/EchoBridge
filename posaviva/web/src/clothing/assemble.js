@@ -405,8 +405,16 @@ const INHERIT_SMOOTH = 3;
  * Jacobi smoothing of sparse top-4 skin weights over the vertices in `region`
  * (half own weights, half the neighbours' mean; 4 largest kept, renormalised).
  */
+const SKIN_MAXB = 32, _bIdx = new Int32Array(SKIN_MAXB), _bW = new Float32Array(SKIN_MAXB);
+/** Adds weight x of bone b to the sparse accumulator (m entries); returns the new count. */
+function addBone(m, b, x) {
+  if (x <= 0) return m;
+  for (let q = 0; q < m; q++) if (_bIdx[q] === b) { _bW[q] += x; return m; }
+  if (m < SKIN_MAXB) { _bIdx[m] = b; _bW[m] = x; m++; }
+  return m;
+}
 function smoothSkinWeights(n, adj, si, sw, region, passes) {
-  const MAXB = 32, bIdx = new Int32Array(MAXB), bW = new Float32Array(MAXB);
+  const bIdx = _bIdx, bW = _bW;
   const nsi = new Uint16Array(si.length), nsw = new Float32Array(sw.length);
   for (let pass = 0; pass < passes; pass++) {
     nsi.set(si); nsw.set(sw);
@@ -415,14 +423,9 @@ function smoothSkinWeights(n, adj, si, sw, region, passes) {
       const d = adj.off[i + 1] - adj.off[i];
       if (!d) continue;
       let m = 0;
-      const add = (b, x) => {
-        if (x <= 0) return;
-        for (let q = 0; q < m; q++) if (bIdx[q] === b) { bW[q] += x; return; }
-        if (m < MAXB) { bIdx[m] = b; bW[m] = x; m++; }
-      };
-      for (let k = 0; k < 4; k++) add(si[i * 4 + k], sw[i * 4 + k] * 0.5);
+      for (let k = 0; k < 4; k++) m = addBone(m, si[i * 4 + k], sw[i * 4 + k] * 0.5);
       const kn = 0.5 / d;
-      for (let e = adj.off[i]; e < adj.off[i + 1]; e++) { const u = adj.adj[e]; for (let k = 0; k < 4; k++) add(si[u * 4 + k], sw[u * 4 + k] * kn); }
+      for (let e = adj.off[i]; e < adj.off[i + 1]; e++) { const u = adj.adj[e]; for (let k = 0; k < 4; k++) m = addBone(m, si[u * 4 + k], sw[u * 4 + k] * kn); }
       let s = 0;
       for (let k = 0; k < 4; k++) {
         let bq = -1, bw = 0;
