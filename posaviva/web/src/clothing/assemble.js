@@ -12,7 +12,7 @@
 // Seams: vertices are split where the angle wraps and between regions.
 import * as THREE from 'three';
 import { quadNormals, buildAdjacency, buildEdges, len3 } from './mesh.js';
-import { WrinklePart, foldFields, noise3, FOLD_BIAS, scratch } from './wrinkles.js';
+import { WrinklePart, foldFields, noise3, FOLD_BIAS, scratch, creaseSetup, foldFabric } from './wrinkles.js';
 import { staticFolds } from './build.js';
 
 /** Atlas rects [x0, y0, w, h] per region (0 torso, 1 arm L, 2 arm R, 3 leg L, 4 leg R). */
@@ -39,8 +39,21 @@ export function atlasUV(r, theta, coord, out, o = 0) {
 const R_REF = [0.15, 0.05, 0.05, 0.075, 0.075];
 /** Distance (m) from a garment edge over which the folds fade in (stiffer hem). */
 const HEM_CALM = 0.022;
-/** Artistic gain over the inextensible-strip estimate (real fabric bunches into fewer, deeper folds). */
+/**
+ * Artistic gain over the inextensible-strip estimate (real fabric bunches into
+ * fewer, deeper folds) of the loosest fit; closer fits get less of it
+ * (foldGain): they have no slack to buckle into deep folds. garment.js sizes the
+ * fold room of the next layer from this upper bound.
+ */
 export const FOLD_GAIN = 2.0;
+/** Fold gain at Vestibilità t (0 aderente .. 1 largo). */
+export const foldGain = (t) => FOLD_GAIN * (0.5 + 0.5 * Math.max(0, Math.min(1, t)));
+/**
+ * Slack bound of the strain folds: most peak-to-valley height (m) where the
+ * fabric lies on the body, and its growth per metre of inward room (ease, bridged
+ * hollows) the fabric can fold into.
+ */
+const PV_MIN = 0.009, PV_ROOM = 1.3;
 
 /** Per-region reference radius and fold frames of a draft. */
 function foldFrames(draft, wr, bi) {
@@ -63,7 +76,7 @@ function foldFrames(draft, wr, bi) {
     return { k, N: Math.max(3, Math.round((2 * Math.PI * r) / (wl * 1.35))), M: Math.max(1, Math.round(k * r * Math.SQRT1_2)) };
   };
   const t = mk(wlT, rr[0], h[0]);
-  const fr = { kT: t.k, NT: t.N, MT: t.M, kL: [0], NL: [0], ML: [0], rr };
+  const fr = { kT: t.k, NT: t.N, MT: t.M, kL: [0], NL: [0], ML: [0], rr, h };
   for (let r = 1; r <= 4; r++) { const q = mk(r <= 2 ? wlA : wlL, rr[r], h[r]); fr.kL[r] = q.k; fr.NL[r] = q.N; fr.ML[r] = q.M; }
   return fr;
 }
@@ -108,8 +121,8 @@ function smoothDense(nf, prof, dense, iterations) {
   }
 }
 
-/** Vertices per fold wavelength (at least). */
-const MIN_SAMPLES = 5.5;
+/** Vertices per fold wavelength (at least): fewer alias into lumps, more give only long soft waves. */
+const MIN_SAMPLES = 4.5;
 
 /** Median fine edge length per region (0 torso, 1-4 limbs) of a draft. */
 function meshSpacing(draft) {
@@ -255,7 +268,7 @@ export function assemble(pieces, bi, opts = {}) {
     // fold amplitude: excess length c folded into waves of length L gives a
     // peak-to-trough of about (2L/pi) sqrt(c); k = garment softness/looseness
     const amp = new Float32Array(nf);
-    const k0 = (wr.k ?? 0.8) * (0.6 + 0.8 * (d.fitT ?? 0.5)) * (2 / Math.PI) * FOLD_GAIN;
+    const k0 = (wr.k ?? 0.8) * (0.6 + 0.8 * (d.fitT ?? 0.5)) * (2 / Math.PI) * foldGain(d.fitT ?? 0.5);
     const wlT = 2 * Math.PI / fr.kT;
     // a hem is a doubled, stiffer edge: folds die out over its last couple of
     // centimetres, so the edge reads as one clean line (no zigzag, no specks)
@@ -267,19 +280,34 @@ export function assemble(pieces, bi, opts = {}) {
       const t = Math.min(1, Math.max(0, m / HEM_CALM));
       return 0.3 + 0.7 * t * t * (3 - 2 * t);
     };
-    const hem = new Float32Array(nf);
+    const hem = new Float32Array(nf), base = new Float32Array(nf);
     for (let i = 0; i < nf; i++) {
       const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
       const mod = 0.75 + 0.4 * noise3(x * 3.1 + 17, y * 3.1 - 3, z * 3.1 + 9);
       const L = C.limb[i], wT = L ? C.wT[i] : 1;
       const wl = wT * wlT + (1 - wT) * (L ? 2 * Math.PI / fr.kL[L] : wlT);
       hem[i] = hemK(i);
-      amp[i] = k0 * wl * mod * (1 - 0.8 * (d.zone ? d.zone[i] : 0)) * (pc.ampScale ? pc.ampScale(i) : 1) * hem[i] * (1 - 0.6 * dense.k[i]);
+      base[i] = (1 - 0.8 * (d.zone ? d.zone[i] : 0)) * (pc.ampScale ? pc.ampScale(i) : 1) * hem[i] * (1 - 0.6 * dense.k[i]);
+      amp[i] = k0 * wl * mod * base[i];
     }
     if (dense.any) smoothDense(nf, prof, dense, 6);
-    const stat = staticFolds(d, pc.folds, noise3);
-    for (let i = 0; i < nf; i++) stat[i] *= 0.5 + 0.5 * hem[i];
+    // static drape; the ring stacks of the limbs (cuffs, ankles) are kept apart:
+    // they ease off as the elbow / knee bends (crease runtime)
+    const ringStat = new Float32Array(nf);
+    const stat = staticFolds(d, pc.folds, noise3, 1, ringStat);
+    let anyRing = false;
+    for (let i = 0; i < nf; i++) { const h = 0.5 + 0.5 * hem[i]; stat[i] *= h; ringStat[i] *= h; if (ringStat[i]) anyRing = true; }
     if (d.staticDisp) for (let i = 0; i < nf; i++) stat[i] += d.staticDisp[i];
+    // joint crease folds (shoulder, elbow, hip, knee) and the armpit tension ridges
+    const fab = foldFabric(d.def?.fabric);
+    const crease = d.kind === 'skirt' ? null : creaseSetup(d, bi, { wr, fabric: d.def?.fabric, fitT: d.fitT ?? 0.5, base, spacing: fr.h, ring: anyRing ? ringStat : null });
+    // ring stacks the crease runtime did not take (no joint to ease them) stay static
+    if (anyRing) for (let i = 0; i < nf; i++) stat[i] += ringStat[i];
+    // where the crease folds own the compression the strain folds only add a little
+    if (crease) { for (let i = 0; i < nf; i++) amp[i] *= 1 - 0.65 * crease.cover[i]; crease.cover = null; }
+    // slack bound of the strain folds (peak to valley): a close fit cannot buckle deep
+    const pvCap = new Float32Array(nf);
+    for (let i = 0; i < nf; i++) pvCap[i] = (PV_MIN + PV_ROOM * d.room[i]) * fab.pv;
     const coarse = d.coarse;
     const basis = coarseBasis(d, bi);
     // taut spans (fabric bridging a hollow: under the bust, across the cleavage,
@@ -291,7 +319,8 @@ export function assemble(pieces, bi, opts = {}) {
     }
     const wp = new WrinklePart({
       coarse: { n: coarse.n, G: coarse.G, adj: coarse.adj || buildAdjacency(coarse.n, buildEdges(coarse.n, coarse.quads)), skin: coarse.skin, basis },
-      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 4,
+      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, pvCap, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 2,
+      crease: crease && (crease.rec.n || crease.ten.n || crease.ring) ? crease : null,
     });
     parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
     fineOffset += nf;

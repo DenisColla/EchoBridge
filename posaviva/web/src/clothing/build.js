@@ -807,13 +807,16 @@ function fineCoords(c, par, nf, bi, FP) {
  * feature: {type:'rings'|'vertical'|'crease'|'bump', region:'torso'|'arm'|'leg',
  *   near: constraint id (zone measured from that cut), width (m), amp (m), wl (m),
  *   theta: center angle, spread: half width (rad), from/to (s range) ...}
- * Returns Float32Array(nf) displacement along the normal.
+ * Returns Float32Array(nf) displacement along the normal. With ringOut
+ * (Float32Array nf), the 'rings' of the arm / leg regions (cuff bunching, ankle
+ * stacking) go there instead: the wrinkle runtime eases them with the pose.
  */
-export function staticFolds(draft, features, noise, strength = 1) {
+export function staticFolds(draft, features, noise, strength = 1, ringOut = null) {
   const nf = draft.nf, out = new Float32Array(nf);
   if (!features || !features.length) return out;
   const C = draft.coords, P = draft.P;
   for (const f of features) {
+    const dst = ringOut && f.type === 'rings' && (f.region === 'arm' || f.region === 'leg') ? ringOut : out;
     // zone distance: min over the referenced cuts (meters from the edge)
     let cv = null;
     if (f.near) {
@@ -838,8 +841,15 @@ export function staticFolds(draft, features, noise, strength = 1) {
       let d = 0;
       switch (f.type) {
         case 'rings': { // folds stacked along the axis (bunching, stacking, slack)
-          const ph = (s / f.wl) * 2 * PI + nz * 2.2 + Math.sin(th * 2 + nz) * 0.9;
-          d = f.amp * (foldProfile(ph) - 0.25) * (0.6 + 0.6 * noise(x * 4.3 + 7, y * 4.3, z * 4.3 + 3));
+          // not a periodic ring pattern (reads as painted stripes): the spacing is
+          // warped by low-frequency noise, each fold wanders and tilts around the
+          // limb, and the folds break into arcs that start and stop (stacked fabric
+          // pushes into offset Z / V folds, not into regular rings)
+          const nw = noise(x * 4.7 + 11, y * 4.7 - 3, z * 4.7 + 5);
+          const na = noise(x * 11.3 - 2, y * 11.3 + 9, z * 11.3 - 6);
+          const ph = (s / f.wl) * 2 * PI + 2.6 * nw + 1.2 * Math.sin(th + 1.9 * nw) + 0.7 * Math.sin(2 * th + 1.3 * na) + nz * 0.8;
+          const arc = smoothstep(-0.55, 0.35, na + 0.45 * Math.sin(3 * th + 2.1 * nw));
+          d = f.amp * (foldProfile(ph) - 0.38) * (0.3 + 0.95 * arc) * (0.8 + 0.35 * noise(x * 4.3 + 7, y * 4.3, z * 4.3 + 3));
           break;
         }
         case 'vertical': { // drape folds hanging down (count around)
@@ -857,7 +867,7 @@ export function staticFolds(draft, features, noise, strength = 1) {
           break;
         default:
       }
-      out[i] += d * env * strength;
+      dst[i] += d * env * strength;
     }
   }
   return out;
