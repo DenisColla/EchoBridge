@@ -333,7 +333,8 @@ export function applyQuality(ctx, q) {
 export function openSettings(ctx) {
   const { settings, scenes, app } = ctx;
   const P = app.projects;
-  const voice = app.modules.voice;
+  // voice commands (voice module): app.voice, also app.modules.voice; absent with ?only=…
+  const voice = typeof app.voice?.openSettings === 'function' ? app.voice : app.modules.voice;
   const usage = h('div', { class: 'pv-io-setting-value' });
   const refreshUsage = () => {
     if (P) {
@@ -355,7 +356,7 @@ export function openSettings(ctx) {
       settingToggle('sparkle', 'Suggerimenti', 'Consigli brevi la prima volta che apri uno strumento', settings.get('tips') !== false, (v) => settings.set('tips', v)),
       // the voice module may be missing (?only=…) or still loading: the row appears only when it can open
       typeof voice?.openSettings === 'function'
-        ? row('mic', 'Comandi vocali', 'Lingua, modalità (solo offline o con Claude) e chiave API', 'Apri', () => { m.close(null); setTimeout(() => voice.openSettings(), 0); })
+        ? row('mic', 'Comandi vocali', 'Lingua, modalità offline / ibrida, chiave API Claude', 'Apri', () => { m.close(null); setTimeout(() => voice.openSettings(), 0); })
         : null,
     ]),
     section('Lingua', [

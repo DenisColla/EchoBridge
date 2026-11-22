@@ -5,6 +5,7 @@ import { h, section, chips, button, toast, haptic, promptDialog, confirmDialog }
 import { PRESETS, GROUPS, PRESET_BY_ID } from './presets/index.js';
 import { TIMES, WEATHERS, SEASONS } from './atmos.js';
 import { presetThumb, storeThumb } from './thumbs.js';
+import { ICON_NAMES } from '../ui/icons.js';
 
 const LS_PREFS = 'posaviva.landscapes.prefs';
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(LS_PREFS) || '{}') || {}; } catch { return {}; } };
@@ -68,13 +69,18 @@ export function registerLandscapesTool(app, shell, manager) {
     if (!c) { toast('Prima crea un paesaggio.', { kind: 'info' }); return; }
     const p = PRESET_BY_ID.get(c.resolved.preset);
     const def = `${p?.label || 'Paesaggio'} (${labelOf(TIMES, c.resolved.time).toLowerCase()})`;
+    // "Salva in…" sheet of the projects module: name, project, section; it captures its own
+    // 3:4 thumbnail with the characters hidden and shows the success toast (null = cancelled)
+    if (app.projects?.openSaveSheet) {
+      try { await app.projects.openSaveSheet({ type: 'landscape', name: def, data: manager.exportData() }); }
+      catch (e) { console.error(e); toast('Salvataggio non riuscito', { kind: 'error' }); }
+      return;
+    }
     if (app.projects?.saveItem) {
       const name = await promptDialog('Nome del paesaggio', def, { title: 'Salva paesaggio', okLabel: 'Salva', maxLength: 60 });
       if (!name) return;
       try {
-        let thumb = null;
-        try { const cv = await app.capture({ width: 240, height: 168, transparent: false }); thumb = cv.toDataURL('image/jpeg', 0.72); } catch { /* optional */ }
-        await app.projects.saveItem({ type: 'landscape', name, data: manager.exportData(), thumb });
+        await app.projects.saveItem({ type: 'landscape', name, data: manager.exportData() });
         toast('Paesaggio salvato', { kind: 'ok' });
       } catch (e) { console.error(e); toast('Salvataggio non riuscito', { kind: 'error' }); }
       return;
@@ -85,7 +91,7 @@ export function registerLandscapesTool(app, shell, manager) {
   }
 
   shell.registerTool({
-    id: 'landscapes', label: 'Paesaggi', icon: 'tree', group: 'scene', order: 64, title: 'Paesaggi pronti',
+    id: 'landscapes', label: 'Paesaggi', icon: ICON_NAMES.includes('landscape') ? 'landscape' : 'mountain', group: 'scene', order: 64, title: 'Paesaggi pronti',
     build(el) {
       el.classList.add('pv-ls-panel');
       // ---- current landscape + actions

@@ -48,9 +48,13 @@ export class LandscapeManager extends THREE.EventDispatcher {
     app.addEventListener('renderstyle', () => this.env.hideStudioFloor());
   }
 
+  /** True while a landscape with its own ground (terrain) is shown (rooms have none: y = 0 floor). */
+  get hasTerrain() { return !!(this.env.active && this.env.terrain.cfg); }
+
   /**
    * Height of the landscape ground at world (x, z): terrain, or a walkable deck
-   * (skyscraper roof, pier) above it. 0 without a landscape / terrain.
+   * (skyscraper roof, pier) above it. 0 without a landscape / terrain. Used by
+   * props, exteriors, buildings, animals, character placement and the camera floor.
    */
   heightAt(x, z) {
     if (!this.env.active || !this.env.terrain.cfg) return 0;
@@ -64,6 +68,30 @@ export class LandscapeManager extends THREE.EventDispatcher {
       }
     }
     return h;
+  }
+
+  /**
+   * First point where a ray (THREE.Ray, world) meets the ground raised by `lift` metres
+   * (terrain, roof or pier: heightAt). Drags use it so the finger moves an object over the
+   * hills instead of along a flat plane. Returns `target` or null (no landscape ground, the
+   * ray starts below it, or nothing within maxDist).
+   */
+  rayGround(ray, lift = 0, target = new THREE.Vector3(), maxDist = 600) {
+    if (!this.hasTerrain) return null;
+    const o = ray.origin, d = ray.direction;
+    const f = (t) => o.y + d.y * t - (this.heightAt(o.x + d.x * t, o.z + d.z * t) + lift);
+    if (f(0) <= 0) return null;
+    let t = 0;
+    while (t < maxDist) {
+      const t1 = t + Math.max(0.2, t * 0.015);
+      if (f(t1) <= 0) {
+        let a = t, b = t1;
+        for (let i = 0; i < 14; i++) { const m = (a + b) / 2; if (f(m) > 0) a = m; else b = m; }
+        return target.copy(d).multiplyScalar(b).add(o);
+      }
+      t = t1;
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------ frame & resolution
@@ -107,7 +135,51 @@ export class LandscapeManager extends THREE.EventDispatcher {
       for (const a of g.animals) if (a.follow) fix(a);
       for (const e of g.scatter) for (const it of e.items) fix(it);
     }
+    if (g.terrain) this._levelSites(g);
     return { preset, atm, g, chars: chars.map((c) => [c.x, c.z]) };
+  }
+
+  /**
+   * Building sites: the relief under a building that follows the terrain (huts, farms,
+   * village houses, towers, temples) is levelled to the building's base, blending back to
+   * the relief within a few metres — no gap under the downhill side, no slope through the
+   * floor. The base stays the height the generator chose (scenes saved earlier keep their
+   * buildings on the ground); what stands near a site follows the levelled ground.
+   */
+  _levelSites(g) {
+    const pads = [];
+    for (const it of g.items) {
+      if (!it.follow || !/^ed_/.test(it.type)) continue;
+      const p = it.params || {};
+      // (a farmhouse's barn / portico adds max(6, 0.55 W) beside it, centred on the whole)
+      const W = (+p.width || 8) + (p.barn ? Math.max(6, (+p.width || 8) * 0.55) : 0), D = +p.depth || +p.width || 8;
+      let x = it.x, z = it.z;
+      // anchored by the front: the footprint lies behind the anchor point (front = local +Z)
+      if (it.fit?.front) { x -= Math.sin(it.yaw) * D / 2; z -= Math.cos(it.yaw) * D / 2; }
+      // (steps, porticoes and eaves reach beyond width x depth: a generous margin)
+      pads.push({ x, z, r: (Math.hypot(W, D) / 2) * 1.15 + 1.2, y: it.y - 0.03, it });
+    }
+    if (!pads.length) return;
+    const raw = g.terrain.height, F = 5;
+    const owners = new Set(pads.map((q) => q.it));
+    const near = (x, z) => pads.some((q) => Math.hypot(x - q.x, z - q.z) < q.r + F);
+    // weighted: inside its own site a building's base wins over a neighbour's falloff
+    const level = (x, z) => {
+      let wMax = 0, sw = 0, sy = 0;
+      for (const q of pads) {
+        const d = Math.hypot(x - q.x, z - q.z) - q.r;
+        if (d >= F) continue;
+        const w = d <= 0 ? 1 : 1 - smooth(0, F, d), k = w ** 8;
+        wMax = Math.max(wMax, w); sw += k; sy += k * q.y;
+      }
+      const h = raw(x, z);
+      return wMax > 0 && sw > 0 ? h + (sy / sw - h) * wMax : h;
+    };
+    g.terrain.height = level;
+    const fix = (it) => { if (near(it.x, it.z)) it.y += level(it.x, it.z) - raw(it.x, it.z); };
+    for (const it of g.items) if (it.follow && !owners.has(it)) fix(it);
+    for (const a of g.animals) if (a.follow) fix(a);
+    for (const e of g.scatter) for (const it of e.items) fix(it);
   }
 
   _envDesc(b, seed, frame) {
@@ -176,10 +248,12 @@ export class LandscapeManager extends THREE.EventDispatcher {
     try {
       // replace the previous landscape (its props, animals, environment)
       const prevLights = this.current?.prevLights || app.lightRig?.getState?.() || null;
+      const settle = this._groundSnapshot();
       this._removeItems(this.current);
       const frame = this._frame();
       const b = this._build(resolved, seed, frame);
       this.env.build(this._envDesc(b, seed, frame));
+      this._groundSettle(settle);
       const id = `ls${Date.now().toString(36)}`;
       const group = `L${id}`;
       const made = await this._instantiate(b, frame, group, token);
@@ -212,8 +286,11 @@ export class LandscapeManager extends THREE.EventDispatcher {
   clear({ commit = true, lights = true } = {}) {
     ++this._token;
     const c = this.current;
+    const settle = this._groundSnapshot(c);
     this._removeItems(c);
     this.env.clear(true);
+    this._decks = [];
+    this._groundSettle(settle);
     if (lights && c?.prevLights && this.app.lightRig?.setState) this.app.lightRig.setState(c.prevLights);
     for (const ch of this.app.characters) this.app.city?.liftCharacter?.(ch);
     this.current = null;
@@ -232,6 +309,44 @@ export class LandscapeManager extends THREE.EventDispatcher {
     }
     const A = this.app.animals;
     if (A && c.animals?.length) for (const a of [...A.animals]) if (c.animals.includes(a.id)) A.remove(a);
+  }
+
+  /**
+   * The user's own objects (props / exteriors / buildings not generated by the landscape,
+   * animals) keep their height above the ground when the ground changes (new landscape,
+   * Svuota, a saved landscape): snapshot of the ground under each one before the change...
+   */
+  _groundSnapshot(c = this.current) {
+    const out = [];
+    const skipAnimals = new Set(c?.animals || []);
+    for (const p of this.app.props?.props || []) {
+      if (p.hold || (c && p.group === c.group)) continue;
+      out.push({ o: p, kind: 'prop', y0: this.heightAt(p.root.position.x, p.root.position.z) });
+    }
+    for (const a of this.app.animals?.animals || []) {
+      if (skipAnimals.has(a.id)) continue;
+      out.push({ o: a, kind: 'animal', y0: this.heightAt(a.root.position.x, a.root.position.z) });
+    }
+    return out;
+  }
+
+  /** ...and after it: each one moves by the change of the ground under it (no-op on the flat stage). */
+  _groundSettle(list) {
+    let moved = false;
+    for (const e of list) {
+      const r = e.o.root;
+      if (!r.parent) continue; // removed meanwhile
+      const d = this.heightAt(r.position.x, r.position.z) - e.y0;
+      if (Math.abs(d) < 1e-4) continue;
+      r.position.y += d;
+      r.updateMatrixWorld(true);
+      moved = true;
+    }
+    if (moved) {
+      this.app.props?._changed?.(null);
+      this.app.animals?.dispatchEvent?.({ type: 'change', animal: null, what: 'placement' });
+      this.app.invalidate();
+    }
   }
 
   _remember(r) {
@@ -291,6 +406,8 @@ export class LandscapeManager extends THREE.EventDispatcher {
           p.root.position.set(wx, it.y, wz);
         }
       }
+      if (it.follow && g.terrain && !/^ed_/.test(it.type)) this._fitSlope(p, it, frame, g);
+      p.root.updateMatrixWorld(true); // current matrices for the rays that follow (ground pieces under the characters)
       out.count++;
       if (it.lamp || g.lampTypes.has(it.type)) {
         if (it.lamp) p.root.userData.lsLamp = it.lamp;
@@ -318,6 +435,39 @@ export class LandscapeManager extends THREE.EventDispatcher {
     }
     this.dispatchEvent({ type: 'progress', done: total, total });
     return out;
+  }
+
+  /**
+   * Long, low items standing on sloped ground (fences, carts, benches, stalls, logs, cars)
+   * are tilted with the ground under their footprint (up to 20°) and set on it, keeping
+   * the generator's sink: no end floating above a hillside (flat pieces such as path
+   * segments up to 35°). Trees, towers and buildings
+   * stay upright (buildings get a levelled site, see _levelSites).
+   */
+  _fitSlope(p, it, frame, g) {
+    const lb = p.localBox;
+    if (lb.isEmpty() || p.type.sub === 'alberi') return;
+    const s = p.scale;
+    const sx = (lb.max.x - lb.min.x) * s, sz = (lb.max.z - lb.min.z) * s, sy = (lb.max.y - lb.min.y) * s;
+    const ext = Math.max(sx, sz);
+    if (ext < 1.2 || sy > ext * 1.6) return;
+    const H = g.terrain.height, [rx, rz] = this._toLocal(frame, p.root.position.x, p.root.position.z);
+    const c = Math.cos(it.yaw), sn = Math.sin(it.yaw);
+    const at = (bx, bz) => H(rx + bx * c + bz * sn, rz - bx * sn + bz * c);
+    const cx = ((lb.min.x + lb.max.x) / 2) * s, cz = ((lb.min.z + lb.max.z) / 2) * s, hx = sx * 0.45, hz = sz * 0.45;
+    const xp = at(cx + hx, cz), xm = at(cx - hx, cz), zp = at(cx, cz + hz), zm = at(cx, cz - hz);
+    const lim = (sy < 0.2 ? 35 : 20) * DEG; // flat pieces (paths) lie on steeper ground too
+    const ax = Math.max(-lim, Math.min(lim, -Math.atan((zp - zm) / (2 * hz))));
+    const az = Math.max(-lim, Math.min(lim, Math.atan((xp - xm) / (2 * hx))));
+    if (Math.abs(ax) < 1.5 * DEG && Math.abs(az) < 1.5 * DEG) return;
+    const sink = Math.max(0, Math.min(0.15, H(rx, rz) - p.root.position.y)); // the generator's sink at its root
+    p.root.rotation.set(ax, p.root.rotation.y, az, 'YXZ');
+    p.root.position.y = 0;
+    p.root.updateMatrixWorld(true);
+    // the bottom centre of the footprint onto the ground plane under it
+    _v.set((lb.min.x + lb.max.x) / 2, lb.min.y, (lb.min.z + lb.max.z) / 2).applyMatrix4(p.root.matrixWorld);
+    p.root.position.y = (xp + xm + zp + zm) / 4 - sink - _v.y;
+    p.root.updateMatrixWorld(true);
   }
 
   /** Light source of a lamp-like prop (world head position + colour), or null. */
@@ -457,17 +607,20 @@ export class LandscapeManager extends THREE.EventDispatcher {
   async applySaved(data) {
     if (!data?.landscape) return false;
     const app = this.app;
+    const settle = this._groundSnapshot();
     this._removeItems(this.current);
     const cur = { ...data.landscape, id: `ls${Date.now().toString(36)}` };
     cur.group = `L${cur.id}`;
     const b = this._build(cur.resolved, cur.seed, cur.frame, cur.chars);
     this.env.build(this._envDesc(b, cur.seed, cur.frame));
+    this._groundSettle(settle);
     const M = app.props;
     if (M) for (const j of data.items || []) { if (!TYPE_BY_ID.has(j.type)) continue; const q = { ...j, group: cur.group }; delete q.id; delete q.hold; M.create(q); }
     if (M) { M._meshesDirty = true; M._changed?.(null, 'list'); }
     cur.animals = [];
     if (app.animals) for (const j of data.animals || []) { try { const { id, ...rest } = j; void id; const a = await app.animals.add(j.species, { ...rest, position: j.position, rotationY: j.rotationY, select: false }); a.fromJSON?.({ ...rest, id: a.id }); cur.animals.push(a.id); } catch (e) { console.warn('[landscapes] animal restore failed', e); } }
     this.current = { ...cur, prevLights: this.current?.prevLights || app.lightRig?.getState?.() || null };
+    for (const ch of app.characters) app.city?.liftCharacter?.(ch);
     this._applyLights(b, cur.frame, []);
     app.commit('paesaggio salvato');
     this.dispatchEvent({ type: 'generated', id: cur.id, seed: cur.seed, spec: cur.spec, resolved: cur.resolved, ms: 0 });

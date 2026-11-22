@@ -343,7 +343,8 @@ export const CITY = [
         g.add('ls_barca', { pos: [x, z], yaw: H + g.rng.range(-0.25, 0.25), terrain: false, y: level, params: { kind: k, length: L }, color: g.rng.pick(['#2f5a8a', '#b3261e', '#f2f1ec', '#2f6b3a', '#e2b21e']), r: L * 0.45, free: { corridor: false } });
       }
       for (let i = 0; i < g.n(3, 1); i++) g.add('ls_barca', { pos: [g.rng.range(-80, 80), shore - g.rng.range(40, 140)], yaw: g.rng.range(-PI, PI), terrain: false, y: level, params: { kind: g.rng.pick(['vela', 'pesca']), length: g.rng.range(8, 12) }, color: '#f2f1ec', r: 5 });
-      for (let x = -30; x <= 30; x += g.rng.range(5, 8)) g.add('es_dissuasori', { pos: [x, shore + 0.6], params: { style: 'cemento', count: 1 }, r: 0.3, free: { corridor: false } });
+      // (not on the pier's landing: same random sequence, the skipped spot draws nothing)
+      for (let x = -30; x <= 30; x += g.rng.range(5, 8)) if (Math.abs(x - px) > mw / 2 + 0.6) g.add('es_dissuasori', { pos: [x, shore + 0.6], params: { style: 'cemento', count: 1 }, r: 0.3, free: { corridor: false } });
       // containers, crane, warehouse on one side
       const side = -Math.sign(px) || 1;
       const cols = ['#b3261e', '#2f5a8a', '#2f6b3a', '#d98a1c', '#6b6f75', '#7a2f6b'];

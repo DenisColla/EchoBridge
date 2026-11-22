@@ -42,37 +42,96 @@ export function registerCityTool(app, shell, thumbs) {
   /** Meshes of ground-like exterior props (roads, sidewalks, terrain, lawns). */
   function groundMeshes(except = null) {
     const out = [];
-    for (const q of props().props) if (q !== except && isGroundType(q.type) && q.root.visible) out.push(...q.meshes);
+    for (const q of props().props) {
+      if (q === except || !isGroundType(q.type) || !q.root.visible) continue;
+      // current matrices for the rays (the pivot does not auto-update: refresh from the root down)
+      q.root.updateWorldMatrix(true, true);
+      out.push(...q.meshes);
+    }
     return out;
   }
-  /** Height of the ground-like surface under world (x, z), 0 when none. */
-  function groundY(x, z, except = null) {
-    const list = groundMeshes(except);
-    if (!list.length) return 0;
-    for (const m of list) m.updateWorldMatrix(true, false);
-    _rc.set(_v.set(x, 60, z), _down);
-    _rc.far = 80;
-    const hit = _rc.intersectObjects(list, false)[0];
-    return hit ? Math.max(0, hit.point.y) : 0;
+  /** Ground of a ready landscape at world (x, z) (terrain, roof, pier), 0 without one. */
+  function baseY(x, z) {
+    const L = app.landscapes;
+    const y = L?.heightAt ? L.heightAt(x, z) : 0;
+    return Number.isFinite(y) ? y : 0;
   }
-  /** Drops a non-ground item onto the ground-like surface under it (roads, sidewalks, terrain). */
+  /**
+   * Height of the ground under world (x, z): the ground-like exterior pieces
+   * (roads, sidewalks, lawns, terrain props) on top of the landscape ground
+   * (app.landscapes.heightAt), else the floor y = 0.
+   */
+  function groundY(x, z, except = null) {
+    const base = baseY(x, z);
+    const list = groundMeshes(except);
+    if (!list.length) return base;
+    _rc.set(_v.set(x, base + 60, z), _down);
+    _rc.far = 120;
+    const hit = _rc.intersectObjects(list, false)[0];
+    _rc.far = Infinity;
+    return hit ? Math.max(base, hit.point.y) : base;
+  }
+  /** Drops a non-ground item onto the ground-like surface under it (roads, sidewalks, terrain, landscape). */
   function dropOnGround(p) {
     if (!p || isGroundType(p.type) || p.hold) return;
     const sink = p.type.sub === 'alberi' ? 0.04 : p.type.id === 'es_tronco' ? 0.03 : 0;
-    p.root.position.y = Math.max(0, groundY(p.root.position.x, p.root.position.z, p) - sink);
+    const y = groundY(p.root.position.x, p.root.position.z, p) - sink;
+    // trunks sink a little into the soil of a landscape; never below the studio floor
+    p.root.position.y = app.landscapes?.current ? y : Math.max(0, y);
   }
-  /** Lifts a character onto the surface under its feet (sidewalk, terrain). */
+  /**
+   * True when the character stands on a support above the ground (a table, a bed,
+   * a stool: a non-ground prop whose top is at its placement height under it).
+   */
+  function onSupport(ch, ground) {
+    const pos = ch.root.position, M = props();
+    if (!M || pos.y < ground + 0.03) return false;
+    const list = [];
+    for (const q of M.props) {
+      if (q.hold || !q.root.visible || isGroundType(q.type)) continue;
+      q.root.updateWorldMatrix(true, true);
+      for (const m of q.meshes) list.push(m);
+    }
+    if (!list.length) return false;
+    const r = 0.12 * (ch.root.scale.x || 1);
+    for (const [ox, oz] of [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]]) {
+      _rc.set(_v.set(pos.x + ox, pos.y + 0.35, pos.z + oz), _down);
+      _rc.far = 0.6;
+      const hits = _rc.intersectObjects(list, false);
+      _rc.far = Infinity;
+      // any surface near the feet (something else may hang above it: a lamp, a shelf)
+      if (hits.some((h) => Math.abs(h.point.y - pos.y) < 0.2)) return true;
+    }
+    return false;
+  }
+  /**
+   * Lifts (or lowers) a character onto the ground under its feet (sidewalk,
+   * terrain, a landscape's hill / roof / pier). Characters standing, sitting or
+   * lying on a support above the ground (table, bed…) are left where they are.
+   * Returns true when the character moved.
+   */
   function liftCharacter(ch) {
     if (!ch) return false;
     const pos = ch.root.position;
     const y = groundY(pos.x, pos.z);
     if (Math.abs(y - pos.y) < 0.004) return false;
+    if (onSupport(ch, y)) return false;
     ch.setPlacement({ position: new THREE.Vector3(pos.x, y, pos.z), rotationY: ch.root.rotation.y });
     return true;
   }
 
   // ------------------------------------------------------------ placement of new items
-  function anchor() {
+  /**
+   * Reference point of a new item: `near` (a Character, a prop / animal with a root,
+   * a Vector3, [x, z] or {x, z}), else the selected character, else the view target.
+   */
+  function anchor(near) {
+    if (near != null) {
+      if (near.boneByName && near.root) return { x: near.root.position.x, z: near.root.position.z, ch: near };
+      if (near.root?.position) return { x: near.root.position.x, z: near.root.position.z, ch: null };
+      if (Array.isArray(near)) return { x: +near[0] || 0, z: +(near.length > 2 ? near[2] : near[1]) || 0, ch: null };
+      if (Number.isFinite(near.x) && Number.isFinite(near.z)) return { x: near.x, z: near.z, ch: null };
+    }
     const ch = app.selection.character;
     if (ch && ch.root.visible) return { x: ch.root.position.x, z: ch.root.position.z, ch };
     return { x: app.controls.target.x, z: app.controls.target.z, ch: null };
@@ -97,11 +156,17 @@ export function registerCityTool(app, shell, thumbs) {
     return cw + ww * 0.5 + 0.15;
   }
 
-  function addItem(id) {
+  /**
+   * Adds an exterior item (road piece, vehicle, tree, furniture…) next to the
+   * subject. opts: {near (see anchor()), commit = true, select = true, toast = true,
+   * lift = true (roads: the subject steps onto the new sidewalk)}. Returns the prop.
+   */
+  function addItem(id, opts = {}) {
     const type = TYPE_BY_ID.get(id);
     if (!type || !props()) return null;
+    const { commit = true, select = true, toast: tell = true, lift = true } = opts;
     const M = props();
-    const a = anchor();
+    const a = anchor(opts.near);
     let p;
     if (type.road) {
       const params = defaultParams(type);
@@ -135,6 +200,7 @@ export function registerCityTool(app, shell, thumbs) {
         p.root.position.set(a.x + bx * back, 0, a.z + bz * back);
         p.root.rotation.set(0, type.id === 'es_strisce' || type.id === 'es_tombino' ? yaw : ryaw, 0, 'YXZ');
         if (type.onRoad) p.root.position.set(a.x + bx * 2, 0, a.z + bz * 2);
+        p.root.position.y = baseY(p.root.position.x, p.root.position.z); // on a landscape: its ground
         // areas without connectors (parking, square): step back until they do not overlap other roads
         if (!type.connectors && !type.onRoad) {
           const mine = new THREE.Box3(), other = new THREE.Box3();
@@ -148,7 +214,7 @@ export function registerCityTool(app, shell, thumbs) {
       }
       M._meshesDirty = true;
       M._changed?.(p, 'list');
-      if (a.ch && back0(type)) liftCharacter(a.ch);
+      if (a.ch && lift && back0(type)) liftCharacter(a.ch);
     } else if (type.vehicle) {
       const params = { ...defaultParams(type), seed: newSeed() };
       const same = M.props.filter((q) => q.type.id === id).length;
@@ -158,8 +224,10 @@ export function registerCityTool(app, shell, thumbs) {
       let onRoad = false;
       if (hasRoads(M.props)) onRoad = placeOnRoad(M, p, a.x + bx * 4, a.z + bz * 4);
       if (!onRoad) {
-        M._spawn?.(p, a.ch);
+        if (a.ch || opts.near == null) M._spawn?.(p, a.ch);
+        else p.root.position.set(a.x, 0, a.z);
         p.root.rotation.set(0, yaw + Math.PI / 2, 0, 'YXZ'); // side view: nicer reference
+        dropOnGround(p);
       }
       M._meshesDirty = true;
       M._changed?.(p, 'list');
@@ -169,18 +237,19 @@ export function registerCityTool(app, shell, thumbs) {
       if (p.type.params.some((d) => d.id === 'seed')) M.setParams(p, { seed: newSeed() });
       // big items (trees, terrain) go behind the subject rather than beside it
       const fr = p.footprintRadius();
+      if (!a.ch && opts.near != null && fr <= 2.5) p.root.position.set(a.x, 0, a.z);
       if (fr > 2.5) {
         const { bx, bz } = viewAxes();
         const d = fr * (isGroundType(p.type) ? 0.85 : 0.9) + 0.6;
         p.root.position.set(a.x + bx * d, 0, a.z + bz * d);
       }
+      if (isGroundType(p.type)) p.root.position.y = baseY(p.root.position.x, p.root.position.z);
       dropOnGround(p);
       M._changed?.(p);
     }
-    M.select(p);
-    haptic(12);
-    app.commit('aggiungi esterno');
-    toast(`${type.label}: trascinalo per spostarlo`, 1600);
+    if (select) M.select(p);
+    if (commit) { haptic(12); app.commit('aggiungi esterno'); }
+    if (tell) toast(`${type.label}: trascinalo per spostarlo`, 1600);
     return p;
   }
   const back0 = (type) => !['es_strisce', 'es_tombino', 'es_vialetto'].includes(type.id);
@@ -194,7 +263,7 @@ export function registerCityTool(app, shell, thumbs) {
     const cc = p.type.connectors(p.params)[ci];
     const yaw = wrap(c.yaw + Math.PI - cc.yaw), co = Math.cos(yaw), sn = Math.sin(yaw);
     p.root.rotation.set(0, yaw, 0, 'YXZ');
-    p.root.position.set(c.x - (cc.x * co + cc.z * sn) * p.scale, 0, c.z - (-cc.x * sn + cc.z * co) * p.scale);
+    p.root.position.set(c.x - (cc.x * co + cc.z * sn) * p.scale, c.y ?? 0, c.z - (-cc.x * sn + cc.z * co) * p.scale);
   }
 
   /** Adds a ready kit as a group of props around the subject. */
@@ -217,6 +286,7 @@ export function registerCityTool(app, shell, thumbs) {
       const q = M.create({ type: it.type, params, color: it.color || type.color, group });
       const [lx, lz] = it.pos;
       q.root.position.set(a.x + lx * c + lz * s, 0, a.z - lx * s + lz * c);
+      q.root.position.y = baseY(q.root.position.x, q.root.position.z); // landscape ground (ground pieces)
       q.root.rotation.set(0, wrap((it.yaw || 0) + vy + Math.PI), 0, 'YXZ');
       created.push(q);
     }
@@ -268,7 +338,10 @@ export function registerCityTool(app, shell, thumbs) {
     rc.setFromCamera(_ndc, app.camera);
     _plane.set(_up, -hit.point.y);
     const grab = rc.ray.intersectPlane(_plane, new THREE.Vector3()) || hit.point.clone();
-    drag = { id: e.pointerId, p, x0: e.clientX, y0: e.clientY, moved: false, planeY: hit.point.y, offset: p.root.position.clone().sub(grab), ctl: app.controls.enabled, raf: 0, lx: 0, ly: 0, snapped: null };
+    drag = { id: e.pointerId, p, x0: e.clientX, y0: e.clientY, moved: false, planeY: hit.point.y, offset: p.root.position.clone().sub(grab), ctl: app.controls.enabled, raf: 0, lx: 0, ly: 0, snapped: null,
+      rel: p.root.position.y - baseY(p.root.position.x, p.root.position.z),
+      // over a landscape the finger follows the ground (the grabbed point's height above it)
+      lift: app.landscapes?.hasTerrain && app.landscapes.rayGround ? hit.point.y - baseY(grab.x, grab.z) : null };
     app.controls.enabled = false;
   }, { capture: true });
   cv.addEventListener('pointermove', (e) => {
@@ -301,9 +374,12 @@ export function registerCityTool(app, shell, thumbs) {
     app.pointerToNDC({ clientX: x, clientY: y }, _ndc);
     const rc = props().raycaster;
     rc.setFromCamera(_ndc, app.camera);
-    _plane.set(_up, -d.planeY);
-    const q = rc.ray.intersectPlane(_plane, _v);
-    if (!q || q.distanceTo(app.camera.position) > 1500) return;
+    let q = d.lift != null ? app.landscapes.rayGround(rc.ray, d.lift, _v, 400) : null;
+    if (!q) {
+      _plane.set(_up, -d.planeY);
+      q = rc.ray.intersectPlane(_plane, _v);
+      if (!q || q.distanceTo(app.camera.position) > 1500) return;
+    }
     const M = props(), p = d.p;
     const tx = q.x + d.offset.x, tz = q.z + d.offset.z;
     if (isRoad(p) && prefs.snap) {
@@ -323,6 +399,12 @@ export function registerCityTool(app, shell, thumbs) {
       p.root.position.x = tx; p.root.position.z = tz;
     }
     M.moveTo(p, tx, tz);
+    // over a landscape the item follows its ground (cheap analytic height; the exact
+    // drop on roads / sidewalks happens on release)
+    if (app.landscapes?.current) {
+      const yN = baseY(tx, tz) + d.rel;
+      if (Math.abs(yN - p.root.position.y) > 1e-5) M.setHeight(p, yN);
+    }
   }
 
   // ------------------------------------------------------------ tool

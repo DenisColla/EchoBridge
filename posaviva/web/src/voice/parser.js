@@ -7,17 +7,38 @@
 // "con un cane accanto"), references ("lei", "il cane", names) -> actions.
 //
 // scene = {characters: [{id, name, sex}], animals: [{id, species}], props: [{id, type, label}],
-//          selected: {kind, id} | null, hasLandscape, rooms: [{id}]}
+//          selected: {kind, id} | null, hasLandscape, rooms: [{id}],
+//          saved: [{id, type, name}] (app.projects items), projects: [{id, name}]}
 import { tokenize, norm, stem, shadeHex, FILLERS, FUNCTION_WORDS } from './lexicon.js';
 import { OUTFIT_SETS } from './vocab.js';
+import { splitProjectCommands } from './projectCmd.js';
 
 const SEAT_HEADS = ['divan', 'poltron', 'sedi', 'sgabell', 'panc', 'panchin', 'divanett', 'pouf', 'dormeus', 'sofa', 'seggiol', 'trono', 'altalen'];
 const BED_HEADS = ['lett', 'futon', 'brand', 'materass', 'culla', 'amac'];
+const TABLE_HEADS = ['tavol', 'scrivan', 'banc', 'cattedr', 'scrittoi'];
 const PERSON_ONLY = new Set(['expr', 'hairStyle', 'hairColor', 'beard', 'body', 'outfitSet', 'undress', 'garment']);
 const LIVING = new Set(['person', 'animal', 'ref']);
 
 /** parse(text, lex, scene) -> {actions, unknown, debug} */
 export function parse(text, lex, scene = {}) {
+  // project commands (salva / apri / applica …) are split off first (projectCmd.js)
+  const pj = splitProjectCommands(text, scene);
+  if (!pj.before.length && !pj.after.length) return parseScene(text, lex, scene);
+  const r = pj.text.trim() ? parseScene(pj.text, lex, scene) : { actions: [], unknown: [], debug: { items: [], clauses: 0 } };
+  const k = pj.before.length;
+  if (k) for (const a of r.actions) shiftNew(a, k);
+  return { actions: [...pj.before, ...r.actions, ...pj.after], unknown: r.unknown, debug: { ...r.debug, project: k + pj.after.length } };
+}
+
+/** Moves the {kind:'new', index} references of an action by k (actions inserted before it). */
+function shiftNew(o, k) {
+  if (!o || typeof o !== 'object') return;
+  if (Array.isArray(o)) { for (const x of o) shiftNew(x, k); return; }
+  if (o.kind === 'new' && Number.isInteger(o.index)) o.index += k;
+  for (const v of Object.values(o)) if (v && typeof v === 'object') shiftNew(v, k);
+}
+
+function parseScene(text, lex, scene) {
   const tokens = tokenize(text);
   const items = lex.tag(tokens);
   // names of the scene's characters win over any other reading ("gira Anna verso il cane")
@@ -161,6 +182,15 @@ function parseClause(items, ctx) {
         if (d.p === 'su') { rel = startRel(C, 'on', it); if (!next || !OPENS_TARGET(next)) closeRel(rel); break; }
         if (d.p === 'in' && !rel) { rel = startRel(C, 'in', it); if (!next || !OPENS_TARGET(next)) closeRel(rel); break; }
         if (d.p === 'con') { con = true; break; }
+        // "seduta al tavolo", "seduto alla scrivania": a chair at that table
+        if (d.p === 'a' && (!rel || rel.done)) {
+          const s0 = livingCtx();
+          const nx = next?.kind === 'det' ? items[k + 2] : next;
+          if (s0 && s0.pose && /^sit_(chair|relaxed|legs|stool)/.test(s0.pose) && nx?.kind === 'propWord' && TABLE_HEADS.some((h) => (nx.data?.stem || '').startsWith(h))) {
+            rel = { rel: 'seat', subject: s0, i0: it.i0 };
+            break;
+          }
+        }
         if ((d.p === 'a' || d.p === 'da') && !rel && C.intent && ['add', 'dress', 'remove'].includes(C.intent) && next && (next.kind === 'person' || next.kind === 'mark' && next.data.mark === 'name')) {
           // "metti alla donna una giacca": dative person = the one to dress
           C.flags.dative = true;
@@ -298,7 +328,7 @@ function parseClause(items, ctx) {
         }
         const w = tokens[it.i0].w;
         const np = newNP('prop', it, { head: d.stem, word: w, extra });
-        if (np.count == null && /[ie]$/.test(w) && w.length > 4 && !/(e|i)$/.test(lex.cat?.props?.find((p) => stem(norm(p.label).split(' ')[0]) === d.stem)?.label?.split(' ')[0] || 'x') ) np.count = np.det?.def ? null : 2;
+        if (np.count == null && /[ie]$/.test(w) && !/[àèéìíòóù]$/i.test(tokens[it.i0].raw) && w.length > 4 && !/(e|i)$/.test(lex.cat?.props?.find((p) => stem(norm(p.label).split(' ')[0]) === d.stem)?.label?.split(' ')[0] || 'x') ) np.count = np.det?.def ? null : 2;
         if (np.det?.pl && np.count == null) np.count = 2;
         k = j - 1;
         break;
@@ -483,6 +513,8 @@ function applyRel(subject, rel, target) {
   let r = rel.rel;
   if (r === 'toward') { subject.facing = target; return; }
   if (r === 'hand') { subject.place = { relation: 'hand', target }; return; }
+  // "su una spiaggia", "in un bosco": the landscape is where the scene happens, not an object
+  if ((r === 'in' || r === 'on') && target.kind === 'landscape' && !(target.propHit && subject.kind === 'prop')) { target.asPlace = true; subject.inLandscape = target; return; }
   if (r === 'in') {
     if (target.kind === 'room' || target.kind === 'landscape' || target.kind === 'special' && target.special === 'room') { subject.inRoom = target; return; }
     r = 'on';
@@ -535,9 +567,11 @@ function emitClause(C, ctx) {
     return;
   }
   // ---- lights / time of day
-  const landscapeNP = nps.find((n) => n.kind === 'landscape' && n.role !== 'target');
-  const useLandscape = landscapeNP && !landscapeNP.place?.relation && (C.intent === 'add' || !C.intent || C.flags.landscape || C.time || C.weather) &&
+  const landscapeNP = nps.find((n) => n.kind === 'landscape' && (n.role !== 'target' || n.asPlace));
+  let useLandscape = landscapeNP && !landscapeNP.place?.relation && (C.intent === 'add' || !C.intent || C.flags.landscape || C.time || C.weather) &&
     !(landscapeNP.propHit && (landscapeNP.count > 1 || nps.some((n) => n.place?.target === landscapeNP)));
+  // "una donna sulla spiaggia" with a landscape already there: she just goes into it
+  if (useLandscape && landscapeNP.asPlace && scene.hasLandscape && !(C.time || C.weather || C.season)) { useLandscape = false; landscapeNP.consumed = true; }
   if (lightClause && !useLandscape && !nps.some((n) => n.kind !== 'ref' && n.kind !== 'special' && n.role === 'subject')) {
     const a = { type: 'lights' };
     if (C.light) a.preset = C.light;
@@ -556,7 +590,8 @@ function emitClause(C, ctx) {
     if (C.weather) spec.weather = C.weather;
     if (C.season) spec.season = C.season;
     const feats = [];
-    for (const n of nps) if (n !== landscapeNP && (n.kind === 'prop' || n.kind === 'animal')) { const f = featureOf(n); if (f) { feats.push(f); n.consumed = true; } }
+    // named objects become features of the generation ("con una fontana"); named animals are added as they are
+    for (const n of nps) if (n !== landscapeNP && n.kind === 'prop' && !n.place) { const f = featureOf(n); if (f) { feats.push(f); n.consumed = true; } }
     if (feats.length) spec.features = feats;
     A.push({ type: 'landscape', spec });
     if (landscapeNP) landscapeNP.consumed = true;
@@ -576,6 +611,8 @@ function emitClause(C, ctx) {
   // ---- remove
   if (C.intent === 'remove') {
     const targets = nps.filter((n) => n.role !== 'companion' && n.kind !== 'special');
+    // "togli il paesaggio / lo sfondo"
+    if (!targets.length && C.flags.landscape) { A.push({ type: 'remove', target: { kind: 'all', type: 'landscape' } }); return; }
     if (!targets.length && C.clitic !== null) targets.push(ensureItRef(C, ctx));
     for (const n of targets) {
       if (n.kind === 'room') { A.push({ type: 'remove', target: { kind: 'room', ...(n.room ? { type: n.room } : {}) } }); continue; }
@@ -804,7 +841,8 @@ function makeAdd(n, C, ctx, unknown) {
     const ranked = n._ranked || ctx.lex.rankProps(n.head, n.extra || [], { hand: n.place?.relation === 'hand' });
     if (n.place?.relation === 'hand' && !n._handRanked) { n._ranked = ctx.lex.rankProps(n.head, n.extra || [], { hand: true }); }
     const best = (n.place?.relation === 'hand' ? n._ranked : ranked)[0];
-    if (!best) { unknown.push(n.word); return null; }
+    // "un caffè" is not a "Carrello del caffè": a word found only as a label's complement is not understood
+    if (!best || (best.field === 'compl' && !(n.extra || []).length)) { unknown.push(n.word); return null; }
     a = { type: 'addProp', propType: best.id, query: [n.word, ...(n.extraWords || [])].join(' ') };
     if (count > 1) a.count = count;
     if (n.color) a.color = n.color;

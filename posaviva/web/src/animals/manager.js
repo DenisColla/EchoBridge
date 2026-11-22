@@ -26,6 +26,16 @@ export class AnimalManager extends THREE.EventDispatcher {
 
   entry(id) { return this.manifest?.species.find((s) => s.id === id) || null; }
 
+  /** Ground height at world (x, z): a ready landscape's terrain / roof / pier, else 0. */
+  floorAt(x, z) {
+    const L = this.app.landscapes;
+    const y = L?.heightAt ? L.heightAt(x, z) : 0;
+    return Number.isFinite(y) ? y : 0;
+  }
+
+  /** Ground height under an animal's root. */
+  floorUnder(a) { return this.floorAt(a.root.position.x, a.root.position.z); }
+
   /** Adds an animal of a species. opts: {near: Character|Animal, select, position, rotationY, ...Animal opts}. */
   async add(speciesId, opts = {}) {
     const data = await loadSpecies(speciesId);
@@ -65,7 +75,7 @@ export class AnimalManager extends THREE.EventDispatcher {
       if (!clash) break;
       x += Math.max(0.5, width + 0.3);
     }
-    a.root.position.set(x, 0, z);
+    a.root.position.set(x, this.floorAt(x, z), z);
     // side view toward the camera reads best: body across the view
     const cam = app.camera.position;
     const toCam = Math.atan2(cam.x - x, cam.z - z);
@@ -85,7 +95,9 @@ export class AnimalManager extends THREE.EventDispatcher {
   async duplicate(a) {
     const j = a.toJSON();
     delete j.id;
+    const rel = j.position[1] - this.floorUnder(a); // same height above the ground (landscapes)
     j.position[0] += Math.max(0.5, (a.entry.bounds.max[0] - a.entry.bounds.min[0]) * a.root.scale.x + 0.3);
+    j.position[1] = this.floorAt(j.position[0], j.position[2]) + rel;
     const b = await this.add(a.species, { ...j, rotationY: j.rotationY, select: true });
     return b;
   }

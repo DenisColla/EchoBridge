@@ -12,6 +12,9 @@
 //   app.props.addPreset(ROOM_PRESETS[i], {near: ch}) furnished room = group of props
 //   app.props.groupOf(prop) / removeGroup(prop) / ungroup(prop); app.props.moveTogether
 //   app.props.regenerate(prop)                  new random variant ('seed' param)
+//   app.props.create(state, {emit, select, ground}) prop from a state object; emit announces it
+//                                                ('list' event, as add() does), ground lands it
+//   app.props.floorAt(x, z) / floorUnder(prop, {lowest}) the floor: app.landscapes.heightAt or 0
 // Events on app.props: 'list', 'select' {prop}, 'change' {prop}.
 //
 // Library: ~100 procedural types (gen/*.js, parameters + "Rigenera") and ~280

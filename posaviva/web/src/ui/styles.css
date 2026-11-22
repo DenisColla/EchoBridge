@@ -32,7 +32,7 @@
   --toolbar-h: 66px;
   --rail-w: 0px;
   --sheet-h: 42vh;
-  --side-w: min(380px, 42vw);
+  --side-w: min(380px, 43vw);
   color-scheme: dark;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -49,6 +49,10 @@ button:disabled { cursor: default; }
 .pv-overlay { position: absolute; inset: 0; pointer-events: none; }
 .pv-overlay > * { pointer-events: auto; }
 .pv-overlay > .passthrough, .pv-overlay > canvas { pointer-events: none; }
+/* floating buttons of the free view (voice mic .pv-vc-fabwrap bottom-left, quick zoom .pv-focus-wrap
+   bottom-right, any [data-pv-fab]): hidden when the shell finds no room for them (.pv-view-short:
+   nearly full-height sheet or very narrow free view), never pushed under the top bar or a panel */
+.pv-view-short .pv-overlay > .pv-vc-fabwrap, .pv-view-short .pv-overlay > .pv-focus-wrap, .pv-view-short .pv-overlay > [data-pv-fab] { visibility: hidden; opacity: 0; }
 .pv-safe-probe { position: absolute; left: 0; top: 0; width: 0; height: 0; visibility: hidden; pointer-events: none;
   padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left); }
 .pv-icon { flex: none; }
@@ -225,6 +229,8 @@ input.pv-swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; op
 .pv-subtabs.compact .pv-chip > .pv-icon { display: none; }
 .pv-subtabs.tight { gap: 3px; }
 .pv-subtabs.tight .pv-chip { padding: 7px 9px; font-size: 13px; letter-spacing: -.005em; }
+.pv-subtabs.tighter { gap: 2px; padding-left: 3px; padding-right: 3px; }
+.pv-subtabs.tighter .pv-chip { padding: 7px 6px; }
 
 /* ------------------------------------------------------------------ fields */
 .pv-field { display: flex; flex-direction: column; gap: 6px; }
@@ -312,6 +318,9 @@ input.pv-swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; op
   .pv-menu-sep { margin: 3px 10px; }
   .pv-menu-header { padding: 6px 12px 2px; }
 }
+
+/* very short landscape screens: the six rail buttons fit without scrolling */
+@media (max-height: 405px) { .pv-side .pv-tool { min-height: 54px; } }
 
 /* ------------------------------------------------------------------ Corpo tool (body/bodyModule.js) */
 .pv-body-types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }

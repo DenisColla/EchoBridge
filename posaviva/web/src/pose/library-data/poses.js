@@ -130,13 +130,16 @@ export const POSE_DEFS = [
     'thigh.R': [-18, -6, 0], 'knee.R': -34, 'foot.R': [-22, 0, 0], 'toes.R': 24,
   },
   { id: 'run', label: 'Corsa', cat: 'action',
-    // forward lean, twisted torso against the legs, elbows at ~90°
-    root: [-12, 0, -9],
-    spine: [-7, 18, 0], neck: [10, -10, 0], head: [8, -6, 0],
+    // toe-off: forward lean, twisted torso against the legs, elbows at ~90°. The rear leg is
+    // the stance leg (toes on the floor): the root pitch tilts the legs back with the body,
+    // so the thighs are given relative to a leaning pelvis (rear thigh only a little back,
+    // front knee high) — otherwise the raised front leg ends up carrying a deep lunge.
+    root: [-10, 0, -9],
+    spine: [-6, 18, 0], neck: [10, -10, 0], head: [8, -6, 0],
     'clav.R': [-10, 0, -2], 'clav.L': [8, 0, 0],
-    'arm.L': [46, 10, 34], 'fore.L': [-54, 10, 0], 'arm.R': [-54, 0, 30], 'fore.R': [-68, 0, 0], 'hand.LR': ['fist', 0.55],
-    'thigh.L': [64, -4, 0], 'knee.L': -86, 'foot.L': [8, 0, 0],
-    'thigh.R': [-26, -4, 0], 'knee.R': -22, 'foot.R': [-34, 0, 0], 'toes.R': 26,
+    'arm.L': [44, 10, 34], 'fore.L': [-50, 10, 0], 'arm.R': [-34, 0, 34], 'fore.R': [-42, 0, 0], 'hand.LR': ['fist', 0.55],
+    'thigh.L': [70, -4, 0], 'knee.L': -96, 'foot.L': [10, 0, 0],
+    'thigh.R': [-6, -4, 0], 'knee.R': -18, 'foot.R': [-34, 0, 0], 'toes.R': 28,
   },
   { id: 'sprint', label: 'Scatto', cat: 'action',
     root: [-26, 0, -8],

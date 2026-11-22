@@ -4,7 +4,8 @@ Describe a scene in Italian, by voice or text, and PosaViva builds it:
 "metti un uomo con una maglietta bianca seduto sul divano con un cane accanto",
 "voglio una cucina, metti il tavolo al centro e due sedie a sinistra",
 "crea una strada di città di notte con pioggia", "gira la donna verso la finestra",
-"inquadra dal basso".
+"inquadra dal basso", "salva la scena come Inseguimento nel progetto Noir, tavola 3",
+"applica la posa Saluto alla donna".
 
 ## How the user reaches it
 
@@ -29,6 +30,7 @@ engine.js    createEngine(app): catalogs -> lexicon, parseOffline, understand (h
 lexicon.js   Italian normalization, tokenizer, stemmer, typo distance, numbers, closed word classes
 vocab.js     collectCatalogs(app) (runtime catalogs) + buildLexicon (synonyms + catalog labels, prop index)
 parser.js    offline parser: tags -> clauses -> noun phrases + relations + references -> plan
+projectCmd.js project clauses (salva / apri / applica / inserisci / apri i progetti) split off first
 plan.js      plan format + normalizePlan (validation against the catalogs)
 schema.js    zod schema of the plan (structured output of the cloud mode)
 cloud.js     Claude via @anthropic-ai/sdk (messages.parse + zodOutputFormat), fallbacks
@@ -49,7 +51,10 @@ undress, hair:{style, color, beard}, pose, expression, place, rotateTowards, loo
 `addAnimal {species, count, pose, place}`, `addProp {propType | query, count, color, place}`,
 `addRoom {preset}`, `landscape {spec: {preset, place, time, weather, season, features}}`,
 `modify {target, pose, outfit, color, expression, hair, rotateTowards, turn, place, lookAt}`,
-`camera {angle, focal, framing, target}`, `lights {preset, time}`, `remove {target}`.
+`camera {angle, focal, framing, target}`, `lights {preset, time}`, `remove {target}`,
+`project {op: save|open|browse, what: scene|landscape|character|pose, name, project, section,
+sectionKind, query, target}` (app.projects: a missing project / section is created on save;
+open = open a saved scene, apply a landscape or a pose, insert a character).
 Place = `{relation, target, target2, side}` with relations `left right front behind beside
 near on under center corner wall between around seat hand floor in row facing`.
 Target = `{kind: new|character|animal|prop|it|selected|camera|room|window|door|all, index, id,
@@ -67,8 +72,16 @@ type, query, name, ordinal, all}`.
   cells (rays on a 0.2 m grid, cached). Inside a room everything is clamped to the walls.
 - A moved table takes along what stands on it, the lamp above it and the chairs around it.
 - New things out of view: the camera frames them (animated, not committed separately).
-- One undo step: the modules' own commits are held during the command
-  (`app.history.push` is shadowed while it runs), then `app.commit('comando vocale')`.
+- One undo step: the command runs inside `app.history.batch('comando vocale', …)` (core API:
+  the modules' own commits are held, undo / redo wait, one step is recorded at the end; older
+  cores without it fall back to shadowing `history.push`). Trailing saves ("… e salva la scena")
+  run after the step, so the saved scene counts as unchanged; a scene opened by the command
+  restarts the history (no Annulla for that command).
+- "seduto al tavolo / alla scrivania": a free chair at that table (else a new one on its far
+  side), not the table top. "tra due lampade": the two new lamps step apart so the thing fits.
+- "su una spiaggia", "in un bosco": the landscape is generated (the subject goes into it);
+  named animals ("un deserto con un cavallo") are added as they are, named objects become
+  landscape features.
 
 ## Tests
 
@@ -80,5 +93,10 @@ type, query, name, ordinal, all}`.
   scene with assertions on the result (counts, types, colours, seated / on top / inside,
   facing angles, screen-left / right, room corners and walls, camera height / focal,
   light preset, landscape spec, one undo step): 57/57 passing, 0 console errors.
+- Round 5 regression (same harness + 41 commands: landscapes, rooms with spatial relations,
+  coloured clothes and poses, animals on / next to furniture, camera, lights, Progetti save /
+  open / apply): every command is also checked to be exactly one undo step, and one Annulla
+  must restore the scene before it (characters, outfits, poses, props, animals, landscape,
+  light preset).
 - E2E (`tools/e2e.cjs` + voice steps: open, run, Annulla, cloud path with a mocked client
   — success / refusal / network error / no key —, settings, close): 0 console errors.

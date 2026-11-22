@@ -664,10 +664,17 @@ export class PoseGizmo {
       d.C = C;
       d.startPos = ch.root.position.clone();
       d.startYaw = ch.root.rotation.y;
+      // on a landscape the character follows its ground (same height above it); one standing
+      // on the ground at the start lands on the ground where it is released (sidewalks too)
+      d.rel = d.startPos.y - this.ctx.floorAt(d.startPos.x, d.startPos.z);
+      d.onGround = Math.abs(d.startPos.y - this.ctx.groundAt(d.startPos.x, d.startPos.z)) < 0.03;
       _plane.set(_n.set(0, 1, 0), -d.groundY);
       const ray = this._ray(e.clientX, e.clientY);
       d.grab = ray.intersectPlane(_plane, new THREE.Vector3());
       d.screenTurn = Math.abs(ray.direction.y) < 0.15 || !d.grab;
+      // over a landscape a moved character follows the ground under the finger
+      const L = this.app.landscapes;
+      d.lift = hit.kind === 'move' && d.grab && L?.hasTerrain && L.rayGround ? d.groundY - L.heightAt(d.grab.x, d.grab.z) : null;
       if (hit.kind === 'turn') {
         d.a0 = d.grab ? Math.atan2(d.grab.x - C.x, d.grab.z - C.z) : 0;
         // pelvis offset from the placement origin (world, horizontal), to turn about the ring center
@@ -757,10 +764,14 @@ export class PoseGizmo {
     } else if (d.kind === 'move') {
       _plane.set(_n.set(0, 1, 0), -d.groundY);
       const ray = this._ray(x, y);
-      if (Math.abs(ray.direction.y) < 0.01) return;
-      const p = ray.intersectPlane(_plane, _v3);
-      if (!p || !d.grab || p.distanceTo(ray.origin) > 80) return;
-      ch.root.position.set(d.startPos.x + p.x - d.grab.x, d.startPos.y, d.startPos.z + p.z - d.grab.z);
+      let p = d.lift != null ? this.app.landscapes.rayGround(ray, d.lift, _v3, 200) : null;
+      if (!p) {
+        if (Math.abs(ray.direction.y) < 0.01) return;
+        p = ray.intersectPlane(_plane, _v3);
+        if (!p || !d.grab || p.distanceTo(ray.origin) > 80) return;
+      }
+      const nx = d.startPos.x + p.x - d.grab.x, nz = d.startPos.z + p.z - d.grab.z;
+      ch.root.position.set(nx, this.ctx.floorAt(nx, nz) + d.rel, nz);
       ch.root.updateMatrixWorld(true);
       this.ctx.placed(ch);
     } else if (d.kind === 'turn') {
@@ -779,7 +790,7 @@ export class PoseGizmo {
       const dy = yaw - d.startYaw;
       const ox = d.offW.x * Math.cos(dy) + d.offW.z * Math.sin(dy), oz = -d.offW.x * Math.sin(dy) + d.offW.z * Math.cos(dy);
       ch.root.rotation.y = wrapAngle(yaw);
-      ch.root.position.set(d.C.x - ox, d.startPos.y, d.C.z - oz);
+      ch.root.position.set(d.C.x - ox, this.ctx.floorAt(d.C.x - ox, d.C.z - oz) + d.rel, d.C.z - oz);
       ch.root.updateMatrixWorld(true);
       this._hintYaw(yaw);
       this.ctx.placed(ch);
@@ -795,6 +806,10 @@ export class PoseGizmo {
     if (!d.moved) return;
     if (d.kind === 'stroke') { if (!d.cancelled) this.ctx.applyStroke(d.ch, d.pts); return; }
     const labels = { ring: 'ruota parte', ball: 'ruota parte', effector: 'trascina', move: 'sposta personaggio', turn: 'ruota personaggio' };
+    if (d.kind === 'move' && d.onGround && this.app.characters.includes(d.ch)) {
+      const pos = d.ch.root.position, y = this.ctx.groundAt(pos.x, pos.z);
+      if (Math.abs(y - pos.y) > 1e-4) { pos.y = y; d.ch.root.updateMatrixWorld(true); }
+    }
     if (d.kind === 'move' || d.kind === 'turn') this.ctx.placed(d.ch, true, labels[d.kind]);
     else this.ctx.edited(d.ch, true, labels[d.kind]);
   }

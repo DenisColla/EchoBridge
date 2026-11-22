@@ -79,10 +79,31 @@ app.landscapes.setAtmosphere({ time, weather, season })  // changes light / sky 
 app.landscapes.clear()                       // removes objects + environment, restores the previous lights
 app.landscapes.current                       // {id, seed, spec, resolved, frame, group, animals, ...} | null
 app.landscapes.heightAt(x, z)                // ground height (terrain, roofs, piers); 0 without landscape
+app.landscapes.hasTerrain                    // true while a landscape with its own ground is shown (rooms: false)
+app.landscapes.rayGround(ray, lift?, target?) // first point where a THREE.Ray meets the ground (+ lift m), or null
 app.landscapes.serialize() / deserialize(obj)
 app.landscapes.exportData() / await applySaved(data)    // "Salva paesaggio" (app.projects.saveItem type 'landscape')
 app.landscapes.addEventListener('generated' | 'cleared' | 'change' | 'progress', fn)
 ```
+
+### Ground contract (everything standing on a landscape)
+
+`heightAt(x, z)` is the one ground height used by every module: props (`app.props.floorAt /
+floorUnder`: add, ground, spawn, duplicate, "Altezza da terra"), exteriors (`app.city.groundY` =
+ground pieces on top of it), buildings (lowest point of the footprint), animals
+(`app.animals.floorAt`: placement, duplicate, "A terra"), characters (Posa › "Appoggia a terra",
+"Altezza da terra", `app.city.liftCharacter`, which leaves characters standing / sitting / lying
+on a support alone) and the camera floor (`sceneTools.camera.floorAt`: ground + 5 cm, more far
+from the stage where the mesh is coarser). Every drag (Oggetti, Esterni, Edifici, Animali, Posa ›
+Sposta) moves the object under the finger with `rayGround` instead of along a flat plane, keeping
+its height above the ground; a character that started on the ground lands on `app.city.groundY`.
+
+Generation, "Svuota" and a saved landscape keep the user's own props and animals at the same
+height above the ground (`_groundSnapshot` / `_groundSettle`; nothing moves on the flat stage).
+Buildings that follow the terrain get a levelled site (`_levelSites`: no gap under the downhill
+side); long, low items on slopes (fences, carts, benches, logs, cars) are tilted with the ground
+(`_fitSlope`, up to 20°, flat path pieces up to 35°); long paths are chains of short pieces (`gen/common.js trail()`). "Salva" opens the projects module's «Salva in…» sheet
+(`app.projects.openSaveSheet({type: 'landscape', name, data})`).
 
 Scene JSON: `app.serialize().scene.landscapes = {v: 1, cur: {id, seed, spec, resolved, frame, chars, group, animals, prevLights, ms, items} | null}`.
 Module exports: `PRESETS, GROUPS, resolve(spec, seed), matchPreset(text), TIMES, WEATHERS, SEASONS`.

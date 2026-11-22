@@ -248,6 +248,8 @@ export class VoiceUI {
       foot.appendChild(this.undoBtn);
     }
     this.result.replaceChildren(list, foot);
+    // the summary and Annulla in view (short landscape screens scroll the panel body)
+    requestAnimationFrame(() => { try { foot.scrollIntoView({ block: 'nearest' }); } catch { /* old WebView */ } });
     // compact after a result: the scene stays visible (examples / history come back on input)
     this.panel.classList.toggle('has-result', r.done.length > 0);
     this._status(r.done.length ? 'Fatto' : 'Nessuna modifica', r.done.length ? 'ok' : 'warn');

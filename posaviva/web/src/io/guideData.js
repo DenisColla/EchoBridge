@@ -46,7 +46,9 @@ export const START_HERE = ['vista', 'posa-ruota', 'zoom-rapido', 'esportare'];
 const hasLine = (e) => e.posing('drawLine');
 const hasProjects = (e) => typeof e.app?.projects?.open === 'function';
 const noProjects = (e) => !hasProjects(e);
-const hasVoice = (e) => typeof e.app?.modules?.voice?.open === 'function' || !!document.querySelector?.('.pv-vc-fab');
+const hasVoice = (e) => typeof e.app?.voice?.open === 'function' || typeof e.app?.modules?.voice?.open === 'function';
+/** "Salva posa…" (Posa › Posa intera) and "Le mie pose" (Pose pronte): pose module + projects archive */
+const hasMyPoses = (e) => hasProjects(e) && typeof e.app?.projects?.openSaveSheet === 'function' && e.tool('poselib');
 const hasAdjust = (e) => e.posing('dynamism') && e.posing('setNaturalness');
 const hasSoftSpine = (e) => e.poseState('softSpine');
 
@@ -118,22 +120,28 @@ export const TOPICS = [
 
   {
     id: 'voce', chapter: 'basi', icon: 'mic', title: 'Comandi vocali e scritti',
-    summary: 'Descrivi la scena a voce o per iscritto e l\'app la costruisce',
-    keywords: 'voce comandi vocali parlare microfono dettare scrivere comando frase metti aggiungi gira inquadra offline ibrida claude chiave api esempi prova recenti',
-    where: ['Comandi'],
+    summary: 'Descrivi la scena a voce o per iscritto: personaggi, vestiti, pose, animali, oggetti, stanze, paesaggi, luci, camera',
+    keywords: 'voce comandi vocali parlare microfono dettare scrivere comando testo frase descrivi metti aggiungi gira togli inquadra claude ibrida offline chiave api annulla esempi prova recenti non ho capito',
+    where: ['Microfono (in basso a sinistra)', 'Comandi'],
     when: hasVoice,
     steps: [
-      'Tocca [mic], il tasto tondo in basso a sinistra della vista: si apre **Comandi** e l\'app ti ascolta.',
-      'Parla in italiano, per esempio «metti un gatto sul letto», «crea una strada di città di notte con pioggia», «gira la donna verso la finestra», «inquadra dal basso».',
-      'Oppure scrivi in **Scrivi un comando…** e tocca la freccia. Sotto **Prova** ci sono esempi da toccare; i comandi già usati restano tra i recenti.',
-      'Il pannello dice cosa ha fatto e cosa non ha capito. **Annulla** toglie tutto il comando in un passo.',
-      'Tocca [settings] nel pannello (o [menu] › **Impostazioni** › **Comandi vocali**) per la **Modalità**: **Solo offline** capisce i comandi sul telefono, senza internet; **Ibrida** usa anche Claude per le frasi più difficili, con la tua chiave API.',
+      'Tocca [mic], il pulsante tondo in basso a sinistra della vista: si apre **Comandi** e PosaViva ti ascolta. La prima volta Android chiede il permesso di usare il microfono.',
+      'Descrivi cosa vuoi, per esempio «metti un uomo con una maglietta bianca seduto sul divano con un cane accanto». Mentre parli vedi le parole; quando smetti di parlare il comando viene eseguito.',
+      'Se preferisci, scrivi il comando nel campo **Scrivi un comando…** e tocca la freccia.',
+      'Sotto compare cosa è stato fatto; le parti che non ha capito sono elencate in «Non ho capito». **Annulla** toglie tutto il comando in un solo passo.',
+      'I suggerimenti **Prova** eseguono un esempio; **Recenti** ripropone i comandi già usati.',
     ],
     tips: [
-      'La chiave API resta solo su questo dispositivo. Senza rete, o senza chiave, i comandi vengono capiti offline.',
+      'Più cose insieme: «voglio una cucina, metti il tavolo al centro e due sedie a sinistra».',
+      'Sinistra e destra sono quelle che vedi sullo schermo; davanti e dietro seguono il fronte della cosa nominata.',
+      'Anche per la scena: «crea una strada di città di notte con pioggia», «luce da tramonto», «fai notte».',
+      'Anche per la camera: «inquadra dal basso», «primo piano della donna», «grandangolo».',
+      'Per cambiare quello che c\'è già: «gira la donna verso la finestra», «falla sorridere», «colora il divano di blu», «togli il cane».',
+      'Il pulsante [settings] di **Comandi** (o [menu] › **Impostazioni** › **Comandi vocali**) apre **Comandi vocali**: **Solo offline** capisce i comandi sul telefono, senza rete; **Ibrida** usa Claude se inserisci la tua chiave API e sei online, altrimenti torna offline. La chiave resta solo su questo dispositivo.',
       'Accanto a **Comandi** vedi la modalità in uso (**Offline** o **Ibrida**): toccala per cambiarla.',
     ],
-    go: { spot: 'mic' }, related: ['personaggi', 'paesaggi', 'annulla'],
+    go: { action: 'openVoice', label: 'Apri Comandi' },
+    related: ['personaggi', 'oggetti', 'paesaggi', 'annulla'],
   },
 
   // ------------------------------------------------------------------ personaggi
@@ -247,7 +255,7 @@ export const TOPICS = [
   {
     id: 'pose-pronte', chapter: 'posa', icon: 'people', art: 'poses', title: 'Partire da una posa pronta',
     summary: 'Camminata, corsa, combattimento, seduti… in un tocco',
-    keywords: 'pose pronte preset libreria camminata corsa salto combattimento seduto sedia a terra sdraiato gesti specchia dinamismo naturalezza asimmetrie',
+    keywords: 'pose pronte preset libreria camminata corsa salto combattimento seduto sedia a terra sdraiato gesti specchia dinamismo naturalezza asimmetrie le mie pose salvate',
     where: ['Posa', 'Pose pronte'],
     steps: [
       'Seleziona il personaggio, poi apri **Posa** › **Pose pronte**.',
@@ -258,21 +266,23 @@ export const TOPICS = [
     ],
     tips: [
       'Una posa pronta è un punto di partenza: rifiniscila con **Ruota**, **Trascina** o **Linea**.',
-      { t: 'Una tua posa da riusare: [menu] › **Salva in…** › **Posa**; poi in **Progetti** toccala e scegli **Applica posa** (va sul personaggio selezionato).', when: hasProjects },
+      { t: 'Le tue pose: salvale con **Posa intera** › **Salva posa…**; poi in **Pose pronte** › **Le mie pose** tocca una posa per darla al personaggio selezionato.', when: hasMyPoses },
+      { t: 'Una tua posa da riusare: [menu] › **Salva in…** › **Posa**; poi in **Progetti** toccala e scegli **Applica posa** (va sul personaggio selezionato).', when: (e) => hasProjects(e) && !hasMyPoses(e) },
       'Le pose sedute si appoggiano all\'altezza di una sedia: aggiungine una da **Scena** › **Oggetti**.',
     ],
     go: { tool: 'poselib' }, context: ['poselib'], related: ['linea', 'posa-intera'],
   },
   {
     id: 'posa-intera', chapter: 'posa', icon: 'mirror', title: 'Specchiare, copiare o azzerare la posa',
-    summary: 'Specchia posa, Copia su…, Azzera posa e opzioni',
-    keywords: 'specchia specchiare copia copiare altro personaggio azzera azzerare reset opzioni limiti colonna morbida bacino piedi fissi articolazioni',
+    summary: 'Specchia posa, Copia su…, Salva posa…, Azzera posa e opzioni',
+    keywords: 'specchia specchiare copia copiare altro personaggio azzera azzerare reset salva posa le mie pose riusare opzioni limiti colonna morbida bacino piedi fissi articolazioni',
     where: ['Posa', 'Posa intera'],
     steps: [
       'Apri **Posa** e scorri fino a **Posa intera**.',
       '**Specchia posa** scambia il lato destro con il sinistro.',
       '**Copia su…** copia la posa su un altro personaggio, o su tutti.',
       '**Azzera posa** riporta tutte le articolazioni alla posizione di partenza: l\'avviso che compare ha **Annulla**.',
+      { t: '**Salva posa…** conserva la posa in **Progetti** (nome, progetto e sezione): la ritrovi in **Pose pronte** › **Le mie pose**.', when: hasMyPoses },
       'In **Opzioni** trovi **Limiti anatomici**, **Piedi fissi** e **Mostra articolazioni**.',
     ],
     go: { tool: 'pose', mode: 'rotate' }, related: ['posa-ruota', 'personaggi'],
@@ -347,16 +357,19 @@ export const TOPICS = [
   {
     id: 'vestiti', chapter: 'aspetto', icon: 'shirt', title: 'Vestire il personaggio',
     summary: 'Outfit pronti, capi singoli, colori, vestibilità e pieghe',
-    keywords: 'vestiti abiti capi outfit maglietta t-shirt jeans pantaloni gonna vestito scarpe giacca camicia felpa colore vestibilità aderente largo pieghe togliere',
+    keywords: 'vestiti abiti capi outfit maglietta t-shirt jeans pantaloni gonna vestito scarpe giacca camicia felpa colore vestibilità aderente largo pieghe togliere skinny slim regolare comodo oversize taglio',
     where: ['Aspetto', 'Vestiti'],
     steps: [
       'Apri **Aspetto** › **Vestiti**.',
       'Per un look completo tocca uno degli **Outfit rapidi**: Casual, Formale, Sport/Action, Street, Solo intimo.',
       'Oppure, in **Aggiungi capi**, scegli una categoria (Sopra, Sotto, Interi, Scarpe, Calze e intimo) e tocca un capo: prende il posto di quello dello stesso tipo.',
-      'Tocca un capo in **Indossati** per cambiarne colore, **Vestibilità** (Normale, Aderente, Largo) e **Pieghe**, o per toglierlo con **Togli**.',
+      'Tocca un capo in **Indossati** per cambiarne colore, **Vestibilità** e **Pieghe**, o per toglierlo con **Togli**. La **Vestibilità** va da **Aderente** a **Largo** passando per **Slim**, **Normale** e **Comodo**: i jeans diventano skinny, slim, dritti, comodi o larghi; magliette e felpe passano da attillate a oversize.',
       '**Pieghe (tutti i capi)** regola le pieghe di tutto l\'outfit; **Togli tutto** toglie tutti i capi.',
     ],
-    tips: ['Le pieghe seguono la posa: piega un braccio e la manica si raggrinzisce.'],
+    tips: [
+      'Le pieghe seguono la posa: piega un braccio e la manica si raggrinzisce.',
+      'I capi seguono le forme del corpo: appoggiano su spalle e fianchi e scendono dritti sotto il seno, la pancia e i glutei, come la stoffa vera; con **Largo** cadono più morbidi e fanno più pieghe.',
+    ],
     go: { tool: 'clothes' }, context: ['clothes'], related: ['capelli', 'corpo'],
   },
   {
@@ -458,25 +471,28 @@ export const TOPICS = [
       '**Personaggio sopra** appoggia il personaggio selezionato sulla superficie (marciapiede, roccia, tronco…).',
       'Con **Muovi tutto il kit** trascini o ruoti un kit intero.',
     ],
-    go: { tool: 'exteriors' }, context: ['exteriors'], related: ['edifici', 'oggetti'],
+    go: { tool: 'exteriors' }, context: ['exteriors'], related: ['paesaggi', 'edifici', 'oggetti'],
   },
 
   {
-    id: 'paesaggi', chapter: 'scena', icon: 'mountain', title: 'Paesaggi pronti',
-    summary: 'Città, natura, fantasy e stanze creati intorno ai personaggi, ogni volta diversi',
-    keywords: 'paesaggi paesaggio sfondo ambiente città natura fantasy stanze spiaggia bosco montagna deserto vicolo piazza castello genera nuovo rigenera svuota salva ora del giorno alba tramonto notte meteo pioggia neve nebbia stagione inverno estate',
+    id: 'paesaggi', chapter: 'scena', icon: 'landscape', title: 'Paesaggi pronti',
+    summary: 'Un ambiente completo intorno ai personaggi in un tocco: città, natura, fantasy, stanze',
+    keywords: 'paesaggio paesaggi sfondo ambiente ambientazione cielo meteo pioggia neve nebbia stagione ora alba tramonto sera notte città strada incrocio grattacieli vicolo tetto piazza quartiere parcheggio porto bosco pineta foresta montagna deserto spiaggia mare lago prato giungla fattoria campagna villaggio medievale rovine castello stanza soggiorno cucina genera rigenera svuota salva',
     where: ['Scena', 'Paesaggi'],
     when: (e) => e.tool('landscapes'),
     steps: [
       'Apri **Scena** › **Paesaggi** e scegli un gruppo: **Città**, **Natura**, **Fantasy** o **Stanze**.',
-      'Tocca un paesaggio (per esempio **Vicolo notturno** o **Piazza europea**): viene creato intorno ai personaggi, ogni volta diverso, e la camera lo inquadra.',
-      '**Ora del giorno**, **Meteo** e **Stagione** cambiano subito luce, cielo e tempo del paesaggio; con **Auto** sceglie l\'app. **Quantità di oggetti** vale dal prossimo **Genera nuovo**.',
-      '**Genera nuovo** ne crea un altro dello stesso tipo, **Rigenera** rifà lo stesso con una nuova variante, **Svuota** lo toglie.',
-      { t: '**Salva** lo mette in un progetto (solo l\'ambiente, senza personaggi). Per riusarlo: [menu] › **Progetti**, tocca il paesaggio › **Applica paesaggio**.', when: hasProjects },
+      'Tocca un paesaggio: viene creato intorno ai personaggi, con cielo, luce del sole, terreno e oggetti, e la camera li inquadra con il paesaggio alle spalle. Ogni volta è diverso.',
+      'Sotto le schede scegli **Ora del giorno**, **Meteo** e **Stagione**: con un paesaggio già creato cambiano solo luce, cielo e atmosfera, gli oggetti restano dove sono. **Auto** lascia la scelta al caso.',
+      '**Genera nuovo** crea un\'altra variante dello stesso paesaggio; **Rigenera** ripete la stessa richiesta con un risultato nuovo; **Svuota** toglie il paesaggio e tutti i suoi oggetti.',
+      'Ogni oggetto del paesaggio resta modificabile: toccalo per spostarlo, cambiarlo o eliminarlo con **Oggetti**, **Edifici**, **Esterni** o **Animali**.',
+      { t: '**Salva** apre **Salva in…**: scegli nome, progetto e sezione. Si salva solo l\'ambiente, senza i personaggi; per riusarlo: [menu] › **Progetti**, tocca il paesaggio › **Applica paesaggio**.', when: hasProjects },
     ],
     tips: [
-      'Ogni pezzo del paesaggio resta modificabile con **Oggetti**, **Edifici**, **Esterni** e **Animali**.',
-      'Non ti piace? [undo] annulla la generazione.',
+      '**Quantità di oggetti** (**Poca**, **Media**, **Tanta**) vale dal prossimo **Genera nuovo**.',
+      'Con [undo] **Annulla** torni al paesaggio precedente o alla scena senza paesaggio.',
+      'Nello stile **Linee** il cielo diventa carta bianca: restano i contorni di personaggi e oggetti.',
+      { t: 'Anche a voce: «crea una spiaggia al tramonto»; con un paesaggio già creato «metti la pioggia» o «fai notte».', when: hasVoice },
     ],
     go: { tool: 'landscapes' }, context: ['landscapes'], related: ['esterni', 'edifici', 'luci', 'progetti'],
   },
@@ -561,6 +577,7 @@ export const TOPICS = [
       '[more] su una sezione: **Rinomina o cambia tipo**, **Sposta su**, **Sposta giù**, **Elimina sezione**. Su una cosa salvata: **Rinomina**, **Sposta in…**, **Duplica**, **Elimina**.',
       '[more] su un progetto › **Esporta file (.posaviva)**: tutto il fumetto in un file, da conservare o da aprire su un altro telefono con **Importa**.',
       'Applicare un paesaggio, una posa o inserire un personaggio si annulla con [undo].',
+      { t: 'Le pose salvate compaiono anche in **Posa** › **Pose pronte** › **Le mie pose**.', when: hasMyPoses },
     ],
     go: { action: 'openProjects', label: 'Apri Progetti' }, related: ['salvare', 'paesaggi', 'personaggi'],
   },

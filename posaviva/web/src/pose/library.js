@@ -795,7 +795,7 @@ export function applyPosePreset(ch, presetId, opts = {}) {
   // floor poses (kneeling, lying, sitting on the floor) rest on the body: shoes tucked under the
   // legs may dip into the floor rather than lift the whole body off it
   const onFloor = p.category === 'floor' || (p.category === 'sit' && !p.seat);
-  const o = { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, shoes: !onFloor, dynamism: p.dynamism || 1, ...opts };
+  const o = { ground: p.ground, air: p.air || 0, touch: p.touch, seat: p.seat || 0, collide: true, shoes: !onFloor, dynamism: p.dynamism || 1, ...opts, presetId: presetId };
   if (ch.data) setSeatMark(ch, o.seat && o.ground ? o.seat : 0);
   return applyPoseObject(ch, p.pose, o);
 }
@@ -811,6 +811,8 @@ export function applyPosePreset(ch, presetId, opts = {}) {
  */
 export function applyPoseObject(ch, pose, opts = {}) {
   const { ground = true, air = 0 } = opts;
+  // which ready pose this is (ch.data.pose.preset): set by applyPosePreset, cleared otherwise
+  if (ch.data) setPresetMark(ch, opts.presetId || null, !!opts.mirror);
   if (opts.mirror) pose = mirrorPose(pose);
   const bi = ch.model.boneIndex;
   const keep = new Set(PRESERVED_BONES);
@@ -898,6 +900,19 @@ export function seatMark(ch) { return +(ch.data?.pose?.seat) || 0; }
 export function setSeatMark(ch, seat) {
   const d = ch.data.pose || (ch.data.pose = {});
   if (seat > 0) d.seat = Math.round(seat * 1000) / 1000; else delete d.seat;
+  if (!Object.keys(d).length) delete ch.data.pose;
+}
+
+/**
+ * Preset mark: the id of the last ready pose applied to the character, kept in
+ * ch.data.pose.preset (+ presetMirror: true when applied mirrored), serialized with
+ * the character. Cleared by any other pose edit (the pose module clears it on a final
+ * edit; a pose applied with applyPoseObject without presetId clears it too).
+ */
+export function presetMark(ch) { return ch.data?.pose?.preset || null; }
+export function setPresetMark(ch, id, mirror = false) {
+  const d = ch.data.pose || (ch.data.pose = {});
+  if (id) { d.preset = id; if (mirror) d.presetMirror = true; else delete d.presetMirror; } else { delete d.preset; delete d.presetMirror; }
   if (!Object.keys(d).length) delete ch.data.pose;
 }
 

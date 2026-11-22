@@ -5,7 +5,7 @@
 // ids): the executor resolves them, or the `query` words, against the catalog.
 // Loaded only in cloud mode (and by the Node tests): zod is not in the boot path.
 import * as z from 'zod/v4';
-import { RELATIONS, TARGET_KINDS, BODY_TYPES, FRAMINGS } from './plan.js';
+import { RELATIONS, TARGET_KINDS, BODY_TYPES, FRAMINGS, PROJECT_OPS, SAVED_TYPES, SECTION_KINDS } from './plan.js';
 
 const ids = (list, fallback) => {
   const a = [...new Set((list || []).map((x) => (typeof x === 'string' ? x : x.id)).filter(Boolean))];
@@ -78,9 +78,20 @@ export function makePlanSchema(cat = {}) {
   const Camera = z.object({ type: z.literal('camera'), angle: Angle.optional(), focal: z.number().optional().describe('mm'), framing: z.enum(FRAMINGS).optional(), target: Target.optional() });
   const Lights = z.object({ type: z.literal('lights'), preset: Light.optional(), time: z.string().optional() });
   const Remove = z.object({ type: z.literal('remove'), target: Target });
+  const Project = z.object({
+    type: z.literal('project'),
+    op: z.enum(PROJECT_OPS).describe('save = salva nei Progetti; open = apri una scena salvata / applica un paesaggio o una posa salvati / inserisci un personaggio salvato; browse = apri l\'archivio dei Progetti'),
+    what: z.enum(SAVED_TYPES).optional().describe('scene = scena intera, landscape = paesaggio, character = personaggio, pose = posa'),
+    name: z.string().optional().describe('nome dell\'elemento da salvare o da aprire (vedi "Elementi salvati")'),
+    project: z.string().optional().describe('nome del progetto (fumetto); se non esiste viene creato'),
+    section: z.string().optional().describe('nome della sezione, es. "Tavola 3"; se non esiste viene creata'),
+    sectionKind: z.enum(SECTION_KINDS).optional(),
+    query: z.string().optional().describe('testo da cercare nell\'archivio (browse)'),
+    target: Target.optional().describe('personaggio da salvare o a cui applicare la posa'),
+  });
 
   return z.object({
-    actions: z.array(z.discriminatedUnion('type', [AddCharacter, AddAnimal, AddProp, AddRoom, LandscapeA, Modify, Camera, Lights, Remove])),
+    actions: z.array(z.discriminatedUnion('type', [AddCharacter, AddAnimal, AddProp, AddRoom, LandscapeA, Modify, Camera, Lights, Remove, Project])),
     unknown: z.array(z.string()).describe('parti del comando che non sai eseguire, in italiano'),
   });
 }

@@ -21,11 +21,17 @@
 //   camera       { angle?, focal?, framing?, target? }
 //   lights       { preset?, time? }
 //   remove       { target }
+//   project      { op: 'save'|'open'|'browse', what?: 'scene'|'landscape'|'character'|'pose', name?, project?,
+//                  section?, sectionKind?: 'capitolo'|'tavola'|'vignetta', query?, target? (character to save / pose to) }
+//                  (app.projects: save into a project / section, open a scene, apply a landscape or pose, insert a character)
 
 export const PLAN_VERSION = 1;
 export const RELATIONS = ['left', 'right', 'front', 'behind', 'beside', 'near', 'on', 'under', 'center', 'corner', 'wall', 'between', 'around', 'seat', 'hand', 'floor', 'in', 'row', 'facing'];
 export const TARGET_KINDS = ['new', 'character', 'animal', 'prop', 'it', 'selected', 'camera', 'room', 'window', 'door', 'all'];
-export const ACTION_TYPES = ['addCharacter', 'addAnimal', 'addProp', 'addRoom', 'landscape', 'modify', 'camera', 'lights', 'remove'];
+export const ACTION_TYPES = ['addCharacter', 'addAnimal', 'addProp', 'addRoom', 'landscape', 'modify', 'camera', 'lights', 'remove', 'project'];
+export const PROJECT_OPS = ['save', 'open', 'browse'];
+export const SAVED_TYPES = ['scene', 'landscape', 'character', 'pose'];
+export const SECTION_KINDS = ['capitolo', 'tavola', 'vignetta'];
 export const BODY_TYPES = ['slim', 'normal', 'curvy'];
 export const FRAMINGS = ['subject', 'all', 'face', 'body', 'hand'];
 export const LIMITS = { characters: 8, perAction: 12, animals: 12 };
@@ -172,10 +178,20 @@ export function normalizePlan(plan, cat = {}) {
         o = { type: a.type, target: t };
         break;
       }
+      case 'project': {
+        if (!PROJECT_OPS.includes(a.op)) return;
+        o = { type: a.type, op: a.op };
+        if (SAVED_TYPES.includes(a.what)) o.what = a.what;
+        for (const f of ['name', 'project', 'section', 'query']) if (str(a[f])) o[f] = str(a[f]).slice(0, 80);
+        if (SECTION_KINDS.includes(a.sectionKind)) o.sectionKind = a.sectionKind;
+        const t = target(a.target); if (t) o.target = t;
+        if (a.op === 'open' && !o.name) { out.unknown.push('quale elemento salvato'); return; }
+        break;
+      }
     }
     if (!o) return;
     // shared optional fields
-    if (a.type !== 'addRoom' && a.type !== 'landscape' && a.type !== 'camera' && a.type !== 'lights' && a.type !== 'remove') {
+    if (a.type !== 'addRoom' && a.type !== 'landscape' && a.type !== 'camera' && a.type !== 'lights' && a.type !== 'remove' && a.type !== 'project') {
       const pl = place(a.place); if (pl) o.place = pl;
       const rt = target(a.rotateTowards); if (rt) o.rotateTowards = rt;
       const la = target(a.lookAt); if (la) o.lookAt = la;

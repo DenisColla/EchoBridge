@@ -148,7 +148,7 @@ export function registerAnimalsTool(app, shell, ctx) {
     const poseRow = h('div', { class: 'pv-row pv-an-actions' },
       button({ label: 'Specchia', icon: 'mirror', small: true, onClick: () => { a.mirrorPose(); a.dropToGround(); app.commit('specchia posa'); } }),
       button({ label: 'Azzera', icon: 'reset', small: true, onClick: () => { a.resetPose(); a.dropToGround(); a.lastPreset = 'stand'; poseChips.setValue('stand'); app.commit('azzera posa'); } }),
-      button({ label: 'A terra', icon: 'ground', small: true, onClick: () => { a.root.position.y = 0; a.dropToGround(); refreshValues(); app.commit('animale a terra'); } }),
+      button({ label: 'A terra', icon: 'ground', small: true, onClick: () => { a.root.position.y = manager.floorUnder(a); a.dropToGround(); refreshValues(); app.commit('animale a terra'); } }),
     );
     body.appendChild(section('Pose pronte', [poseChips, poseRow]));
 
@@ -194,10 +194,11 @@ export function registerAnimalsTool(app, shell, ctx) {
     rot._get = () => Math.round(deg(wrapA(a.root.rotation.y)));
     sliders.push(rot);
     // height above the floor: birds on a perch, flying or swimming animals, a cat on a wall
-    const lift = slider({ label: 'Altezza da terra', min: 0, max: 600, step: 1, value: Math.round(a.root.position.y * 100), format: (v) => (v / 100).toFixed(2) + ' m',
+    // (above the ground under it: a ready landscape's terrain, else the floor y = 0)
+    const lift = slider({ label: 'Altezza da terra', min: 0, max: 600, step: 1, value: Math.round((a.root.position.y - manager.floorUnder(a)) * 100), format: (v) => (v / 100).toFixed(2) + ' m',
       defaultValue: 0,
-      onInput: (v) => { a.root.position.y = v / 100; a.root.updateMatrixWorld(true); app.invalidate(); }, onChange: () => { manager.dispatchEvent({ type: 'change', animal: a, what: 'placement' }); app.commit('altezza animale'); } });
-    lift._get = () => Math.round(a.root.position.y * 100);
+      onInput: (v) => { a.root.position.y = manager.floorUnder(a) + v / 100; a.root.updateMatrixWorld(true); app.invalidate(); }, onChange: () => { manager.dispatchEvent({ type: 'change', animal: a, what: 'placement' }); app.commit('altezza animale'); } });
+    lift._get = () => Math.round((a.root.position.y - manager.floorUnder(a)) * 100);
     sliders.push(lift);
     body.appendChild(section('Posizione', [h('div', { class: 'pv-an-note' }, 'Trascina l’animale per spostarlo; usa l’anello arancione per girarlo.'), rot, lift]));
   }

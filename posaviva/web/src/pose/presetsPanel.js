@@ -31,12 +31,18 @@ export function registerPresetsTool(ctx) {
 
       let sig = '';
       let cards = new Map(); // id -> {card, thumb}
+      // "Le mie pose": poses saved in the projects archive (Posa › Posa intera › Salva posa…)
+      const P = () => app.projects?.items && app.projects?.loadItem ? app.projects : null;
+      const myPoses = () => (P() ? P().items({ type: 'pose' }).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0)) : []);
       function categories() {
         const used = new Set(POSE_PRESETS.map((p) => p.category));
-        return [{ id: 'all', label: 'Tutte' }, ...POSE_CATEGORIES.filter((c) => used.has(c.id))];
+        const list = [{ id: 'all', label: 'Tutte' }, ...POSE_CATEGORIES.filter((c) => used.has(c.id))];
+        if (P()) list.push({ id: 'mine', label: 'Le mie pose' });
+        return list;
       }
       function rebuild() {
-        const s = POSE_PRESETS.length + '|' + POSE_PRESETS.map((p) => p.id).join(',') + '|' + category;
+        const mine = category === 'mine' ? myPoses() : null;
+        const s = POSE_PRESETS.length + '|' + POSE_PRESETS.map((p) => p.id).join(',') + '|' + category + '|' + (P() ? 'P' : '') + (mine ? mine.map((x) => x.id + x.name + (x.updated || '')).join(',') : '');
         if (s === sig) return;
         sig = s;
         const cats = categories();
@@ -44,6 +50,7 @@ export function registerPresetsTool(ctx) {
         chipHost.replaceChildren(chips({ items: cats, value: category, onSelect: (id) => { category = id; haptic('tick'); rebuild(); } }));
         grid.replaceChildren();
         cards = new Map();
+        if (category === 'mine') { buildMine(mine || myPoses()); return; }
         const list = POSE_PRESETS.filter((p) => category === 'all' || p.category === category);
         empty.style.display = list.length ? 'none' : '';
         empty.replaceChildren(icon('pose', 30), h('div', {}, POSE_PRESETS.length ? 'Nessuna posa in questa categoria.' : 'Le pose pronte non sono ancora disponibili.'));
@@ -58,6 +65,50 @@ export function registerPresetsTool(ctx) {
         requestThumbs();
       }
       function markActive() { for (const [id, c] of cards) c.card.classList.toggle('active', id === lastApplied); }
+
+      /** Cards of the saved poses: stored thumbnails, tap = apply to the selected character. */
+      let mineSeq = 0;
+      function buildMine(list) {
+        empty.style.display = list.length ? 'none' : '';
+        empty.replaceChildren(icon('pose', 30), h('div', {}, 'Nessuna posa salvata.'),
+          h('div', {}, 'Metti in posa un personaggio, poi Posa › Posa intera › «Salva posa…».'));
+        const thumbsById = new Map();
+        for (const it of list) {
+          const thumb = h('div', { class: 'pv-pose-thumb loading' });
+          const sub = it.projectName || P()?.get?.(it.projectId)?.name || '';
+          const card = h('button', { type: 'button', class: 'pv-pose-card pv-pose-mine', title: sub ? `${it.name} · ${sub}` : it.name }, thumb, h('span', { class: 'pv-pose-card-label' }, it.name));
+          card.addEventListener('click', () => applyMine(it));
+          grid.appendChild(card);
+          thumbsById.set(it.id, thumb);
+        }
+        if (!list.length) return;
+        const seq = ++mineSeq;
+        P().thumbs(list.map((x) => x.id)).then((m) => {
+          if (seq !== mineSeq) return;
+          for (const [id, th] of thumbsById) {
+            th.classList.remove('loading');
+            const url = m.get(id);
+            th.replaceChildren(url ? h('img', { src: url, alt: '' }) : icon('pose', 28));
+          }
+        }).catch(() => { for (const th of thumbsById.values()) { th.classList.remove('loading'); th.replaceChildren(icon('pose', 28)); } });
+      }
+      async function applyMine(it) {
+        const ch = app.selection.character;
+        if (!ch) { toast('Seleziona un personaggio', { kind: 'warning' }); return; }
+        haptic('tick');
+        try {
+          await P().loadItem(it.id, { character: ch }); // re-grounded / seated, one undo step
+          lastApplied = null; markActive();
+          toast(`Posa «${it.name}» applicata a ${ch.name}`, { kind: 'ok', ms: 1600 });
+        } catch (e) { toast(e?.message || 'Impossibile applicare la posa', { kind: 'error' }); }
+      }
+      // saved poses added, renamed or removed (also from Personaggi or ☰ › Progetti)
+      let watching = false;
+      function watchProjects() {
+        if (watching || !P()?.addEventListener) return;
+        watching = true;
+        P().addEventListener('change', () => { if (shown && category === 'mine') { sig = ''; rebuild(); } });
+      }
       function apply(p) {
         const ch = app.selection.character;
         if (!ch) { toast('Seleziona un personaggio', { kind: 'warning' }); return; }
@@ -65,7 +116,7 @@ export function registerPresetsTool(ctx) {
         if (!applyPosePreset(ch, p.id, { mirror })) return;
         ctx.reapplyNaturalness(ch); // the character's own small asymmetries stay
         applying = true;
-        try { ctx.edited(ch, true, 'posa: ' + p.label.toLowerCase()); } finally { applying = false; }
+        try { ctx.edited(ch, true, 'posa: ' + p.label.toLowerCase(), { keepPreset: true }); } finally { applying = false; }
         lastApplied = p.id; lastChar = ch;
         markActive();
       }
@@ -124,6 +175,7 @@ export function registerPresetsTool(ctx) {
       return {
         onShow() {
           shown = true;
+          watchProjects();
           thumbs ||= getThumbRenderer(app);
           if (lastSex !== sexOf()) { lastSex = sexOf(); sig = ''; }
           rebuild();

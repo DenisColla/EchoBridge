@@ -30,7 +30,7 @@ function relativeSlider(ctx, { label, min, max, def, hint, begin, apply, finish,
       if (!ses || !app.characters.includes(ses.ch)) return;
       apply(ses.ch, ses.st, v / 100);
       finish?.(ses.ch, ses.st, v / 100);
-      ctx.edited(ses.ch, true, undoLabel);
+      ctx.edited(ses.ch, true, undoLabel, { keepPreset: true }); // still the same ready pose, adjusted
     },
   });
   if (hint) s.appendChild(h('div', { class: 'pv-pose-slider-hint' }, hint));
@@ -79,7 +79,7 @@ export function buildAdjustSliders(ctx, { curve = true } = {}) {
       if (natRaf) { cancelAnimationFrame(natRaf); natRaf = 0; }
       if (!ch || !app.characters.includes(ch)) return;
       ctx.keepFeet(ch, () => ctx.setNaturalness(ch, v / 100));
-      ctx.edited(ch, true, 'naturalezza');
+      ctx.edited(ch, true, 'naturalezza', { keepPreset: true });
     },
   });
   nat.appendChild(h('div', { class: 'pv-pose-slider-hint' }, 'Piccole asimmetrie, diverse per ogni personaggio.'));

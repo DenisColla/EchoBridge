@@ -6,9 +6,9 @@
 // furniture, and ready kits (groups of editable props). Every item is a regular
 // prop: movable, undoable, saved with the scene, rendered in every style.
 //
-// Public API: app.city = {types, kits, addItem(id), addKit(kit), regenerate(prop),
+// Public API: app.city = {types, kits, addItem(id, {near, commit, select, toast, lift}), addKit(kit), regenerate(prop),
 //   snapRoad(prop), attachPiece(prop, typeId, {which}), placeOnRoad(vehicle, x, z),
-//   dropOnGround(prop), liftCharacter(ch), groundY(x, z)}
+//   dropOnGround(prop), liftCharacter(ch) (skips characters on a support), groundY(x, z) (landscape ground included)}
 import './city.css';
 import { registerPropTypes, registerPropRoles } from '../props/catalog.js';
 import { haptic } from '../ui/kit.js';

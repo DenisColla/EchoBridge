@@ -69,6 +69,7 @@ export function visibleTopics(env) {
 export function contextTopicId(app, shell, topics) {
   const has = (id) => topics.some((t) => t.id === id);
   if (app.modules?.focus?.active && has('zoom-rapido')) return 'zoom-rapido';
+  if (app.voice?.ui?.isOpen && has('voce')) return 'voce';
   const tool = shell.activeToolId;
   if (!tool) return null;
   if (tool === 'props' && app.props?.selected?.hold && has('in-mano')) return 'in-mano';

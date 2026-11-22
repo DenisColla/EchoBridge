@@ -360,6 +360,9 @@ export class App extends THREE.EventDispatcher {
   /** Records an undo step (call when an interaction ends). */
   commit(label = '') { this.history.push(label); }
 
+  /** Runs fn as ONE undo step (see History.batch): module commits inside are held. */
+  batch(label, fn) { return this.history.batch(label, fn); }
+
   // ------------------------------------------------------------ frame loop
   _resize() {
     const w = this.container.clientWidth || 1, h = this.container.clientHeight || 1;
@@ -427,11 +430,67 @@ export class App extends THREE.EventDispatcher {
   }
 }
 
+/**
+ * Undo / redo: a stack of scene snapshots (JSON strings of app.serialize()).
+ *
+ * Batches: an operation that runs several module actions (a voice command, a
+ * generated landscape with its characters lifted, a multi-step import…) is ONE
+ * undo step with `await app.history.batch(label, async () => {...})`. While a
+ * batch runs, the modules' own `app.commit()` calls are held (only the latest
+ * label is remembered), undo / redo are ignored and `canUndo` / `canRedo` read
+ * false; when the outermost batch ends, one step is recorded with `label` (only
+ * if the scene changed), also when the function throws. Batches nest: inner ones
+ * merge into the outermost. Low level: `const release = app.history.hold();
+ * … release(label)` (idempotent; `release(null)` records with the last held
+ * label, `release(false)` records nothing — the changes then join the next step).
+ */
 class History {
-  constructor(app) { this.app = app; this.stack = []; this.index = -1; this.limit = 60; this._restoring = false; }
+  constructor(app) { this.app = app; this.stack = []; this.index = -1; this.limit = 60; this._restoring = false; this._holds = 0; this._heldLabel = null; }
   reset() { this.stack = [JSON.stringify(this.app.serialize())]; this.index = 0; this._emit(); }
+
+  /** true while a batch (or a hold) is open: module commits are deferred */
+  get held() { return this._holds > 0; }
+
+  /**
+   * Starts holding commits. Returns release(label): ends this hold; when it is the
+   * last one, records one step labelled `label` (string), the last held module
+   * label (null / undefined), or nothing (false). Calling release twice is harmless.
+   */
+  hold() {
+    let open = true;
+    if (this._holds++ === 0) { this._heldLabel = null; this._emit(); }
+    return (label) => {
+      if (!open) return false;
+      open = false;
+      return this._release(label);
+    };
+  }
+
+  _release(label) {
+    if (this._holds <= 0) return false;
+    if (--this._holds > 0) return false;
+    const held = this._heldLabel;
+    this._heldLabel = null;
+    const before = this.index, top = this.stack[this.index];
+    if (label !== false) this.push(typeof label === 'string' ? label : held || '');
+    const recorded = this.index !== before || this.stack[this.index] !== top;
+    if (!recorded) this._emit(); // the buttons come back even when nothing changed
+    return recorded;
+  }
+
+  /**
+   * Runs fn (sync or async) as ONE undo step labelled `label` and resolves to its
+   * result. Commits made inside are held; the step is recorded when the outermost
+   * batch ends, even if fn throws (the error is then re-thrown).
+   */
+  async batch(label, fn) {
+    const release = this.hold();
+    try { return await fn(); } finally { release(label); }
+  }
+
   push(label) {
     if (this._restoring) return;
+    if (this._holds > 0) { if (label) this._heldLabel = label; return; }
     const snap = JSON.stringify(this.app.serialize());
     if (this.stack[this.index] === snap) return;
     this.stack.splice(this.index + 1);
@@ -443,8 +502,9 @@ class History {
   }
   /** true while undo/redo is restoring a snapshot */
   get restoring() { return this._restoring; }
-  get canUndo() { return this.index > 0; }
-  get canRedo() { return this.index < this.stack.length - 1; }
+  // a batch in progress cannot be undone half-way: undo / redo wait for its end
+  get canUndo() { return this.index > 0 && !this._holds; }
+  get canRedo() { return this.index < this.stack.length - 1 && !this._holds; }
   undo() { if (this.canUndo) this._restore(--this.index); }
   redo() { if (this.canRedo) this._restore(++this.index); }
   _restore(i) {
@@ -452,5 +512,5 @@ class History {
     try { this.app.deserialize(JSON.parse(this.stack[i])); } finally { this._restoring = false; }
     this._emit();
   }
-  _emit() { this.app.dispatchEvent({ type: 'history', canUndo: this.canUndo, canRedo: this.canRedo }); }
+  _emit() { this.app.dispatchEvent({ type: 'history', canUndo: this.canUndo, canRedo: this.canRedo, held: this._holds > 0 }); }
 }

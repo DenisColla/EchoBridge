@@ -154,8 +154,9 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         const yaw = slider({ label: 'Rotazione', min: -180, max: 180, step: 1, value: p.yaw * R2D, defaultValue: 0, format: fmtDeg,
           onInput: (v) => manager.setYaw(p, (gizmo.snap ? Math.round(v / 15) * 15 : v) * D2R), onChange: () => commit('ruota oggetto') });
         const snap = toggle({ label: 'Scatto 15°', value: gizmo.snap, onChange: (v) => gizmo.setSnap(v) });
-        const height = slider({ label: 'Altezza da terra', min: -1, max: 3, step: 0.01, value: p.root.position.y, defaultValue: 0, center: false, format: fmtM,
-          onInput: (v) => manager.setHeight(p, v), onChange: () => commit('altezza oggetto') });
+        // height above the floor under the prop (a landscape's ground, else y = 0)
+        const height = slider({ label: 'Altezza da terra', min: -1, max: 3, step: 0.01, value: p.root.position.y - manager.floorUnder(p), defaultValue: 0, center: false, format: fmtM,
+          onInput: (v) => manager.setHeight(p, manager.floorUnder(p) + v), onChange: () => commit('altezza oggetto') });
         const groundBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => {
           const s = manager.ground(p);
           commit('appoggia oggetto');
@@ -175,7 +176,7 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         syncers.push(() => {
           place.style.display = p.hold ? 'none' : '';
           yaw.setValue(p.yaw * R2D);
-          height.setValue(p.root.position.y);
+          height.setValue(p.root.position.y - manager.floorUnder(p));
           tiltX.setValue(p.root.rotation.x * R2D);
           tiltZ.setValue(p.root.rotation.z * R2D);
           straightBtn.style.display = p.tilted || p.isHand ? '' : 'none';

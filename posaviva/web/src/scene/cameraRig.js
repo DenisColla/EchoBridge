@@ -19,6 +19,8 @@ export const ROLL_LIMIT = 45;
 export const MAX_VIEWS = 6;
 /** lowest camera height (m). Just above the floor: the ground is single-sided. */
 export const CAMERA_FLOOR = 0.02;
+/** offsets (m) around the camera where a landscape's ground is probed (the highest wins) */
+const FLOOR_PROBE = [[0, 0], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]];
 /** OrbitControls damping per 60 Hz frame; rescaled to the real frame time (120 Hz displays) */
 const DAMPING_60HZ = 0.1;
 
@@ -174,14 +176,33 @@ export class CameraRig extends THREE.EventDispatcher {
     return animating;
   }
 
+  /**
+   * Lowest camera height at world (x, z): just above the studio floor, or above a
+   * ready landscape's ground (app.landscapes.heightAt: terrain, roofs, piers) with a
+   * margin for the terrain mesh, which is coarser far from the characters.
+   */
+  floorAt(x, z) {
+    const L = this.app.landscapes;
+    if (!L?.current || !L.heightAt || L.hasTerrain === false) return CAMERA_FLOOR;
+    let h = -Infinity;
+    for (const [dx, dz] of FLOOR_PROBE) h = Math.max(h, L.heightAt(x + dx, z + dz));
+    if (!Number.isFinite(h)) return CAMERA_FLOOR;
+    const f = L.current.frame, r = f ? Math.hypot(x - f.x, z - f.z) : 0;
+    return h + 0.05 + Math.min(0.5, r * 0.004);
+  }
+
   _clampFloor() {
     const c = this.controls, t = c.target, p = this.camera.position;
-    if (t.y < 0) t.y = 0;
+    const L = this.app.landscapes, land = !!(L?.current && L.heightAt && L.hasTerrain !== false);
+    // the orbit target stays on or above the ground (a landscape's hills, else y = 0)
+    const tFloor = land ? L.heightAt(t.x, t.z) : 0;
+    if (Number.isFinite(tFloor) && t.y < tFloor) t.y = tFloor;
     _v.subVectors(p, t);
     const r = _v.length();
     if (r < 1e-6) return;
-    if (p.y < CAMERA_FLOOR) {
-      const ny = CAMERA_FLOOR - t.y;
+    const floor = land ? this.floorAt(p.x, p.z) : CAMERA_FLOOR;
+    if (p.y < floor) {
+      const ny = floor - t.y;
       const hor = Math.hypot(_v.x, _v.z);
       if (Math.abs(ny) < r && hor > 1e-6) {
         const k = Math.sqrt(r * r - ny * ny) / hor;
@@ -192,7 +213,7 @@ export class CameraRig extends THREE.EventDispatcher {
       this.camera.lookAt(t);
     }
     // prevent OrbitControls (and its damping) from pushing below the floor next frame
-    c.maxPolarAngle = Math.acos(Math.max(-1, Math.min(1, (CAMERA_FLOOR - t.y) / Math.max(r, 1e-3))));
+    c.maxPolarAngle = Math.acos(Math.max(-1, Math.min(1, (floor - t.y) / Math.max(r, 1e-3))));
   }
 
   // ---------------------------------------------------------------- tweens

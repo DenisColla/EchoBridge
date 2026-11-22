@@ -179,10 +179,12 @@ export function registerPoseTool(ctx) {
       const yawSlider = slider({ label: 'Rotazione', min: -180, max: 180, step: 1, value: 0, format: (v) => `${Math.round(v)}°`,
         onInput: (v) => { const ch = app.selection.character; if (!ch) return; turnAboutPelvis(ch, toRad(v)); ctx.placed(ch); },
         onChange: () => { const ch = app.selection.character; if (ch) ctx.placed(ch, true, 'ruota personaggio'); } });
+      // height above the floor (a ready landscape's ground under the character, else y = 0)
+      const floorOf = (ch) => ctx.floorAt(ch.root.position.x, ch.root.position.z);
       const heightSlider = slider({ label: 'Altezza da terra', min: -0.5, max: 2.5, step: 0.01, value: 0, center: false, defaultValue: 0, format: (v) => `${v.toFixed(2)} m`,
-        onInput: (v) => { const ch = app.selection.character; if (!ch) return; ch.root.position.y = v; ch.root.updateMatrixWorld(true); ctx.placed(ch); },
+        onInput: (v) => { const ch = app.selection.character; if (!ch) return; ch.root.position.y = floorOf(ch) + v; ch.root.updateMatrixWorld(true); ctx.placed(ch); },
         onChange: () => { const ch = app.selection.character; if (ch) ctx.placed(ch, true, 'altezza personaggio'); } });
-      const dropBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => { const ch = app.selection.character; if (!ch) return; haptic('tick'); ch.root.position.y = 0; ch.root.updateMatrixWorld(true); ctx.ops.dropToGround(ch); ctx.placed(ch); } });
+      const dropBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => { const ch = app.selection.character; if (!ch) return; haptic('tick'); ch.root.position.y = ctx.groundAt(ch.root.position.x, ch.root.position.z); ch.root.updateMatrixWorld(true); ctx.ops.dropToGround(ch); ctx.placed(ch); } });
       const movePane = h('div', {}, h('p', { class: 'pv-pose-note' }, 'Trascina l\'anello a terra (o il personaggio) per spostarlo, il pomello per ruotarlo.'), yawSlider, heightSlider, h('div', { class: 'pv-pose-actions' }, dropBtn));
 
       // ---------------------------------------------------------------- line of action pane
@@ -218,7 +220,16 @@ export function registerPoseTool(ctx) {
         ctx.ops.resetPose(ch);
         toast('Posa azzerata', { action: { label: 'Annulla', onClick: () => app.history.undo() } });
       } });
-      const poseSection = section('Posa intera', [h('div', { class: 'pv-pose-actions wrap' }, mirrorPoseBtn, copyBtn, resetPoseBtn)]);
+      // "Salva posa…": the projects module's "Salva in…" sheet (pose of the selected character)
+      // (the projects module loads after this one: shown once it is there)
+      const savePoseBtn = button({ label: 'Salva posa…', icon: 'save', small: true, onClick: () => {
+        const ch = app.selection.character;
+        if (!ch || !app.projects?.openSaveSheet) return;
+        haptic('tick');
+        app.projects.openSaveSheet({ type: 'pose', character: ch })?.catch?.((e) => { console.error(e); toast('Salvataggio non riuscito', { kind: 'error' }); });
+      } });
+      savePoseBtn.classList.add('pv-pose-save');
+      const poseSection = section('Posa intera', [h('div', { class: 'pv-pose-actions wrap' }, mirrorPoseBtn, copyBtn, savePoseBtn, resetPoseBtn)]);
       async function copyMenu(anchor) {
         const src = app.selection.character;
         if (!src) return;
@@ -256,6 +267,7 @@ export function registerPoseTool(ctx) {
       let lastPane = '';
       function refresh() {
         const { character: ch, control } = ctx.sel();
+        savePoseBtn.style.display = app.projects?.openSaveSheet ? '' : 'none';
         modeSeg.setValue(state.mode);
         noChar.style.display = ch ? 'none' : '';
         content.style.display = ch ? '' : 'none';
@@ -287,7 +299,7 @@ export function registerPoseTool(ctx) {
         if (ch && state.mode === 'move') {
           let deg = Math.round(toDeg(ch.root.rotation.y)); if (deg === -180) deg = 180;
           yawSlider.setValue(deg);
-          heightSlider.setValue(ch.root.position.y);
+          heightSlider.setValue(ch.root.position.y - floorOf(ch));
         }
         refreshMap();
       }

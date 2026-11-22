@@ -23,7 +23,20 @@ export async function createEngine(app) {
       props: (app.props?.props || []).filter((p) => !p.hold).map((p) => ({ id: p.id, type: p.type.id, label: p.type.label })),
       selected: sel ? { kind: 'character', id: sel.id } : null,
       hasLandscape: !!app.landscapes?.current,
+      ...savedCtx(),
     };
+  }
+
+  /** Saved items and projects (app.projects, in-memory headers): names for "apri la scena X". */
+  function savedCtx() {
+    const P = app.projects;
+    if (!P?.items) return { saved: [], projects: [] };
+    try {
+      return {
+        saved: P.items({}).map((i) => ({ id: i.id, type: i.type, name: i.name })),
+        projects: P.list().map((p) => ({ id: p.id, name: p.name })),
+      };
+    } catch { return { saved: [], projects: [] }; }
   }
 
   /** Offline: text -> validated plan {actions, unknown}. */

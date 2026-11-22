@@ -1,14 +1,14 @@
 // Executes a command plan (plan.js) on the real module APIs:
 //   characters  app.addCharacter + app.clothing (outfit, colours) + app.hair + app.face + pose library
 //   animals     app.animals.add + app.modules.animals.applyPreset
-//   props       app.props.add / create (buildings: app.buildings.placeBehind, exteriors: app.city)
+//   props       app.props.add (buildings: app.buildings.add, exteriors: app.city.addItem / addKit)
 //   rooms       app.props.addPreset(ROOM_PRESETS[i])
 //   landscapes  app.landscapes.generate / setAtmosphere (feature-detected)
 //   camera      app.sceneTools.camera (quick angles, focal, framing), app.modules.focus
 //   lights      app.lightRig.applyPreset
 // Positions come from the spatial solver (spatial.js). The whole command is ONE
-// undo step: the modules' own commits are held while it runs, then a single
-// app.commit('comando vocale') records the result.
+// undo step: it runs inside app.history.batch('comando vocale', …), which holds
+// the modules' own commits and records a single step at the end.
 import * as THREE from 'three';
 import { E, boxOf, footprintOf, extentAlong, viewAxes, yawToward, yawToCamera, obstacles, roomAt, toRoom, fromRoom, clampToRoom, roomOpening, seatOf, topOf, findFree, isFlat, dependentsOf, isFreeAt } from './spatial.js';
 import { characterBounds } from '../scene/bounds.js';
@@ -38,25 +38,42 @@ export class Executor {
     this.created = []; this.subjects = []; this.done = []; this.failed = []; this.added = [];
     this.cameraTouched = false; this.landscapeMade = false; this.lastCharacter = null;
     const hist = app.history;
-    const hadOwn = Object.prototype.hasOwnProperty.call(hist, 'push');
-    const ownPush = hist.push;
-    hist.push = () => {}; // module commits are held: the command is one undo step
-    try {
-      for (let i = 0; i < plan.actions.length; i++) {
-        const a = plan.actions[i];
-        try { this.created[i] = (await this.exec(a, i)) || []; }
-        catch (e) { console.error('[voice] action failed', a, e); this.failed.push(this.describeFail(a)); this.created[i] = []; }
-      }
+    // trailing saves ("… e salva la scena") run after the step is recorded: they save
+    // the finished scene, and the saved scene then counts as unchanged
+    let tail = plan.actions.length;
+    while (tail > 0 && plan.actions[tail - 1].type === 'project' && plan.actions[tail - 1].op === 'save') tail--;
+    const step = async (i) => {
+      const a = plan.actions[i];
+      try { this.created[i] = (await this.exec(a, i)) || []; }
+      catch (e) { console.error('[voice] action failed', a, e); this.failed.push(this.describeFail(a)); this.created[i] = []; }
+    };
+    // a landscape is generated around the characters: people and animals of the same command
+    // come first, so it frames them, keeps its objects off them and puts them on its ground
+    const order = [...Array(tail).keys()];
+    const isLand = (i) => plan.actions[i].type === 'landscape' && !plan.actions[i].spec?.atmosphereOnly;
+    const lastLiving = Math.max(-1, ...order.filter((i) => ['addCharacter', 'addAnimal'].includes(plan.actions[i].type)));
+    const firstLand = order.find(isLand);
+    if (firstLand !== undefined && lastLiving > firstLand) {
+      const lands = order.filter(isLand);
+      const rest = order.filter((i) => !isLand(i));
+      rest.splice(rest.indexOf(lastLiving) + 1, 0, ...lands);
+      order.splice(0, order.length, ...rest);
+    }
+    const body = async () => {
+      for (const i of order) await step(i);
       if (!this.cameraTouched && !this.landscapeMade && this.added.length) this.frameNew();
       if (this.lastCharacter && app.characters.includes(this.lastCharacter)) app.select(this.lastCharacter);
       await this.settle();
-    } finally {
-      if (hadOwn) hist.push = ownPush; else delete hist.push;
-    }
-    const before = hist.index;
-    app.commit(label);
+    };
+    // ONE undo step: the modules' own commits are held while the command runs
+    const before = hist.index, top = hist.stack[hist.index];
+    if (typeof hist.batch === 'function') await hist.batch(label, body);
+    else await legacyBatch(app, label, body);
     app.invalidate();
-    return { done: this.done, failed: this.failed, undoIndex: hist.index !== before ? hist.index : null, created: this.added.length };
+    const recorded = hist.index !== before || hist.stack[hist.index] !== top;
+    for (let i = tail; i < plan.actions.length; i++) await step(i);
+    // a scene opened by the command resets the history: nothing to undo then
+    return { done: this.done, failed: this.failed, undoIndex: recorded && hist.index > 0 ? hist.index : null, created: this.added.length };
   }
 
   /** Waits for camera tweens and pending builds (max ~2 s), so the snapshot is final. */
@@ -81,12 +98,13 @@ export class Executor {
       case 'camera': return this.camera(a);
       case 'lights': return this.lights(a);
       case 'remove': return this.remove(a);
+      case 'project': return this.project(a);
       default: return [];
     }
   }
 
   describeFail(a) {
-    const what = { addCharacter: 'il personaggio', addAnimal: 'l\'animale', addProp: a.query || a.propType || 'l\'oggetto', addRoom: 'la stanza', landscape: 'il paesaggio', modify: 'la modifica', camera: 'l\'inquadratura', lights: 'le luci', remove: 'la rimozione' }[a.type];
+    const what = { addCharacter: 'il personaggio', addAnimal: 'l\'animale', addProp: a.query || a.propType || 'l\'oggetto', addRoom: 'la stanza', landscape: 'il paesaggio', modify: 'la modifica', camera: 'l\'inquadratura', lights: 'le luci', remove: 'la rimozione', project: a.op === 'save' ? 'il salvataggio' : 'l\'apertura' }[a.type];
     return `non sono riuscito a fare ${what}`;
   }
 
@@ -328,6 +346,8 @@ export class Executor {
         const tp = T.obj;
         const seatLike = SEAT_TYPES.test(tp.type.id) || SEAT_TYPES.test(norm(tp.type.label));
         const bedLike = BED_TYPES.test(tp.type.id) || /^letto/.test(norm(tp.type.label));
+        // "seduta al tavolo": on a chair at that table (one is added when none is free)
+        if (isChar && rel === 'seat' && tableT && !seatLike) { desc = await this.sitAtTable(self, T, pose, index); return desc; }
         if (isChar && (rel === 'seat' || (seatLike && pose && /^sit_/.test(pose)))) {
           desc = await this.seatCharacter(self.obj, tp, pose, index);
           return desc;
@@ -429,10 +449,25 @@ export class Executor {
         break;
       }
       case 'between': {
-        const T2 = place.target2 ? (await this.ensureTarget(place.target2))[0] : null;
-        if (T && T2 && T.obj && T2.obj) {
-          const a = rootPos(T), b = rootPos(T2);
-          setXZ(free((a.x + b.x) / 2, (a.z + b.z) / 2));
+        // "tra il tavolo e la finestra", or one plural target: "tra due lampade"
+        let T1 = T, T2 = place.target2 ? (await this.ensureTarget(place.target2))[0] : null;
+        if (!T2 && targets.length >= 2) { T1 = targets[0]; T2 = targets[1]; }
+        if (T1 && T2 && T1.obj && T2.obj) {
+          ignore.add(T2.obj);
+          const a = rootPos(T1), b = rootPos(T2);
+          let dx = b.x - a.x, dz = b.z - a.z;
+          const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+          // two things made by this command step apart so the new one fits between them
+          const need = extentAlong(fp, dx, dz) * 2 + extentAlong(footprintOf(T1), dx, dz) + extentAlong(footprintOf(T2), dx, dz) + 0.16;
+          const mine = (e) => e.kind === 'prop' && this.added.some((q) => q.obj === e.obj);
+          if (L < need && mine(T1) && mine(T2)) {
+            const m = (need - L) / 2;
+            app.props.moveTo(T1.obj, a.x - dx * m, a.z - dz * m);
+            app.props.moveTo(T2.obj, b.x + dx * m, b.z + dz * m);
+          }
+          const a2 = rootPos(T1), b2 = rootPos(T2);
+          setXZ(free((a2.x + b2.x) / 2, (a2.z + b2.z) / 2));
+          if (self.kind === 'prop' && yaw === null) yaw = yawToCamera(app, x, z);
         } else if (T) away(rx, rz);
         desc = 'in mezzo';
         break;
@@ -534,6 +569,38 @@ export class Executor {
       ch.setPlacement({ position: [ch.root.position.x + slot.x - hx, floorY, ch.root.position.z + slot.z - hz], rotationY: seat.yaw });
     }
     return (ch.sex === 'F' ? 'seduta ' : 'seduto ') + articleName(p.type.label, 'su');
+  }
+
+  /** A character sits at a table: a free chair around it, else a new chair on its far side (facing it). */
+  async sitAtTable(e, T, pose, index = 0) {
+    const app = this.app, tp = T.obj;
+    const tfp = footprintOf(T);
+    const reach = Math.max(tfp.hx, tfp.hz) + 0.9;
+    const taken = app.characters.filter((c) => c !== e.obj && this.lib?.seatMark?.(c)).map((c) => c.root.position);
+    const cam = app.camera.position;
+    const chairs = (app.props?.props || [])
+      .filter((p) => p !== tp && !p.hold && /sedi|sgabell|chair|stool|panca|panchett/.test(p.type.id))
+      .map((p) => ({ p, f: footprintOf(E('prop', p)) }))
+      .filter(({ f }) => Math.hypot(f.cx - tfp.cx, f.cz - tfp.cz) < reach)
+      .filter(({ f }) => !taken.some((q) => Math.hypot(q.x - f.cx, q.z - f.cz) < 0.45))
+      // the chair farthest from the camera first: the character faces the viewer across the table
+      .sort((a, b) => Math.hypot(b.f.cx - cam.x, b.f.cz - cam.z) - Math.hypot(a.f.cx - cam.x, a.f.cz - cam.z));
+    let chair = chairs[0]?.p || null;
+    if (!chair) {
+      chair = app.props.add('sedia', { near: null, select: false });
+      if (!chair) return '';
+      const ce = E('prop', chair);
+      this.added.push(ce);
+      const { fx, fz, rx, rz } = viewAxes(app);
+      const sides = [[-fx, -fz], [rx, rz], [-rx, -rz], [fx, fz]];
+      const [dx, dz] = sides[index % sides.length];
+      const d = extentAlong(tfp, dx, dz) + extentAlong(footprintOf(ce), dx, dz) * 0.6 + 0.05;
+      const cx = tfp.cx + dx * d, cz = tfp.cz + dz * d;
+      app.props.setYaw?.(chair, yawToward(cx, cz, tfp.cx, tfp.cz));
+      app.props.moveTo(chair, cx, cz);
+    }
+    const w = await this.seatCharacter(e.obj, chair, pose, index);
+    return w ? (e.obj.sex === 'F' ? 'seduta ' : 'seduto ') + articleName(tp.type.label, 'a') : '';
   }
 
   /**
@@ -658,8 +725,9 @@ export class Executor {
       if (a.turnAway) this.turnToward(e, null, { away: true });
       if (a.lookAt) this.lookAt(e, a.lookAt);
       if (a.size) ch.setSlider?.('height', a.size > 1 ? 0.8 : 0.2);
-      // on the floor only: a character on a bed / table keeps its height
-      if (ch.root.position.y < 0.02) app.city?.liftCharacter?.(ch);
+      // onto the ground under the feet (sidewalk, a landscape's hill or pier); the city
+      // module leaves characters standing / lying on a support (bed, table) alone
+      if (!this.lib?.seatMark?.(ch)) app.city?.liftCharacter?.(ch);
       this.subjects.push(e);
       this.lastCharacter = ch;
       this.done.push(this.describeCharacter(ch, a, where));
@@ -696,7 +764,7 @@ export class Executor {
       bits.push(g.color ? `${lab} ${agree(colorName(g.color), lab)}` : lab);
     }
     const pl = this.cat.poses?.find((p) => p.id === a.pose);
-    if (pl && !where.startsWith('seduto') && !where.startsWith('sdraiato')) bits.push(pl.label.toLowerCase());
+    if (pl && !/^(sedut|sdraiat)/.test(where)) bits.push(pl.label.toLowerCase());
     const ex = this.cat.expressions?.find((p) => p.id === a.expression);
     if (ex) bits.push(ex.label.toLowerCase());
     if (where) bits.push(where);
@@ -752,14 +820,23 @@ export class Executor {
     for (let k = 0; k < n; k++) {
       let p;
       const building = type.cat === 'edifici';
-      if (building) {
+      const exterior = !building && type.cat === 'esterni' && a.place?.relation !== 'hand';
+      const near = this.lastCharacter || app.selection.character || null;
+      if (building && app.buildings?.add) {
+        // public API: fresh variant, behind the subject as seen from the camera (or placed below)
+        p = app.buildings.add(typeId, { near, place: !a.place, commit: false, select: false, toast: false });
+        if (!p) continue;
+      } else if (building) {
         const t = (await import('../props/catalog.js')).TYPE_BY_ID.get(typeId);
         const params = {};
         for (const d of t.params || []) params[d.id] = d.default;
         if ('seed' in params) params.seed = 1 + Math.floor(Math.random() * 999999);
-        p = app.props.create({ type: typeId, params, color: t.color });
-        if (!a.place && app.buildings?.placeBehind) app.buildings.placeBehind(p, this.lastCharacter || app.selection.character);
-        app.props._changed?.(p, 'list');
+        p = app.props.create({ type: typeId, params, color: t.color }, { emit: true });
+        if (!a.place && app.buildings?.placeBehind) app.buildings.placeBehind(p, near);
+      } else if (exterior && app.city?.addItem) {
+        // roads snap to the roads already there, vehicles go onto a lane, nature on the ground
+        p = app.city.addItem(typeId, { near: a.place ? undefined : near || undefined, commit: false, select: false, toast: false });
+        if (!p) continue;
       } else {
         const near = a.place ? null : (this.lastCharacter || app.selection.character || null);
         p = app.props.add(typeId, { near: a.place?.relation === 'hand' ? null : near, select: false });
@@ -838,6 +915,111 @@ export class Executor {
     else this.failed.push('paesaggi non disponibili');
     if (spec.time) await this.lights({ time: spec.time });
     return [];
+  }
+
+  // ------------------------------------------------------------------ projects (app.projects)
+  /**
+   * Save into / open from the Progetti archive. Saving changes nothing in the scene
+   * (no undo step of its own); a landscape, character or pose applied from the archive
+   * joins the command's undo step; a scene opened from it replaces the scene (asking
+   * about unsaved changes) and starts a new history.
+   */
+  async project(a) {
+    const app = this.app, P = app.projects;
+    if (!P?.saveItem) { this.failed.push('i Progetti non sono disponibili'); return []; }
+    await P.ready;
+    const TYPE = { scene: 'scena', landscape: 'paesaggio', character: 'personaggio', pose: 'posa' };
+    try {
+      if (a.op === 'browse') {
+        const proj = a.project ? findByName(P.list(), a.project) : null;
+        P.open?.({ projectId: proj?.id, type: a.what, query: a.query || (a.project && !proj ? a.project : undefined) });
+        this.done.push(proj ? `Aperto il progetto «${proj.name}»` : a.query ? `Cerco «${a.query}» nei Progetti` : 'Aperti i Progetti');
+        this.cameraTouched = true;
+        return [];
+      }
+      if (a.op === 'save') {
+        const what = a.what || 'scene';
+        let ch = null;
+        if (what === 'character' || what === 'pose') {
+          ch = a.target ? this.resolve(a.target).find((e) => e.kind === 'character')?.obj : null;
+          ch ||= (this.lastCharacter && app.characters.includes(this.lastCharacter) ? this.lastCharacter : null) || app.selection.character || app.characters[0] || null;
+          if (!ch) { this.failed.push('non c\'è nessun personaggio da salvare'); return []; }
+        }
+        if (what === 'landscape' && !app.landscapes?.current && !(app.props?.props || []).length) { this.failed.push('non c\'è nessun paesaggio da salvare'); return []; }
+        await this.settle();
+        // finished outfits and hair in the thumbnail
+        await Promise.race([app.clothing?.whenIdle?.() || null, new Promise((r) => setTimeout(r, 5000))]);
+        const where = await this.projectPlace(P, a);
+        const item = await P.saveItem({ type: what, name: a.name, character: ch || undefined, ...where.ids });
+        const pj = P.get?.(item.projectId)?.name || where.projectName || '';
+        const sec = item.sectionId ? P.section?.(item.sectionId)?.name : '';
+        const fem = what === 'scene' || what === 'pose';
+        this.done.push(`Salvat${fem ? 'a' : 'o'} ${fem ? 'la' : 'il'} ${TYPE[what]} «${item.name}»${pj ? ' in ' + pj : ''}${sec ? ' › ' + sec : ''}${where.created.length ? ' (creat' + (where.created.length > 1 ? 'i ' : 'o ') + where.created.join(' e ') + ')' : ''}`);
+        return [];
+      }
+      // open / apply / insert
+      const hits = P.find({ text: a.name, type: a.what });
+      const n = norm(a.name);
+      const it = hits.find((h) => norm(h.name) === n) || hits.find((h) => norm(h.name).startsWith(n)) || hits[0];
+      if (!it) { this.failed.push(`non trovo ${a.what ? TYPE[a.what] + ' ' : ''}«${a.name}» nei Progetti`); return []; }
+      let ch = null;
+      if (it.type === 'pose') {
+        ch = a.target ? this.resolve(a.target).find((e) => e.kind === 'character')?.obj : null;
+        ch ||= (this.lastCharacter && app.characters.includes(this.lastCharacter) ? this.lastCharacter : null) || app.selection.character || null;
+        if (!ch) { this.failed.push('nessun personaggio a cui applicare la posa'); return []; }
+      }
+      const before = new Set(app.characters);
+      const r = await P.loadItem(it.id, ch ? { character: ch } : {});
+      if (r && r.ok === false) { this.failed.push(`apertura di «${it.name}» annullata`); return []; }
+      if (it.type === 'scene') {
+        this.done.push(`Aperta la scena «${it.name}»`);
+        this.cameraTouched = true; this.landscapeMade = true; this.lastCharacter = null;
+        this.created = []; this.subjects = []; this.added = [];
+        return [];
+      }
+      if (it.type === 'landscape') { this.landscapeMade = true; this.done.push(`Applicato il paesaggio «${it.name}»`); return []; }
+      if (it.type === 'character') {
+        const nc = r?.character || app.characters.find((c) => !before.has(c));
+        if (!nc) { this.done.push(`Inserito il personaggio «${it.name}»`); return []; }
+        const e = E('character', nc);
+        this.added.push(e); this.subjects.push(e); this.lastCharacter = nc;
+        this.cameraTouched = true; // the projects module frames it
+        this.done.push(`Inserito il personaggio «${it.name}»`);
+        return [e];
+      }
+      if (it.type === 'pose') {
+        const e = E('character', ch);
+        this.subjects.push(e); this.lastCharacter = ch;
+        this.done.push(`Applicata la posa «${it.name}» a ${ch.name}`);
+        return [e];
+      }
+      return [];
+    } catch (e) {
+      console.warn('[voice] projects', e);
+      this.failed.push(cap1(e?.message || 'operazione sui Progetti non riuscita'));
+      return [];
+    }
+  }
+
+  /** Project / section of a save: found by name, else created. -> {ids: {projectId, sectionId}, created, projectName} */
+  async projectPlace(P, a) {
+    const created = [];
+    let proj = null;
+    if (a.project) {
+      proj = findByName(P.list(), a.project);
+      if (!proj) { proj = await P.create(cap1(a.project)); created.push(`il progetto «${proj.name}»`); }
+    }
+    const pid = proj?.id || P.current?.id || null;
+    let sec = null;
+    if (a.section && pid) {
+      const secs = P.sections(pid) || [];
+      sec = findByName(secs, a.section) || (a.sectionKind && /^\d+$/.test(a.section.split(' ').pop()) ? secs.find((s) => s.kind === a.sectionKind && norm(s.name).endsWith(' ' + a.section.split(' ').pop())) : null);
+      if (!sec) { sec = await P.createSection(pid, cap1(a.section), a.sectionKind || 'tavola'); created.push(`la sezione «${sec.name}»`); }
+    }
+    const ids = {};
+    if (proj) ids.projectId = proj.id;
+    if (sec) { ids.projectId = pid; ids.sectionId = sec.id; }
+    return { ids, created, projectName: proj?.name };
   }
 
   // ------------------------------------------------------------------ modify / remove
@@ -1024,6 +1206,25 @@ export class Executor {
 
 // ------------------------------------------------------------------ helpers
 /** Coat palette whose base colour is closest to a hex colour ("un gatto nero"). */
+/**
+ * Older cores without app.history.batch: hold the modules' commits by shadowing
+ * history.push while the command runs, then record one step.
+ */
+async function legacyBatch(app, label, fn) {
+  const hist = app.history;
+  const hadOwn = Object.prototype.hasOwnProperty.call(hist, 'push');
+  const ownPush = hist.push;
+  hist.push = () => {};
+  try { await fn(); } finally { if (hadOwn) hist.push = ownPush; else delete hist.push; app.commit(label); }
+}
+
+/** Entry of `list` ({name}) whose name matches `name` (exact, then prefix, then contains), accent-insensitive. */
+function findByName(list, name) {
+  const n = norm(name).trim();
+  if (!n) return null;
+  return list.find((x) => norm(x.name) === n) || list.find((x) => norm(x.name).startsWith(n)) || list.find((x) => norm(x.name).includes(n)) || null;
+}
+
 function nearestPalette(pals, hex) {
   const rgb = (h) => { const n = parseInt(String(h).replace('#', '').slice(0, 6), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   const [r, g, b] = rgb(hex);

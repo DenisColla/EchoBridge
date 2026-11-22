@@ -276,7 +276,7 @@ const TIME_WORDS = {
 };
 const WEATHER_WORDS = {
   sereno: 'sereno, sole, soleggiato, col sole, con il sole, limpido, cielo sereno, bel tempo', nuvoloso: 'nuvoloso, nuvole, coperto, cielo coperto, cielo grigio',
-  pioggia: 'pioggia, piove, piovoso, con la pioggia, sotto la pioggia, temporale, tempesta, acquazzone, diluvio', neve: 'neve, nevica, innevato, innevata, con la neve, nevicata, bufera',
+  pioggia: 'pioggia, piove, piovoso, con la pioggia, sotto la pioggia, temporale, tempesta, acquazzone, diluvio, piovere, piovendo, sta piovendo, fai piovere, fa piovere', neve: 'neve, nevica, innevato, innevata, con la neve, nevicata, bufera, nevicare, nevicando, sta nevicando, fai nevicare, fa nevicare',
   nebbia: 'nebbia, nebbioso, nebbiosa, foschia, con la nebbia',
 };
 const SEASON_WORDS = { primavera: 'primavera, primaverile, in primavera', estate: 'estate, estivo, estiva, d estate', autunno: 'autunno, autunnale, d autunno', inverno: 'inverno, invernale, d inverno' };
@@ -330,7 +330,7 @@ const MARKERS = {
   degrees: 'gradi, grado',
   halfTurn: 'mezzo giro, di 180',
   quarterTurn: 'un quarto di giro',
-  mutual: 'si guardano, che si guardano, faccia a faccia, uno di fronte all altro, una di fronte all altra, si fronteggiano, uno davanti all altro, una davanti all altra, si parlano, che si parlano, parlano tra loro, che parlano',
+  mutual: 'si guardano, che si guardano, faccia a faccia, uno di fronte all altro, una di fronte all altra, si fronteggiano, uno davanti all altro, una davanti all altra, si parlano, che si parlano, parlano tra loro, che parlano, si stringono la mano, che si stringono la mano, si danno la mano, che si danno la mano, stretta di mano, si abbracciano, che si abbracciano',
 };
 
 /** Generic nouns -> the type a person most likely means (when no other word narrows it). */
@@ -340,6 +340,7 @@ const HEAD_DEFAULTS = {
   lampada: 'lampada_terra', lampadario: 'ph_Chandelier_01', casa: 'ed_villetta', villetta: 'ed_villetta', palazzo: 'ed_palazzina', palazzina: 'ed_palazzina', condominio: 'ed_condominio', grattacielo: 'ed_grattacielo',
   negozio: 'ed_negozio', chiesa: 'ed_chiesa', faro: 'ed_faro', torre: 'ed_torre', castello: 'ed_castello', strada: 'es_strada', marciapiede: 'es_marciapiede', panchina: 'es_panchina', lampione: 'es_lampione',
   semaforo: 'es_semaforo', cespuglio: 'es_cespuglio', siepe: 'es_siepe', roccia: 'es_roccia', sasso: 'es_roccia', masso: 'es_roccia', pianta: 'pianta', fiori: 'vaso_fiori', quadro: 'quadro', computer: 'pc',
+  caffe: 'tazza', cappuccino: 'tazza', tisana: 'tazza',
   pc: 'pc', tv: 'tv', televisore: 'tv', televisione: 'tv', telefono: 'telefono', cellulare: 'telefono', smartphone: 'telefono', libro: 'libro', palla: 'palla', pallone: 'ph_football', specchio: 'specchio', tappeto: 'tappeto',
   armadio: 'armadio', scrivania: 'scrivania', tavolo: 'tavolo', tavolino: 'tavolino', sedia: 'sedia', sgabello: 'sgabello', divano: 'divano', poltrona: 'poltrona', letto: 'letto', cassa: 'ph_wooden_crate_01',
   scatola: 'scatola', valigia: 'ph_vintage_suitcase', chitarra: 'chitarra', pianoforte: 'pianoforte', piano: 'pianoforte', frigorifero: 'frigo', frigo: 'frigo', bicchiere: 'bicchiere', bottiglia: 'bottiglia',
@@ -432,6 +433,7 @@ export function buildLexicon(cat) {
   return lex;
 }
 
+const COMPL_PREPS = new Set(['di', 'da', 'del', 'della', 'dello', 'dell', 'dei', 'degli', 'delle', 'per', 'd']);
 const EXACT_KINDS = new Set(['det', 'prep', 'num', 'pron', 'ord', 'mark', 'intent']);
 const KIND_PRIO = { intent: 7, rel: 6, mark: 5, det: 5, prep: 5, num: 5, pron: 4, ord: 4, color: 4, shade: 4, undress: 5, person: 4, animal: 4, garment: 3, hairStyle: 3, hairColor: 3, beard: 3, pose: 3, apose: 2, expr: 3, body: 3, outfitSet: 3, room: 2, landscape: 2, kit: 1, time: 3, weather: 3, season: 3, light: 2, angle: 3, framing: 2, focal: 3, mm: 3 };
 
@@ -472,7 +474,10 @@ export class Lexicon {
         if (ex) { if (weight > ex.w) { ex.w = weight; ex.field = field; } } else arr.push({ id: t.id, w: weight, field });
         if (w.length >= 4) this.singleKeys.set(s, w);
       };
-      lw.forEach((w, i) => put(w, i === 0 ? 3 : 1.5, i === 0 ? 'head' : 'label'));
+      // a word after "di / da / del…" names the content or use ("Carrello del caffè"): a weak match on its own
+      const raw = norm(t.label).replace(/['’]/g, ' ').split(/[^a-z0-9]+/).filter(Boolean);
+      const compl = new Set(raw.filter((w, i) => i > 0 && COMPL_PREPS.has(raw[i - 1])));
+      lw.forEach((w, i) => put(w, i === 0 ? 3 : compl.has(w) ? 1.2 : 1.5, i === 0 ? 'head' : compl.has(w) ? 'compl' : 'label'));
       for (const [w, id] of Object.entries(HEAD_DEFAULTS)) if (id === t.id) put(w, 3.2, 'default');
       for (const w of tags) put(w, 1, 'tag');
       const cl = catLabel.get(t.cat);
@@ -580,7 +585,8 @@ export class Lexicon {
   rankProps(headStem, extraStems = [], opts = {}) {
     const base = this.propIndex.get(headStem) || [];
     const scores = new Map();
-    for (const { id, w, field } of base) scores.set(id, w + (field === 'head' ? 0.5 : field === 'default' ? 0.9 : 0));
+    const fields = new Map();
+    for (const { id, w, field } of base) { scores.set(id, w + (field === 'head' ? 0.5 : field === 'default' ? 0.9 : 0)); fields.set(id, field); }
     let narrowed = false;
     for (const s of extraStems) {
       const arr = this.propIndex.get(s);
@@ -600,7 +606,7 @@ export class Lexicon {
       if (opts.cats?.includes(t.cat)) s += 0.6;
       if (opts.hand && t.hand) s += 0.8;
       if (t.cat === 'mano' && !opts.hand) s -= 0.3;
-      out.push({ id, score: s });
+      out.push({ id, score: s, field: fields.get(id) });
     }
     out.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     return out;

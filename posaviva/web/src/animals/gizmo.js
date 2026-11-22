@@ -138,9 +138,12 @@ export class AnimalGizmo {
       const ray = this._ray(e.clientX, e.clientY);
       if (mode === 'move') {
         d.planeY = a.root.position.y;
+        d.rel = a.root.position.y - this.manager.floorUnder(a); // follows a landscape's ground
         _plane.set(_n, -d.planeY);
         const g = ray.intersectPlane(_plane, new THREE.Vector3()) || a.root.position.clone();
         d.offset = a.root.position.clone().sub(g);
+        const L = app.landscapes; // over a landscape the finger follows the ground
+        d.lift = L?.hasTerrain && L.rayGround ? d.planeY - L.heightAt(g.x, g.z) : null;
       } else {
         _plane.set(_n, -(a.root.position.y + 0.004));
         const q = ray.intersectPlane(_plane, _v);
@@ -184,11 +187,15 @@ export class AnimalGizmo {
     if (!d.moved) haptic(8);
     const ray = this._ray(x, y);
     if (d.mode === 'move') {
-      if (Math.abs(ray.direction.y) < 0.015) return;
-      _plane.set(_n, -d.planeY);
-      const q = ray.intersectPlane(_plane, _v);
-      if (!q || q.distanceTo(ray.origin) > 80) return;
-      a.root.position.set(q.x + d.offset.x, d.planeY, q.z + d.offset.z);
+      let q = d.lift != null ? this.app.landscapes.rayGround(ray, d.lift, _v, 200) : null;
+      if (!q) {
+        if (Math.abs(ray.direction.y) < 0.015) return;
+        _plane.set(_n, -d.planeY);
+        q = ray.intersectPlane(_plane, _v);
+        if (!q || q.distanceTo(ray.origin) > 80) return;
+      }
+      const nx = q.x + d.offset.x, nz = q.z + d.offset.z;
+      a.root.position.set(nx, this.manager.floorAt(nx, nz) + d.rel, nz);
       this.shell.hint('Trascina per spostare');
     } else {
       let yaw;

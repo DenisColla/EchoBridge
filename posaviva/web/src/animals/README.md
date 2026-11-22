@@ -169,6 +169,9 @@ a.setAxis(ctrl, ctrl.axes[0], 30); a.mirrorPose(); a.dropToGround(); a.setPalett
 a.setSize(1.2); a.setAge(0.2); a.toJSON(); a.raycast(ray); a.worldBox(); a.bonePoint('head', 0.5);
 ```
 
+Ground: `app.animals.floorAt(x, z)` / `floorUnder(a)` = `app.landscapes.heightAt` (0 without a
+landscape). New animals, drags, duplicates, "A terra" and "Altezza da terra" are relative to it.
+
 Scene JSON: `app.serialize().scene.animals = {v: 1, animals: [{id, species, name,
 position, rotationY, palette, color, size, age, pose: {bones: {name: [x,y,z,w]}, lift}}]}`.
 Undo: every interaction ends with `app.commit(label)`; `deserializeScene` updates

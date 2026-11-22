@@ -114,5 +114,30 @@ for (const [err, reason] of [[Object.assign(new Error('fetch failed'), { name: '
   }
   ok('offline plans validate against the zod schema');
 }
+// 8. project commands (Progetti): split off before the scene parser, valid plans
+{
+  const lex = buildLexicon(cat);
+  const fmt = zodOutputFormat(makePlanSchema(cat));
+  const scene = { characters: [{ id: 'c1', name: 'Donna 1', sex: 'F' }], animals: [], props: [], saved: [{ id: 'i1', type: 'scene', name: 'Inseguimento' }, { id: 'i2', type: 'pose', name: 'Saluto' }], projects: [{ id: 'p1', name: 'Noir' }] };
+  const want = {
+    'salva la scena come Fuga nel progetto Noir, tavola 3': { op: 'save', what: 'scene', name: 'Fuga', project: 'Noir', section: 'Tavola 3', sectionKind: 'tavola' },
+    'apri la scena Inseguimento': { op: 'open', what: 'scene', name: 'Inseguimento' },
+    'applica la posa Saluto alla donna': { op: 'open', what: 'pose', name: 'Saluto' },
+    'apri i progetti': { op: 'browse' },
+  };
+  for (const [t, w] of Object.entries(want)) {
+    const r = parse(t, lex, scene);
+    const plan = normalizePlan({ actions: r.actions, unknown: r.unknown }, cat);
+    assert.equal(plan.actions.length, 1, t);
+    for (const [k, v] of Object.entries(w)) assert.equal(plan.actions[0][k], v, `${t}: ${k}`);
+    fmt.parse(JSON.stringify(plan));
+  }
+  // a save after scene actions stays last; "metti una posa" without a saved item is not a project command
+  const r = parse('metti un uomo e salva la scena come Uomo', lex, scene);
+  assert.equal(r.actions[r.actions.length - 1].type, 'project');
+  assert.equal(r.actions[0].type, 'addCharacter');
+  assert.ok(!parse('metti una sedia', lex, scene).actions.some((a) => a.type === 'project'));
+  ok('project commands');
+}
 assert.ok(vocabularyText(cat).length > 200);
 console.log(`\n${n} cloud tests passed`);

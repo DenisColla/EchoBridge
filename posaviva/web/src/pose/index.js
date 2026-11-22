@@ -3,8 +3,14 @@
 // skinned body, FK rotation gizmo, IK effectors (hands, feet, head, pelvis with
 // pinned feet), character placement, pose presets and hand tools.
 //
-// Tools: 'pose' (Posa), 'poselib' (Pose pronte), 'hands' (Mani) in the 'pose' group.
+// Tools: 'pose' (Posa), 'poselib' (Pose pronte, with "Le mie pose" from app.projects), 'hands'
+// (Mani) in the 'pose' group. Posa › Posa intera › "Salva posa…" opens app.projects' sheet.
 // Public API: app.posing (see the bottom of create()).
+// Per-character state: ch.data.pose = {seat, nat, preset, presetMirror}: `preset` is the id of the
+// last ready pose applied (library.applyPosePreset), kept through Dinamismo / Naturalezza /
+// "Appoggia a terra" / Specchia (presetMirror toggles) and Copia su…, cleared by any other edit.
+// Placement follows a ready landscape's ground (app.landscapes.heightAt): Sposta drags, "Altezza
+// da terra" (relative to it), "Appoggia a terra" (app.city.groundY: sidewalks too).
 import './pose.css';
 import * as THREE from 'three';
 import { haptic } from '../ui/kit.js';
@@ -17,7 +23,7 @@ import { PoseGizmo } from './gizmo.js';
 import { registerPoseTool } from './panel.js';
 import { registerPresetsTool } from './presetsPanel.js';
 import { registerHandsTool } from './handsPanel.js';
-import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, applyPosePreset, lowestGroundY, measureSeat, seatMark, setSeatMark, feetOnFloor, fitArms, NATURAL_POSE } from './library.js';
+import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, applyPosePreset, lowestGroundY, measureSeat, seatMark, setSeatMark, presetMark, setPresetMark, feetOnFloor, fitArms, NATURAL_POSE } from './library.js';
 import { SpineFollow, applyNaturalness, exaggerate, poseSnapshot, bendLine, lineSnapshot } from './soft.js';
 import { ActionLine } from './actionLine.js';
 
@@ -66,10 +72,18 @@ export function create(app, shell) {
       if (!v) { v = []; ctrl.axes.forEach((a, k) => { if (!a.extra || !state.limits) v.push(k); }); _vis.set(key, v); }
       return v;
     },
-    /** after a pose edit: final = interaction ended (undo step) */
-    edited(ch, final = false, label = 'posa') {
+    /**
+     * after a pose edit: final = interaction ended (undo step). A final edit clears the
+     * ready-pose mark (ch.data.pose.preset) unless opts.keepPreset (preset applied,
+     * Dinamismo / Naturalezza on top of it, drop to the floor).
+     */
+    edited(ch, final = false, label = 'posa', { keepPreset = false } = {}) {
       ch.applyPose(); // fires 'pose': live UI refresh goes through the selected character's listener
-      if (final) { notify('pose-final'); app.commit(label); }
+      if (final) {
+        if (!keepPreset && ch.data?.pose?.preset) setPresetMark(ch, null);
+        notify('pose-final');
+        app.commit(label);
+      }
     },
     /** after a placement change (ch.root) */
     placed(ch, final = false, label = 'sposta') {
@@ -104,6 +118,17 @@ export function create(app, shell) {
   };
 
   ctx.feetOnFloor = (ch) => { ch.root.updateMatrixWorld(true); return feetOnFloor(ch); };
+  /** a ready landscape's ground height at world (x, z) (terrain, roof, pier), else 0 — cheap */
+  ctx.floorAt = (x, z) => {
+    const L = app.landscapes;
+    const y = L?.heightAt ? L.heightAt(x, z) : 0;
+    return Number.isFinite(y) ? y : 0;
+  };
+  /** the ground under world (x, z) including exterior pieces (sidewalks, roads, lawns) — raycasts */
+  ctx.groundAt = (x, z) => {
+    const y = app.city?.groundY ? app.city.groundY(x, z) : ctx.floorAt(x, z);
+    return Number.isFinite(y) ? y : ctx.floorAt(x, z);
+  };
   ctx.follow = new SpineFollow(ctx);
   ctx.line = new ActionLine(ctx);
   /** "Naturalezza" amount of a character (0..1, kept in ch.data.pose.nat) */
@@ -143,7 +168,10 @@ export function create(app, shell) {
       ch.applyPose();
       // the mesh is not perfectly symmetric: a grounded pose stays on the floor
       if (mode) settle(ch, mode);
-      ctx.edited(ch, true, 'specchia posa');
+      // the same ready pose, mirrored
+      const pid = presetMark(ch);
+      if (pid) setPresetMark(ch, pid, !ch.data.pose.presetMirror);
+      ctx.edited(ch, true, 'specchia posa', { keepPreset: !!pid });
     },
     resetPose(ch) {
       const keep = PRESERVED_BONES.map((n) => [n, ch.getBoneRotation(n)?.clone()]);
@@ -170,12 +198,13 @@ export function create(app, shell) {
       const k = hs > 0 ? HIP_REF / hs : 1;
       applyPoseObject(dst, { bones: pose.bones, root: pose.root.map((v) => v * k) }, { ground: !!mode, seat, collide: true, shoes: mode !== 'skin' });
       setSeatMark(dst, seat > 0 ? seatMark(src) || seat : 0);
+      setPresetMark(dst, presetMark(src), !!src.data?.pose?.presetMirror); // same ready pose
       notify('pose-final');
       app.commit('copia posa');
     },
     dropToGround(ch) {
       ch.dropToGround();
-      ctx.edited(ch, true, 'appoggia a terra');
+      ctx.edited(ch, true, 'appoggia a terra', { keepPreset: true });
     },
   };
   ctx.ops = ops;
@@ -365,14 +394,14 @@ export function create(app, shell) {
     actionLine: ctx.line,
     /** "Naturalezza" 0..1 of a character (deterministic asymmetries, ch.data.pose.nat) */
     naturalness: (ch) => ctx.naturalness(ch),
-    setNaturalness(ch, v, commit = false) { ctx.keepFeet(ch, () => ctx.setNaturalness(ch, v)); ctx.edited(ch, commit, 'naturalezza'); },
+    setNaturalness(ch, v, commit = false) { ctx.keepFeet(ch, () => ctx.setNaturalness(ch, v)); ctx.edited(ch, commit, 'naturalezza', { keepPreset: true }); },
     /** "Dinamismo": exaggerates the current pose (amount 1 = unchanged, 1.5 = +50%), limits respected */
     dynamism(ch, amount, commit = false) {
       const g = groundMode(ch);
       exaggerate(ch, poseSnapshot(ch), amount, rig, controls);
       ch.applyPose(); fitArms(ch);
       if (g) settle(ch, g);
-      ctx.edited(ch, commit, 'dinamismo');
+      ctx.edited(ch, commit, 'dinamismo', { keepPreset: true });
     },
     /** "Curva": scales the bend of the back's line of action (0 straight, 1 unchanged, 2 double) */
     curve(ch, t, commit = false) { bendLine(ch, lineSnapshot(ch, rig, controls), t, rig); ctx.edited(ch, commit, 'curva linea d\'azione'); },

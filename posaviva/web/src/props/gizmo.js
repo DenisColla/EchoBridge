@@ -245,6 +245,11 @@ export class PropGizmo {
       _plane.set(_n.set(0, 1, 0), -d.planeY);
       d.grab = ray.intersectPlane(_plane, new THREE.Vector3()) || p.root.position.clone();
       d.offset = p.root.position.clone().sub(d.grab);
+      // height above the floor under it: on a landscape the prop follows the ground
+      d.rel = p.root.position.y - this.manager.floorUnder(p);
+      // over a landscape the finger follows the ground (the grabbed point's height above it)
+      const L = app.landscapes;
+      d.lift = L?.hasTerrain && L.rayGround ? d.planeY - L.heightAt(d.grab.x, d.grab.z) : null;
       this.shell.hint('Trascina per spostare');
     } else if (mode === 'rotate') {
       d.planeY = p.root.position.y + 0.004;
@@ -267,7 +272,8 @@ export class PropGizmo {
       const q = ray.intersectPlane(_plane, _v);
       d.y0 = q ? q.y : p.root.position.y;
       d.wpp = this._worldPerPixel(p.root.position);
-      this._hintHeight(p.root.position.y);
+      d.floor = this.manager.floorUnder(p);
+      this._hintHeight(p.root.position.y - d.floor);
     }
     this.drag = d;
     haptic(8);
@@ -280,11 +286,16 @@ export class PropGizmo {
     if (!d.moved && Math.hypot(x - d.x0, y - d.y0) < 3) return;
     const ray = this._ray(x, y);
     if (d.mode === 'move') {
-      if (Math.abs(ray.direction.y) < 0.015) return;
-      _plane.set(_n.set(0, 1, 0), -d.planeY);
-      const q = ray.intersectPlane(_plane, _v);
-      if (!q || q.distanceTo(ray.origin) > 60) return;
+      let q = d.lift !== null ? this.app.landscapes.rayGround(ray, d.lift, _v, 200) : null;
+      if (!q) {
+        if (Math.abs(ray.direction.y) < 0.015) return;
+        _plane.set(_n.set(0, 1, 0), -d.planeY);
+        q = ray.intersectPlane(_plane, _v);
+        if (!q || q.distanceTo(ray.origin) > 60) return;
+      }
       m.moveTo(p, q.x + d.offset.x, q.z + d.offset.z);
+      const y = m.floorUnder(p) + d.rel;
+      if (Math.abs(y - p.root.position.y) > 1e-5) m.setHeight(p, y);
     } else if (d.mode === 'rotate') {
       let yaw;
       if (d.screen) yaw = d.startYaw + (x - d.x0) * 0.012;
@@ -307,10 +318,10 @@ export class PropGizmo {
       const q = ray.intersectPlane(_plane, _v);
       // fallback (plane edge-on): screen pixels -> meters at the prop distance
       let yNew = q ? d.startPos.y + (q.y - d.y0) : d.startPos.y - (y - d.y0) * d.wpp;
-      yNew = THREE.MathUtils.clamp(yNew, -2, 8);
-      if (Math.abs(yNew) < 0.015) yNew = 0; // magnet to the floor
+      yNew = THREE.MathUtils.clamp(yNew, d.floor - 2, d.floor + 8);
+      if (Math.abs(yNew - d.floor) < 0.015) yNew = d.floor; // magnet to the floor
       m.setHeight(p, yNew);
-      this._hintHeight(yNew);
+      this._hintHeight(yNew - d.floor);
     }
     d.moved = true;
   }

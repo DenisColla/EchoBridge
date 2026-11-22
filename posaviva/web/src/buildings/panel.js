@@ -58,24 +58,34 @@ export function registerBuildingsTool(app, shell, thumbs) {
     p.root.position.set(ox - fx * back + rx * sft, 0, oz - fz * back + rz * sft);
     p.root.rotation.set(0, yaw, 0, 'YXZ');
     p.root.scale.setScalar(p.scale);
+    p.root.position.y = groundOf(p);
     props()._changed?.(p);
   }
 
-  function addBuilding(id) {
+  /** Ground under a building: a landscape's terrain (lowest point of the footprint) or y = 0. */
+  const groundOf = (p) => props().floorUnder ? props().floorUnder(p, { lowest: true }) : 0;
+
+  /**
+   * Adds a building with a fresh random variant. opts: {near: Character (placed
+   * behind it as seen from the camera; default the selected character), place = true
+   * (false: leave it at the origin, the caller places it), commit = true, select = true,
+   * toast = true, params, color}. Returns the prop.
+   */
+  function addBuilding(id, opts = {}) {
     const type = TYPE_MAP.get(id);
     if (!type || !props()) return null;
+    const { near, place = true, commit = true, select = true, toast: tell = true } = opts;
     const same = props().props.filter((q) => q.type.id === id).length;
     // built once, directly with a fresh random variant (and a new color for repeats)
-    const params = { ...defaultParams(type), seed: 1 + Math.floor(Math.random() * 999999) };
-    const color = same && !type.noColor ? pickColor(type, type.color) : type.color;
+    const params = { ...defaultParams(type), seed: 1 + Math.floor(Math.random() * 999999), ...(opts.params || {}) };
+    const color = opts.color || (same && !type.noColor ? pickColor(type, type.color) : type.color);
     const p = props().create({ type: id, params, color });
     if (!p) return null;
-    placeBehind(p);
+    if (place) placeBehind(p, near !== undefined ? near : app.selection.character);
     props()._changed?.(p, 'list');
-    props().select(p);
-    haptic(12);
-    app.commit('aggiungi edificio');
-    toast(`${type.label}: trascinalo per spostarlo`, 1800);
+    if (select) props().select(p);
+    if (commit) { haptic(12); app.commit('aggiungi edificio'); }
+    if (tell) toast(`${type.label}: trascinalo per spostarlo`, 1800);
     return p;
   }
 
@@ -111,7 +121,8 @@ export function registerBuildingsTool(app, shell, thumbs) {
     rc.setFromCamera(_ndc, app.camera);
     _plane.set(_n, -hit.point.y);
     const grab = rc.ray.intersectPlane(_plane, new THREE.Vector3()) || hit.point.clone();
-    drag = { id: e.pointerId, p, x0: e.clientX, y0: e.clientY, moved: false, planeY: hit.point.y, offset: p.root.position.clone().sub(grab), ctl: app.controls.enabled, raf: 0, lx: 0, ly: 0 };
+    drag = { id: e.pointerId, p, x0: e.clientX, y0: e.clientY, moved: false, planeY: hit.point.y, offset: p.root.position.clone().sub(grab), ctl: app.controls.enabled, raf: 0, lx: 0, ly: 0, rel: p.root.position.y - groundOf(p),
+      lift: app.landscapes?.hasTerrain && app.landscapes.rayGround ? hit.point.y - app.landscapes.heightAt(grab.x, grab.z) : null };
     app.controls.enabled = false;
   }, { capture: true });
   c.addEventListener('pointermove', (e) => {
@@ -141,12 +152,18 @@ export function registerBuildingsTool(app, shell, thumbs) {
     app.pointerToNDC({ clientX: x, clientY: y }, _ndc);
     const rc = props().raycaster;
     rc.setFromCamera(_ndc, app.camera);
-    _plane.set(_n, -d.planeY);
-    const q = rc.ray.intersectPlane(_plane, _v);
-    if (!q) return;
-    // keep it within a sane distance of the camera target
-    if (q.distanceTo(app.camera.position) > 2000) return;
+    let q = d.lift != null ? app.landscapes.rayGround(rc.ray, d.lift, _v, 800) : null;
+    if (!q) {
+      _plane.set(_n, -d.planeY);
+      q = rc.ray.intersectPlane(_plane, _v);
+      if (!q) return;
+      // keep it within a sane distance of the camera target
+      if (q.distanceTo(app.camera.position) > 2000) return;
+    }
     props().moveTo(d.p, q.x + d.offset.x, q.z + d.offset.z);
+    // on a landscape the building follows the ground (same height above it as before the drag)
+    const yN = groundOf(d.p) + d.rel;
+    if (Math.abs(yN - d.p.root.position.y) > 1e-5) props().setHeight(d.p, yN);
   }
 
   // ------------------------------------------------------------ tool
@@ -297,8 +314,10 @@ export function registerBuildingsTool(app, shell, thumbs) {
         // next to the original along its street line (right side)
         const w = (p.localBox.max.x - p.localBox.min.x) * p.scale + 0.05;
         const yaw = p.yaw;
+        const rel = p.root.position.y - groundOf(p); // same height above the ground (landscapes)
         q.root.position.set(p.root.position.x + Math.cos(yaw) * w, p.root.position.y, p.root.position.z - Math.sin(yaw) * w);
         q.root.rotation.set(0, yaw, 0, 'YXZ');
+        q.root.position.y = groundOf(q) + rel;
         props()._changed?.(q);
         props().select(q);
         app.commit('duplica edificio');

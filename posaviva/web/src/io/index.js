@@ -62,6 +62,13 @@ export function create(app, shell) {
     /** "Salva in…": scene, landscape, character or pose into a project / section */
     saveIn: (o = {}) => (app.projects?.openSaveSheet ? app.projects.openSaveSheet(o) : S.saveScene(ctx, { asNew: true })),
     openInfo: () => S.openInfo(ctx),
+    /** "Comandi" panel of the voice module (guide: "Apri Comandi"); without the module, a notice */
+    openVoice: () => {
+      const v = typeof app.voice?.open === 'function' ? app.voice : app.modules.voice;
+      if (typeof v?.open === 'function') return v.open();
+      toast('I comandi vocali non sono disponibili', { kind: 'info' });
+      return null;
+    },
     restartTutorial: () => { resetOnboarding(); settings.set('tipsSeen', {}); settings.set('tips', true); onboarding(); },
     /** Guida: opts {topic, query, context: true (topic of the open tool / pose mode)} */
     openGuide: (o = {}) => loadGuide().then((g) => g.openGuide(ctx, o)).catch((e) => {

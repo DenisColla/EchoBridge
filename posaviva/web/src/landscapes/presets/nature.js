@@ -1,6 +1,6 @@
 // Nature presets: wood, pine forest, mountain, desert, beach, countryside farm,
 // lake, flower meadow, jungle.
-import { natureTerrain, seasonTree, forest, PI, H, mixHex } from '../gen/common.js';
+import { natureTerrain, seasonTree, forest, trail, PI, H, mixHex } from '../gen/common.js';
 
 const night = (g) => g.atm.night || g.atm.dusk;
 
@@ -44,8 +44,10 @@ function wildlife(g, list, chance = 0.45, max = 2) {
 /** A path from the stage into the background. */
 function path(g, { surface = 'terra', width = 1.6 } = {}) {
   const bend = g.rng.range(-40, 40);
-  g.add('es_vialetto', { pos: [g.rng.range(-1.5, 1.5), -9], yaw: 0, params: { length: 16, width, bend, surface, edging: false } });
-  g.add('es_vialetto', { pos: [g.rng.range(-6, 6), -24], yaw: g.rng.range(-0.3, 0.3), params: { length: 16, width: width * 0.9, bend: -bend * 0.7, surface, edging: false } });
+  trail(g, { pos: [g.rng.range(-1.5, 1.5), -9], yaw: 0, length: 16, width, bend, surface });
+  // (argument order kept: the same random sequence as before)
+  const p2 = [g.rng.range(-6, 6), -24];
+  trail(g, { pos: p2, yaw: g.rng.range(-0.3, 0.3), length: 16, width: width * 0.9, bend: -bend * 0.7, surface });
 }
 
 export const NATURE = [
@@ -196,7 +198,7 @@ export const NATURE = [
       }
       for (let i = 0; i < g.n(3, 1); i++) g.tryAdd('ls_fieno', { r: 2.5, params: { kind: g.rng.pick(['rotoli', 'balle']), count: g.rng.int(2, 6), seed: g.rng.seedInt() } }, () => g.around(9, 22, 150));
       g.tryAdd('ls_carretto', { r: 2, params: { load: g.rng.chance(0.6) } }, () => g.around(5, 12, 140));
-      g.add('es_vialetto', { pos: [fx * 0.5, (fz + 2) / 2], yaw: Math.atan2(fx, -fz) * 0.5, params: { length: Math.abs(fz) - 4, width: 2.6, bend: g.rng.range(-20, 20), surface: 'terra', edging: false } });
+      trail(g, { pos: [fx * 0.5, (fz + 2) / 2], yaw: Math.atan2(fx, -fz) * 0.5, length: Math.abs(fz) - 4, width: 2.6, bend: g.rng.range(-20, 20), surface: 'terra' });
       for (let i = 0; i < g.n(4, 2); i++) { const tr = seasonTree(g); g.tryAdd(tr.type, { params: { ...tr.params, height: g.rng.range(8, 13) }, color: tr.color, r: 2.5, sink: 0.05 }, () => g.around(14, 40, 160)); }
       if (g.rng.chance(0.6)) g.add('es_filare', { pos: [g.rng.range(-30, 30), -g.rng.range(45, 70)], yaw: g.rng.range(-0.4, 0.4), params: { count: 8, spacing: 6, height: 11, species: 'cipresso', seed: g.rng.seedInt() } });
       // vineyard / orchard rows on the hills (instanced bushes along lines)

@@ -288,7 +288,10 @@ export class PeopleTool {
   }
 
   _place(ch, pos, rotationY) {
-    if (typeof ch.setPlacement === 'function') ch.setPlacement({ position: pos, rotationY });
+    // on a landscape, stand on the terrain (characters outside the flat stage must not sink into hills)
+    const gy = this.app?.landscapes?.current ? this.app.landscapes.heightAt?.(pos.x, pos.z) : null;
+    if (Number.isFinite(gy)) pos = { x: pos.x, y: gy, z: pos.z, isVector3: false, toArray() { return [this.x, this.y, this.z]; } };
+    if (typeof ch.setPlacement === 'function') ch.setPlacement({ position: Number.isFinite(gy) ? [pos.x, pos.y, pos.z] : pos, rotationY });
     else { ch.root.position.copy(pos); ch.root.rotation.y = rotationY; }
   }
 

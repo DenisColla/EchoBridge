@@ -6,7 +6,8 @@
 // facade textures and normal maps. 21 styles + "Isolato" (a whole street
 // front of buildings with sidewalk as one prop).
 //
-// Public API: app.buildings = {types, add(typeId) -> Prop, placeBehind(prop, ch?), regenerate(prop), runtime}
+// Public API: app.buildings = {types, add(typeId, {near, place, commit, select, toast, params, color}) -> Prop,
+//   placeBehind(prop, ch?), regenerate(prop), runtime}  (placement follows app.landscapes.heightAt)
 import './buildings.css';
 import { registerPropTypes } from '../props/catalog.js';
 import { BUILDING_TYPES, CATEGORY, SUBS } from './types.js';

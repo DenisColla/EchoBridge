@@ -21,7 +21,7 @@ function toWorld(p, x, z) {
 /** World connectors of a road prop: [{x, z, yaw, kind, i}]. */
 export function worldConnectors(p) {
   if (!isRoad(p)) return [];
-  return p.type.connectors(p.params).map((c, i) => { const [x, z] = toWorld(p, c.x, c.z); return { x, z, yaw: wrap(c.yaw + p.root.rotation.y), kind: c.kind || 'road', i }; });
+  return p.type.connectors(p.params).map((c, i) => { const [x, z] = toWorld(p, c.x, c.z); return { x, z, y: p.root.position.y, yaw: wrap(c.yaw + p.root.rotation.y), kind: c.kind || 'road', i }; });
 }
 
 /** Connectors of p that are not joined to another road piece. */
@@ -61,7 +61,7 @@ export function matePlace(p, ci, o) {
   const s = p.root.scale.x, co = Math.cos(yaw), sn = Math.sin(yaw);
   p.root.position.x = o.x - (c.x * co + c.z * sn) * s;
   p.root.position.z = o.z - (-c.x * sn + c.z * co) * s;
-  p.root.position.y = 0;
+  p.root.position.y = o.y ?? 0; // level with the piece it joins (a landscape may raise both)
 }
 
 /**
@@ -91,13 +91,13 @@ function worldLanes(props) {
   const out = [];
   for (const q of props) {
     if (!isCity(q) || q.hold) continue;
-    if (q.type.lanes) for (const l of q.type.lanes(q.params)) out.push({ pts: l.pts.map(([x, z]) => toWorld(q, x, z)), loop: l.loop, prop: q });
+    if (q.type.lanes) for (const l of q.type.lanes(q.params)) out.push({ pts: l.pts.map(([x, z]) => toWorld(q, x, z)), loop: l.loop, prop: q, y: q.root.position.y });
   }
   return out;
 }
 function worldSlots(props) {
   const out = [];
-  for (const q of props) if (isCity(q) && q.type.slots) for (const s of q.type.slots(q.params)) { const [x, z] = toWorld(q, s.x, s.z); out.push({ x, z, yaw: wrap(s.yaw + q.root.rotation.y), prop: q }); }
+  for (const q of props) if (isCity(q) && q.type.slots) for (const s of q.type.slots(q.params)) { const [x, z] = toWorld(q, s.x, s.z); out.push({ x, z, y: q.root.position.y, yaw: wrap(s.yaw + q.root.rotation.y), prop: q }); }
   return out;
 }
 
@@ -121,8 +121,8 @@ export function placeOnRoad(manager, p, tx, tz, { preferSlots = false } = {}) {
   const props = manager.props;
   const lanes = worldLanes(props), slots = worldSlots(props);
   let best = null, bestD = Infinity;
-  const cand = (x, z, yaw, kind) => { const d = Math.hypot(x - tx, z - tz) + (kind === 'slot' && !preferSlots ? 2 : 0); if (d < bestD && !blocked(p, x, z, props)) { bestD = d; best = { x, z, yaw }; } };
-  for (const s of slots) cand(s.x, s.z, s.yaw, 'slot');
+  const cand = (x, z, yaw, kind, y = 0) => { const d = Math.hypot(x - tx, z - tz) + (kind === 'slot' && !preferSlots ? 2 : 0); if (d < bestD && !blocked(p, x, z, props)) { bestD = d; best = { x, z, yaw, y }; } };
+  for (const s of slots) cand(s.x, s.z, s.yaw, 'slot', s.y);
   const step = 0.75;
   for (const l of lanes) {
     const pts = l.pts;
@@ -130,12 +130,12 @@ export function placeOnRoad(manager, p, tx, tz, { preferSlots = false } = {}) {
       const a = pts[i], b = pts[i + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
       if (L < 1e-3) continue;
       const yaw = Math.atan2(b[0] - a[0], b[1] - a[1]);
-      for (let s = 0; s <= L; s += step) { const t = s / L; cand(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, yaw, 'lane'); }
+      for (let s = 0; s <= L; s += step) { const t = s / L; cand(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, yaw, 'lane', l.y); }
     }
   }
   if (!best) return false;
   // keep the vehicle fully on its lane: back off from the lane ends is good enough with the step
-  p.root.position.set(best.x, 0, best.z);
+  p.root.position.set(best.x, best.y || 0, best.z); // level with its road (landscapes raise roads)
   p.root.rotation.set(0, best.yaw, 0, 'YXZ');
   return true;
 }

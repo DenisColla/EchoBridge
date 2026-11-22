@@ -219,7 +219,22 @@ export function buildPanel(el, app, shell, mgr) {
   app.addEventListener('loaded', () => { if (visible()) refresh(); });
   app.addEventListener('characters', () => { if (visible()) refresh(); });
   mgr.addEventListener('intensity', () => globalSl.setValue(mgr.intensity));
-  mgr.addEventListener('change', (e) => { if (visible() && e.character === ch && !pending) { renderWorn(); renderCards(); } });
+  mgr.addEventListener('change', (e) => { if (visible() && e.character === ch && !pending) { renderWorn(); syncEditor(); renderCards(); } });
+
+  /**
+   * Outfit changed from code (voice, projects, app.clothing.update): the editor's
+   * Vestibilità / Pieghe sliders and colour follow the item's values; a removed item
+   * hands the editor to the first worn one.
+   */
+  function syncEditor() {
+    const list = worn();
+    if (!selected || !list.some((x) => x.id === selected)) { selected = list[0]?.id || null; renderEditor(); return; }
+    const it = list.find((x) => x.id === selected);
+    if (editor.style.display === 'none') { renderEditor(); return; }
+    if (Math.abs(fitSl.getValue() - (it.fit ?? 0.5)) > 1e-3) fitSl.setValue(it.fit ?? 0.5);
+    if (Math.abs(wrSl.getValue() - (it.wrinkles ?? 1)) > 1e-3) wrSl.setValue(it.wrinkles ?? 1);
+    colorEl.setValue?.(it.color);
+  }
 
   return { onShow: refresh };
 }

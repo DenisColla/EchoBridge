@@ -27,6 +27,7 @@ Regole:
 - "seduto su X" = place {relation:"seat", target:X} con una posa seduta; "sul letto" per animali o oggetti = relation "on"; "in mano" = relation "hand".
 - Stanze pronte (addRoom) per "una cucina", "un soggiorno"...; paesaggi (landscape) per ambientazioni esterne con ora, meteo e stagione; luci (lights) per "luce da tramonto", "fai notte".
 - Inquadrature: camera.angle (dal basso = low, dall'alto = high, zenitale = top, di profilo = side, 3/4 = threeq, da dietro = back, altezza occhi = eye, frontale = front), camera.focal in mm (grandangolo 24, tele 135), camera.framing (face = primo piano, body/subject = figura intera, all = tutta la scena).
+- Progetti (archivio dei salvataggi): "salva la scena come X nel progetto Y, tavola 3" = project {op:"save", what:"scene", name, project, section}; "salva la donna come Nina" = what "character" con target; "salva la posa dell'uomo" = what "pose"; "apri la scena X" / "applica il paesaggio X" / "inserisci il personaggio X" / "applica la posa X alla donna" = op "open" con il nome dagli "Elementi salvati"; "apri i progetti" = op "browse". Il salvataggio va dopo le azioni che costruiscono la scena.
 - Colori sempre in esadecimale #rrggbb (bianco #f2f1ec, nero #1c1c1f, rosso #c0392b, blu #2c4f9e, verde #2e8b57, giallo #f1c40f, grigio #86888c, marrone #6b4423, rosa #e88aa8, viola #6a3a9e, beige #d8c3a5, azzurro #5dade2, arancione #e67e22).
 - Se una parte del comando non è eseguibile con il vocabolario, NON inventare id: mettila in "unknown" (brevi frammenti in italiano). Se non capisci nulla, restituisci actions vuoto e il comando in unknown.
 - Non aggiungere cose non richieste.`;
@@ -69,6 +70,17 @@ export function sceneSummary(app) {
   const props = (app.props?.props || []).filter((p) => !p.hold).slice(-80);
   for (const p of props) lines.push(`oggetto id=${p.id} tipo=${p.type.id} "${p.type.label}" pos=(${r(p.root.position.x)}, ${r(p.root.position.z)})${p.group ? ' gruppo=' + p.group : ''}`);
   if (app.landscapes?.current) lines.push(`paesaggio=${app.landscapes.current.spec?.preset || app.landscapes.current.resolved?.preset || 'sì'}`);
+  // saved items the user may name ("apri la scena Inseguimento"): names only, most recent first
+  try {
+    const P = app.projects;
+    if (P?.list) {
+      const projs = P.list().slice(0, 12);
+      if (projs.length) lines.push('Progetti: ' + projs.map((p) => `"${p.name}"`).join(', '));
+      const items = (P.items?.({}) || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 40);
+      const lab = { scene: 'scena', landscape: 'paesaggio', character: 'personaggio', pose: 'posa' };
+      if (items.length) lines.push('Elementi salvati: ' + items.map((i) => `${lab[i.type] || i.type} "${i.name}"`).join(', '));
+    }
+  } catch { /* projects optional */ }
   return lines.length ? lines.join('\n') : '(scena vuota)';
 }
 

@@ -8,6 +8,37 @@ export const CAR_COLORS = ['#c9ccd1', '#1d1f22', '#f2f2ef', '#8c1c1c', '#1f3a6b'
 export const CARS = ['es_utilitaria', 'es_berlina', 'es_suv', 'es_berlina', 'es_utilitaria', 'es_sportiva', 'es_furgone', 'es_pickup', 'es_taxi'];
 const CAR_LEN = { es_utilitaria: 3.7, es_berlina: 4.7, es_suv: 4.6, es_sportiva: 4.5, es_furgone: 5.4, es_pickup: 5.4, es_taxi: 4.7, es_polizia: 4.7, es_ambulanza: 5.4 };
 
+/**
+ * A path (es_vialetto) that follows the relief: a chain of short straight pieces along the
+ * same centre line as one long piece would have (it starts along +Z and turns by `bend`
+ * degrees, centred on its bounds), each set on the ground and tilted with it when the
+ * landscape is built (one long flat strip floats over dips and sinks into bumps). Uses no
+ * random numbers (the generator's sequence is unchanged).
+ */
+export function trail(g, { pos, yaw = 0, length, width, bend = 0, surface = 'terra', edging = false, seg = 3.5 }) {
+  const n = Math.max(1, Math.round(length / seg)), b = (bend * PI) / 180;
+  const arc = (k) => {
+    const out = [];
+    if (Math.abs(b) < 1e-3) { for (let i = 0; i <= k; i++) out.push([0, -length / 2 + (length * i) / k]); return out; }
+    const R = length / Math.abs(b), sg = Math.sign(b);
+    for (let i = 0; i <= k; i++) { const a = (b * i) / k; out.push([sg * R * (1 - Math.cos(a)), R * Math.sin(Math.abs(a))]); }
+    return out;
+  };
+  const pts = arc(n);
+  if (Math.abs(b) >= 1e-3) {
+    const fine = arc(24);
+    const xs = fine.map((q) => q[0]), zs = fine.map((q) => q[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+    for (const q of pts) { q[0] -= cx; q[1] -= cz; }
+  }
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  for (let i = 0; i < n; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1];
+    const mx = (ax + bx) / 2, mz = (az + bz) / 2;
+    g.add('es_vialetto', { pos: [pos[0] + mx * c + mz * s, pos[1] - mx * s + mz * c], yaw: yaw + Math.atan2(bx - ax, bz - az), params: { length: Math.hypot(bx - ax, bz - az) + 0.2, width, bend: 0, surface, edging } });
+  }
+}
+
 /** City ground: flat out to `flatR`, low hills far away, asphalt / concrete colours. */
 export function cityTerrain(g, { flatR = 260, hills = 18, base = '#6f6d68', alt = '#7c7a73' } = {}) {
   const seed = g.rng.seedInt();

@@ -30,6 +30,8 @@ const SNAPS = { peek: 0.31, half: 0.47, full: 1 };
 const SNAP_ORDER = ['peek', 'half', 'full'];
 const SNAP_KEY = 'posaviva.ui.sheet';
 const SIDE_QUERY = '(orientation: landscape) and (min-width: 700px)';
+/** Free view (CSS px) below which the floating buttons (mic, quick zoom) are hidden: two 48 px buttons + margins side by side, room above the sheet. */
+const FAB_MIN_FREE_H = 230, FAB_MIN_FREE_W = 150;
 
 export class Shell extends EventTarget {
   constructor(app, root) {
@@ -150,14 +152,16 @@ export class Shell extends EventTarget {
 
   /**
    * Makes the sub-tabs fit the header row: first without icons ('compact'), then with
-   * tighter labels ('tight', e.g. the five Scena tabs on a 412 px phone); if they still
-   * do not fit the row scrolls, with faded edges where more tabs are hidden.
+   * tighter labels ('tight', e.g. the five Scena tabs on a 412 px phone), then with
+   * the least padding that keeps them readable ('tighter', e.g. the same tabs in the
+   * 374-380 px landscape side panel); if they still do not fit the row scrolls, with
+   * faded edges where more tabs are hidden. The font size never drops below 13 px.
    */
   _fitSubTabs() {
     const st = this.subTabs;
     if (st.style.display === 'none') return;
-    st.classList.remove('compact', 'tight');
-    for (const level of ['compact', 'tight']) {
+    st.classList.remove('compact', 'tight', 'tighter');
+    for (const level of ['compact', 'tight', 'tighter']) {
       if (st.scrollWidth <= st.clientWidth + 1) break;
       st.classList.add(level);
     }
@@ -292,6 +296,11 @@ export class Shell extends EventTarget {
     const roomy = H - ins.bottom - topBarBottom >= 120;
     const tb = this.mode === 'sheet' ? this.toolbar.offsetHeight : this.safeInsets().bottom;
     ds.setProperty('--pv-toast-bottom', Math.round((roomy ? Math.max(ins.bottom, tb) : tb) + 14) + 'px');
+    // Floating buttons of the free view (voice mic bottom-left, quick zoom bottom-right):
+    // when a (nearly) full-height sheet, or a very narrow free view, leaves no room for
+    // them they are hidden (styles.css) instead of sliding under the top bar or each other.
+    const freeH = H - ins.top - ins.bottom, freeW = W - ins.left - ins.right;
+    this.root.classList.toggle('pv-view-short', freeH < FAB_MIN_FREE_H || freeW < FAB_MIN_FREE_W);
     const ev = new Event('layout');
     ev.live = live; ev.insets = ins;
     this.dispatchEvent(ev);

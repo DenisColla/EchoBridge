@@ -42,9 +42,42 @@ export class PropManager extends THREE.EventDispatcher {
   byId(id) { return this.props.find((p) => p.id === id) || null; }
   get heldProps() { return this.props.filter((p) => p.hold); }
 
+  // ------------------------------------------------------------ ground
+  /**
+   * Floor height at world (x, z): the ready landscape's ground (terrain, roof or
+   * pier decks, app.landscapes.heightAt) or 0 (studio floor).
+   */
+  floorAt(x, z) {
+    const L = this.app.landscapes;
+    if (!L?.heightAt) return 0;
+    const y = L.heightAt(x, z);
+    return Number.isFinite(y) ? y : 0;
+  }
+
+  /**
+   * Floor height under a free prop: at the centre of its footprint, or with
+   * {lowest: true} the lowest of the centre and the 4 footprint corners (big
+   * items such as buildings sit on the downhill side, the uphill side is buried).
+   */
+  floorUnder(p, { lowest = false } = {}) {
+    const f = this._footprint(p, p.root.position, p.yaw, this._fu || (this._fu = {}));
+    let y = this.floorAt(f.cx, f.cz);
+    if (lowest && this.app.landscapes?.current) {
+      for (const [a, b] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+        const lx = a * f.hx, lz = b * f.hz;
+        y = Math.min(y, this.floorAt(f.cx + lx * f.c + lz * f.s, f.cz - lx * f.s + lz * f.c));
+      }
+    }
+    return y;
+  }
+
   // ------------------------------------------------------------ lifecycle
-  /** Creates a prop from a state object and puts it in the world (no undo step). */
-  create(state) {
+  /**
+   * Creates a prop from a state object and puts it in the world (no undo step).
+   * opts: {emit = false: announce it ('list' + 'change' events, as add() does),
+   * select = false, ground = false: land it on the floor / the prop under it}.
+   */
+  create(state, { emit = false, select = false, ground = false } = {}) {
     const p = new Prop(this.app.materials, state);
     if (state.grip) Object.assign(p.grip, { slide: +state.grip.slide || 0, twist: +state.grip.twist || 0, flip: !!state.grip.flip });
     p.setFree(state.pos, state.rot);
@@ -52,6 +85,9 @@ export class PropManager extends THREE.EventDispatcher {
     this.app.world.add(p.root);
     this.props.push(p);
     this._meshesDirty = true;
+    if (ground) this.ground(p);
+    if (emit) this._changed(p, 'list');
+    if (select) this.select(p);
     return p;
   }
 
@@ -79,7 +115,7 @@ export class PropManager extends THREE.EventDispatcher {
     if (!held) {
       this._spawn(p, near);
       // wall / ceiling items start at their usual height
-      if (Number.isFinite(type.spawnY)) p.root.position.y = type.spawnY;
+      if (Number.isFinite(type.spawnY)) p.root.position.y = this.floorUnder(p) + type.spawnY;
       if (type.lieRot) {
         const D = Math.PI / 180;
         p.root.rotation.set(type.lieRot[0] * D, p.root.rotation.y, type.lieRot[2] * D, 'YXZ');
@@ -102,7 +138,7 @@ export class PropManager extends THREE.EventDispatcher {
     const base = new THREE.Vector3();
     if (near) { near.root.updateWorldMatrix(true, false); base.setFromMatrixPosition(near.root.matrixWorld); base.z -= Math.max(0, (preset.size?.[1] || 4) / 2 - 1.1); }
     else base.set(this.app.controls.target.x, 0, this.app.controls.target.z);
-    base.y = 0;
+    base.y = this.floorAt(base.x, base.z); // on a landscape: its ground under the room
     const created = [];
     let t0 = performance.now();
     for (const it of preset.items()) {
@@ -126,7 +162,7 @@ export class PropManager extends THREE.EventDispatcher {
       const fx = ax < 0 ? _box.min.x : ax > 0 ? _box.max.x : (_box.min.x + _box.max.x) / 2;
       const fz = az < 0 ? _box.min.z : az > 0 ? _box.max.z : (_box.min.z + _box.max.z) / 2;
       const [x, y, z] = it.pos || [0, 0, 0];
-      p.root.position.set(base.x + x - fx, y, base.z + z - fz);
+      p.root.position.set(base.x + x - fx, base.y + y, base.z + z - fz);
       created.push(p);
     }
     // pieces removed meanwhile (undo during the build) are dropped from the result
@@ -175,9 +211,10 @@ export class PropManager extends THREE.EventDispatcher {
     const q = this.create(j);
     if (p.hold) q.root.rotation.set(0, q.root.rotation.y, 0, 'YXZ');
     // next to the original (its right, then left, behind, front …), on the same level
-    const y = p.hold ? 0 : q.root.position.y;
+    // (above its own floor: on a landscape the ground may be higher or lower there)
+    const rel = p.hold ? 0 : q.root.position.y - this.floorUnder(p);
     this._spawn(q, p.hold ? p.hold.ch : null, p.hold ? null : p);
-    q.root.position.y = y;
+    q.root.position.y = this.floorUnder(q) + rel;
     if (p.hold) this.ground(q, { straighten: true });
     this._changed(q, 'list');
     this.select(q);
@@ -196,7 +233,7 @@ export class PropManager extends THREE.EventDispatcher {
       const j = p.toJSON();
       delete j.id; delete j.hold;
       const q = this.create(j);
-      if (!this.attach(q, dst, p.hold.side, { pose: false, emit: false })) q.root.position.y = Math.max(0, q.root.position.y);
+      if (!this.attach(q, dst, p.hold.side, { pose: false, emit: false })) q.root.position.y = Math.max(this.floorUnder(q), q.root.position.y);
       n++;
     }
     if (n) this._changed(null, 'list');
@@ -269,6 +306,8 @@ export class PropManager extends THREE.EventDispatcher {
     p.root.position.copy(_p);
     p.root.rotation.set(0, yaw, 0, 'YXZ');
     p.root.scale.setScalar(p.scale);
+    // on the floor (a landscape's terrain, roof or pier under the footprint centre)
+    p.root.position.y = this.floorUnder(p);
   }
 
   /** Footprint rectangle (x/z) of a free prop placed at pos with yaw: center, half extents, cos/sin. */
@@ -345,10 +384,11 @@ export class PropManager extends THREE.EventDispatcher {
   }
 
   setParams(p, patch) {
+    const floor = p.hold ? 0 : this.floorUnder(p);
     const before = p.hold ? null : p.worldMinY();
     if (p.setParams(patch)) this._meshesDirty = true;
     // keep standing on whatever it stood on (e.g. after changing a stool height)
-    if (!p.hold && Math.abs(before) < 0.005) p.root.position.y += -p.worldMinY();
+    if (!p.hold && Math.abs(before - floor) < 0.005) p.root.position.y += floor - p.worldMinY();
     this._changed(p);
   }
 
@@ -369,7 +409,8 @@ export class PropManager extends THREE.EventDispatcher {
 
   /**
    * Lands the prop on the highest surface below it (another prop's top) or on
-   * the floor. Returns the support prop or null (floor).
+   * the floor (a landscape's ground under its centre, else y = 0). Returns the
+   * support prop or null (floor).
    */
   ground(p, { straighten = false } = {}) {
     if (p.hold) return null;
@@ -379,10 +420,14 @@ export class PropManager extends THREE.EventDispatcher {
     // probe straight down from a few footprint points, starting a little above
     // the bottom (tolerates a prop slightly sunk into its support)
     const others = [];
-    for (const q of this.props) if (q !== p && !q.hold && q.root.visible) others.push(...q.meshes);
-    let support = null, top = 0;
+    for (const q of this.props) {
+      if (q === p || q.hold || !q.root.visible) continue;
+      q.root.updateWorldMatrix(true, true); // props placed since the last frame: current matrices for the rays
+      others.push(...q.meshes);
+    }
+    p.worldBox(_box);
+    let support = null, top = this.floorAt((_box.min.x + _box.max.x) / 2, (_box.min.z + _box.max.z) / 2);
     if (others.length) {
-      p.worldBox(_box);
       const y0 = minY + Math.max(0.02, (_box.max.y - minY) * 0.25);
       const cx = (_box.min.x + _box.max.x) / 2, cz = (_box.min.z + _box.max.z) / 2;
       const hx = (_box.max.x - _box.min.x) * 0.3, hz = (_box.max.z - _box.min.z) * 0.3;
@@ -613,7 +658,9 @@ export class PropManager extends THREE.EventDispatcher {
     rc.setFromCamera(ndc, this.app.camera);
     const list = only ? only.meshes : this.meshes;
     if (!list.length) return null;
-    for (const m of list) m.updateWorldMatrix(true, false);
+    // current matrices (a prop moved since the last frame; the pivot does not auto-update)
+    if (only) only.root.updateWorldMatrix(true, true);
+    else for (const p of this.props) if (p.root.visible) p.root.updateWorldMatrix(true, true);
     const hit = rc.intersectObjects(list, false)[0];
     if (!hit) return null;
     if (occlusion && this._bodyBefore(rc.ray, hit.distance - 0.005)) return null;

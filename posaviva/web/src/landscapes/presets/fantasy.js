@@ -1,5 +1,5 @@
 // Fantasy / historical presets: medieval village, ancient ruins, castle.
-import { natureTerrain, seasonTree, forest, PI, H, mixHex } from '../gen/common.js';
+import { natureTerrain, seasonTree, forest, trail, PI, H, mixHex } from '../gen/common.js';
 
 const night = (g) => g.atm.night || g.atm.dusk;
 
@@ -88,8 +88,8 @@ export const FANTASY = [
       natureTerrain(g, { undul: 1, dirtAmt: 0.25, relief: { hills: { amp: 25, scale: 110, start: 40, ramp: 100 }, mountains: { amp: g.rng.range(120, 260), start: 260, scale: 260, sharp: 0.8, back: 0.7 }, bumps: [{ x: cx, z: cz, r: 70, h: ch }] }, snowLine: 170, snowK: 1, rockSlope: 0.4 });
       g.add('ed_castello', { pos: [cx, cz], yaw: Math.atan2(-cx, -cz), terrain: false, y: ch - 0.3, params: { width: g.rng.range(36, 54), height: g.rng.range(24, 36), roof: g.rng.pick(['merlata', 'conico', 'conico']), seed: g.rng.seedInt() } });
       if (g.spec.variant === 1) for (const s of [-1, 1]) g.add('ed_torre', { pos: [cx + s * g.rng.range(40, 55), cz + g.rng.range(10, 25)], params: { shape: g.rng.pick(['quadrata', 'tonda']), width: 6, height: g.rng.range(16, 24), roof: 'conico', seed: g.rng.seedInt() }, r: 4, free: { corridor: false } });
-      g.add('es_vialetto', { pos: [cx * 0.25, -16], yaw: Math.atan2(cx, -cz) * 0.4, params: { length: 26, width: 2.6, bend: g.rng.range(-25, 25), surface: 'terra', edging: false } });
-      g.add('es_vialetto', { pos: [cx * 0.6, -40], yaw: Math.atan2(cx, -cz) * 0.6, params: { length: 26, width: 2.6, bend: g.rng.range(-25, 25), surface: 'terra', edging: false } });
+      trail(g, { pos: [cx * 0.25, -16], yaw: Math.atan2(cx, -cz) * 0.4, length: 26, width: 2.6, bend: g.rng.range(-25, 25), surface: 'terra' });
+      trail(g, { pos: [cx * 0.6, -40], yaw: Math.atan2(cx, -cz) * 0.6, length: 26, width: 2.6, bend: g.rng.range(-25, 25), surface: 'terra' });
       for (let i = 0; i < g.n(3, 2); i++) g.tryAdd('es_palo', { r: 0.4, params: { style: 'bandiera', height: g.rng.range(4, 6) } }, () => g.around(5, 14, 120));
       lanterns(g, g.n(3, 1), 4, 12, 'torcia');
       for (let i = 0; i < g.n(4, 2); i++) { const tr = seasonTree(g, 'any'); g.tryAdd(tr.type, { params: { ...tr.params, height: g.rng.range(8, 13) }, color: tr.color, r: 2.4, sink: 0.05 }, () => g.around(10, 30, 160)); }
