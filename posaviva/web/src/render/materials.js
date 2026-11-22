@@ -172,8 +172,11 @@ function anatomyHook(material, anat, cfg, definition) {
         vec4 pvA = texture2D( pvAnat, vNormalMapUv );
         // only the marked grooves: the soft floor of the muscle separations stays clean
         // a light accent of the deepest grooves only (the relief itself carries the anatomy;
-        // the baked map's fine detail is blob-shaped and would read as dirt if pushed)
-        float pvCv = smoothstep( 0.2, 0.9, pvA.r ) * pvAnatK.x;
+        // the baked map's fine detail is blob-shaped and would read as dirt if pushed). The
+        // sculpt-baked maps of the realistic bodies carry weaker grooves (scapula border,
+        // back muscles) that read as smudges: only the clear creases (pecs, abs, groin,
+        // gluteal fold, joints) pass the threshold
+        float pvCv = smoothstep( 0.32, 0.95, pvA.r ) * pvAnatK.x;
         float pvNv = clamp( dot( normal, geometryViewDir ), 0.0, 1.0 );
         vec3 pvOcc = mix( vec3( 1.0 ), pvCavTint, pvCv ) * ( 1.0 + pvAnatK.y * pvA.g ) * ( 1.0 - pvAnatK.w * ( 1.0 - pvNv * pvNv ) );
         reflectedLight.directDiffuse *= pvOcc;

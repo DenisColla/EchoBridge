@@ -6,8 +6,8 @@ import { Character } from '../core/Character.js';
 import { materials } from '../render/materials.js';
 import { applyPosePreset, applyHandPreset } from './library.js';
 
-const STORE_KEY = 'posaviva.pose.thumbs.v3'; // v3: reworked presets (lines of action)
-const OLD_KEYS = ['posaviva.pose.thumbs.v1', 'posaviva.pose.thumbs.v2'];
+const STORE_KEY = 'posaviva.pose.thumbs.v4'; // v4: realistic bodies (Human Base Meshes anatomy)
+const OLD_KEYS = ['posaviva.pose.thumbs.v1', 'posaviva.pose.thumbs.v2', 'posaviva.pose.thumbs.v3'];
 const D = Math.PI / 180;
 // thumbnail arm pose (raw bone Euler degrees 'ZXY', left side, as the 'wave' preset):
 // hand raised beside the head, palm to the front, fingers up — hand signs read at a glance

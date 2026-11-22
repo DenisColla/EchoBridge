@@ -50,10 +50,12 @@ const cavityFrag = /* glsl */`
   }
   void main() {
     // divergence in units of its 98th percentile over the grooves of the baked maps
-    // (measured: 22, 16, 9, 4.2 per UV unit at radii 3, 5, 12, 24 texels of a 1024 map;
-    // radius 3 at the finest: below it the 8-bit steps of the map show as ladders)
+    // (measured on the sculpt-baked maps of the realistic bodies, mean of F / M: 19.5, 12.3,
+    // 3.7, 1.0 per UV unit at radii 3, 5, 12, 24 texels of a 1024 map — the broad muscle
+    // forms are in the geometry, so the broad scales of the maps are weak; radius 3 at the
+    // finest: below it the 8-bit steps of the map show as ladders)
     float sc = srcSize / 1024.0;
-    float d1 = div( 3.0 * sc ) / 22.0, d2 = div( 5.0 * sc ) / 16.0, d3 = div( 12.0 * sc ) / 9.0, d4 = div( 24.0 * sc ) / 4.2;
+    float d1 = div( 3.0 * sc ) / 19.5, d2 = div( 5.0 * sc ) / 12.3, d3 = div( 12.0 * sc ) / 3.7, d4 = div( 24.0 * sc ) / 1.0;
     // band-pass: narrow grooves only. A broad bowl (scapular fossa, lower back) curves the
     // same at every radius and is cancelled by the broad term; it would read as a stain.
     float cav = ( 0.6 * max( 0.0, - d1 ) + max( 0.0, - d2 ) - 0.9 * max( 0.0, - d3 ) ) / 1.1;

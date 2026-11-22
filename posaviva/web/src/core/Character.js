@@ -20,8 +20,11 @@ export const DEFAULT_APPEARANCE = {
 /**
  * Default muscle definition (0..1, strength of the anatomical normal map) per
  * body preset; ch.appearance.definition overrides it when the user sets it.
+ * The maps hold the sculpted relief of the realistic bodies (tools/hbm/bake.py,
+ * slopes stored / 2.6): at ~0.6 the realistic style shows it 1:1, the clay style
+ * ~1.3x, 1 = ~1.7x; the softer bodies (Curvy / Robusto) default lower.
  */
-export const PRESET_DEFINITION = { f_slim: 0.6, f_normal: 0.55, f_curvy: 0.4, m_slim: 0.6, m_normal: 0.7, m_curvy: 0.45 };
+export const PRESET_DEFINITION = { f_slim: 0.62, f_normal: 0.6, f_curvy: 0.45, m_slim: 0.62, m_normal: 0.62, m_curvy: 0.48 };
 /** normalScale of the skin normal map at definition 1 */
 const DEFINITION_SCALE = 4.0;
 

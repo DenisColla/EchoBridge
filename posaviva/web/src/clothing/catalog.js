@@ -236,7 +236,9 @@ export const GARMENTS = [
     fabric: 'lycra', color: '#1d1f24', palette: PAL.sport,
     mask: (k) => [
       k.above('hem', k.land.underBust - 0.045),
-      k.neckline('neck', { front: 0.1, back: 0.09, width: k.bi.neckRadius + 0.035, shape: 'scoop', backShape: 'scoop' }),
+      // straps at least ~3 cm wide (armhole inset 6 cm): on narrow shoulders or a full neck a
+      // thinner strap falls below the mesh resolution and is dropped on one side
+      k.neckline('neck', { front: 0.1, back: 0.09, width: Math.min(k.bi.neckRadius + 0.035, k.land.shoulderX - 0.06 - 0.03), shape: 'scoop', backShape: 'scoop' }),
       k.armhole('armholeL', 'L', { inset: 0.06, drop: 0.035, rx: 0.06, ry: 0.09 }),
       k.armhole('armholeR', 'R', { inset: 0.06, drop: 0.035, rx: 0.06, ry: 0.09 }),
       ARMS(k), HEAD(k),

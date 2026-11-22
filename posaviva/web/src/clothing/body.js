@@ -206,6 +206,8 @@ class LimbFrame {
 }
 
 const YBIN = 0.01, YMAX = 2.6, NYB = Math.ceil(YMAX / YBIN);
+/** Minimal distance (m) of the waist landmark below the under-bust. */
+const WAIST_UNDER = 0.045;
 /** Gaussian width (m) of the spatial bump removal on fabric base surfaces. */
 const BUMP_SIGMA = 0.009;
 
@@ -441,7 +443,7 @@ export class BodyInfo {
     const neck = J('neck01'), shoulderL = J('upperarm01.L'), hipL = J('upperleg01.L'), head = J('head');
     // torso half width per height bin (torso + legs, no arms) and front z (torso only)
     const halfW = new Float32Array(NYB), front = new Float32Array(NYB).fill(-1e9);
-    let crotch = Infinity, armpit = -Infinity;
+    let crotch = Infinity, crotchAny = Infinity, armpit = -Infinity;
     for (let v = 0; v < nv; v++) {
       const x = P[v * 3], y = P[v * 3 + 1], z = P[v * 3 + 2];
       const b = Math.max(0, Math.min(NYB - 1, Math.floor(y / YBIN)));
@@ -449,13 +451,18 @@ export class BodyInfo {
       const wT = topo.regionWeight(v, 0);
       if (wArm < 0.2 && wT > 0.3 && Math.abs(x) > halfW[b]) halfW[b] = Math.abs(x);
       if (wT > 0.6 && z > front[b]) front[b] = z;
-      if (Math.abs(x) < 0.012 && y < hipL[1] && y > hipL[1] * 0.6 && y < crotch) crotch = y;
+      // crotch: where the legs part, at the perineum (behind the hip joints' plane): a male
+      // body's genitals hang lower in front and would drop the hems and the crotch seams
+      if (Math.abs(x) < 0.012 && y < hipL[1] && y > hipL[1] * 0.6) {
+        if (z <= hipL[2] && y < crotch) crotch = y;
+        if (y < crotchAny) crotchAny = y;
+      }
       // armpit: lowest vertex of the arm/torso junction, near the torso
       if (wArm > 0.35 && wArm < 0.65 && y < shoulderL[1] && Math.abs(x) < Math.abs(shoulderL[0]) + 0.03 && y > armpit - 1) {
         if (armpit === -Infinity || y < armpit) armpit = y;
       }
     }
-    if (!Number.isFinite(crotch)) crotch = hipL[1] - 0.06;
+    if (!Number.isFinite(crotch)) crotch = Number.isFinite(crotchAny) ? crotchAny : hipL[1] - 0.06;
     if (!Number.isFinite(armpit)) armpit = shoulderL[1] - 0.1;
     const binOf = (y) => Math.max(0, Math.min(NYB - 1, Math.floor(y / YBIN)));
     // waist: narrowest between hip joint + 6% and armpit - 10%
@@ -469,6 +476,14 @@ export class BodyInfo {
     const fw = front[binOf(waist)];
     let under = bust - 0.06 * H;
     for (let b = binOf(bust); b >= binOf(waist); b--) if (front[b] < fmax - 0.6 * (fmax - fw)) { under = (b + 0.5) * YBIN; break; }
+    // a full bust over a short torso (Curvy) narrows the torso right under the breasts: a waist
+    // found there would lift every waistband to the bust. Keep it at least WAIST_UNDER below
+    // the under-bust (narrowest below that)
+    if (under - waist < WAIST_UNDER) {
+      let w2 = waist, m2 = Infinity;
+      for (let b = binOf(hipL[1] + 0.12 * H); b <= binOf(under - WAIST_UNDER); b++) if (halfW[b] > 0 && halfW[b] < m2) { m2 = halfW[b]; w2 = (b + 0.5) * YBIN; }
+      if (Number.isFinite(m2)) waist = w2;
+    }
     // widest hips between crotch and waist
     let hips = hipL[1], hmax = -Infinity;
     for (let b = binOf(crotch); b <= binOf(waist); b++) if (halfW[b] > hmax) { hmax = halfW[b]; hips = (b + 0.5) * YBIN; }

@@ -5,7 +5,9 @@
 //   node tools/build-assets.mjs [path/to/makehuman/data]
 //
 // Output: web/public/assets/human.json (metadata) + human.bin (typed arrays)
-//         web/public/assets/eye.png, skin.png
+//         web/public/assets/eye.png, skin.png, skin_normal.png, skin_normal_m.png
+// Body shapes: the realistic Blender Studio "Human Base Meshes" bodies (CC0) fitted
+// onto the MakeHuman topology (tools/hbm/data, made by tools/hbm/run.sh) when present.
 // All positions are emitted in METERS, Y up, character facing +Z.
 // Format v2 (~3.6 MB instead of 8.2): preset positions as 0.1 mm steps from the
 // base mesh and slider deltas as varint streams (see encodeStream), UVs and skin
@@ -210,6 +212,53 @@ const SLIDERS = [
   { id: 'neck', label: 'Collo', kind: 'target', pos: ['neck/neck-scale-vert-incr.target'], neg: ['neck/neck-scale-vert-decr.target'] },
 ];
 
+// ---------------------------------------------------------------- realistic bodies (Human Base Meshes)
+// tools/hbm/data/fit_f.bin / fit_m.bin hold EVERY MakeHuman vertex (body, helpers, joint cubes)
+// registered onto the realistic female / male bodies of the Blender Studio "Human Base Meshes"
+// bundle (CC0 1.0) by tools/hbm/fit.py: Float32 xyz, meters, MakeHuman rest pose and frame, same
+// floor height as the MakeHuman preset. They ARE the 'Normale' presets (f_normal / m_normal); the
+// other presets of a sex add the MakeHuman difference (preset - normal of that sex), scaled by
+// PRESET_DELTA_SCALE, on top of the realistic anatomy. Without the files (or with PV_DUMP_MH) the
+// plain MakeHuman shapes are built. See tools/hbm/run.sh for the whole pipeline.
+const HBM_DIR = path.join(HERE, 'hbm/data');
+const HBM = (() => {
+  if (process.env.PV_DUMP_MH || process.env.PV_NO_HBM) return null;
+  const read = (f) => {
+    const file = path.join(HBM_DIR, f);
+    if (!fs.existsSync(file)) return null;
+    const b = fs.readFileSync(file);
+    if (b.length !== NV * 12) throw new Error(`${f}: ${b.length} bytes, expected ${NV * 12}`);
+    const a = new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.length));
+    return Float64Array.from(a, (x) => x / DM2M); // dm, like evalShape
+  };
+  const F = read('fit_f.bin'), M = read('fit_m.bin');
+  if (!F || !M) { console.log('Human Base Meshes fit not found: plain MakeHuman presets'); return null; }
+  console.log('presets: realistic bodies (Human Base Meshes fit) + MakeHuman preset differences');
+  return { F, M };
+})();
+const NORMAL_OF = { F: 'f_normal', M: 'm_normal' };
+/** How much of the MakeHuman difference (preset - normal) the derived presets add to the realistic body. */
+const PRESET_DELTA_SCALE = { f_slim: 1.0, f_curvy: 1.0, m_slim: 1.0, m_curvy: 1.15 };
+/**
+ * Breast part of that difference (cup / firmness of the preset vs the normal's): the realistic
+ * female bust is already fuller than MakeHuman's, so the Curvy cup is only partly added.
+ */
+const PRESET_CUP_SCALE = { f_slim: 1.0, f_curvy: 0.45 };
+/** Rest shape of a preset (dm, MakeHuman frame). */
+function presetShape(pr) {
+  const mhShape = evalShape(pr.p);
+  if (!HBM) return mhShape;
+  const fit = HBM[pr.sex];
+  if (pr.id === NORMAL_OF[pr.sex]) return Float64Array.from(fit);
+  const np = PRESETS.find((p) => p.id === NORMAL_OF[pr.sex]).p;
+  const normal = evalShape(np);
+  const k = PRESET_DELTA_SCALE[pr.id] ?? 1, kc = PRESET_CUP_SCALE[pr.id] ?? 1, out = new Float64Array(NV * 3);
+  // the preset with the normal's bust: body difference and bust difference apart
+  const sameCup = pr.sex === 'F' && kc !== 1 ? evalShape({ ...pr.p, cup: np.cup, firmness: np.firmness }) : mhShape;
+  for (let i = 0; i < NV * 3; i++) out[i] = fit[i] + k * (sameCup[i] - normal[i]) + kc * (mhShape[i] - sameCup[i]);
+  return out;
+}
+
 // ---------------------------------------------------------------- binary writer
 const chunks = []; let offset = 0;
 function emit(arr) {
@@ -269,7 +318,8 @@ const toM = a => Float32Array.from(a, x => x * DM2M);
 const meta = {
   version: 2,
   units: 'meters',
-  source: 'MakeHuman hm08 base mesh, targets, default skeleton & weights (CC0 1.0) — makehumancommunity.org',
+  source: 'MakeHuman hm08 base mesh, targets, default skeleton & weights (CC0 1.0) — makehumancommunity.org' +
+    (HBM ? '; body shapes and skin relief from the Blender Studio "Human Base Meshes" realistic bodies (CC0 1.0)' : ''),
   vertexCount: NV,
   groups: GROUPS,
   quantization: 1 / Q,
@@ -289,7 +339,8 @@ meta.topology = {
 // presets (positions as 0.1 mm steps from the base mesh) + macro slider deltas
 meta.presets = [];
 for (const pr of PRESETS) {
-  const pos = evalShape(pr.p);
+  const pos = presetShape(pr);
+  const mhPos = HBM ? evalShape(pr.p) : pos; // macro slider deltas are MakeHuman differences around the preset settings
   const q = new Array(NV * 3);
   for (let i = 0; i < NV * 3; i++) {
     q[i] = Math.round((pos[i] * DM2M - basePosM[i]) * Q);
@@ -302,7 +353,7 @@ for (const pr of PRESETS) {
     const up = Math.min(1, v0 + s.range), dn = Math.max(0, v0 - s.range);
     const pu = evalShape({ ...pr.p, [s.param]: up });
     const pd = evalShape({ ...pr.p, [s.param]: dn });
-    entry.deltas[s.id] = { pos: emitSparseV2(diff(pu, pos), NEEDED), neg: emitSparseV2(diff(pd, pos), NEEDED) };
+    entry.deltas[s.id] = { pos: emitSparseV2(diff(pu, mhPos), NEEDED), neg: emitSparseV2(diff(pd, mhPos), NEEDED) };
   }
   meta.presets.push(entry);
   console.log(`preset ${pr.id} done`);
@@ -382,6 +433,36 @@ for (let i = 0; i < NV; i++) {
 console.log(`bones kept: ${boneNames.length}, unweighted verts: ${unweighted}`);
 // weights as 16-bit fractions (renormalized to sum 1 when loaded)
 meta.skin = { index: emit(skinIndex), weight: { ...emit(Uint16Array.from(skinWeight, (w) => Math.round(w * 65535))), normalized: true } };
+
+// PV_DUMP_MH=<file>: writes the MakeHuman data the body-fitting tools need
+// (tools/hbm/fit.py) and stops: topology, the MakeHuman preset shapes (meters),
+// skin weights, bones and joint vertex lists, expression units, eye proxy refs.
+if (process.env.PV_DUMP_MH) {
+  const groupOfV = new Int8Array(NV).fill(-1);
+  const objGroup = new Map();
+  for (const f of base.faces) for (const [vi] of f.c) if (!objGroup.has(vi)) objGroup.set(vi, f.group);
+  for (let f = 0; f < faceG.length; f++) for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff && groupOfV[v] < 0) groupOfV[v] = faceG[f]; }
+  const dump = {
+    NV, faceV, faceG, faceRV, rv2v, rvUV, groups: GROUPS, groupOfV: [...groupOfV],
+    objGroupOfV: Array.from({ length: NV }, (_, v) => objGroup.get(v) || ''),
+    presets: Object.fromEntries(PRESETS.map((pr) => [pr.id, [...toM(evalShape(pr.p))]])),
+    presetDefs: PRESETS.map((pr) => ({ id: pr.id, sex: pr.sex, p: pr.p })),
+    base: [...basePosM],
+    skinIndex: [...skinIndex], skinWeight: [...skinWeight],
+    bones: meta.bones, joints: Object.fromEntries(jointNames.map((j) => [j, skel.joints[j]])), allJoints: skel.joints,
+    // region markers: nipple and navel tips, ears, nostrils, lips, mouth corners
+    targets: Object.fromEntries(['breast/nipple-point-incr.target', 'stomach/stomach-navel-in.target', 'ears/l-ear-scale-incr.target', 'ears/r-ear-scale-incr.target',
+      'nose/nose-nostrils-width-incr.target', 'mouth/mouth-angles-up.target', 'mouth/mouth-lowerlip-volume-incr.target', 'mouth/mouth-upperlip-volume-incr.target'].map((rel) => {
+      const t = loadTarget(rel); return [rel, { idx: [...t.idx], d: [...t.d].map((x) => x * DM2M) }];
+    })),
+    expressions: Object.fromEntries(fs.readdirSync(path.join(DATA, 'targets/expression/units/caucasian')).filter((f) => f.endsWith('.target')).map((f) => {
+      const t = loadTarget(`expression/units/caucasian/${f}`); return [f.replace('.target', ''), { idx: [...t.idx], d: [...t.d].map((x) => x * DM2M) }];
+    })),
+  };
+  fs.writeFileSync(process.env.PV_DUMP_MH, JSON.stringify(dump));
+  console.log(`MakeHuman dump written to ${process.env.PV_DUMP_MH}`);
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------- soft joints (weight smoothing)
 // MakeHuman's default weights switch from one bone to the next over a few cm,
@@ -508,7 +589,8 @@ function smoothSkinWeights(perV) {
 //   flexX  rotation of the bone about its rest X axis (hinge), degrees * sign
 //   raise  elevation of the bone's Y axis from the torso's down axis, minus rest
 {
-  const P = toM(evalShape({ gender: 0.5, muscle: 0.5, weight: 0.5, height: 0.5, proportions: 0.6 }));
+  // masks built on the average body (the mean of the two realistic bodies when present)
+  const P = HBM ? Float32Array.from(HBM.F, (x, i) => 0.5 * (x + HBM.M[i]) * DM2M) : toM(evalShape({ gender: 0.5, muscle: 0.5, weight: 0.5, height: 0.5, proportions: 0.6 }));
   const isBody = new Uint8Array(NV);
   const bodyF = [];
   for (let f = 0; f < faceG.length; f++) if (faceG[f] === 0) { bodyF.push(f); for (let k = 0; k < 4; k++) { const v = faceV[f * 4 + k]; if (v !== 0xffff) isBody[v] = 1; } }
@@ -686,7 +768,7 @@ console.log(`human.bin ${(bin.length / 1e6).toFixed(2)} MB, human.json ${(JSON.s
 import zlib from 'node:zlib';
 {
   const SIZE = 1024;
-  const P = toM(evalShape(PRESETS[1].p)); // neutral-ish female, meters, MH centered
+  const P = toM(presetShape(PRESETS[1])); // the female 'Normale' body, meters, MH centered
   const nv = NV;
   // per-vertex masks
   const lip = new Float32Array(nv), nail = new Float32Array(nv), palm = new Float32Array(nv), red = new Float32Array(nv);
@@ -847,7 +929,15 @@ import zlib from 'node:zlib';
 // (knuckles, hand/foot tendons, kneecap rim) as a texel height map.
 // three.js builds the TBN from screen-space UV derivatives, so the frame used
 // here is (dP/du, dP/dv, N) orthogonalized against N; image row 0 is v = 1.
-{
+// With the Human Base Meshes fit, the maps are baked from the sculpted realistic bodies
+// instead (tools/hbm/bake.py -> tools/hbm/data/skin_normal_{f,m}.png, same frame and
+// conventions, 2048 px) and copied here; the procedural relief below is the fallback.
+const HBM_MAPS = HBM && ['skin_normal_f.png', 'skin_normal_m.png'].every((f) => fs.existsSync(path.join(HBM_DIR, f)));
+if (HBM_MAPS) {
+  fs.copyFileSync(path.join(HBM_DIR, 'skin_normal_f.png'), path.join(OUT, 'skin_normal.png'));
+  fs.copyFileSync(path.join(HBM_DIR, 'skin_normal_m.png'), path.join(OUT, 'skin_normal_m.png'));
+  console.log(`normal maps: realistic sculpt bakes (${['skin_normal.png', 'skin_normal_m.png'].map((f) => `${f} ${(fs.statSync(path.join(OUT, f)).size / 1e3).toFixed(0)} KB`).join(', ')})`);
+} else {
   const SIZE = 1024;
   const t0 = Date.now();
   const bodyF = [];

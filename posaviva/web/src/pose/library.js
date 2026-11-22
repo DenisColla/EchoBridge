@@ -80,9 +80,12 @@ export const HAND_BONES = [
 ];
 
 /**
- * Root (hip) height of the authoring body (f_normal, measured: rest root joint at
- * 0.872 m). Root offsets of the presets are scaled by rootHeight / HIP_REF so they
- * fit every body type.
+ * Reference hip height of the pose data: the presets' root offsets were authored on
+ * the MakeHuman f_normal (rest root joint at 0.872 m) and saved poses / project items
+ * store theirs in the same unit, so the value is kept (the realistic f_normal stands at
+ * 0.853 m). Root offsets are scaled by rootHeight / HIP_REF so they fit every body type;
+ * seats, feet and hand contacts are then fitted to the actual body (fitSeat, plantFeet,
+ * reachTouches, resolveArms).
  */
 export const HIP_REF = 0.872;
 
@@ -692,10 +695,27 @@ function fitSeat(ch, seat) {
 
 // arm samples: [segment, t along it] (upper arm: shoulder -> elbow, forearm: elbow -> wrist)
 // (the upper half of the upper arm is left out: under the armpit arm and torso always touch)
-const ARM_SAMPLES = [['u', 0.7], ['u', 0.88], ['f', 0.12], ['f', 0.32], ['f', 0.52], ['f', 0.72], ['f', 0.9], ['h', 0.55], ['h', 1]];
+const ARM_SAMPLES = [['u', 0.7], ['u', 0.88], ['f', 0.12], ['f', 0.32], ['f', 0.52], ['f', 0.72], ['f', 0.9], ['h', 0.55], ['h', 1],
+  // finger tips and middle joints (bone name, t along the bone: 1 = its tail): a hand hanging beside
+  // a full thigh or resting near the face curls its fingers into the skin long before the palm touches
+  ['k', 'finger1-3', 1], ['k', 'finger2-3', 1], ['k', 'finger3-3', 1], ['k', 'finger4-3', 1], ['k', 'finger5-3', 1], ['k', 'finger3-2', 0], ['k', 'finger5-2', 0]];
+const FINGER_R = 0.008; // finger half-thickness (meters, f_normal)
 const CLOTH_MARGIN = 0.004; // garments over the skin (meters, f_normal)
 const PEN_EPS = 0.01; // tolerated contact: soft tissue gives way a little (meters)
 const _ca = new THREE.Vector3(), _cb = new THREE.Vector3(), _cp = new THREE.Vector3(), _cn = new THREE.Vector3();
+
+/** World point at fraction t of a bone (0 = head, 1 = tail; bone matrices current). False if the bone is missing. */
+function fingerPoint(ch, name, t, out) {
+  const i = boneIdx(ch, name);
+  if (i < 0) return false;
+  const e = ch.bones[i].matrixWorld.elements, b = ch.model.bones[i];
+  const h = ch.jointPositions.get(b.head), tl = ch.jointPositions.get(b.tail);
+  if (!h || !tl) return false;
+  const len = h.distanceTo(tl) * t; // rest length of the bone on this body (rig space)
+  // the rest frame's Y axis runs along the bone (head -> tail); matrixWorld carries the root scale
+  out.set(e[12] + e[4] * len, e[13] + e[5] * len, e[14] + e[6] * len);
+  return true;
+}
 
 /** mean distance of a bone group's vertices to its axis (rest pose): limb radius */
 function limbRadius(ch, verts, headBone, tailBone) {
@@ -740,10 +760,11 @@ function resolveArms(ch, s) {
       bonePos(ch, iU, _S); bonePos(ch, iL, _E); bonePos(ch, iW, _W); bonePos(ch, iK, _T);
       let worst = 0, wSeg = '', wT = 0;
       const wP = _P, wN = _nrm;
-      for (const [seg, t] of ARM_SAMPLES) {
+      for (const [seg, t, tk] of ARM_SAMPLES) {
         let r;
         if (seg === 'u') { _cp.copy(_S).lerp(_E, t); r = rU; }
         else if (seg === 'f') { _cp.copy(_E).lerp(_W, t); r = rF * (1 - 0.25 * t); }
+        else if (seg === 'k') { if (!fingerPoint(ch, `${t}.${sd}`, tk, _cp)) continue; r = FINGER_R * sc; }
         else { _cp.copy(_W).lerp(_T, t); r = rH; }
         // nearest body point and its outward normal
         let bj = -1, bd = Infinity;
