@@ -6,17 +6,22 @@
 // builder:
 //   1. selects the body faces inside all constraints, cleans the selection
 //   2. snaps boundary vertices onto the zero level set (clean, straight hems)
-//   3. offsets the patch by thickness + ease (+ lower layers), lets loose
-//      garments hang (fit.js) and bridges concavities with a constrained
-//      membrane smoothing
-//   4. derives skin weights from the body (diffused for loose parts)
+//   3. offsets the patch from a smoothed, bump-free body by thickness + ease
+//      (gravity-aware: the fabric rests on surfaces that face up, hangs off the
+//      others; per-garment ease maps; the layers below measured in the same
+//      frame), lets it hang from protrusions (fit.js: cylindrical envelopes for
+//      sides and limbs, front / back depth maps for bust, belly, shoulder
+//      blades and buttocks), bridges concavities with a constrained membrane
+//      smoothing, straightens the edges and rounds the span edges
+//   4. derives skin weights from the body (diffused only where the fabric
+//      stands off the body: lying on it, it rides the skin exactly)
 //   5. Catmull-Clark subdivides once and re-applies the offset constraint
 //   6. computes the per-vertex coordinates used by UVs, static folds, edge
 //      treatments (hems, rib bands, collars, lapels) and wrinkles
 // The result is a "draft" (fine quad surface + metadata) that assemble.js
 // turns into a SkinnedMesh geometry and a wrinkle runtime.
 import { buildEdges, buildAdjacency, boundaryCounts, boundaryLoops, subdivide, applyStencil, applyParents, quadNormals, normalize3, edgeDistance, len3 } from './mesh.js';
-import { PART, NPART } from './body.js';
+import { PART, NPART, flattenBumps } from './body.js';
 import { hangFit, bridgeSmooth, metricSmooth, enforceOffset, smoothWeights, top4, footEnvelope } from './fit.js';
 import { collideBody } from './collide.js';
 
@@ -352,15 +357,7 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
 
   // ---- offsets
   const thick = fit.thickness ?? 0.002;
-  const ease = lerp(fit.ease?.[0] ?? 0.001, fit.ease?.[1] ?? 0.012, fitT);
-  const off = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const v = body[i];
-    let o = thick + ease * (1 - zone[i] * 0.85);
-    if (fit.offset) o += fit.offset(coords, i, P0, bi) || 0;
-    if (occ && occ[v] > -0.5) o = Math.max(o, occ[v] + thick * 0.6 + 0.0012);
-    off[i] = o;
-  }
+  const ease = easeOf(fit, fitT);
   // the fabric rests on a smoothed body (no nipples, navel, rib or muscle detail);
   // against the true body only a small hard clearance is enforced
   const base = bi.smoothBase(fit.smooth ?? 8);
@@ -372,6 +369,45 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   }
   taubin(n, P0s, adj, bnd, 2);
   const N0s = quadNormals(n, cq, P0s);
+  // Ease is not a uniform shell: a garment hangs from the surfaces that carry it.
+  // Where the body faces up (top of the shoulders, upper bust, hip shelf, top of
+  // the deltoid in the rest pose) the fabric lies on it; sideways and downward
+  // facing surfaces get the full ease. Garments may shape it further (easeMap:
+  // jeans hug the seat, open up below the knee).
+  const contact = fit.contact ?? 0.75;
+  // the layer below, as the fabric feels it: its height over the smoothed base
+  // (measured from the true body, then corrected: lower where the base fills a
+  // hollow such as the gluteal cleft, higher where it shaved off a bump such as
+  // a nipple), with its edges and bumps (bra cup rim, waistband step) bridged
+  // over a few vertex rings instead of copied
+  let lowS = null;
+  if (occ) {
+    lowS = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = body[i], k = i * 3;
+      if (!(occ[v] > -0.5)) continue;
+      const d0 = (P0[k] - P0s[k]) * N0s[k] + (P0[k + 1] - P0s[k + 1]) * N0s[k + 1] + (P0[k + 2] - P0s[k + 2]) * N0s[k + 2];
+      lowS[i] = Math.max(0, occ[v] + d0);
+    }
+    softLayer(n, lowS, adj, 5);
+  }
+  const off = new Float32Array(n);
+  // ease per vertex, then smoothed over the surface: the contact factor reads the
+  // normal, which flips up and down around small dense features (nipples, navel)
+  const eas = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let e = ease * (1 - zone[i] * 0.85);
+    e *= 1 - contact * smoothstep(0.15, 0.75, N0s[i * 3 + 1]);
+    if (fit.easeMap) e *= fit.easeMap(coords, i, P0, bi, fitT);
+    eas[i] = e;
+  }
+  smoothField(n, eas, adj, P0s, bnd, EASE_SMOOTH);
+  for (let i = 0; i < n; i++) {
+    let o = thick + eas[i];
+    if (fit.offset) o += fit.offset(coords, i, P0, bi) || 0;
+    if (lowS && lowS[i] > 0.0004) o = Math.max(o, lowS[i] + thick * 0.6 + 0.0012);
+    off[i] = o;
+  }
   // Edge zone (visible skin around the garment, see coverage margins): the
   // garment must clear the true body there. Inside, the body is hidden, so only
   // lower layers must be cleared and small protrusions (nipples, navel) vanish.
@@ -398,20 +434,37 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
     const bodyMin = edgeZone(i) ? thick * 0.7 + 0.0015 + (snapClear[i] >= 0 ? snapClear[i] : bi.clearance[v]) : -1;
     offBody[i] = bodyMin;
     offMin[i] = Math.max(lower, bodyMin);
+    // a hem lying on a layer below stands a little off it (the rolled edge, and
+    // room for that layer's folds when the legs move: no jeans through a T-shirt hem)
+    if (lowS && lowS[i] > 0.0004 && edgeD[i] < HEM_LIFT_R) off[i] += HEM_LIFT * (1 - edgeD[i] / HEM_LIFT_R);
     if (off[i] < offMin[i]) off[i] = offMin[i];
   }
   const G = new Float32Array(n * 3);
   for (let i = 0; i < n * 3; i++) G[i] = P0s[i] + N0s[i] * off[Math.floor(i / 3)];
   enforceOffset(n, G, P0, N0, offMin);
-  const c = { n, body, P0: P0s, N0: N0s, off, G, coords, adj, bnd, bprev, bnext, hard: { P0, N0, offMin } };
+  const c = { n, body, P0: P0s, N0: N0s, off, G, coords, adj, bnd, bprev, bnext, hard: { P0, N0, offMin }, span: new Float32Array(n) };
   const loose = lerp(fit.loose?.[0] ?? 0, fit.loose?.[1] ?? 0.3, fitT);
   {
     const fade = new Float32Array(n);
     for (let i = 0; i < n; i++) fade[i] = 1 - zone[i];
     if (fit.looseFade) for (let i = 0; i < n; i++) fade[i] *= fit.looseFade(coords, i, cvals, cons);
-    hangFit(c, bi, { loose, slope: lerp(fit.slope?.[0] ?? 0.8, fit.slope?.[1] ?? 0.3, fitT), innerSlope: fit.innerSlope ?? 1.4, fade, bridgeSlope: fit.bridgeSlope ?? 0.8, hullAmount: fit.hull ?? (fit.bridgeSlope >= 1.9 ? 0 : 0.85) });
+    const slope = geo(fit.slope?.[0] ?? 0.8, fit.slope?.[1] ?? 0.3, fitT);
+    // sleeves / trouser legs may drape differently from the body of the garment
+    const limb = (spec, def) => (spec ? {
+      loose: lerp(spec.loose?.[0] ?? 0, spec.loose?.[1] ?? 0, fitT), slope: geo(spec.slope?.[0] ?? 0.8, spec.slope?.[1] ?? 0.3, fitT),
+      slopeUpper: spec.slopeUpper ? geo(spec.slopeUpper[0], spec.slopeUpper[1], fitT) : undefined, bridgeSlope: spec.bridgeSlope ?? def.bridgeSlope,
+    } : null);
+    const torso = { loose, slope, bridgeSlope: fit.bridgeSlope ?? 0.8 };
+    hangFit(c, bi, {
+      loose, slope, innerSlope: fit.innerSlope ?? 1.4, fade, bridgeSlope: torso.bridgeSlope, hullAmount: fit.hull ?? (fit.bridgeSlope >= 1.9 ? 0 : 0.85),
+      arm: limb(fit.sleeve, torso), leg: limb(fit.leg, torso),
+    });
   }
   bridgeSmooth(c, fit.bridge ?? 12);
+  // edges are one clean line: straighten every boundary loop along itself (a hem
+  // crossing the gluteal cleft or the ankle otherwise zigzags and folds back,
+  // a slit or jagged teeth once the rolled hem is added)
+  straightenLoops(c, fit.loopSmooth ?? 8);
   // collision against the true body in creases and near the edges
   const near = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (bnd[i]) { near[i] = 1; for (let j = adj.off[i]; j < adj.off[i + 1]; j++) near[adj.adj[j]] = 1; }
@@ -419,6 +472,15 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   for (let i = 0; i < n; i++) test[i] = (near[i] || bi.risky[body[i]]) && offBody[i] > 0 ? 1 : 0;
   collideBody(bi, n, G, body, offBody, test, 3);
   metricSmooth(c, fit.finalSmooth ?? 4);
+  // where a span leaves the body (under the bust) the fabric turns over a sharp
+  // edge: round it (the skin there is hidden; only the layers below are kept clear)
+  roundSpanEdges(c, 6);
+  // no small bumps in the fabric itself either (a bra apex, a nipple, the navel
+  // rim show through as points): spatial bump removal, then the hard clearances
+  if (!fit.envelope) {
+    flattenBumps(G, N0s, n, 0.01, 0.8);
+    enforceOffset(n, G, P0, N0, offMin);
+  }
   // shoes / socks: cross-section hull around the foot axis (one toe box, no
   // toes). Last shaping step: any smoothing after it would slide the toe-gap
   // walls back between the toes.
@@ -442,7 +504,17 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
     if (w > 0) W[i * nb + boneLocal.get(SI[v * 4 + k])] += w;
   }
   if (def.weightBlend) def.weightBlend(W, nb, boneLocal, c, bi, model, fitT);
-  smoothWeights(n, nb, W, adj, Math.round((fit.wSmooth ?? 2) + loose * 6), null);
+  // Weight diffusion only where the fabric stands off the body (bridged spans,
+  // hanging hems): there it must not tear between bones. Fabric lying on the
+  // body keeps the body's own weights, so it rides the skin exactly (a diffused
+  // sleeve cap lags behind the deltoid when the arm comes down: a puffed shoulder).
+  const wAmt = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const gap = (G[o] - P0[o]) * N0[o] + (G[o + 1] - P0[o + 1]) * N0[o + 1] + (G[o + 2] - P0[o + 2]) * N0[o + 2] - thick;
+    wAmt[i] = Math.max(fit.wSmoothMin ?? 0.15, smoothstep(0.01, 0.035, gap));
+  }
+  smoothWeights(n, nb, W, adj, Math.round((fit.wSmooth ?? 2) + loose * 6), wAmt);
   yield 'weights';
 
   // ---- subdivision
@@ -492,6 +564,7 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
   }
   const fcoords = fineCoords(coords, fine.parents, nf, bi, FP);
   const fzone = applyParents(fine.parents, zone, 1, new Float32Array(nf), nf);
+  const fspan = applyParents(fine.parents, c.span, 1, new Float32Array(nf), nf);
   const fcvals = cvals.map((cv) => applyParents(fine.parents, cv, 1, new Float32Array(nf), nf));
   const FW = applyParents(fine.parents, W, nb, new Float32Array(nf * nb), nf);
   const skin = top4(nf, nb, FW, boneIds);
@@ -516,7 +589,7 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
 
   return {
     kind: 'body', def, n, nf,
-    P: FP, quads: fine.quads, B: FB, BN: FBN, off: Foff, room, zone: fzone,
+    P: FP, quads: fine.quads, B: FB, BN: FBN, off: Foff, room, zone: fzone, span: fspan,
     coords: fcoords, cons, cvals: fcvals, skin, loops: floops, thick,
     fitT, loose,
     coarse: { n, G, quads: cq, adj, skin: coarseSkin, parents: fine.parents, P0, N0, body, coords },
@@ -528,8 +601,133 @@ function* draftFromFaces(ctx, def, opts, faceIn, cons, vals, fitT) {
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
+/** Geometric interpolation (slopes: equal steps in ratio, so "Normale" sits between a cling and a hang). */
+const geo = (a, b, t) => (a > 0 && b > 0 ? a * Math.pow(b / a, t) : lerp(a, b, t));
+/**
+ * Radial ease (m) of a garment at fit t ("Vestibilità": 0 aderente .. 1 largo).
+ * fit.ease = [at 0, at 1]; optional fit.easeMid = value at 0.5 (piecewise
+ * quadratic through the three points: the slider reads in real-world steps,
+ * aderente / slim / normale / comodo / largo).
+ */
+export function easeOf(fit, t) {
+  const a = fit.ease?.[0] ?? 0.001, b = fit.ease?.[1] ?? 0.012;
+  if (fit.easeMid === undefined) return lerp(a, b, t);
+  const m = fit.easeMid;
+  // quadratic through (0,a) (0.5,m) (1,b)
+  return a * (1 - t) * (1 - 2 * t) + m * 4 * t * (1 - t) + b * t * (2 * t - 1);
+}
 /** Skin within this geodesic distance (m) of a garment edge stays visible (looking into openings). */
 export const EDGE_MARGIN = 0.022;
+
+/**
+ * Heights of the layers below per coarse vertex (in place; 0 where there is
+ * none), relaxed without ever going below the true height: dips are filled and
+ * steps become ramps a few rings wide (the fabric spans them).
+ */
+function softLayer(n, H, adj, iterations) {
+  const H0 = H.slice();
+  let h = H.slice(), t = new Float32Array(n);
+  for (let it = 0; it < iterations; it++) {
+    for (let i = 0; i < n; i++) {
+      const d = adj.off[i + 1] - adj.off[i];
+      if (!d) { t[i] = h[i]; continue; }
+      let s = 0;
+      for (let j = adj.off[i]; j < adj.off[i + 1]; j++) s += h[adj.adj[j]];
+      const m = h[i] * 0.5 + (s / d) * 0.5;
+      t[i] = m > h[i] ? m : Math.max(H0[i], m);
+    }
+    const x = h; h = t; t = x;
+  }
+  H.set(h);
+}
+
+/** Extra clearance (m) of a hem over the layer below, fading out over HEM_LIFT_R from the edge. */
+const HEM_LIFT = 0.004, HEM_LIFT_R = 0.03;
+
+/** Smoothing passes of the per-vertex ease field. */
+const EASE_SMOOTH = 8;
+
+/** Edge-length weighted Laplacian smoothing of a scalar field (boundary values kept). */
+function smoothField(n, F, adj, X, fixed, iterations) {
+  const W = new Float32Array(adj.adj.length);
+  for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; W[j] = 1 / (len3(X[u * 3] - X[i * 3], X[u * 3 + 1] - X[i * 3 + 1], X[u * 3 + 2] - X[i * 3 + 2]) + 0.002); }
+  const T = new Float32Array(n);
+  for (let it = 0; it < iterations; it++) {
+    for (let i = 0; i < n; i++) {
+      if (fixed[i]) { T[i] = F[i]; continue; }
+      let s = 0, w = 0;
+      for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { s += F[adj.adj[j]] * W[j]; w += W[j]; }
+      T[i] = w ? F[i] * 0.5 + (s / w) * 0.5 : F[i];
+    }
+    F.set(T);
+  }
+}
+
+/**
+ * Rounds the garment where a bridged span departs from the body: Laplacian
+ * smoothing around the spans (dilated by two rings), limited to SPAN_ROUND_IN
+ * inwards and kept clear of the lower layers / visible skin (hard offsets only).
+ */
+function roundSpanEdges(c, iterations) {
+  const { n, G, adj, span, bnd } = c;
+  if (!span) return;
+  let k = new Float32Array(n);
+  for (let i = 0; i < n; i++) k[i] = Math.min(1, Math.max(0, (span[i] - 0.003) / 0.01));
+  for (let ring = 0; ring < 2; ring++) {
+    const k2 = k.slice();
+    for (let i = 0; i < n; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) if (k[adj.adj[j]] * 0.8 > k2[i]) k2[i] = k[adj.adj[j]] * 0.8;
+    k = k2;
+  }
+  let any = false;
+  for (let i = 0; i < n; i++) if (k[i] > 0 && !bnd[i]) { any = true; break; }
+  if (!any) return;
+  const start = G.slice(), tmp = new Float32Array(n * 3);
+  for (let it = 0; it < iterations; it++) {
+    tmp.set(G);
+    for (let i = 0; i < n; i++) {
+      if (!k[i] || bnd[i]) continue;
+      let ax = 0, ay = 0, az = 0, m = 0;
+      for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j] * 3; ax += G[u]; ay += G[u + 1]; az += G[u + 2]; m++; }
+      if (!m) continue;
+      const w = 0.5 * k[i], o = i * 3;
+      tmp[o] = G[o] + w * (ax / m - G[o]); tmp[o + 1] = G[o + 1] + w * (ay / m - G[o + 1]); tmp[o + 2] = G[o + 2] + w * (az / m - G[o + 2]);
+    }
+    G.set(tmp);
+  }
+  // bounded inward travel (along the base normal), then the hard constraints
+  for (let i = 0; i < n; i++) {
+    const o = i * 3, N = c.N0;
+    const d = (G[o] - start[o]) * N[o] + (G[o + 1] - start[o + 1]) * N[o + 1] + (G[o + 2] - start[o + 2]) * N[o + 2];
+    if (d < -SPAN_ROUND_IN) { const f = -SPAN_ROUND_IN - d; G[o] += N[o] * f; G[o + 1] += N[o + 1] * f; G[o + 2] += N[o + 2] * f; }
+  }
+  if (c.hard) enforceOffset(n, G, c.hard.P0, c.hard.N0, c.hard.offMin);
+}
+/** Most a span edge may be rounded inwards (m). */
+const SPAN_ROUND_IN = 0.009;
+
+/**
+ * Laplacian smoothing of the boundary loops of the coarse garment along the
+ * loops only (Taubin pairs: no shrinking of the opening), then the offset
+ * constraints again.
+ */
+function straightenLoops(c, iterations) {
+  const { n, G, bnd, bprev, bnext } = c;
+  if (iterations <= 0) return;
+  const tmp = new Float32Array(n * 3);
+  for (let it = 0; it < iterations * 2; it++) {
+    const k = it & 1 ? -0.53 : 0.5;
+    tmp.set(G);
+    for (let i = 0; i < n; i++) {
+      if (!bnd[i]) continue;
+      const a = bprev[i], b = bnext[i];
+      if (a < 0 || b < 0) continue;
+      for (let q = 0; q < 3; q++) tmp[i * 3 + q] = G[i * 3 + q] + k * ((G[a * 3 + q] + G[b * 3 + q]) * 0.5 - G[i * 3 + q]);
+    }
+    G.set(tmp);
+  }
+  enforceOffset(n, G, c.P0, c.N0, c.off);
+  if (c.hard) enforceOffset(n, G, c.hard.P0, c.hard.N0, c.hard.offMin);
+}
 
 /** Taubin (lambda|mu) smoothing: removes small detail without shrinking. Boundary vertices fixed. */
 function taubin(n, X, adj, fixed, iterations) {

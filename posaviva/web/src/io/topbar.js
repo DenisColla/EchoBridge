@@ -1,5 +1,6 @@
 // Top bar: selected-character chip (opens Personaggi), undo / redo wired to
-// app.history, "?" (Guida on the current topic), main menu (scene files, export, guide, settings, info).
+// app.history, "?" (Guida on the current topic), main menu (Progetti, scene save / "Salva in…",
+// export, scene files, guide, settings, info).
 import { h, icon, iconButton, haptic, sheetMenu } from '../ui/kit.js';
 import { describe } from './people.js';
 
@@ -71,13 +72,19 @@ export class TopBar {
   }
 
   openMenu() {
-    const a = this.ctx.actions, scenes = this.ctx.scenes;
+    const a = this.ctx.actions, scenes = this.ctx.scenes, app = this.app;
+    const P = app.projects;
+    const where = scenes.location?.();
     const title = `${scenes.current.name}${scenes.dirty ? ' · modificata' : ''}`;
+    const saved = !!(scenes.current.id && (!P || P.item(scenes.current.id)));
+    const cur = P?.current;
     return sheetMenu([
-      { header: title },
+      { header: where ? `${title} — ${where.section ? `${where.project} › ${where.section}` : where.project}` : title },
+      P ? { id: 'projects', label: 'Progetti', icon: 'book', hint: cur ? `Scene, paesaggi, personaggi e pose · ${cur.name}` : 'Scene, paesaggi, personaggi e pose salvati', onClick: () => a.openProjects() } : null,
       { id: 'new', label: 'Nuova scena', icon: 'filePlus', onClick: a.newScene },
-      { id: 'save', label: 'Salva scena', icon: 'save', hint: scenes.current.id ? 'Aggiorna la scena salvata' : null, onClick: a.saveScene },
-      { id: 'open', label: 'Apri scena…', icon: 'folder', onClick: a.openScenes },
+      { id: 'save', label: 'Salva scena', icon: 'save', hint: saved ? 'Aggiorna la scena salvata' : P ? 'Scegli progetto, sezione e nome' : null, onClick: a.saveScene },
+      P ? { id: 'saveIn', label: 'Salva in…', icon: 'folder', hint: 'Una copia, un paesaggio, un personaggio o una posa', onClick: () => a.saveIn({}) }
+        : { id: 'open', label: 'Apri scena…', icon: 'folder', onClick: a.openScenes },
       { separator: true },
       { id: 'png', label: 'Esporta immagine PNG', icon: 'image', onClick: () => a.exportImage(false) },
       { id: 'share', label: 'Condividi immagine', icon: 'share', onClick: () => a.exportImage(true) },

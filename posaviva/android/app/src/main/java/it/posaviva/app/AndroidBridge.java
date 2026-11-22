@@ -49,10 +49,39 @@ final class AndroidBridge {
 
     private final MainActivity activity;
     private final Context app;
+    private final SpeechBridge speech;
 
-    AndroidBridge(MainActivity activity) {
+    AndroidBridge(MainActivity activity, SpeechBridge speech) {
         this.activity = activity;
         this.app = activity.getApplicationContext();
+        this.speech = speech;
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Voice commands (window.__onSpeech receives {state|partial|final|level|error})
+
+    /** Starts speech recognition (asks for RECORD_AUDIO first if needed). "ok" or "error:&lt;code&gt;". */
+    @JavascriptInterface
+    public String startListening(String lang) {
+        return speech.start(lang);
+    }
+
+    /** Stops listening and delivers the final result. */
+    @JavascriptInterface
+    public void stopListening() {
+        speech.stop();
+    }
+
+    /** Stops listening without a result. */
+    @JavascriptInterface
+    public void cancelListening() {
+        speech.cancel();
+    }
+
+    /** "true" if a speech recognition service is available on the device. */
+    @JavascriptInterface
+    public boolean speechAvailable() {
+        return speech.available();
     }
 
     // ---------------------------------------------------------------------------------

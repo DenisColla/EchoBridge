@@ -5,11 +5,13 @@ import { buildBodyDraftSteps } from './build.js';
 import { buildSkirtDraft, skirtOccupancy, ribbon } from './skirt.js';
 import { hemExtras, collarExtras, discExtras, newExtras } from './edges.js';
 import { assemble, FOLD_GAIN } from './assemble.js';
-import { quadNormals, len2 } from './mesh.js';
+import { quadNormals, len2, len3 } from './mesh.js';
 import { referenceSkin } from './wrinkles.js';
 
 /** occupancy value of body vertices with no garment below (occupancy = signed outer height over the body) */
 export const NO_LAYER = -1;
+/** Most fold room (m) a layer reserves for its own rest folds under the next layer. */
+const CREST_MAX = 0.0035;
 
 /** Parts of a garment for a sex (each part inherits the garment's fields). */
 export function partsOf(def, sex) {
@@ -51,6 +53,9 @@ export function* buildGarmentSteps(ctx, def, item) {
     if (!draft) continue;
     yield 'draft';
     draft.N = quadNormals(draft.nf, draft.quads, draft.P);
+    // enveloped parts (shoes, socks) keep body-derived folds in their toe gaps:
+    // a smoothed normal field gives them one coherent outward direction
+    if (pdef.fit?.envelope) smoothNormals(draft, 8);
     if (pdef.sole) applySole(draft, pdef.sole, bi);
     const extras = [];
     // edge treatments
@@ -69,7 +74,8 @@ export function* buildGarmentSteps(ctx, def, item) {
     // layering for the next part / garment
     if (draft.kind === 'skirt') { skirtOccupancy(draft, bi, topo, occ); skirtOccupancy(draft, bi, topo, surf); }
     else {
-      bodyOccupancy(draft, occ, pdef);
+      bodyOccupancy(draft, occ, pdef, extras);
+      ribbonOccupancy(extras, bi, topo, occ);
       bodySurface(draft, surf);
       if (pdef.hide !== false) hidden = coverage(topo, draft, hidden);
     }
@@ -91,6 +97,24 @@ function foldFade(draft, spec) {
   return (i) => { const t = tT[i]; const f = t >= t1 ? 1 : t <= t0 ? 0 : (t - t0) / (t1 - t0); return min + (1 - min) * f * f * (3 - 2 * f); };
 }
 
+/** Laplacian smoothing of a draft's unit normals (in place), `passes` times. */
+function smoothNormals(draft, passes) {
+  const N = draft.N, Q = draft.quads, nf = draft.nf, nq = Q.length >> 2;
+  const acc = new Float32Array(nf * 3);
+  for (let p = 0; p < passes; p++) {
+    acc.set(N);
+    for (let f = 0; f < nq; f++) {
+      let sx = 0, sy = 0, sz = 0;
+      for (let k = 0; k < 4; k++) { const v = Q[f * 4 + k] * 3; sx += N[v]; sy += N[v + 1]; sz += N[v + 2]; }
+      for (let k = 0; k < 4; k++) { const v = Q[f * 4 + k] * 3; acc[v] += sx; acc[v + 1] += sy; acc[v + 2] += sz; }
+    }
+    for (let i = 0; i < nf; i++) {
+      const l = len3(acc[i * 3], acc[i * 3 + 1], acc[i * 3 + 2]) || 1;
+      N[i * 3] = acc[i * 3] / l; N[i * 3 + 1] = acc[i * 3 + 1] / l; N[i * 3 + 2] = acc[i * 3 + 2] / l;
+    }
+  }
+}
+
 /** Height of the garment's outer face over each covered body vertex (rest pose). */
 function bodySurface(draft, surf) {
   const c = draft.coarse, G = c.G, P0 = c.P0, N0 = c.N0;
@@ -103,16 +127,71 @@ function bodySurface(draft, surf) {
 }
 
 /** Normal offset of the garment over each covered body vertex (+ room for its folds). */
-function bodyOccupancy(draft, occ, pdef) {
+function bodyOccupancy(draft, occ, pdef, extras = null) {
   const c = draft.coarse, G = c.G, P0 = c.P0, N0 = c.N0;
-  // room for the folds of this layer: k * 2L/pi * sqrt(c) at c ~ 0.35, crest part (~70%)
+  // the edge finishes and hardware (rolled hems, waistband top, buttons) stand
+  // above the surface: the layer over this one must clear them too
+  const lift = new Float32Array(c.n);
+  if (extras) {
+    const P = draft.P, N = draft.N, pi = c.parents.idx, pw = c.parents.w;
+    for (const ex of extras) {
+      if (!ex) continue;
+      for (let q = 0; q < ex.parent.length; q++) {
+        const v = ex.parent[q];
+        if (v < 0) continue;
+        const h = (ex.pos[q * 3] - P[v * 3]) * N[v * 3] + (ex.pos[q * 3 + 1] - P[v * 3 + 1]) * N[v * 3 + 1] + (ex.pos[q * 3 + 2] - P[v * 3 + 2]) * N[v * 3 + 2];
+        if (!(h > 0)) continue;
+        // to the coarse vertices this fine vertex comes from
+        for (let k = 0; k < 4; k++) if (pw[v * 4 + k] > 0.2) { const ci = pi[v * 4 + k]; if (h > lift[ci]) lift[ci] = Math.min(0.008, h); }
+      }
+    }
+  }
+  // room for the folds of this layer at rest. Only a share of the full crest
+  // height (k * 2L/pi * sqrt(c)): posed folds that rise higher push the layer
+  // above out at runtime (GarmentRuntime layer pass), so the outer garment does
+  // not stand off the body by a whole fold height everywhere (T-shirt over jeans).
   const w = pdef.wrinkle || {};
-  const crest = (w.k ?? 0.8) * (0.6 + 0.8 * (draft.fitT ?? 0.5)) * (2 / Math.PI) * FOLD_GAIN * (w.wl ?? 0.05) * 0.45 * 0.7 + 0.001;
+  const full = (w.k ?? 0.8) * (0.6 + 0.8 * (draft.fitT ?? 0.5)) * (2 / Math.PI) * FOLD_GAIN * (w.wl ?? 0.05) * 0.45 * 0.7;
+  const crest = Math.min(CREST_MAX, full * 0.3) + 0.0008;
   for (let i = 0; i < c.n; i++) {
     const v = c.body[i], o = i * 3;
     const d = (G[o] - P0[o]) * N0[o] + (G[o + 1] - P0[o + 1]) * N0[o + 1] + (G[o + 2] - P0[o + 2]) * N0[o + 2];
-    const val = Math.min(0.08, d + draft.thick * 0.5 + crest);
+    const val = Math.min(0.08, d + draft.thick * 0.5 + crest + lift[i]);
     if (val > occ[v]) occ[v] = val;
+  }
+}
+
+/** Reach (m) of a ribbon (bra strap) over the body vertices around it, for the next layer. */
+const RIBBON_REACH = 0.012;
+
+/**
+ * Ribbons laid on the body outside the part's own surface (bra straps: extras
+ * with no parent vertex) stand above the skin too: the body vertices under and
+ * beside them get their height, so a close top over them keeps clear of them
+ * instead of letting them through.
+ */
+function ribbonOccupancy(extras, bi, topo, occ) {
+  const P = bi.P, N = bi.N, r2 = RIBBON_REACH * RIBBON_REACH;
+  for (const ex of extras) {
+    if (!ex || !ex.pos || !ex.parent.length || ex.parent.some((v) => v >= 0)) continue;
+    const Q = ex.pos, m = Q.length / 3;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let q = 0; q < m; q++) {
+      const x = Q[q * 3], y = Q[q * 3 + 1], z = Q[q * 3 + 2];
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    for (let v = 0; v < topo.nv; v++) {
+      const px = P[v * 3], py = P[v * 3 + 1], pz = P[v * 3 + 2];
+      if (px < x0 - RIBBON_REACH || px > x1 + RIBBON_REACH || py < y0 - RIBBON_REACH || py > y1 + RIBBON_REACH || pz < z0 - RIBBON_REACH || pz > z1 + RIBBON_REACH) continue;
+      let best = r2, h = -1;
+      for (let q = 0; q < m; q++) {
+        const dx = Q[q * 3] - px, dy = Q[q * 3 + 1] - py, dz = Q[q * 3 + 2] - pz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= best) continue;
+        best = d2; h = dx * N[v * 3] + dy * N[v * 3 + 1] + dz * N[v * 3 + 2];
+      }
+      if (h > 0) { const val = Math.min(0.02, h + 0.0012); if (val > occ[v]) occ[v] = val; }
+    }
   }
 }
 

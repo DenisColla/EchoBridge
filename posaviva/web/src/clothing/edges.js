@@ -69,12 +69,46 @@ function strip(ex, draft, L, N, rings, ringFn, opts = {}) {
   }
 }
 
+/**
+ * Fine vertex of the surface about `dist` m inward from boundary vertex v
+ * (walking the quad edges against the outward direction b).
+ */
+function inwardVertex(draft, nbr, v, b, dist) {
+  const P = draft.P;
+  let cur = v, walked = 0;
+  for (let step = 0; step < 6 && walked < dist * 0.8; step++) {
+    let best = -1, bd = 0.15;
+    for (const u of nbr(cur)) {
+      const dx = P[u * 3] - P[cur * 3], dy = P[u * 3 + 1] - P[cur * 3 + 1], dz = P[u * 3 + 2] - P[cur * 3 + 2];
+      const l = len3(dx, dy, dz) || 1;
+      const d = -(dx * b[0] + dy * b[1] + dz * b[2]) / l;
+      if (d > bd) { bd = d; best = u; }
+    }
+    if (best < 0) break;
+    walked += -((P[best * 3] - P[cur * 3]) * b[0] + (P[best * 3 + 1] - P[cur * 3 + 1]) * b[1] + (P[best * 3 + 2] - P[cur * 3 + 2]) * b[2]);
+    cur = best;
+  }
+  return cur;
+}
+
+/** Edge neighbours of the fine vertices of a draft (lazy, cached on the draft). */
+function neighbours(draft) {
+  if (draft._nbr) return draft._nbr;
+  const Q = draft.quads, nq = Q.length >> 2, map = new Map();
+  const add = (a, b) => { let l = map.get(a); if (!l) map.set(a, (l = [])); if (!l.includes(b)) l.push(b); };
+  for (let f = 0; f < nq; f++) for (let k = 0; k < 4; k++) { const a = Q[f * 4 + k], b = Q[f * 4 + ((k + 1) & 3)]; add(a, b); add(b, a); }
+  draft._nbr = (v) => map.get(v) || [];
+  return draft._nbr;
+}
+
 /** Rolled hem: the shell curls under the edge so the fabric shows its thickness. */
 export function hemExtras(draft, loop, N, spec, group = 0) {
   const ex = newExtras(group);
   const L = loop.verts, frames = loopFrames(draft, L, N);
   const r = spec.r ?? Math.max(0.0012, draft.thick * 0.75);
   const depth = spec.depth ?? 0.01;
+  const nbr = neighbours(draft);
+  const inner = [];
   strip(ex, draft, L, N, 4, (i, v, p, n, b, o, k) => {
     const room = Math.max(0.0006, draft.room[v] + draft.off[v] * 0.85 - 0.0012);
     const inn = Math.min(2 * r, room);
@@ -83,7 +117,12 @@ export function hemExtras(draft, loop, N, spec, group = 0) {
     const bs = k === 1 ? r * 0.85 : k === 2 ? r * 0.35 : -depth;
     const ns = k === 1 ? -inn * 0.45 : -inn;
     o[0] = p[0] + b[0] * bs + n[0] * ns; o[1] = p[1] + b[1] * bs + n[1] * ns; o[2] = p[2] + b[2] * bs + n[2] * ns;
+    if (k === 3) inner.push(ex.pos.length / 3, inwardVertex(draft, nbr, v, b, depth));
   }, { frames });
+  // the turned-up allowance lies under the surface `depth` above the edge: it moves
+  // with that part of the surface (its folds), not with the edge, or wrinkle
+  // valleys there would let it show through as specks
+  for (let q = 0; q < inner.length; q += 2) ex.parent[inner[q]] = inner[q + 1];
   return ex;
 }
 

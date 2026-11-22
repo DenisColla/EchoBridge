@@ -148,12 +148,19 @@ export class Shell extends EventTarget {
     }
   }
 
-  /** Drops the tab icons when the labels would not all fit in the header row. */
+  /**
+   * Makes the sub-tabs fit the header row: first without icons ('compact'), then with
+   * tighter labels ('tight', e.g. the five Scena tabs on a 412 px phone); if they still
+   * do not fit the row scrolls, with faded edges where more tabs are hidden.
+   */
   _fitSubTabs() {
     const st = this.subTabs;
     if (st.style.display === 'none') return;
-    st.classList.remove('compact');
-    if (st.scrollWidth > st.clientWidth + 1) st.classList.add('compact');
+    st.classList.remove('compact', 'tight');
+    for (const level of ['compact', 'tight']) {
+      if (st.scrollWidth <= st.clientWidth + 1) break;
+      st.classList.add(level);
+    }
     this._subTabsFade();
   }
 

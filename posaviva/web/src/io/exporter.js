@@ -137,8 +137,8 @@ export class Exporter {
     setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 4000);
   }
 
-  /** Lets the user pick a text file. -> Promise<{text, name}|null> */
-  pickTextFile(accept = '.json,application/json') {
+  /** Lets the user pick a text file. -> Promise<{text, name}|{error}|null> */
+  pickTextFile(accept = '.json,application/json', maxBytes = 20 * 1024 * 1024) {
     return new Promise((resolve) => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -149,7 +149,7 @@ export class Exporter {
       input.addEventListener('change', async () => {
         const f = input.files?.[0];
         if (!f) return finish(null);
-        if (f.size > 20 * 1024 * 1024) return finish({ error: 'File troppo grande' });
+        if (f.size > maxBytes) return finish({ error: 'File troppo grande' });
         try { finish({ text: await f.text(), name: f.name }); } catch (e) { finish({ error: e.message }); }
       });
       input.addEventListener('cancel', () => finish(null));

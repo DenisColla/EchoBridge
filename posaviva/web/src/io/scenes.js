@@ -1,8 +1,10 @@
-// Scenes: saved scenes in localStorage ('posaviva.scenes'), autosave of the
-// current scene ('posaviva.autosave', restored at startup), new / open /
-// import / export, dirty tracking against the undo history.
+// Scenes: the current scene's identity and saving, autosave ('posaviva.autosave',
+// restored at startup), new / open / import / export, dirty tracking against the
+// undo history.
 //
-// 'posaviva.scenes' = [{id, name, date, thumb (JPEG data URL), data (app.serialize())}], newest first.
+// Saved scenes are items of type 'scene' of the projects archive (app.projects,
+// IndexedDB) when the projects module is loaded; otherwise (?only=…) they stay in
+// localStorage: 'posaviva.scenes' = [{id, name, date, thumb, data}], newest first.
 // 'posaviva.autosave' = {v, time, current:{id, name}, dirty, scene (app.serialize())}.
 import { store } from './storage.js';
 
@@ -77,9 +79,42 @@ export class SceneManager extends EventTarget {
   }
 
   // ---------------------------------------------------------------- saved scenes
+  /** The projects archive (null when the module is not loaded: localStorage fallback). */
+  get projects() { return this.app.projects || null; }
+
+  /** Saved scenes: [{id, name, date, projectId?, sectionId?}] (no payload with projects). */
   list() {
+    const P = this.projects;
+    if (P) return P.items({ type: 'scene' }).map((i) => ({ id: i.id, name: i.name, date: i.updated, projectId: i.projectId, sectionId: i.sectionId, chars: i.meta?.chars ?? null }));
     const l = store.get(SCENES_KEY, []);
     return Array.isArray(l) ? l.filter((e) => e && e.id && isSceneJSON(e.data)) : [];
+  }
+
+  /** The scene on screen now is the saved item `item` (after "Salva in…"). */
+  adopt(item) {
+    this.current = { id: item.id, name: item.name };
+    this._cleanSnap = this.app.history.stack[this.app.history.index];
+    this._emit();
+    this.flushAutosave(true);
+  }
+
+  /** The saved item of the scene on screen was renamed elsewhere. */
+  adoptName(name) { this.current.name = name; this._emit(); this.flushAutosave(true); }
+
+  /** The saved item of the scene on screen was deleted: the scene is no longer "saved". */
+  detach() {
+    if (!this.current.id) return;
+    this.current.id = null;
+    this._cleanSnap = null;
+    this._emit();
+    this.flushAutosave(true);
+  }
+
+  /** Where the scene on screen is saved: {project, section} names (projects only) or null. */
+  location() {
+    const P = this.projects, it = this.current.id && P?.item(this.current.id);
+    if (!it) return null;
+    return { project: P.get(it.projectId)?.name || '', section: it.sectionId ? P.section(it.sectionId)?.name || '' : '' };
   }
 
   _write(list) {
@@ -94,10 +129,22 @@ export class SceneManager extends EventTarget {
    * Saves the current scene. opts: {name, asNew}. Overwrites the entry the scene
    * came from unless asNew. -> {ok, entry?, quota?, error?}
    */
-  async save({ name, asNew = false } = {}) {
+  async save({ name, asNew = false, projectId, sectionId } = {}) {
     const data = this.app.serialize();
     let thumb = null;
     try { thumb = await this.deps.thumbnail(); } catch { /* keep going without */ }
+    const P = this.projects;
+    if (P) {
+      const id = !asNew && this.current.id && P.item(this.current.id)?.type === 'scene' ? this.current.id : undefined;
+      try {
+        const item = await P.saveItem({ type: 'scene', id, name: name || this.current.name || 'Scena', projectId, sectionId, data, thumb });
+        this.current = { id: item.id, name: item.name };
+        this._cleanSnap = this.app.history.stack[this.app.history.index];
+        this._emit();
+        this.flushAutosave(true);
+        return { ok: true, entry: item };
+      } catch (error) { return { ok: false, quota: !!error.quota, error }; }
+    }
     const list = this.list();
     const id = !asNew && this.current.id && list.some((e) => e.id === this.current.id) ? this.current.id : uid();
     const entry = { id, name: (name || this.current.name || 'Scena').slice(0, 60), date: Date.now(), thumb, data };
@@ -113,6 +160,7 @@ export class SceneManager extends EventTarget {
   }
 
   rename(id, name) {
+    if (this.projects) return this.projects.renameItem(id, name).then(() => ({ ok: true }), (error) => ({ ok: false, quota: !!error.quota, error }));
     const list = this.list();
     const e = list.find((x) => x.id === id);
     if (!e) return { ok: false };
@@ -123,6 +171,7 @@ export class SceneManager extends EventTarget {
   }
 
   duplicate(id) {
+    if (this.projects) return this.projects.duplicateItem(id).then(() => ({ ok: true }), (error) => ({ ok: false, quota: !!error.quota, error }));
     const list = this.list();
     const e = list.find((x) => x.id === id);
     if (!e) return { ok: false };
@@ -131,12 +180,14 @@ export class SceneManager extends EventTarget {
   }
 
   remove(id) {
+    if (this.projects) return this.projects.removeItem(id).then(() => { if (this.current.id === id) this.detach(); return { ok: true }; });
     const r = this._write(this.list().filter((e) => e.id !== id));
     if (r.ok && this.current.id === id) { this.current.id = null; this._cleanSnap = null; this._emit(); }
     return r;
   }
 
   removeAll() {
+    if (this.projects) return this.projects.store.removeAll().then(() => this.detach());
     store.remove(SCENES_KEY);
     this.current.id = null;
     this._cleanSnap = null;
@@ -155,9 +206,10 @@ export class SceneManager extends EventTarget {
     this.flushAutosave(true);
   }
 
-  open(id) {
-    const e = this.get(id);
-    if (!e) throw new Error('Scena non trovata');
+  /** Opens a saved scene. -> Promise<entry> (throws when missing). */
+  async open(id) {
+    const e = this.projects ? await this.projects.getItem(id) : this.get(id);
+    if (!e || !e.data) throw new Error('Scena non trovata');
     this.load(e.data, { id: e.id, name: e.name, clean: true });
     return e;
   }
@@ -236,8 +288,10 @@ export class SceneManager extends EventTarget {
     if (!scene) return false;
     try {
       this.load(scene, { id: a.current?.id ?? null, name: a.current?.name || 'Senza titolo', clean: !a.dirty });
-      // the saved entry may have been deleted meanwhile
-      if (this.current.id && !this.list().some((e) => e.id === this.current.id)) this.current.id = null;
+      // the saved entry may have been deleted meanwhile (the projects archive loads asynchronously)
+      const P = this.projects;
+      if (P) P.ready.then(() => { if (this.current.id && P.item(this.current.id)?.type !== 'scene') { this.current.id = null; this._emit(); } });
+      else if (this.current.id && !this.list().some((e) => e.id === this.current.id)) this.current.id = null;
       return true;
     } catch (e) {
       console.warn('[PosaViva] autosave restore failed', e);

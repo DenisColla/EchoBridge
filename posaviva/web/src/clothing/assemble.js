@@ -37,6 +37,8 @@ export function atlasUV(r, theta, coord, out, o = 0) {
 }
 
 const R_REF = [0.15, 0.05, 0.05, 0.075, 0.075];
+/** Distance (m) from a garment edge over which the folds fade in (stiffer hem). */
+const HEM_CALM = 0.022;
 /** Artistic gain over the inextensible-strip estimate (real fabric bunches into fewer, deeper folds). */
 export const FOLD_GAIN = 2.0;
 
@@ -64,6 +66,46 @@ function foldFrames(draft, wr, bi) {
   const fr = { kT: t.k, NT: t.N, MT: t.M, kL: [0], NL: [0], ML: [0], rr };
   for (let r = 1; r <= 4; r++) { const q = mk(r <= 2 ? wlA : wlL, rr[r], h[r]); fr.kL[r] = q.k; fr.NL[r] = q.N; fr.ML[r] = q.M; }
   return fr;
+}
+
+/**
+ * Local mesh density of a draft: k[i] = 1 where the vertex spacing is under 30%
+ * of the median spacing, 0 above 75%; nbr = fine adjacency (CSR).
+ */
+function denseSpots(nf, quads, P) {
+  const adj = buildAdjacency(nf, buildEdges(nf, quads));
+  const le = new Float32Array(nf);
+  for (let i = 0; i < nf; i++) {
+    let s = 0, m = 0;
+    for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j]; s += len3(P[u * 3] - P[i * 3], P[u * 3 + 1] - P[i * 3 + 1], P[u * 3 + 2] - P[i * 3 + 2]); m++; }
+    le[i] = m ? s / m : 0;
+  }
+  const sorted = Float32Array.from(le).sort();
+  const med = sorted[sorted.length >> 1] || 1;
+  const k = new Float32Array(nf);
+  let any = false;
+  for (let i = 0; i < nf; i++) { const r = le[i] / med; k[i] = Math.min(1, Math.max(0, (0.75 - r) / 0.45)); if (k[i] > 0) any = true; }
+  // grow a ring so the softening fades out instead of stopping at a vertex
+  const k2 = k.slice();
+  for (let i = 0; i < nf; i++) for (let j = adj.off[i]; j < adj.off[i + 1]; j++) if (k[adj.adj[j]] * 0.6 > k2[i]) k2[i] = k[adj.adj[j]] * 0.6;
+  return { k: k2, adj, any };
+}
+
+/** Low-pass of the four fold fields over the dense spots (in place). */
+function smoothDense(nf, prof, dense, iterations) {
+  const { k, adj } = dense, tmp = new Float32Array(prof.length);
+  for (let it = 0; it < iterations; it++) {
+    tmp.set(prof);
+    for (let i = 0; i < nf; i++) {
+      if (!k[i]) continue;
+      let a0 = 0, a1 = 0, a2 = 0, a3 = 0, m = 0;
+      for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j] * 4; a0 += prof[u]; a1 += prof[u + 1]; a2 += prof[u + 2]; a3 += prof[u + 3]; m++; }
+      if (!m) continue;
+      const w = 0.6 * k[i], o = i * 4;
+      tmp[o] += (a0 / m - prof[o]) * w; tmp[o + 1] += (a1 / m - prof[o + 1]) * w; tmp[o + 2] += (a2 / m - prof[o + 2]) * w; tmp[o + 3] += (a3 / m - prof[o + 3]) * w;
+    }
+    prof.set(tmp);
+  }
 }
 
 /** Vertices per fold wavelength (at least). */
@@ -114,7 +156,7 @@ function coarseBasis(draft, bi) {
  * pieces: [{draft, extras: Extras[], faceGroup?(f)->group, wrinkle: def.wrinkle, folds: features, uvRegion?}]
  */
 export function assemble(pieces, bi, opts = {}) {
-  const pos = [], uv = [], uv1 = [], skI = [], skW = [], rv2v = [], nid = [];
+  const pos = [], uv = [], uv1 = [], skI = [], skW = [], rv2v = [], nid = [], main = [];
   const groupsTris = [[], [], []];
   const parts = [];
   let fineOffset = 0, nslot = 0;
@@ -141,6 +183,7 @@ export function assemble(pieces, bi, opts = {}) {
       keyMap.set(key, r);
       rv2v.push(fineOffset + v);
       nid.push(nslot + v);
+      main.push(1);
       pos.push(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]);
       uv.push(th * rRef[R], sOf(v, R));
       atlasUV(R, th, coordOf(v, R), uvTmp);
@@ -190,6 +233,7 @@ export function assemble(pieces, bi, opts = {}) {
         }
         rv2v.push(v >= 0 ? fineOffset + v : -1);
         nid.push(extraSlot++);
+        main.push(0);
         pos.push(ex.pos[i * 3], ex.pos[i * 3 + 1], ex.pos[i * 3 + 2]);
         uv.push(ex.uv[i * 2], ex.uv[i * 2 + 1]);
         uv1.push(ex.uv1 ? ex.uv1[i * 2] : WHITE_UV1[0], ex.uv1 ? ex.uv1[i * 2 + 1] : WHITE_UV1[1]);
@@ -204,25 +248,50 @@ export function assemble(pieces, bi, opts = {}) {
     const fr = foldFrames(d, wr, bi);
     const bias = wr.bias ?? FOLD_BIAS;
     const prof = foldFields(nf, C, P, fr, bias);
+    // where the body mesh is much denser than around it (rings around the nipples,
+    // the navel) the sharp fold valleys are sampled finely and show as pinpoint
+    // creases: soften the folds there (fold fields low-passed, amplitude lowered)
+    const dense = denseSpots(nf, d.quads, P);
     // fold amplitude: excess length c folded into waves of length L gives a
     // peak-to-trough of about (2L/pi) sqrt(c); k = garment softness/looseness
     const amp = new Float32Array(nf);
     const k0 = (wr.k ?? 0.8) * (0.6 + 0.8 * (d.fitT ?? 0.5)) * (2 / Math.PI) * FOLD_GAIN;
     const wlT = 2 * Math.PI / fr.kT;
+    // a hem is a doubled, stiffer edge: folds die out over its last couple of
+    // centimetres, so the edge reads as one clean line (no zigzag, no specks)
+    const edgeCv = (d.loops || []).map((l) => d.cons?.findIndex((c) => c.id === l.id)).filter((k) => k >= 0).map((k) => d.cvals[k]);
+    const hemK = (i) => {
+      let m = Infinity;
+      for (const cv of edgeCv) if (cv[i] < m) m = cv[i];
+      if (m === Infinity) return 1;
+      const t = Math.min(1, Math.max(0, m / HEM_CALM));
+      return 0.3 + 0.7 * t * t * (3 - 2 * t);
+    };
+    const hem = new Float32Array(nf);
     for (let i = 0; i < nf; i++) {
       const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
       const mod = 0.75 + 0.4 * noise3(x * 3.1 + 17, y * 3.1 - 3, z * 3.1 + 9);
       const L = C.limb[i], wT = L ? C.wT[i] : 1;
       const wl = wT * wlT + (1 - wT) * (L ? 2 * Math.PI / fr.kL[L] : wlT);
-      amp[i] = k0 * wl * mod * (1 - 0.8 * (d.zone ? d.zone[i] : 0)) * (pc.ampScale ? pc.ampScale(i) : 1);
+      hem[i] = hemK(i);
+      amp[i] = k0 * wl * mod * (1 - 0.8 * (d.zone ? d.zone[i] : 0)) * (pc.ampScale ? pc.ampScale(i) : 1) * hem[i] * (1 - 0.6 * dense.k[i]);
     }
+    if (dense.any) smoothDense(nf, prof, dense, 6);
     const stat = staticFolds(d, pc.folds, noise3);
+    for (let i = 0; i < nf; i++) stat[i] *= 0.5 + 0.5 * hem[i];
     if (d.staticDisp) for (let i = 0; i < nf; i++) stat[i] += d.staticDisp[i];
     const coarse = d.coarse;
     const basis = coarseBasis(d, bi);
+    // taut spans (fabric bridging a hollow: under the bust, across the cleavage,
+    // behind the knee) fold little: their valleys may not sink into the hollow
+    let vcap = null;
+    if (d.span) {
+      vcap = new Float32Array(nf);
+      for (let i = 0; i < nf; i++) { const t = Math.min(1, Math.max(0, (d.span[i] - 0.004) / 0.016)); vcap[i] = 0.03 + (0.004 - 0.03) * t * t * (3 - 2 * t); }
+    }
     const wp = new WrinklePart({
       coarse: { n: coarse.n, G: coarse.G, adj: coarse.adj || buildAdjacency(coarse.n, buildEdges(coarse.n, coarse.quads)), skin: coarse.skin, basis },
-      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 4,
+      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 4,
     });
     parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
     fineOffset += nf;
@@ -262,6 +331,7 @@ export function assemble(pieces, bi, opts = {}) {
     delete p.P; delete p.skin;
   }
   const rt = new GarmentRuntime(geo, parts, Int32Array.from(rv2v), Int32Array.from(nid), nslot, posArr, dirN, disp, idxArr);
+  rt.main = Uint8Array.from(main);
   // fine vertex adjacency (global indices) for the layer pass
   const deg = new Int32Array(fineOffset + 1), lists = [];
   for (const p of parts) {
@@ -318,7 +388,9 @@ const LAYER_REACH = 0.035;
 /** Share of the skin weights a garment takes from the layer it rests on. */
 const WEIGHT_INHERIT = 0.85;
 /** Gap kept between a garment and the layer below while posing (m). */
-const LAYER_GAP_MIN = 0.0025, LAYER_GAP_MAX = 0.005;
+const LAYER_GAP_MIN = 0.0035, LAYER_GAP_MAX = 0.006;
+/** Rings (even) and per-ring falloff of the layer push around each contact. */
+const LAYER_SPREAD = 4, LAYER_FALLOFF = 0.86;
 
 /** Blended skin matrix (12 floats, column major 3x4) of fine vertex i into out. */
 function blendMatrix(M, si, sw, i, out) {
@@ -507,11 +579,10 @@ export class GarmentRuntime {
     // closest vertex of the layers below for each vertex of this garment
     const pd2 = new Float32Array(n).fill(Infinity), pr = new Int8Array(n).fill(-1), pj = new Int32Array(n);
     rts.forEach((r, ri) => {
-      const Q = r.fine.P, M = r.dirN, co = r.fine.coarse;
+      const Q = r.fine.P, M = r.dirN;
       for (let j = 0; j < r.fine.n; j++) {
-        // the coarse vertices of the layer below are enough (the push is spread
-        // over two rings and the gap has a margin for crests between them)
-        if (!co[j]) continue;
+        // every fine vertex of the layer below: a garment resting close on it
+        // (T-shirt hem on jeans) would let fold crests between coarse vertices through
         const x = Q[j * 3], y = Q[j * 3 + 1], z = Q[j * 3 + 2];
         const cx = Math.floor(x / cell), cy = Math.floor(y / cell), cz = Math.floor(z / cell);
         let best = r2, bi = -1, bg = 0;
@@ -535,6 +606,28 @@ export class GarmentRuntime {
       }
     });
     if (!out.length) return;
+    // vertices of this garment that no vertex below picked (between two picked
+    // ones) take the closest of their neighbours' partners: otherwise the weights
+    // they inherit alternate vertex by vertex and a hem lying on jeans tears into
+    // teeth as the thighs move
+    const adj = this.fine.adj;
+    for (let ring = 0; ring < 2 && adj; ring++) {
+      const was = pr.slice();
+      for (let i = 0; i < n; i++) {
+        if (was[i] >= 0) continue;
+        const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
+        let best = r2;
+        for (let k = adj.off[i]; k < adj.off[i + 1]; k++) {
+          const u = adj.adj[k];
+          if (was[u] < 0) continue;
+          const r = rts[was[u]], j = pj[u], Q = r.fine.P, M = r.dirN;
+          const ex = x - Q[j * 3], ey = y - Q[j * 3 + 1], ez = z - Q[j * 3 + 2];
+          const d2 = ex * ex + ey * ey + ez * ez;
+          if (d2 >= best || nx * M[j * 3] + ny * M[j * 3 + 1] + nz * M[j * 3 + 2] < 0.4) continue;
+          best = d2; pd2[i] = d2; pr[i] = was[u]; pj[i] = j;
+        }
+      }
+    }
     this._inheritWeights(rts, pd2, pr, pj);
     // grouped by vertex of this garment: its posed frame is computed once
     const order = out.map((_, k) => k).sort((a, b) => out[a] - out[b]);
@@ -638,13 +731,14 @@ export class GarmentRuntime {
       if (v > need[i]) need[i] = v;
     }
     // the fabric is lifted over an area, not vertex by vertex: grow the push over
-    // two rings (a rising crest of the layer below lifts this one smoothly)
+    // a few rings (a rising crest or a lifted thigh below lifts this one smoothly;
+    // vertex by vertex, a hem lying close on jeans would show them through in teeth)
     const adj = this.fine.adj;
-    if (adj) for (let pass = 0; pass < 2; pass++) {
-      const src = pass ? push : need, dst = pass ? need : push;
+    if (adj) for (let pass = 0; pass < LAYER_SPREAD; pass++) {
+      const src = pass & 1 ? push : need, dst = pass & 1 ? need : push;
       for (let i = 0; i < need.length; i++) {
         let m = src[i];
-        for (let k = adj.off[i]; k < adj.off[i + 1]; k++) { const w = src[adj.adj[k]] * 0.7; if (w > m) m = w; }
+        for (let k = adj.off[i]; k < adj.off[i + 1]; k++) { const w = src[adj.adj[k]] * LAYER_FALLOFF; if (w > m) m = w; }
         dst[i] = m;
       }
     }
@@ -766,20 +860,26 @@ export class GarmentRuntime {
       if (fl3) { P[o] += fl3[q]; P[o + 1] += fl3[q + 1]; P[o + 2] += fl3[q + 2]; }
     }
     nacc.fill(0, 0, this.nslot * 3);
+    // a triangle facing against the rest normal of a main-surface vertex (a fold
+    // turned inside out: shoe toe gaps, extreme poses) does not darken its shading
+    const main = this.main;
+    const add = (r, nx, ny, nz) => {
+      if (main && main[r]) { const q = rv2v[r] * 3; if (nx * dirN[q] + ny * dirN[q + 1] + nz * dirN[q + 2] < 0) return; }
+      const s = nid[r] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
+    };
     for (let t = 0, m = index.length; t < m; t += 3) {
       const a = index[t], b = index[t + 1], c = index[t + 2];
       const ao = a * 3, bo = b * 3, co = c * 3;
       const ux = P[bo] - P[ao], uy = P[bo + 1] - P[ao + 1], uz = P[bo + 2] - P[ao + 2];
       const vx = P[co] - P[ao], vy = P[co + 1] - P[ao + 1], vz = P[co + 2] - P[ao + 2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      let s = nid[a] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
-      s = nid[b] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
-      s = nid[c] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
+      add(a, nx, ny, nz); add(b, nx, ny, nz); add(c, nx, ny, nz);
     }
     for (let r = 0; r < n; r++) {
       const s = nid[r] * 3;
-      const x = nacc[s], y = nacc[s + 1], z = nacc[s + 2];
-      const l = Math.sqrt(x * x + y * y + z * z) || 1;
+      let x = nacc[s], y = nacc[s + 1], z = nacc[s + 2];
+      let l = Math.sqrt(x * x + y * y + z * z);
+      if (l < 1e-14) { const q = Math.max(0, rv2v[r]) * 3; x = dirN[q]; y = dirN[q + 1]; z = dirN[q + 2]; l = Math.sqrt(x * x + y * y + z * z) || 1; }
       NR[r * 3] = x / l; NR[r * 3 + 1] = y / l; NR[r * 3 + 2] = z / l;
     }
     posAttr.needsUpdate = true;

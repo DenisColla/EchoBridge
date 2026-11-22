@@ -13,7 +13,9 @@
 // Public API: app.modules.ui = { scenes, exporter, settings, thumbs, viewOffset, people,
 //   openPeople({add}), addCharacter(presetId), saveScene(), newScene(), openScenes(), openExport({share}),
 //   exportSceneFile(), importSceneFile(), openSettings(), openInfo(), openGuide({topic, query, context}),
-//   showOnboarding(), tip(groupId) }
+//   openProjects({projectId, type, query}), saveIn({type, ...}), loadScene(json, {id, name, guard}),
+//   guardUnsaved(what), showOnboarding(), tip(groupId) }
+// Saved scenes live in the projects archive (app.projects) when that module is loaded.
 import './io.css';
 import { toast } from '../ui/kit.js';
 import { Settings } from './storage.js';
@@ -55,6 +57,10 @@ export function create(app, shell) {
     exportSceneFile: () => S.exportSceneFile(ctx),
     importSceneFile: () => S.importSceneFile(ctx),
     openSettings: () => S.openSettings(ctx),
+    /** Progetti (projects module); without it, the scene browser */
+    openProjects: (o) => (app.projects?.open ? app.projects.open(o) : S.openScenes(ctx)),
+    /** "Salva in…": scene, landscape, character or pose into a project / section */
+    saveIn: (o = {}) => (app.projects?.openSaveSheet ? app.projects.openSaveSheet(o) : S.saveScene(ctx, { asNew: true })),
     openInfo: () => S.openInfo(ctx),
     restartTutorial: () => { resetOnboarding(); settings.set('tipsSeen', {}); settings.set('tips', true); onboarding(); },
     /** Guida: opts {topic, query, context: true (topic of the open tool / pose mode)} */
@@ -133,6 +139,10 @@ export function create(app, shell) {
     openPeople: (o) => people.open(o),
     addCharacter: (presetId) => people.add(presetId),
     saveScene: actions.saveScene, newScene: actions.newScene, openScenes: actions.openScenes,
+    openProjects: actions.openProjects, saveIn: actions.saveIn,
+    /** Replaces the scene with saved data (projects: open a saved scene). -> Promise<boolean> */
+    loadScene: (json, meta = {}) => S.loadScene(ctx, json, meta),
+    guardUnsaved: (what) => S.guardUnsaved(ctx, what),
     openExport: (o = {}) => S.openExport(ctx, o),
     exportSceneFile: actions.exportSceneFile, importSceneFile: actions.importSceneFile,
     openSettings: actions.openSettings, openInfo: actions.openInfo,

@@ -20,11 +20,11 @@
 //
 // Text markup: **Etichetta** = a label as written in the app, [icon] = small inline icon.
 //
-// PLACEHOLDERS for the next phases are at the end of TOPICS (status: 'planned'): paesaggi,
-// animali (novità), libreria oggetti/edifici (novità), voce, linea d'azione (avanzata),
-// definizione muscolare (novità). Animali, Esterni, Edifici, Oggetti, Linea d'azione,
-// Definizione muscolare, Linee anatomiche and Deformazione morbida are already documented
-// (each guarded by `when`, so they disappear if the feature is not in the build).
+// PLACEHOLDERS for the next phases are at the end of TOPICS (status: 'planned'): animali
+// (novità), libreria oggetti/edifici (novità), linea d'azione (avanzata), definizione
+// muscolare (novità). Animali, Esterni, Edifici, Oggetti, Paesaggi, Progetti, Comandi vocali,
+// Linea d'azione, Definizione muscolare, Linee anatomiche and Deformazione morbida are
+// documented (each guarded by `when`, so they disappear if the feature is not in the build).
 // To publish one: write steps checked in the running app, set status 'live' (or delete
 // the field) and give it a `when` that tests the feature (usually e.tool('<tool id>')).
 
@@ -44,6 +44,9 @@ export const CHAPTERS = [
 export const START_HERE = ['vista', 'posa-ruota', 'zoom-rapido', 'esportare'];
 
 const hasLine = (e) => e.posing('drawLine');
+const hasProjects = (e) => typeof e.app?.projects?.open === 'function';
+const noProjects = (e) => !hasProjects(e);
+const hasVoice = (e) => typeof e.app?.modules?.voice?.open === 'function' || !!document.querySelector?.('.pv-vc-fab');
 const hasAdjust = (e) => e.posing('dynamism') && e.posing('setNaturalness');
 const hasSoftSpine = (e) => e.poseState('softSpine');
 
@@ -58,7 +61,9 @@ export const TOPICS = [
       'Alcuni gruppi hanno più strumenti: li trovi come schede in cima al pannello (per esempio **Posa** › **Pose pronte** › **Mani** › **Viso**).',
       'Trascina la maniglia del pannello in su o in giù per allargarlo o ridurlo; toccala per cambiare altezza. Trascinalo tutto in giù, o tocca [close], per chiuderlo.',
       'In alto a sinistra c\'è il personaggio selezionato: toccalo per aprire l\'elenco dei personaggi.',
-      'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con scene, esportazione e impostazioni.',
+      { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con **Progetti**, salvataggio, esportazione e impostazioni.', when: hasProjects },
+      { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con scene, esportazione e impostazioni.', when: noProjects },
+      { t: 'In basso sulla vista: a sinistra [mic] apre i **Comandi** vocali, a destra [zoom] lo zoom rapido.', when: hasVoice },
     ],
     tips: [
       'Con il telefono in orizzontale gli strumenti diventano una colonna a sinistra e il pannello si apre a destra.',
@@ -111,6 +116,26 @@ export const TOPICS = [
     go: { spot: 'history' }, related: ['vista'],
   },
 
+  {
+    id: 'voce', chapter: 'basi', icon: 'mic', title: 'Comandi vocali e scritti',
+    summary: 'Descrivi la scena a voce o per iscritto e l\'app la costruisce',
+    keywords: 'voce comandi vocali parlare microfono dettare scrivere comando frase metti aggiungi gira inquadra offline ibrida claude chiave api esempi prova recenti',
+    where: ['Comandi'],
+    when: hasVoice,
+    steps: [
+      'Tocca [mic], il tasto tondo in basso a sinistra della vista: si apre **Comandi** e l\'app ti ascolta.',
+      'Parla in italiano, per esempio «metti un gatto sul letto», «crea una strada di città di notte con pioggia», «gira la donna verso la finestra», «inquadra dal basso».',
+      'Oppure scrivi in **Scrivi un comando…** e tocca la freccia. Sotto **Prova** ci sono esempi da toccare; i comandi già usati restano tra i recenti.',
+      'Il pannello dice cosa ha fatto e cosa non ha capito. **Annulla** toglie tutto il comando in un passo.',
+      'Tocca [settings] nel pannello (o [menu] › **Impostazioni** › **Comandi vocali**) per la **Modalità**: **Solo offline** capisce i comandi sul telefono, senza internet; **Ibrida** usa anche Claude per le frasi più difficili, con la tua chiave API.',
+    ],
+    tips: [
+      'La chiave API resta solo su questo dispositivo. Senza rete, o senza chiave, i comandi vengono capiti offline.',
+      'Accanto a **Comandi** vedi la modalità in uso (**Offline** o **Ibrida**): toccala per cambiarla.',
+    ],
+    go: { spot: 'mic' }, related: ['personaggi', 'paesaggi', 'annulla'],
+  },
+
   // ------------------------------------------------------------------ personaggi
   {
     id: 'personaggi', chapter: 'personaggi', icon: 'userPlus', title: 'Aggiungere e gestire i personaggi',
@@ -127,6 +152,7 @@ export const TOPICS = [
     tips: [
       'Puoi avere fino a 8 personaggi nella stessa scena.',
       'Per dare la stessa posa a due personaggi: **Posa** › **Copia su…**.',
+      { t: 'Riusa i tuoi personaggi: nel menu [more] di una riga scegli **Salva personaggio…** o **Salva posa…**; [book] **Personaggi salvati** li inserisce di nuovo, con vestiti, capelli, viso e posa.', when: hasProjects },
     ],
     go: { tool: 'people' }, context: ['people'], related: ['posa-intera', 'corpo'],
   },
@@ -232,6 +258,7 @@ export const TOPICS = [
     ],
     tips: [
       'Una posa pronta è un punto di partenza: rifiniscila con **Ruota**, **Trascina** o **Linea**.',
+      { t: 'Una tua posa da riusare: [menu] › **Salva in…** › **Posa**; poi in **Progetti** toccala e scegli **Applica posa** (va sul personaggio selezionato).', when: hasProjects },
       'Le pose sedute si appoggiano all\'altezza di una sedia: aggiungine una da **Scena** › **Oggetti**.',
     ],
     go: { tool: 'poselib' }, context: ['poselib'], related: ['linea', 'posa-intera'],
@@ -434,6 +461,26 @@ export const TOPICS = [
     go: { tool: 'exteriors' }, context: ['exteriors'], related: ['edifici', 'oggetti'],
   },
 
+  {
+    id: 'paesaggi', chapter: 'scena', icon: 'mountain', title: 'Paesaggi pronti',
+    summary: 'Città, natura, fantasy e stanze creati intorno ai personaggi, ogni volta diversi',
+    keywords: 'paesaggi paesaggio sfondo ambiente città natura fantasy stanze spiaggia bosco montagna deserto vicolo piazza castello genera nuovo rigenera svuota salva ora del giorno alba tramonto notte meteo pioggia neve nebbia stagione inverno estate',
+    where: ['Scena', 'Paesaggi'],
+    when: (e) => e.tool('landscapes'),
+    steps: [
+      'Apri **Scena** › **Paesaggi** e scegli un gruppo: **Città**, **Natura**, **Fantasy** o **Stanze**.',
+      'Tocca un paesaggio (per esempio **Vicolo notturno** o **Piazza europea**): viene creato intorno ai personaggi, ogni volta diverso, e la camera lo inquadra.',
+      '**Ora del giorno**, **Meteo** e **Stagione** cambiano subito luce, cielo e tempo del paesaggio; con **Auto** sceglie l\'app. **Quantità di oggetti** vale dal prossimo **Genera nuovo**.',
+      '**Genera nuovo** ne crea un altro dello stesso tipo, **Rigenera** rifà lo stesso con una nuova variante, **Svuota** lo toglie.',
+      { t: '**Salva** lo mette in un progetto (solo l\'ambiente, senza personaggi). Per riusarlo: [menu] › **Progetti**, tocca il paesaggio › **Applica paesaggio**.', when: hasProjects },
+    ],
+    tips: [
+      'Ogni pezzo del paesaggio resta modificabile con **Oggetti**, **Edifici**, **Esterni** e **Animali**.',
+      'Non ti piace? [undo] annulla la generazione.',
+    ],
+    go: { tool: 'landscapes' }, context: ['landscapes'], related: ['esterni', 'edifici', 'luci', 'progetti'],
+  },
+
   // ------------------------------------------------------------------ camera
   {
     id: 'obiettivo', chapter: 'camera', icon: 'aperture', title: 'Scegliere l\'obiettivo',
@@ -497,18 +544,41 @@ export const TOPICS = [
 
   // ------------------------------------------------------------------ file
   {
+    id: 'progetti', chapter: 'file', icon: 'book', title: 'Progetti e sezioni del fumetto',
+    summary: 'Scene, paesaggi, personaggi e pose divisi per fumetto, capitolo, tavola, vignetta',
+    keywords: 'progetti progetto fumetto fumetti sezione sezioni capitolo tavola vignetta salva in salvare paesaggio personaggio posa riusare inserisci applica cerca copertina esporta importa posaviva file archivio i miei fumetti',
+    where: ['Menu', 'Progetti'],
+    when: hasProjects,
+    steps: [
+      'Tocca [menu] › **Progetti**: ogni progetto è un fumetto, con la copertina fatta dalle ultime cose salvate. In «I miei fumetti» trovi anche le scene salvate prima.',
+      '**Nuovo progetto** crea un fumetto; toccalo per aprirlo. **Sezione** aggiunge un **Capitolo**, una **Tavola** o una **Vignetta** con il nome che vuoi.',
+      'Per salvare: [menu] › **Salva in…**, poi scegli cosa (**Scena**, **Paesaggio**, **Personaggio**, **Posa**), il nome, il progetto e la sezione (anche nuovi, lì sul momento).',
+      'Dentro un progetto, **Salva qui…** o [save] accanto a una sezione salvano direttamente lì.',
+      'Tocca una cosa salvata: **Apri scena**, **Applica paesaggio** (i personaggi restano), **Inserisci nella scena** (un nuovo personaggio con quell\'aspetto) o **Applica posa** (al personaggio selezionato).',
+      'Cerca con **Cerca in tutti i progetti…**; i filtri **Scene**, **Paesaggi**, **Personaggi** e **Pose** mostrano un tipo solo.',
+    ],
+    tips: [
+      '[more] su una sezione: **Rinomina o cambia tipo**, **Sposta su**, **Sposta giù**, **Elimina sezione**. Su una cosa salvata: **Rinomina**, **Sposta in…**, **Duplica**, **Elimina**.',
+      '[more] su un progetto › **Esporta file (.posaviva)**: tutto il fumetto in un file, da conservare o da aprire su un altro telefono con **Importa**.',
+      'Applicare un paesaggio, una posa o inserire un personaggio si annulla con [undo].',
+    ],
+    go: { action: 'openProjects', label: 'Apri Progetti' }, related: ['salvare', 'paesaggi', 'personaggi'],
+  },
+  {
     id: 'salvare', chapter: 'file', icon: 'save', title: 'Salvare e aprire le scene',
-    summary: 'Le mie scene, salvataggio automatico, nuova scena',
-    keywords: 'salvare salva scena aprire apri le mie scene nuova scena rinomina duplica elimina salvataggio automatico autosave',
+    summary: 'Salva scena, apri una scena salvata, nuova scena',
+    keywords: 'salvare salva scena aprire apri le mie scene nuova scena rinomina duplica elimina salvataggio automatico autosave salva in copia versione salvata',
     where: ['Menu'],
     steps: [
-      'Tocca [menu] › **Salva scena**: la prima volta scegli un nome, le volte successive aggiorna la stessa scena.',
-      '[menu] › **Apri scena…** mostra **Le mie scene** con le anteprime: tocca una scena per aprirla.',
-      'Tocca [more] su una scena per **Rinomina**, **Duplica**, **Esporta file (.json)** o **Elimina**.',
+      { t: 'Tocca [menu] › **Salva scena**: la prima volta scegli nome, progetto e sezione; le volte successive aggiorna la stessa scena.', when: hasProjects },
+      { t: '[menu] › **Salva in…** salva una copia con un altro nome o in un\'altra sezione.', when: hasProjects },
+      { t: 'Per riaprirla: [menu] › **Progetti**, entra nel progetto e tocca la scena › **Apri scena**.', when: hasProjects },
+      { t: 'Tocca [menu] › **Salva scena**: la prima volta scegli un nome, le volte successive aggiorna la stessa scena.', when: noProjects },
+      { t: '[menu] › **Apri scena…** mostra **Le mie scene** con le anteprime: tocca una scena per aprirla. [more] su una scena per **Rinomina**, **Duplica**, **Esporta file (.json)** o **Elimina**.', when: noProjects },
       '[menu] › **Nuova scena** riparte dalla scena iniziale; se ci sono modifiche non salvate te lo chiede prima.',
     ],
     tips: ['Il lavoro si salva anche da solo: riaprendo l\'app ritrovi la scena com\'era.'],
-    go: { action: 'openScenes', label: 'Apri Le mie scene' }, related: ['esportare', 'file-scena'],
+    go: { action: 'openScenes', label: 'Apri le scene salvate' }, related: ['progetti', 'esportare', 'file-scena'],
   },
   {
     id: 'esportare', chapter: 'file', icon: 'image', title: 'Esportare o condividere l\'immagine',
@@ -538,15 +608,17 @@ export const TOPICS = [
   },
   {
     id: 'impostazioni', chapter: 'file', icon: 'settings', title: 'Impostazioni',
-    summary: 'Qualità, vibrazione, suggerimenti, tutorial, spazio occupato',
-    keywords: 'impostazioni qualità batteria fluida vibrazione suggerimenti tutorial benvenuto archivio spazio memoria lingua',
+    summary: 'Qualità, vibrazione, suggerimenti, comandi vocali, tutorial, spazio occupato',
+    keywords: 'impostazioni qualità batteria fluida vibrazione suggerimenti tutorial benvenuto archivio spazio memoria lingua comandi vocali voce microfono',
     where: ['Menu', 'Impostazioni'],
     steps: [
       'Tocca [menu] › **Impostazioni**.',
       '**Qualità di resa**: Alta per il massimo dettaglio, Bassa per più fluidità e meno batteria.',
       '**Vibrazione** e **Suggerimenti** si accendono e spengono.',
+      { t: '**Comandi vocali** › **Apri**: lingua e modalità dei comandi a voce (solo offline o con Claude).', when: hasVoice },
       '**Tutorial iniziale** › **Ripristina** fa rivedere le schede di benvenuto.',
-      '**Archivio** mostra quanto spazio occupano le scene salvate.',
+      { t: '**Archivio** mostra quanto spazio occupano i progetti salvati; **Gestisci** apre **Progetti**.', when: hasProjects },
+      { t: '**Archivio** mostra quanto spazio occupano le scene salvate.', when: noProjects },
     ],
     go: { action: 'openSettings', label: 'Apri Impostazioni' }, related: ['salvare'],
   },
@@ -554,13 +626,6 @@ export const TOPICS = [
   // ================================================================== PLACEHOLDERS
   // Features of the next phases. NOT SHOWN to users (status 'planned'). Fill the steps
   // after checking the feature in the running app, then set status 'live' and a `when`.
-  {
-    id: 'paesaggi', chapter: 'scena', icon: 'tree', title: 'Paesaggi e sfondi', status: 'planned',
-    summary: 'TODO(paesaggi): terreni, cielo, panorami oltre a Scena › Esterni',
-    keywords: 'paesaggio paesaggi montagne cielo panorama terreno sfondo',
-    todo: 'Strade, veicoli e natura sono già documentati nel topic "esterni" (tool "exteriors"). Qui i paesaggi/sfondi panoramici quando arrivano.',
-    steps: [],
-  },
   {
     id: 'animali-avanzato', chapter: 'personaggi', icon: 'paw', title: 'Animali: novità', status: 'planned',
     summary: 'TODO(animali): estensioni future (il topic "animali" documenta il tool Animali già presente)',
@@ -573,13 +638,6 @@ export const TOPICS = [
     summary: 'TODO(libreria): nuove categorie o kit della libreria Oggetti / Edifici',
     keywords: 'libreria oggetti edifici kit',
     todo: 'I topic "oggetti", "in-mano", "stanze" ed "edifici" sono già pubblicati: aggiungere qui solo le funzioni nuove della libreria quando arrivano.',
-    steps: [],
-  },
-  {
-    id: 'voce', chapter: 'basi', icon: 'help', title: 'Comandi vocali', status: 'planned',
-    summary: 'TODO(voce): dettare pose e comandi',
-    keywords: 'voce comandi vocali parlare microfono dettare',
-    todo: 'Funzione futura: comandi a voce. Nessun codice nell\'albero al momento.',
     steps: [],
   },
   {

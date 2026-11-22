@@ -40,6 +40,8 @@ export class ClothingManager extends THREE.EventDispatcher {
     this.topo = BodyTopo.of(app.model);
     this.states = new Map();
     this.intensity = 1; // global wrinkle intensity ("Pieghe")
+    /** build work per frame (ms); tests and batch exports may raise it */
+    this.budget = BUILD_BUDGET_MS;
     this._idle = [];
     app.addRenderHook(() => this._frame());
     app.materials.addEventListener('style', () => { for (const st of this.states.values()) for (const g of st.garments) this._applyMaterials(g); this.app.invalidate(); });
@@ -216,8 +218,8 @@ export class ClothingManager extends THREE.EventDispatcher {
           st.job = this._startJob(st, i);
         }
         this._step(st);
-      } while (performance.now() - t0 < BUILD_BUDGET_MS);
-      if (performance.now() - t0 >= BUILD_BUDGET_MS) break;
+      } while (performance.now() - t0 < this.budget);
+      if (performance.now() - t0 >= this.budget) break;
     }
     // wrinkles: only characters whose pose (or intensity) changed
     for (const st of this.states.values()) {
@@ -302,9 +304,10 @@ export class ClothingManager extends THREE.EventDispatcher {
     // instead of staying where the old body was
     mesh.bind(new THREE.Skeleton(ch.bones, ch.skeleton.boneInverses.map((m) => m.clone())), new THREE.Matrix4());
     mesh.userData.ownSkeleton = true;
-    // stay over the garments below (shoes are rigid: never pushed; underwear is
-    // skin tight with the body's own weights: nothing to correct, not worth the cost)
-    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear').map((x) => x.runtime));
+    // stay over the garments below (shoes are rigid: never pushed). Close-fitting
+    // trousers and skirts also keep clear of the underwear while posing (it rides
+    // the skin with the body's own weights, they do not quite)
+    if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear' || g.def.slot === 'bottom' || g.def.slot === 'full').map((x) => x.runtime));
     // fine adjacency is only needed by the layer pass
     if (!g.runtime.layers && g.runtime.fine) g.runtime.fine.adj = null;
     // loose fabric lies on the floor (shoes define the contact themselves)
@@ -359,11 +362,15 @@ export class ClothingManager extends THREE.EventDispatcher {
     const nm = detailed ? weaveNormal(def.fabric) : null;
     const map = style === 'realistic' || style === 'toon' ? detailMap(def.details) : null;
     const color = g.item.color;
-    const main = { kind: 'cloth', color, roughness: fab.roughness, sheen: fab.sheen, side: 'double' };
+    // shoes and socks are closed shells over the foot: their toe box keeps a few
+    // inverted faces where the toe gaps were bridged; drawn front-only those stay
+    // hidden behind the outer surface (double-sided they show as dark crumples)
+    const side = def.fit?.envelope ? 'front' : 'double';
+    const main = { kind: 'cloth', color, roughness: fab.roughness, sheen: fab.sheen, side };
     if (nm) { main.normalMap = nm; main.normalScale = fab.ns; }
     if (map) main.map = map;
     const trimColor = def.trim || shade(color, def.fabric === 'denim' ? 0.92 : 0.96);
-    const trim = { kind: 'cloth', color: trimColor, roughness: Math.min(1, fab.roughness + 0.04), sheen: fab.sheen, side: 'double' };
+    const trim = { kind: 'cloth', color: trimColor, roughness: Math.min(1, fab.roughness + 0.04), sheen: fab.sheen, side };
     if (detailed) { trim.normalMap = weaveNormal(def.fabric === 'leather' || def.fabric === 'sneaker' ? def.fabric : 'rib'); trim.normalScale = 0.7; }
     let hw;
     if (def.sole) hw = { kind: 'prop', color: def.sole.color, roughness: 0.75, metalness: 0 };

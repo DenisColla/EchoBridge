@@ -89,6 +89,13 @@ const P = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   userPlus: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21a7.5 7.5 0 0 1 15 0M19 8v6M16 11h6"/>',
   swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
+  // projects: a comic book (Progetti), a landscape, the microphone (Comandi vocali), sections
+  book: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M9 7.5h7M9 11h5"/>',
+  mountain: '<path d="m2.5 20 6.5-11 4 6.5 2.5-3.5 6 8z"/><path d="m7.2 12 1.8 1.2 1.6-1"/><circle cx="17.5" cy="6" r="2"/>',
+  mic: '<rect x="9" y="2.5" width="6" height="11.5" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>',
+  section: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M10 10v10"/>',
+  arrowUp: '<path d="M12 19V5m0 0-6 6m6-6 6 6"/>',
+  arrowDown: '<path d="M12 5v14m0 0-6-6m6 6 6-6"/>',
 };
 
 export function icon(name, size = 22) {

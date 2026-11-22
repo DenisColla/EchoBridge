@@ -13,7 +13,7 @@ const CARDS = [
   { art: 'pinch', title: 'Muovi la vista', text: 'Un dito sullo sfondo gira attorno alla scena. Con due dita sposti e zoomi, come in una foto.' },
   { art: 'zoom', title: 'Zoom rapido', text: 'Il tasto con la lente, in basso a destra, inquadra al volo testa, mani o piedi. «Torna alla vista» (o Indietro) ti riporta dov\'eri.' },
   { art: 'poses', title: 'Parti da una posa pronta', text: 'In Posa › Pose pronte trovi pose da rifinire. In Personaggi aggiungi fino a 8 personaggi nella stessa inquadratura.' },
-  { art: 'guide', title: 'Tutto spiegato nella Guida', text: 'Tocca ? in alto, o apri il menu ☰ › Guida: istruzioni passo per passo per ogni strumento, con la ricerca.', guide: true },
+  { art: 'guide', title: 'Tutto spiegato nella Guida', text: 'Tocca ? in alto, o apri il menu ☰ › Guida: istruzioni passo per passo per ogni strumento. In ☰ › Progetti ritrovi scene, paesaggi, personaggi e pose salvati.', guide: true },
 ];
 
 export function isOnboarded() { return store.getRaw(ONBOARDED_KEY) === '1'; }

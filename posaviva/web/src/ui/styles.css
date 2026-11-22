@@ -223,6 +223,8 @@ input.pv-swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; op
 .pv-subtabs.compact { gap: 4px; }
 .pv-subtabs.compact .pv-chip { padding: 7px 13px; }
 .pv-subtabs.compact .pv-chip > .pv-icon { display: none; }
+.pv-subtabs.tight { gap: 3px; }
+.pv-subtabs.tight .pv-chip { padding: 7px 9px; font-size: 13px; letter-spacing: -.005em; }
 
 /* ------------------------------------------------------------------ fields */
 .pv-field { display: flex; flex-direction: column; gap: 6px; }

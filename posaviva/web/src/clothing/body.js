@@ -206,6 +206,57 @@ class LimbFrame {
 }
 
 const YBIN = 0.01, YMAX = 2.6, NYB = Math.ceil(YMAX / YBIN);
+/** Gaussian width (m) of the spatial bump removal on fabric base surfaces. */
+const BUMP_SIGMA = 0.009;
+
+/**
+ * Lowers small convex bumps (nipples, navel rim, knuckles of the toes) of a
+ * surface X in place: each vertex is compared with the area-weighted Gaussian
+ * average of its spatial neighbourhood (not its mesh neighbours: the nipples are
+ * densely meshed and survive any graph smoothing) and pulled down along its
+ * normal by the excess. Hollows and large forms (bust, buttocks, muscles) stay.
+ */
+export function flattenBumps(X, N, nv, sigma, strength = 0.9) {
+  const R = sigma * 2.5, R2 = R * R, inv = 1 / (2 * sigma * sigma);
+  const key = (x, y, z) => ((Math.floor(x / R) + 1024) * 2048 + Math.floor(y / R) + 1024) * 2048 + Math.floor(z / R) + 1024;
+  const grid = new Map();
+  for (let v = 0; v < nv; v++) { const k = key(X[v * 3], X[v * 3 + 1], X[v * 3 + 2]); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(v); }
+  // vertex area ~ squared distance to the nearest neighbour (dense spots weigh less)
+  const area = new Float32Array(nv).fill(R2);
+  for (const l of grid.values()) for (const v of l) {
+    const x = X[v * 3], y = X[v * 3 + 1], z = X[v * 3 + 2];
+    const cx = Math.floor(x / R), cy = Math.floor(y / R), cz = Math.floor(z / R);
+    let best = R2;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const m = grid.get(((cx + dx + 1024) * 2048 + cy + dy + 1024) * 2048 + cz + dz + 1024);
+      if (!m) continue;
+      for (const u of m) { if (u === v) continue; const d = (X[u * 3] - x) ** 2 + (X[u * 3 + 1] - y) ** 2 + (X[u * 3 + 2] - z) ** 2; if (d < best) best = d; }
+    }
+    area[v] = best;
+  }
+  const out = new Float32Array(nv);
+  for (let v = 0; v < nv; v++) {
+    const x = X[v * 3], y = X[v * 3 + 1], z = X[v * 3 + 2], nx = N[v * 3], ny = N[v * 3 + 1], nz = N[v * 3 + 2];
+    const cx = Math.floor(x / R), cy = Math.floor(y / R), cz = Math.floor(z / R);
+    let sx = 0, sy = 0, sz = 0, sw = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const m = grid.get(((cx + dx + 1024) * 2048 + cy + dy + 1024) * 2048 + cz + dz + 1024);
+      if (!m) continue;
+      for (const u of m) {
+        // the same sheet only (not the other thigh, the arm against the torso)
+        if (N[u * 3] * nx + N[u * 3 + 1] * ny + N[u * 3 + 2] * nz < 0.3) continue;
+        const ex = X[u * 3] - x, ey = X[u * 3 + 1] - y, ez = X[u * 3 + 2] - z, d2 = ex * ex + ey * ey + ez * ez;
+        if (d2 > R2) continue;
+        const w = Math.exp(-d2 * inv) * area[u];
+        sx += ex * w; sy += ey * w; sz += ez * w; sw += w;
+      }
+    }
+    if (sw <= 0) continue;
+    const bump = -(sx * nx + sy * ny + sz * nz) / sw; // height of v above its neighbourhood
+    if (bump > 0) out[v] = bump;
+  }
+  for (let v = 0; v < nv; v++) if (out[v] > 0) { const k = out[v] * strength; X[v * 3] -= N[v * 3] * k; X[v * 3 + 1] -= N[v * 3 + 1] * k; X[v * 3 + 2] -= N[v * 3 + 2] * k; }
+}
 
 export class BodyInfo {
   /** @param {BodyTopo} topo */
@@ -346,6 +397,7 @@ export class BodyInfo {
       }
       const t = L; L = tmp; tmp = t;
     }
+    flattenBumps(L, this.N, nv, BUMP_SIGMA);
     this._bases.set(key, L);
     return L;
   }

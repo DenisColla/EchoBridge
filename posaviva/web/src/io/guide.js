@@ -28,6 +28,7 @@ export const SPOTS = {
   help: { sel: '.pv-io-help-btn', label: 'Guida' },
   toolbar: { sel: '.pv-toolbar', label: 'Barra degli strumenti' },
   chip: { sel: '.pv-io-chip', label: 'Personaggio selezionato' },
+  mic: { sel: '.pv-vc-fab', label: 'Comandi vocali' },
 };
 
 /** Tools that act on the selected character (the guide selects one before opening them). */

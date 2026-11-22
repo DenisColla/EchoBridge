@@ -75,6 +75,8 @@ export class WrinklePart {
     for (let i = 0; i < pf.length; i++) this.prof[i] = Math.max(-32767, Math.min(32767, Math.round(pf[i] * PROF_Q)));
     this.amp = src.amp;
     this.room = src.room;
+    /** per fine vertex: depth (m) below which valleys are squeezed (taut spans), or null */
+    this.vcap = src.vcap || null;
     this.stat = src.stat;
     this.kc = src.kc ?? 1;
     this.kt = src.kt ?? 0.35;
@@ -256,7 +258,7 @@ export class WrinklePart {
       const t = src; src = dst; dst = t;
     }
     const AF = src;
-    const { pIdx, pW, prof, amp, room, stat, disp, bias } = this;
+    const { pIdx, pW, prof, amp, room, stat, disp, bias, vcap } = this;
     for (let i = 0; i < nf; i++) {
       let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
       const o4 = i * 4;
@@ -273,6 +275,8 @@ export class WrinklePart {
       // instead of being flattened against the body
       const lift = ai * (a0 + a1 + a2 + a3) * bias - room[i];
       if (lift > 0) d += lift;
+      // a taut span does not sag into the hollow it bridges: soft knee on valleys
+      if (vcap && d < -vcap[i]) d = -vcap[i] + (d + vcap[i]) * 0.2;
       const r = -room[i];
       disp[i] = d < r ? r : d;
     }

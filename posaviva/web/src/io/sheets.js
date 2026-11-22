@@ -25,17 +25,39 @@ export function busy(text) {
 
 /** Shown when the storage is full. */
 export function quotaDialog(ctx) {
+  const P = ctx.app.projects;
   return modal({
     title: 'Memoria piena', icon: 'storage', danger: true,
-    body: h('p', { class: 'pv-modal-text' }, 'Non c\'è più spazio per salvare nell\'app. Elimina qualche scena che non usi più, oppure esportala su file (.json) e poi eliminala.'),
-    actions: [{ label: 'Chiudi', variant: 'ghost', value: null }, { label: 'Gestisci scene', variant: 'primary', value: 'open', onClick: () => { setTimeout(() => openScenes(ctx), 0); } }],
+    body: h('p', { class: 'pv-modal-text' }, P
+      ? 'Non c\'è più spazio per salvare nell\'app. Elimina dai Progetti quello che non usi più, oppure esporta un progetto su file (.posaviva) e poi eliminalo.'
+      : 'Non c\'è più spazio per salvare nell\'app. Elimina qualche scena che non usi più, oppure esportala su file (.json) e poi eliminala.'),
+    actions: [{ label: 'Chiudi', variant: 'ghost', value: null }, { label: P ? 'Apri Progetti' : 'Gestisci scene', variant: 'primary', value: 'open', onClick: () => { setTimeout(() => openScenes(ctx), 0); } }],
   }).result;
+}
+
+/** «Progetto › Sezione» of a saved item (projects) or ''. */
+export function whereText(ctx, item) {
+  const P = ctx.app.projects;
+  if (!P || !item?.projectId) return '';
+  const p = P.get(item.projectId)?.name || '';
+  const sct = item.sectionId ? P.section(item.sectionId)?.name : '';
+  return sct ? `${p} › ${sct}` : p;
 }
 
 // ---------------------------------------------------------------- save / unsaved guard
 /** Saves the current scene (asks a name the first time). -> true when saved */
 export async function saveScene(ctx, { asNew = false, askName = false } = {}) {
   const s = ctx.scenes;
+  const P = ctx.app.projects;
+  // projects: a scene not saved yet (or "Salva come nuova") goes through "Salva in…" (project, section, name)
+  if (P && (asNew || !s.current.id || !P.item(s.current.id))) {
+    const suggestion = s.current.id || s.current.name !== 'Senza titolo' ? (asNew ? `${s.current.name} (copia)` : s.current.name) : '';
+    const item = await P.openSaveSheet({ type: 'scene', name: suggestion, title: asNew ? 'Salva come nuova scena' : 'Salva scena' });
+    if (!item) return false;
+    haptic('success');
+    toast(`Scena «${item.name}» salvata in ${whereText(ctx, item)}`, { kind: 'ok', ms: 2600 });
+    return true;
+  }
   let name = s.current.name;
   if (asNew || askName || !s.current.id) {
     const suggestion = !s.current.id && name === 'Senza titolo' ? `Scena ${s.list().length + 1}` : asNew ? `${name} (copia)` : name;
@@ -47,7 +69,8 @@ export async function saveScene(ctx, { asNew = false, askName = false } = {}) {
   try { r = await s.save({ name, asNew }); } finally { b.close(); }
   if (r.ok) {
     haptic('success');
-    toast(`Scena «${r.entry.name}» salvata`, { kind: 'ok', action: asNew ? null : { label: 'Salva come nuova', onClick: () => saveScene(ctx, { asNew: true }) } });
+    const where = whereText(ctx, r.entry);
+    toast(`Scena «${r.entry.name}» salvata${where ? ` in ${where}` : ''}`, { kind: 'ok', action: asNew ? null : { label: 'Salva come nuova', onClick: () => saveScene(ctx, { asNew: true }) } });
     return true;
   }
   if (r.quota) await quotaDialog(ctx);
@@ -84,7 +107,7 @@ export async function openSavedScene(ctx, id) {
   if (ctx.scenes.current.id === id && !ctx.scenes.dirty) return true;
   if (!(await guardUnsaved(ctx, 'aprire un\'altra scena'))) return false;
   try {
-    const e = ctx.scenes.open(id);
+    const e = await ctx.scenes.open(id);
     haptic('success');
     toast(`Aperta «${e.name}»`, { kind: 'ok', ms: 1600 });
     return true;
@@ -116,8 +139,27 @@ export async function importSceneFile(ctx) {
   } catch (e) { toast(`Importazione non riuscita: ${e.message}`, { kind: 'error' }); }
 }
 
+/** Replaces the scene with a saved scene's data (asks about unsaved changes first). -> true when loaded */
+export async function loadScene(ctx, json, { id = null, name, guard = true } = {}) {
+  const same = !!id && ctx.scenes.current.id === id;
+  if (same && !ctx.scenes.dirty) { toast(`«${name}» è già aperta`, 1600); return true; }
+  if (guard && !(await guardUnsaved(ctx, same ? 'tornare alla versione salvata' : 'aprire un\'altra scena'))) return false;
+  try {
+    ctx.scenes.load(json, { id, name, clean: true });
+    ctx.shell.closePanel();
+    haptic('success');
+    toast(`Aperta «${name}»`, { kind: 'ok', ms: 1600 });
+    return true;
+  } catch (err) {
+    toast(`Impossibile aprire la scena: ${err.message}`, { kind: 'error' });
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------- scene browser
 export function openScenes(ctx) {
+  // with the projects archive the scenes are browsed in Progetti
+  if (ctx.app.projects?.open) return ctx.app.projects.open({ type: 'scene' });
   const s = ctx.scenes;
   const grid = h('div', { class: 'pv-io-scene-grid' });
   const usage = h('div', { class: 'pv-modal-subtitle' });
@@ -289,10 +331,19 @@ export function applyQuality(ctx, q) {
 }
 
 export function openSettings(ctx) {
-  const { settings, scenes } = ctx;
+  const { settings, scenes, app } = ctx;
+  const P = app.projects;
+  const voice = app.modules.voice;
   const usage = h('div', { class: 'pv-io-setting-value' });
-  const refreshUsage = () => { const n = scenes.list().length; usage.textContent = `${n === 1 ? '1 scena' : `${n} scene`} · ${formatBytes(store.usage())}`; };
+  const refreshUsage = () => {
+    if (P) {
+      const n = P.list().length, items = P.items().length;
+      usage.textContent = `${n === 1 ? '1 progetto' : `${n} progetti`} · ${items === 1 ? '1 elemento' : `${items} elementi`} · ${formatBytes(P.usage())}`;
+    } else { const n = scenes.list().length; usage.textContent = `${n === 1 ? '1 scena' : `${n} scene`} · ${formatBytes(store.usage())}`; }
+  };
   refreshUsage();
+  const row = (ic, label, sub, btnLabel, onClick) => h('div', { class: 'pv-io-setting-row' }, icon(ic, 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, label), h('small', {}, sub)),
+    button({ label: btnLabel, small: true, onClick }));
   const body = h('div', { class: 'pv-io-settings' },
     section('Grafica', [
       h('div', { class: 'pv-io-setting-label' }, icon('gauge', 20), h('span', {}, 'Qualità di resa')),
@@ -302,23 +353,29 @@ export function openSettings(ctx) {
     section('Interazione', [
       settingToggle('vibrate', 'Vibrazione', 'Piccolo feedback al tocco', settings.get('haptics') !== false, (v) => { settings.set('haptics', v); if (v) haptic('medium'); }),
       settingToggle('sparkle', 'Suggerimenti', 'Consigli brevi la prima volta che apri uno strumento', settings.get('tips') !== false, (v) => settings.set('tips', v)),
+      // the voice module may be missing (?only=…) or still loading: the row appears only when it can open
+      typeof voice?.openSettings === 'function'
+        ? row('mic', 'Comandi vocali', 'Lingua, modalità (solo offline o con Claude) e chiave API', 'Apri', () => { m.close(null); setTimeout(() => voice.openSettings(), 0); })
+        : null,
     ]),
     section('Lingua', [
       h('div', { class: 'pv-io-setting-row static' }, icon('globe', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Lingua dell\'app'), h('small', {}, 'Altre lingue in arrivo')), h('span', { class: 'pv-io-setting-value' }, 'Italiano')),
     ]),
     section('Aiuto', [
-      h('div', { class: 'pv-io-setting-row' }, icon('help', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Guida'), h('small', {}, 'Istruzioni passo per passo di tutte le funzioni')),
-        button({ label: 'Apri', small: true, onClick: () => { m.close(null); ctx.actions.openGuide(); } })),
-      h('div', { class: 'pv-io-setting-row' }, icon('bookOpen', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Tutorial iniziale'), h('small', {}, 'Rivedi le schede di benvenuto e riattiva i suggerimenti')),
-        button({ label: 'Ripristina', small: true, onClick: () => { m.close(null); ctx.actions.restartTutorial(); } })),
+      row('help', 'Guida', 'Istruzioni passo per passo di tutte le funzioni', 'Apri', () => { m.close(null); ctx.actions.openGuide(); }),
+      row('bookOpen', 'Tutorial iniziale', 'Rivedi le schede di benvenuto e riattiva i suggerimenti', 'Ripristina', () => { m.close(null); ctx.actions.restartTutorial(); }),
     ]),
     section('Archivio', [
-      h('div', { class: 'pv-io-setting-row' }, icon('storage', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Scene salvate'), usage),
+      h('div', { class: 'pv-io-setting-row' }, icon('storage', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, P ? 'Progetti salvati' : 'Scene salvate'), usage),
         button({ label: 'Gestisci', small: true, onClick: () => { m.close(null); openScenes(ctx); } })),
-      button({ label: 'Elimina tutte le scene salvate', icon: 'trash', variant: 'danger', small: true, onClick: async () => {
-        if (!scenes.list().length) { toast('Non ci sono scene salvate', 1600); return; }
-        if (await confirmDialog('Tutte le scene salvate verranno eliminate definitivamente. La scena aperta resta sullo schermo.', { title: 'Eliminare tutte le scene?', okLabel: 'Elimina tutto', danger: true, icon: 'trash' })) {
-          scenes.removeAll(); refreshUsage(); toast('Scene eliminate', 1600);
+      P && !P.persistent ? h('p', { class: 'pv-io-note warn' }, 'Questo dispositivo non permette di conservare l\'archivio: quello che salvi resta solo fino alla chiusura dell\'app. Esporta i progetti su file per non perderli.') : null,
+      button({ label: P ? 'Elimina tutti i progetti' : 'Elimina tutte le scene salvate', icon: 'trash', variant: 'danger', small: true, onClick: async () => {
+        const empty = P ? !P.items().length && P.list().length <= 1 && !P.sections(P.list()[0]?.id).length : !scenes.list().length;
+        if (empty) { toast(P ? 'L\'archivio è già vuoto' : 'Non ci sono scene salvate', 1600); return; }
+        const text = P ? 'Tutti i progetti, con sezioni, scene, paesaggi, personaggi e pose, verranno eliminati definitivamente. La scena aperta resta sullo schermo.'
+          : 'Tutte le scene salvate verranno eliminate definitivamente. La scena aperta resta sullo schermo.';
+        if (await confirmDialog(text, { title: P ? 'Eliminare tutti i progetti?' : 'Eliminare tutte le scene?', okLabel: 'Elimina tutto', danger: true, icon: 'trash' })) {
+          await scenes.removeAll(); refreshUsage(); toast(P ? 'Archivio svuotato' : 'Scene eliminate', 1600);
         }
       } }),
     ]),

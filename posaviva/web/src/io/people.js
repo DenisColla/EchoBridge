@@ -107,9 +107,13 @@ export class PeopleTool {
     const full = chars.length >= MAX_CHARACTERS;
     const add = button({ label: 'Aggiungi', icon: 'userPlus', variant: 'primary', onClick: () => { haptic('tick'); this._tryAdd(); } });
     if (full) add.classList.add('soft-disabled');
+    // characters saved in the projects: inserted with their body, outfit, hair, face and pose
+    const P = app.projects;
+    const saved = P?.open ? iconButton({ icon: 'book', title: 'Personaggi salvati', onClick: () => { haptic('tick'); P.open({ type: 'character' }); } }) : null;
+    saved?.classList.add('pv-io-saved-btn');
     const head = h('div', { class: 'pv-io-people-head' },
       h('div', { class: 'pv-io-count' }, h('strong', {}, String(chars.length)), ` di ${MAX_CHARACTERS} personaggi`),
-      add);
+      saved, add);
     const list = h('div', { class: 'pv-io-people', role: 'list' });
     chars.forEach((ch) => list.appendChild(this._row(ch, ch === sel)));
     if (!chars.length) {
@@ -165,6 +169,12 @@ export class PeopleTool {
       { id: 'rename', label: 'Rinomina', icon: 'edit', onClick: () => this.rename(ch) },
       { id: 'dup', label: 'Duplica', icon: 'copy', hint: 'Stessa forma, posa e vestiti', onClick: () => this.duplicate(ch) },
       { id: 'hide', label: hidden ? 'Mostra' : 'Nascondi', icon: hidden ? 'eye' : 'eyeOff', onClick: () => this.toggleHidden(ch) },
+      ...(this.app.projects?.openSaveSheet ? [
+        { separator: true },
+        { id: 'saveChar', label: 'Salva personaggio…', icon: 'save', hint: 'Corpo, vestiti, capelli, viso e posa in un progetto', onClick: () => { this.app.select(ch); this.app.projects.openSaveSheet({ type: 'character', character: ch }); } },
+        { id: 'savePose', label: 'Salva posa…', icon: 'pose', hint: 'Per riusarla su altri personaggi', onClick: () => { this.app.select(ch); this.app.projects.openSaveSheet({ type: 'pose', character: ch }); } },
+        { id: 'saved', label: 'Personaggi salvati…', icon: 'book', hint: 'Inserisci un personaggio da un progetto', onClick: () => this.app.projects.open({ type: 'character' }) },
+      ] : []),
       { separator: true },
       { id: 'del', label: 'Elimina', icon: 'trash', danger: true, onClick: () => this.remove(ch) },
     ], { title: ch.name, anchor });

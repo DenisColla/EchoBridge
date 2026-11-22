@@ -5,6 +5,23 @@
 // character. Torso heights use the body coordinate T (body.js):
 //   0 crotch, 1 hip joint, 2 waist, 3 bust/chest, 4 shoulder joint, 5 neck base
 // limb params: arm 0 shoulder .. 1 elbow .. 2 wrist, leg 0 hip .. 1 knee .. 2 ankle .. 3 toes.
+//
+// fit (all distances in m; [a, b] = value at Vestibilità 0 "Aderente" and 1 "Largo"):
+//   thickness            fabric thickness
+//   ease, easeMid        radial ease over the smoothed body (easeMid: value at 0.5;
+//                        quadratic through the three, so the slider steps read as
+//                        aderente / slim / normale / comodo / largo)
+//   easeMap(c,i,P0,bi,t) per-vertex ease multiplier (trouserEase, topEase)
+//   contact              share of the ease removed where the body faces up: the
+//                        garment rests on shoulders, upper bust, hip shelf (0.75)
+//   loose, slope         drape of the body of the garment: share of the gap to the
+//                        hanging envelope, and its taper (m/m, interpolated in ratio)
+//   bridgeSlope          stiffness: steepest inward slope under a protrusion (under
+//                        the bust, below the shoulder blades, behind the knee)
+//   sleeve / leg         {loose, slope, slopeUpper (thigh / upper arm), bridgeSlope}
+//                        drape of the limbs: the "cut" (skinny .. straight .. loose)
+//   bridge, smooth, finalSmooth, wSmooth, wSmoothMin, loopSmooth   smoothing passes
+//   offset(c,i,P0,bi)    extra local offset (shoulder pads, toe box), envelope (shoes)
 import { PART, NPART } from './body.js';
 
 export const CATEGORIES = [
@@ -54,6 +71,31 @@ const lowerLegs = (k, min, heel = 0) => {
 };
 const crew = (k, front = 0.065, back = 0.02, extra = 0.018) => k.neckline('neck', { front, back, width: k.bi.neckRadius + extra });
 
+/**
+ * Ease map of trousers (multiplier of the garment ease): jeans and trousers
+ * hug the waist, hips and seat, the thigh gets a little more room and the
+ * full ease from the knee down (where the cut decides the leg line).
+ */
+const trouserEase = (seat = 0.5, thigh = 0.8) => (c, i) => {
+  const L = c.limb[i];
+  if (L < 3) return seat;
+  const a = c.aL[i], w = 1 - c.wT[i];
+  const leg = a <= 0 ? seat : a < 0.5 ? seat + ((thigh - seat) * a) / 0.5 : a < 1 ? thigh + ((1 - thigh) * (a - 0.5)) / 0.5 : 1;
+  return seat + (leg - seat) * w;
+};
+/**
+ * Ease map of tops: snug over the shoulders and upper chest, the full ease from
+ * the bust to the waist, then less again over the hips (a hem cut about as wide
+ * as the chest rests on the hips instead of standing off them).
+ */
+const topEase = (shoulder = 0.45, hip = 0.55) => (c, i, P0, bi) => {
+  if (c.limb[i] && c.wT[i] < 0.5) return 1;
+  const y = P0[i * 3 + 1], T = bi.T(y);
+  const up = shoulder + (1 - shoulder) * Math.min(1, Math.max(0, (bi.land.armpit + 0.02 - y) / 0.08));
+  const lo = hip + (1 - hip) * Math.min(1, Math.max(0, (T - 1.2) / 0.7));
+  return Math.min(up, lo);
+};
+
 /** Static fold presets */
 const cuffBunch = (near, amp = 0.0025, width = 0.09, wl = 0.028) => ({ type: 'rings', region: 'arm', near, width, amp, wl });
 const ankleStack = (near, amp = 0.004, width = 0.12, wl = 0.04) => ({ type: 'rings', region: 'leg', near, width, amp, wl });
@@ -67,7 +109,11 @@ export const GARMENTS = [
     mask: (k) => [k.above('hem', k.y(0.85)), crew(k), ...sleeves(k, 0.42), HEAD(k)],
     bands: { neck: { h: 0.017 } },
     edges: { neck: { type: 'hem', r: 0.0022 }, default: { type: 'hem' } },
-    fit: { thickness: 0.0022, ease: [0.001, 0.022], loose: [0.1, 0.8], slope: [0.6, 0.15], bridgeSlope: 0.55, bridge: 16, smooth: 16 },
+    // Vestibilità: aderente (stretch, ~3 cm of chest ease) .. normale (~9 cm) .. largo (oversize, ~22 cm)
+    fit: {
+      thickness: 0.0022, ease: [0.0006, 0.028], easeMid: 0.0095, easeMap: topEase(0.55), loose: [0.05, 0.75], slope: [0.9, 0.12], bridgeSlope: 0.4, bridge: 6, smooth: 16,
+      sleeve: { loose: [0.05, 0.6], slope: [1.2, 0.15], bridgeSlope: 1.2 },
+    },
     wrinkle: { k: 0.75, wl: 0.055, wlArm: 0.034 },
     folds: [backSlack(0.002), { type: 'rings', region: 'arm', near: ['sleeveL', 'sleeveR'], width: 0.05, amp: 0.0012, wl: 0.03 }],
     weightBlend: hemToPelvis(0.95),
@@ -84,7 +130,7 @@ export const GARMENTS = [
       ARMS(k), HEAD(k),
     ],
     edges: { default: { type: 'hem', r: 0.0018 } },
-    fit: { thickness: 0.002, ease: [0.0008, 0.018], loose: [0.05, 0.7], slope: [0.7, 0.2], bridgeSlope: 0.6, bridge: 16, smooth: 8 },
+    fit: { thickness: 0.002, ease: [0.0005, 0.022], easeMid: 0.0075, easeMap: topEase(0.55), loose: [0.05, 0.7], slope: [0.9, 0.15], bridgeSlope: 0.45, bridge: 6, smooth: 12 },
     wrinkle: { k: 0.6, wl: 0.052 },
     folds: [backSlack(0.0015)],
     weightBlend: hemToPelvis(0.95),
@@ -96,7 +142,10 @@ export const GARMENTS = [
     mask: (k) => [k.above('hem', k.y(0.85)), crew(k, 0.06, 0.018, 0.016), ...sleeves(k, 1.97), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { neck: { h: 0.016 }, sleeveL: { h: 0.035 }, sleeveR: { h: 0.035 } },
     edges: { default: { type: 'hem' } },
-    fit: { thickness: 0.0024, ease: [0.0012, 0.02], loose: [0.1, 0.75], slope: [0.6, 0.15], bridgeSlope: 0.55, bridge: 16, smooth: 8 },
+    fit: {
+      thickness: 0.0024, ease: [0.0006, 0.026], easeMid: 0.009, easeMap: topEase(0.55), loose: [0.05, 0.75], slope: [0.9, 0.12], bridgeSlope: 0.4, bridge: 6, smooth: 14,
+      sleeve: { loose: [0.05, 0.5], slope: [1.2, 0.2], bridgeSlope: 1.2 },
+    },
     wrinkle: { k: 0.85, wl: 0.055, wlArm: 0.032 },
     folds: [backSlack(0.002), cuffBunch(['sleeveL', 'sleeveR'], 0.0032, 0.12, 0.03)],
     weightBlend: hemToPelvis(0.95),
@@ -108,7 +157,10 @@ export const GARMENTS = [
     mask: (k) => [k.above('hem', k.y(0.28)), crew(k, 0.055, 0.015, 0.014), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.06 }, sleeveL: { h: 0.06 }, sleeveR: { h: 0.06 }, neck: { h: 0.022 } },
     edges: { default: { type: 'hem', r: 0.003 } },
-    fit: { thickness: 0.0048, ease: [0.008, 0.03], loose: [0.5, 1.0], slope: [0.35, 0.06], bridgeSlope: 0.45, bridge: 18, wSmooth: 3, smooth: 16 },
+    fit: {
+      thickness: 0.0048, ease: [0.003, 0.032], easeMid: 0.012, easeMap: topEase(0.6), loose: [0.3, 1.0], slope: [0.5, 0.06], bridgeSlope: 0.45, bridge: 8, wSmooth: 3, smooth: 16,
+      sleeve: { loose: [0.2, 0.8], slope: [0.8, 0.1], bridgeSlope: 1.0 },
+    },
     wrinkle: { k: 1.0, wl: 0.07, wlArm: 0.042, kt: 0.25 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.006, 0.16, 0.042), { type: 'rings', region: 'torso', near: 'hem', width: 0.13, amp: 0.004, wl: 0.05 }],
     weightBlend: hemToPelvis(0.95),
@@ -120,7 +172,10 @@ export const GARMENTS = [
     mask: (k) => [k.above('hem', k.y(0.3)), crew(k, 0.04, 0.0, 0.03), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.045 }, sleeveL: { h: 0.05 }, sleeveR: { h: 0.05 } },
     edges: { neck: { type: 'collar', at: () => ({ stand: 0.04, flap: 0.0, lift: 0 }) }, default: { type: 'hem', r: 0.0028 } },
-    fit: { thickness: 0.0035, ease: [0.006, 0.026], loose: [0.4, 0.9], slope: [0.4, 0.1], bridgeSlope: 0.45, bridge: 18, wSmooth: 3, smooth: 16 },
+    fit: {
+      thickness: 0.0035, ease: [0.003, 0.028], easeMid: 0.01, easeMap: topEase(0.6), loose: [0.25, 0.9], slope: [0.6, 0.1], bridgeSlope: 0.45, bridge: 8, wSmooth: 3, smooth: 16,
+      sleeve: { loose: [0.15, 0.7], slope: [0.9, 0.12], bridgeSlope: 1.0 },
+    },
     wrinkle: { k: 0.9, wl: 0.065, wlArm: 0.04 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.005, 0.14, 0.04), { type: 'crease', region: 'torso', theta: 0, amp: 0.0018, halfWidth: 0.004 }],
     hardware: { zipper: true },
@@ -136,7 +191,10 @@ export const GARMENTS = [
       neck: { type: 'collar', at: (q) => ({ stand: 0.032, flap: 0.045 + 0.03 * Math.max(0, Math.cos(q.theta)) ** 6, lift: 0.006, skip: Math.abs(q.theta) < 0.12 }) },
       default: { type: 'hem', r: 0.0016 },
     },
-    fit: { thickness: 0.0018, ease: [0.003, 0.025], loose: [0.2, 0.8], slope: [0.6, 0.15], bridgeSlope: 0.45, bridge: 16, smooth: 8 },
+    fit: {
+      thickness: 0.0018, ease: [0.0015, 0.026], easeMid: 0.01, easeMap: topEase(0.5), loose: [0.15, 0.8], slope: [0.8, 0.15], bridgeSlope: 0.45, bridge: 6, smooth: 12,
+      sleeve: { loose: [0.1, 0.6], slope: [1.0, 0.15], bridgeSlope: 1.0 },
+    },
     wrinkle: { k: 0.85, wl: 0.052, wlArm: 0.034, kt: 0.45 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.0035, 0.13, 0.03), { type: 'crease', region: 'torso', theta: 0, amp: 0.0014, halfWidth: 0.006 }, backSlack(0.003)],
     hardware: { shirtButtons: true },
@@ -197,7 +255,13 @@ export const GARMENTS = [
     mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, 1.97), ARMS(k), FEET(k)],
     bands: { waist: { h: 0.038 } },
     edges: { default: { type: 'hem', r: 0.0028, depth: 0.02 } },
-    fit: { thickness: 0.003, ease: [0.0015, 0.026], loose: [0.0, 0.6], slope: [1.4, 0.3], bridge: 12 },
+    // Vestibilità: skinny (hugs to the ankle) .. slim .. regular (straight from
+    // the knee) .. relaxed .. loose. Seat and hips always fit close.
+    fit: {
+      thickness: 0.0026, ease: [0.0004, 0.02], easeMid: 0.0055, easeMap: trouserEase(0.5, 0.8), contact: 0.6,
+      loose: [0.0, 0.3], slope: [1.6, 0.35], bridgeSlope: 1.1, bridge: 4,
+      leg: { loose: [0.2, 0.95], slope: [0.4, 0.01], slopeUpper: [1.2, 0.03], bridgeSlope: 0.9 },
+    },
     wrinkle: { k: 0.8, wl: 0.058, wlLeg: 0.046, kt: 0.3 },
     folds: [ankleStack(['legL', 'legR'], 0.0045, 0.12, 0.045)],
     hardware: { jeansButton: true },
@@ -209,7 +273,10 @@ export const GARMENTS = [
     mask: (k) => [k.below('waist', k.y(1.75)), ...legs(k, 2.02), ARMS(k), FEET(k)],
     bands: { waist: { h: 0.036 } },
     edges: { default: { type: 'hem', r: 0.0025, depth: 0.03 } },
-    fit: { thickness: 0.0028, ease: [0.004, 0.028], loose: [0.4, 0.9], slope: [0.35, 0.08], innerSlope: 1.6, bridge: 14 },
+    fit: {
+      thickness: 0.0028, ease: [0.0015, 0.024], easeMid: 0.0085, easeMap: trouserEase(0.55, 0.9), contact: 0.6, loose: [0.05, 0.4], slope: [1.4, 0.3], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 5,
+      leg: { loose: [0.6, 1.0], slope: [0.12, 0.004], slopeUpper: [0.8, 0.02], bridgeSlope: 0.8 },
+    },
     wrinkle: { k: 0.8, wl: 0.065, wlLeg: 0.055 },
     folds: [
       { type: 'crease', region: 'leg', theta: Math.PI / 2, amp: 0.0032, halfWidth: 0.0045, sector: [Math.PI / 2, 0.6] },
@@ -225,7 +292,8 @@ export const GARMENTS = [
     bands: { waist: { h: 0.045 }, legL: { h: 0.06 }, legR: { h: 0.06 } },
     edges: { default: { type: 'hem', r: 0.003 } },
     fit: {
-      thickness: 0.0045, ease: [0.006, 0.03], loose: [0.5, 1.0], slope: [0.5, 0.12], innerSlope: 1.6, bridge: 16, wSmooth: 3,
+      thickness: 0.0045, ease: [0.003, 0.03], easeMid: 0.012, easeMap: trouserEase(0.6, 0.95), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.25], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 6, wSmooth: 3,
+      leg: { loose: [0.6, 1.0], slope: [0.1, 0.008], slopeUpper: [0.5, 0.04], bridgeSlope: 0.8 },
       looseFade: (c, i, cv, cons) => { const a = cons.findIndex((q) => q.id === 'legL'), b = cons.findIndex((q) => q.id === 'legR'); const d = Math.min(cv[a][i], cv[b][i]); return Math.min(1, Math.max(0.1, (d - 0.03) / 0.16)); },
     },
     wrinkle: { k: 1.0, wl: 0.07, wlLeg: 0.052, kt: 0.25 },
@@ -238,7 +306,10 @@ export const GARMENTS = [
     mask: (k) => [k.below('waist', k.y(1.5)), ...legs(k, 1.98), ARMS(k), FEET(k)],
     bands: { waist: { h: 0.04 } },
     edges: { default: { type: 'hem', r: 0.003, depth: 0.025 } },
-    fit: { thickness: 0.0035, ease: [0.006, 0.03], loose: [0.55, 1.0], slope: [0.4, 0.1], innerSlope: 1.6, bridge: 14, wSmooth: 3 },
+    fit: {
+      thickness: 0.0035, ease: [0.003, 0.03], easeMid: 0.012, easeMap: trouserEase(0.6, 0.95), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.25], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 6, wSmooth: 3,
+      leg: { loose: [0.7, 1.0], slope: [0.06, 0.004], slopeUpper: [0.4, 0.02], bridgeSlope: 0.8 },
+    },
     wrinkle: { k: 1.0, wl: 0.068, wlLeg: 0.055 },
     folds: [
       ankleStack(['legL', 'legR'], 0.006, 0.15, 0.05),
@@ -253,7 +324,10 @@ export const GARMENTS = [
     mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, 0.4), ARMS(k)],
     bands: { waist: { h: 0.036 } },
     edges: { default: { type: 'hem', r: 0.0028, depth: 0.02 } },
-    fit: { thickness: 0.003, ease: [0.004, 0.03], loose: [0.3, 0.9], slope: [0.8, 0.2], innerSlope: 1.6, bridge: 12 },
+    fit: {
+      thickness: 0.003, ease: [0.002, 0.028], easeMid: 0.01, easeMap: trouserEase(0.55, 1.0), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.3], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 5,
+      leg: { loose: [0.4, 1.0], slope: [0.6, 0.04], bridgeSlope: 0.8 },
+    },
     wrinkle: { k: 0.8, wl: 0.055 },
     details: 'shorts',
   },
@@ -306,7 +380,7 @@ export const GARMENTS = [
           ARMS(k), HEAD(k),
         ],
         edges: { hem: { type: 'none' }, default: { type: 'hem', r: 0.0018 } },
-        fit: { thickness: 0.002, ease: [0.001, 0.012], loose: [0.0, 0.3], slope: [1.4, 0.6], bridge: 20 },
+        fit: { thickness: 0.002, ease: [0.0006, 0.014], easeMid: 0.005, easeMap: topEase(0.6), loose: [0.0, 0.3], slope: [1.4, 0.6], bridgeSlope: 0.6, bridge: 8, smooth: 12 },
         wrinkle: { k: 0.7, wl: 0.055 },
         // under the skirt the bodice stays (almost) flat: the skirt rests on it
         foldFade: [1.75, 2.2, 0.12],
@@ -327,7 +401,7 @@ export const GARMENTS = [
     fabric: 'sneaker', color: '#f2f2f0', palette: PAL.shoes, sole: { color: '#cdc9c0', top: 0.026, below: 0.006, welt: 0.006 },
     mask: (k) => [lowerLegs(k, 1.93, 0.6), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5)],
     edges: { default: { type: 'hem', r: 0.004, depth: 0.012 } },
-    fit: { thickness: 0.003, ease: [0.003, 0.008], loose: [0, 0], bridge: 30, wSmooth: 4, smooth: 24, offset: toeBox(0.007, 0.004), finalSmooth: 10, envelope: 1 },
+    fit: { thickness: 0.003, ease: [0.003, 0.008], loose: [0, 0], bridge: 30, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.007, 0.004), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
     wrinkle: { k: 0.15, wl: 0.03 },
     details: 'sneakers',
@@ -337,7 +411,7 @@ export const GARMENTS = [
     fabric: 'leather', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
     mask: (k) => [lowerLegs(k, 2.03, 0.75), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
     edges: { default: { type: 'hem', r: 0.0022, depth: 0.01 } },
-    fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
+    fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
     wrinkle: { k: 0.1, wl: 0.03 },
     details: 'dressshoes',
@@ -348,7 +422,7 @@ export const GARMENTS = [
     mask: (k) => [lowerLegs(k, 1.45), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5)],
     bands: { cuff: { h: 0.03 } },
     edges: { default: { type: 'hem', r: 0.004, depth: 0.015 } },
-    fit: { thickness: 0.004, ease: [0.004, 0.012], loose: [0, 0.3], bridge: 30, wSmooth: 4, smooth: 24, offset: toeBox(0.008, 0.005), finalSmooth: 10, envelope: 1 },
+    fit: { thickness: 0.004, ease: [0.004, 0.012], loose: [0, 0.3], bridge: 30, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.008, 0.005), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
     wrinkle: { k: 0.25, wl: 0.045 },
     details: 'boots',
@@ -386,7 +460,10 @@ export const GARMENTS = [
           mask: (k) => [braShape(k), ARMS(k)],
           bands: { band: { h: 0.025 } },
           edges: { default: { type: 'hem', r: 0.0014 } },
-          fit: { thickness: 0.0018, ease: [0.002, 0.004], loose: [0, 0], bridge: 30, bridgeSlope: 0.9, smooth: 30 },
+          fit: { thickness: 0.0018, ease: [0.002, 0.004], loose: [0, 0], bridge: 30, bridgeSlope: 0.9, smooth: 30, contact: 0 },
+          // a molded cup: only its very rim must clear the skin (a wide edge zone
+          // would wrap it over the nipples)
+          hideMargin: 0.008,
           wrinkle: { k: 0.12, wl: 0.03 },
           straps: true,
         },

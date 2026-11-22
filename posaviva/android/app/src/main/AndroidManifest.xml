@@ -4,8 +4,21 @@
 
     <!-- Short haptics from the web UI (AndroidBridge.vibrate). -->
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- No INTERNET permission: the whole web app is served from the APK assets.
-         No storage permission: MediaStore inserts need none on API 29+. -->
+    <!-- Voice commands: microphone for android.speech.SpeechRecognizer (asked at runtime,
+         only when the user taps the mic in "Comandi"). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Optional "ibrida" mode of the voice commands only: requests to api.anthropic.com
+         with the user's own API key. The web app itself is still served from the APK
+         assets. No storage permission: MediaStore inserts need none on API 29+. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 11+ package visibility: find the installed speech recognition service. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <!-- WebGL 2 needs OpenGL ES 3.0. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />

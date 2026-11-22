@@ -94,7 +94,10 @@ fi
 # Packaging sanity check: the runtime data files exist, every "./x.js|css|png|..." that
 # index.html and the chunks reference exists (refs starting with "./assets/" resolve
 # against the page, others against the referencing file), and no remote URL is loaded:
-# the APK has no INTERNET permission, so a font or CDN link would simply fail on the phone.
+# the app must work offline, so a font or CDN link would fail on the phone. The only
+# network use is the optional "ibrida" mode of the voice commands (api.anthropic.com,
+# with the user's own key; INTERNET permission). The Anthropic SDK / zod chunks also
+# carry documentation and JSON-schema URLs as plain strings: those are not loaded.
 if command -v node >/dev/null 2>&1; then
   node - "$WWW" <<'NODE' || die "assets/www is incomplete (see above)."
 const fs = require('fs'), path = require('path');
@@ -111,7 +114,7 @@ for (const f of files.filter((p) => /\.(html|js|css)$/.test(p))) {
     const base = m[1].startsWith('assets/') ? www : path.dirname(f);
     if (!fs.existsSync(path.join(base, m[1]))) missing.push(`${path.relative(www, f)} -> ./${m[1]}`);
   }
-  for (const m of src.matchAll(/(?:https?:|["'`(])\/\/(?!www\.w3\.org\/)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?=[\/:"'`)?#]|$)[^\s"'`)]*/gi)) remote.add(`${path.relative(www, f)}: ${m[0].replace(/^["'`(]/, '')}`);
+  for (const m of src.matchAll(/(?:https?:|["'`(])\/\/(?!www\.w3\.org\/)(?!(?:api\.anthropic\.com|docs\.anthropic\.com|platform\.claude\.com|docs\.expo\.dev|json-schema\.org)[\/"'`]|(?:api\.anthropic\.com)$)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?=[\/:"'`)?#]|$)[^\s"'`)]*/gi)) remote.add(`${path.relative(www, f)}: ${m[0].replace(/^["'`(]/, '')}`);
 }
 if (remote.size) console.warn('\x1b[1;33m[warn]\x1b[0m remote URLs in the web build (no network in the APK):\n  ' + [...remote].slice(0, 20).join('\n  '));
 if (missing.length) { console.error('\x1b[1;31m[error]\x1b[0m missing files:\n  ' + missing.join('\n  ')); process.exit(1); }

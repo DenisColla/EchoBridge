@@ -24,6 +24,9 @@
 
 /* ------------------------------------------------------------------ Personaggi */
 .pv-io-people-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 2px 0 12px; }
+.pv-io-people-head .pv-io-count { flex: 1; min-width: 0; }
+.pv-io-people-head .pv-io-saved-btn { flex: none; color: var(--accent-hi); border: 1px solid var(--line-2); background: var(--elev); }
+.pv-io-note.warn { color: #ffb86b; }
 .pv-io-count { color: var(--muted); font-size: 13.5px; }
 .pv-io-count strong { color: var(--text); font-size: 16px; margin-right: 1px; }
 .pv-btn.soft-disabled { opacity: .55; box-shadow: none; }

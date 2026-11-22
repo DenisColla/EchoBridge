@@ -9,6 +9,8 @@ import { LIMB_REGIONS, PART, NPART } from './body.js';
 import { hull2, hullRadius, len2, len3 } from './mesh.js';
 
 const NTH = 36; // angular bins of the hang grid
+/** Torso hang direction: the radial direction with its lateral part scaled by this (towards front / back). */
+const TORSO_SQUEEZE = 0.15;
 const DS = 0.015; // axial bin size (m)
 
 /**
@@ -20,13 +22,27 @@ const DS = 0.015; // axial bin size (m)
  * c: coarse context {n, body (Int32 body vertex per coarse vertex), P0, N0, off, G, coords}
  */
 export function hangFit(c, bi, opts) {
-  const { loose = 0, slope = 0.4, innerSlope = 1.2, torsoStartY = bi.land.armpit - 0.02, fade = null, bridgeSlope = 0.8, hullAmount = 0 } = opts;
-  if (loose <= 0.001 && bridgeSlope >= 1.9 && hullAmount <= 0) return;
+  const { innerSlope = 1.2, torsoStartY = bi.land.armpit - 0.02, fade = null, hullAmount = 0 } = opts;
+  const base = { loose: opts.loose ?? 0, slope: opts.slope ?? 0.4, bridgeSlope: opts.bridgeSlope ?? 0.8 };
+  const optsOf = (R) => (R === 0 ? base : (R <= 2 ? opts.arm : opts.leg) || base);
+  const idle = (o) => o.loose <= 0.001 && o.bridgeSlope >= 1.9;
+  if (idle(base) && hullAmount <= 0 && (!opts.arm || idle(opts.arm)) && (!opts.leg || idle(opts.leg))) return;
   const { n, P0, off, G, coords } = c;
+  const span = c.span || null;
   const tmp = new Float32Array(9);
   const regions = [0, ...LIMB_REGIONS];
   const rv = new Float32Array(n), sv = new Float32Array(n), tv = new Float32Array(n), dirs = new Float32Array(n * 3);
   for (const R of regions) {
+    const { loose, slope, bridgeSlope } = optsOf(R);
+    // limbs: the upper segment (thigh / upper arm) may taper faster than the lower one
+    // (regular jeans narrow from the thigh to the knee, then fall straight to the hem)
+    const slopeUpper = R === 0 ? slope : optsOf(R).slopeUpper ?? slope;
+    const seg0 = R === 0 ? Infinity : bi.limbs[R].L[0];
+    if (R !== 0 && idle(optsOf(R))) continue;
+    // limbs: only the limb itself seeds its envelope. Above the joint (negative
+    // axial coordinate) the cross-section reaches the shoulder top / armpit wall
+    // or the buttock: carried down the limb, it puffs the sleeve cap like a balloon.
+    const seedMin = R === 0 ? -Infinity : R <= 2 ? 0.0 : -0.04;
     // gather member vertices
     let smin = Infinity, smax = -Infinity, count = 0;
     for (let i = 0; i < n; i++) {
@@ -35,6 +51,7 @@ export function hangFit(c, bi, opts) {
       const x = P0[i * 3], y = P0[i * 3 + 1], z = P0[i * 3 + 2];
       let s;
       if (R === 0) { bi.torsoCyl(x, y, z, tmp); s = -y; } else { const a = coords.aL[i]; bi.limbs[R].cyl(Math.max(0, a), x, y, z, tmp); s = bi.limbs[R].metric(a); }
+      if (s < seedMin) { rv[i] = -1; continue; }
       rv[i] = tmp[1] + off[i]; sv[i] = s; tv[i] = tmp[0];
       dirs[i * 3] = tmp[5]; dirs[i * 3 + 1] = tmp[6]; dirs[i * 3 + 2] = tmp[7];
       if (s < smin) smin = s;
@@ -50,20 +67,20 @@ export function hangFit(c, bi, opts) {
       return r * NTH + t;
     };
     for (let i = 0; i < n; i++) if (rv[i] >= 0) { const k = cell(sv[i], tv[i]); if (rv[i] > grid[k]) grid[k] = rv[i]; }
-    // fill empty cells around each row, then empty rows from the previous one
+    // fill empty cells of each row by interpolating (around the circle) between the
+    // nearest known cells on both sides — a one-sided sweep would carry the hip's
+    // radius across the empty centre-back cells (a lopsided hem, a slit at the
+    // back); empty rows copy the previous one
+    const known = new Int32Array(NTH);
     for (let r = 0; r < rows; r++) {
       const o = r * NTH;
-      let any = false;
-      for (let t = 0; t < NTH; t++) if (grid[o + t] >= 0) { any = true; break; }
-      if (!any) { if (r > 0) for (let t = 0; t < NTH; t++) grid[o + t] = grid[o - NTH + t]; continue; }
-      for (let pass = 0; pass < NTH; pass++) {
-        let changed = false;
-        for (let t = 0; t < NTH; t++) {
-          if (grid[o + t] >= 0) continue;
-          const a = grid[o + ((t + 1) % NTH)], b = grid[o + ((t + NTH - 1) % NTH)];
-          if (a >= 0 || b >= 0) { grid[o + t] = Math.max(a, b); changed = true; }
-        }
-        if (!changed) break;
+      let m = 0;
+      for (let t = 0; t < NTH; t++) if (grid[o + t] >= 0) known[m++] = t;
+      if (!m) { if (r > 0) for (let t = 0; t < NTH; t++) grid[o + t] = grid[o - NTH + t]; continue; }
+      for (let q = 0; q < m; q++) {
+        const a = known[q], b = known[(q + 1) % m], gap = (b - a + NTH) % NTH || NTH;
+        // small holes: the larger neighbour (fabric spans them); long runs: interpolated
+        for (let k = 1; k < gap; k++) grid[o + ((a + k) % NTH)] = gap <= 3 ? Math.max(grid[o + a], grid[o + b]) : grid[o + a] + ((grid[o + b] - grid[o + a]) * k) / gap;
       }
     }
     // angular spread: fabric spans over small dips around the cross-section
@@ -104,10 +121,11 @@ export function hangFit(c, bi, opts) {
         }
       }
     }
-    const propagate = (g, base) => {
+    const propagate = (g, baseLo, baseUp = baseLo) => {
       for (let r = 1; r < rows; r++) {
         const s = smin + r * DS;
         if (s < start) continue;
+        const base = s < seg0 ? baseUp : baseLo;
         for (let t = 0; t < NTH; t++) {
           let sl = base;
           if (R !== 0) {
@@ -121,22 +139,165 @@ export function hangFit(c, bi, opts) {
         }
       }
     };
-    propagate(grid, slope);
+    propagate(grid, slope, slopeUpper);
     propagate(gridB, bridgeSlope);
     // move vertices outward
     for (let i = 0; i < n; i++) {
       if (rv[i] < 0) continue;
       const w = R === 0 ? coords.wT[i] : 1 - coords.wT[i];
-      // bilinear lookup
+      // bilinear lookup (row of this vertex, any angle)
       const fr = Math.max(0, Math.min(rows - 1.001, (sv[i] - smin) / DS - 0.5));
       const r0 = Math.floor(fr), r1 = Math.min(rows - 1, r0 + 1), ar = fr - r0;
-      const ft = ((tv[i] + Math.PI) / (2 * Math.PI)) * NTH - 0.5;
-      const t0 = ((Math.floor(ft) % NTH) + NTH) % NTH, t1 = (t0 + 1) % NTH, at = ft - Math.floor(ft);
-      const lerp2 = (G2) => (G2[r0 * NTH + t0] * (1 - at) + G2[r0 * NTH + t1] * at) * (1 - ar) + (G2[r1 * NTH + t0] * (1 - at) + G2[r1 * NTH + t1] * at) * ar;
-      const target = lerp2(grid), targetB = lerp2(gridB);
-      let d = Math.max(Math.max(0, targetB - rv[i]), Math.max(0, target - rv[i]) * loose) * Math.min(1, w * 1.4);
-      if (fade) d *= fade[i];
-      G[i * 3] += dirs[i * 3] * d; G[i * 3 + 1] += dirs[i * 3 + 1] * d; G[i * 3 + 2] += dirs[i * 3 + 2] * d;
+      const look = (G2, th) => {
+        const ft = ((th + Math.PI) / (2 * Math.PI)) * NTH - 0.5;
+        const t0 = ((Math.floor(ft) % NTH) + NTH) % NTH, t1 = (t0 + 1) % NTH, at = ft - Math.floor(ft);
+        return (G2[r0 * NTH + t0] * (1 - at) + G2[r0 * NTH + t1] * at) * (1 - ar) + (G2[r1 * NTH + t0] * (1 - at) + G2[r1 * NTH + t1] * at) * ar;
+      };
+      const target = look(grid, tv[i]), targetB = look(gridB, tv[i]);
+      const f = Math.min(1, w * 1.4) * (fade ? fade[i] : 1);
+      const dRaw = Math.max(Math.max(0, targetB - rv[i]), Math.max(0, target - rv[i]) * loose);
+      // taut span (stiff bridging, not slack drape): wrinkle valleys stay shallow there
+      if (span) { const b = Math.max(0, targetB - rv[i]) * f; if (b > span[i]) span[i] = b; }
+      if (dRaw * f < 1e-5) continue;
+      if (R !== 0) {
+        const d = dRaw * f;
+        G[i * 3] += dirs[i * 3] * d; G[i * 3 + 1] += dirs[i * 3 + 1] * d; G[i * 3 + 2] += dirs[i * 3 + 2] * d;
+        continue;
+      }
+      // Torso: fabric hanging from a protrusion (bust, belly, shoulder blades,
+      // buttocks) falls straight down in front of / behind it, so a vertex below
+      // it moves forward or back, not out along the radius from the body axis
+      // (that would shove the fabric under a breast sideways and leave the front
+      // clinging to the under-bust). Direction: the radial one squeezed towards
+      // the front-back axis; distance: where that line meets the envelope.
+      const rx0 = dirs[i * 3], rz0 = dirs[i * 3 + 2];
+      let ux = rx0 * TORSO_SQUEEZE, uz = rz0;
+      const ul = Math.hypot(ux, uz) || 1;
+      ux /= ul; uz /= ul;
+      const qx = rx0 * rv[i], qz = rz0 * rv[i]; // the vertex at its garment radius, relative to the axis
+      let t = dRaw / Math.max(0.35, ux * rx0 + uz * rz0);
+      for (let k = 0; k < 3; k++) {
+        const px = qx + ux * t, pz = qz + uz * t, r = Math.hypot(px, pz) || 1e-6;
+        const th = Math.atan2(-px, pz);
+        const want = Math.max(look(gridB, th), rv[i] + loose * Math.max(0, look(grid, th) - rv[i]));
+        t = Math.max(0, t + (want - r) / Math.max(0.35, (ux * px + uz * pz) / r));
+      }
+      // never more than a generous share past the radial estimate (degenerate angles)
+      t = Math.min(t, dRaw * 2.5 + 0.01) * f;
+      G[i * 3] += ux * t; G[i * 3 + 2] += uz * t;
+    }
+  }
+  depthHang(c, bi, { ...base, torsoStartY, fade, span });
+  // A bridged span (under the bust, over the lumbar hollow) is a near-vertical
+  // sheet, but the body surface it was made from wraps around the crease below
+  // the protrusion: projected onto the sheet its vertices come out folded over
+  // each other. Relax them within the sheet (x, y only), then snap their depth
+  // back onto the envelope.
+  if (span) {
+    const { adj } = c;
+    const k = new Float32Array(n);
+    let any = false;
+    for (let i = 0; i < n; i++) if (coords.wT[i] >= 0.5 && !c.bnd[i]) { k[i] = Math.min(1, Math.max(0, (span[i] - 0.005) / 0.012)); if (k[i] > 0) any = true; }
+    if (any) {
+      const tmp = new Float32Array(n * 2);
+      for (let it = 0; it < SPAN_RELAX; it++) {
+        for (let i = 0; i < n; i++) {
+          tmp[i * 2] = G[i * 3]; tmp[i * 2 + 1] = G[i * 3 + 1];
+          if (!k[i]) continue;
+          let ax = 0, ay = 0, m = 0;
+          for (let j = adj.off[i]; j < adj.off[i + 1]; j++) { const u = adj.adj[j] * 3; ax += G[u]; ay += G[u + 1]; m++; }
+          if (!m) continue;
+          const w = 0.5 * k[i];
+          tmp[i * 2] = G[i * 3] + w * (ax / m - G[i * 3]); tmp[i * 2 + 1] = G[i * 3 + 1] + w * (ay / m - G[i * 3 + 1]);
+        }
+        for (let i = 0; i < n; i++) if (k[i]) { G[i * 3] = tmp[i * 2]; G[i * 3 + 1] = tmp[i * 2 + 1]; }
+      }
+      depthHang(c, bi, { ...base, torsoStartY, fade, span: null });
+    }
+  }
+}
+
+/** Relaxation passes over bridged spans (see hangFit). */
+const SPAN_RELAX = 12;
+
+/**
+ * Front / back depth maps of the torso (z per x column and height, as seen from
+ * the front and from the back), propagated down each column with the bridge and
+ * drape slopes: fabric falls straight down from the bust or belly apex, the
+ * shoulder blades, the buttocks, whatever their distance from the body axis
+ * (the cylindrical envelope smears off-axis protrusions over its angle bins).
+ * Front-facing vertices move forward, back-facing ones backward.
+ */
+function depthHang(c, bi, o) {
+  const { n, G, N0, coords } = c;
+  const { loose, slope, bridgeSlope, torsoStartY, fade, span } = o;
+  if (loose <= 0.001 && bridgeSlope >= 1.9) return;
+  const DX = 0.01, DY = 0.01, X0 = -0.5, NX = 100;
+  let ymin = Infinity, ymax = -Infinity;
+  for (let i = 0; i < n; i++) if (coords.wT[i] >= 0.3) { const y = G[i * 3 + 1]; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+  if (!(ymax > ymin)) return;
+  const rows = Math.ceil((ymax - ymin) / DY) + 1;
+  for (const side of [1, -1]) {
+    const M = new Float32Array(rows * NX).fill(NaN);
+    // how much a vertex faces this side: the horizontal part of its normal, or
+    // facing down on this side of the body (the underside of the bust, of the belly,
+    // of the seat: it faces the floor, even a little inwards, yet the fabric hangs here)
+    // (only on this side of the body axis: never pull the front to the back map)
+    const facing = (i) => {
+      const dz = side * (G[i * 3 + 2] - bi.cz(G[i * 3 + 1]));
+      if (dz <= 0) return 0;
+      const nx = N0[i * 3], ny = N0[i * 3 + 1], nz = N0[i * 3 + 2];
+      const h = (side * nz) / Math.max(0.25, Math.hypot(nx, nz));
+      const ahead = dz > 0.03 ? Math.min(1, Math.max(0, (-ny - 0.4) / 0.4)) : 0;
+      return Math.max(h, ahead * 0.5);
+    };
+    for (let i = 0; i < n; i++) {
+      if (coords.wT[i] < 0.3 || facing(i) < 0.1) continue;
+      const col = Math.round((G[i * 3] - X0) / DX), row = Math.round((ymax - G[i * 3 + 1]) / DY);
+      if (col < 0 || col >= NX) continue;
+      const k = row * NX + col, z = G[i * 3 + 2] * side;
+      if (!(M[k] >= z)) M[k] = z;
+    }
+    // close small gaps along each row (linear between known cells, no extrapolation)
+    for (let r = 0; r < rows; r++) {
+      let last = -1;
+      for (let x = 0; x < NX; x++) {
+        const v = M[r * NX + x];
+        if (v !== v) continue;
+        if (last >= 0 && x - last > 1 && x - last <= 4) for (let q = last + 1; q < x; q++) M[r * NX + q] = M[r * NX + last] + ((v - M[r * NX + last]) * (q - last)) / (x - last);
+        last = x;
+      }
+    }
+    const MB = M.slice(), MD = M.slice();
+    const r0 = Math.max(1, Math.ceil((ymax - torsoStartY) / DY));
+    for (let r = r0; r < rows; r++) for (let x = 0; x < NX; x++) {
+      const k = r * NX + x, u = k - NX;
+      const b = MB[u] - bridgeSlope * DY, d = MD[u] - slope * DY;
+      // only where the column exists at this height (no fabric conjured outside the body outline)
+      if (M[k] !== M[k]) continue;
+      if (b > MB[k]) MB[k] = b;
+      if (d > MD[k]) MD[k] = d;
+    }
+    for (let i = 0; i < n; i++) {
+      if (coords.wT[i] < 0.3) continue;
+      const fz = facing(i);
+      if (fz < 0.1) continue;
+      const cx = (G[i * 3] - X0) / DX, ry = (ymax - G[i * 3 + 1]) / DY;
+      const x0 = Math.floor(cx), y0 = Math.floor(ry), ax = cx - x0, ay = ry - y0;
+      if (x0 < 0 || x0 + 1 >= NX || y0 < 0 || y0 + 1 >= rows) continue;
+      const look = (A) => {
+        let s = 0, w = 0;
+        for (const [k, kw] of [[y0 * NX + x0, (1 - ax) * (1 - ay)], [y0 * NX + x0 + 1, ax * (1 - ay)], [(y0 + 1) * NX + x0, (1 - ax) * ay], [(y0 + 1) * NX + x0 + 1, ax * ay]]) { const v = A[k]; if (v === v) { s += v * kw; w += kw; } }
+        return w > 0 ? s / w : NaN;
+      };
+      const zb = look(MB), zd = look(MD), z = G[i * 3 + 2] * side;
+      if (zb !== zb) continue;
+      const fb = Math.max(0, zb - z), fd = Math.max(0, (zd === zd ? zd : z) - z) * loose;
+      const k = Math.min(1, coords.wT[i] * 1.4) * Math.min(1, (fz - 0.1) / 0.3) * (fade ? fade[i] : 1);
+      const dz = Math.max(fb, fd) * k;
+      if (dz <= 0) continue;
+      if (span && fb * k > span[i]) span[i] = fb * k;
+      G[i * 3 + 2] += dz * side;
     }
   }
 }

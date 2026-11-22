@@ -47,7 +47,9 @@ import java.util.Locale;
  * PosaViva shell: one full-screen, immersive WebView running the bundled Three.js app.
  *
  * JS contract:
- *   window.AndroidBridge.{saveImage, saveTextFile, shareImage, vibrate, getDeviceInfo}
+ *   window.AndroidBridge.{saveImage, saveTextFile, shareImage, vibrate, getDeviceInfo,
+ *                         startListening, stopListening, cancelListening, speechAvailable}
+ *   window.__onSpeech({state|partial|final|level|error, message}) -> voice commands
  *   window.__onAndroidBack()  -> return true if the page consumed the back gesture
  *   window.__onInsets({top,right,bottom,left,gestureLeft,gestureRight})
  *     + CSS vars --safe-top/right/bottom/left and --gesture-left/right
@@ -78,6 +80,7 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private WebView webView;
     private AssetServer assetServer;
+    private SpeechBridge speech;
     private ScriptHandler insetsStartScript;
     private OnBackInvokedCallback backCallback;
     private ValueCallback<Uri[]> pendingFileCallback;
@@ -107,6 +110,7 @@ public class MainActivity extends Activity {
         WebView.setWebContentsDebuggingEnabled(
                 (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0);
         assetServer = new AssetServer(this);
+        speech = new SpeechBridge(this, this::emitSpeech);
         createWebView();
         webView.loadUrl(AssetServer.START_URL);
 
@@ -126,8 +130,25 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (speech != null) speech.release();      // never keep the microphone in the background
         if (webView != null) webView.onPause();   // page gets visibilitychange -> hidden
         super.onPause();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == SpeechBridge.REQUEST_RECORD_AUDIO) {
+            speech.onPermissionResult(grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    /** Speech events -> window.__onSpeech(json) (UI thread). */
+    private void emitSpeech(String json) {
+        runOnUiThread(() -> {
+            if (webView != null) webView.evaluateJavascript("window.__onSpeech&&window.__onSpeech(" + json + ")", null);
+        });
     }
 
     @Override
@@ -145,6 +166,7 @@ public class MainActivity extends Activity {
             pendingFileCallback.onReceiveValue(null);
             pendingFileCallback = null;
         }
+        if (speech != null) speech.release();
         destroyWebView();
         super.onDestroy();
     }
@@ -179,7 +201,7 @@ public class MainActivity extends Activity {
             WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, false);
         }
 
-        wv.addJavascriptInterface(new AndroidBridge(this), "AndroidBridge");
+        wv.addJavascriptInterface(new AndroidBridge(this, speech), "AndroidBridge");
         wv.setWebViewClient(new ShellWebViewClient());
         wv.setWebChromeClient(new ShellChromeClient());
 
