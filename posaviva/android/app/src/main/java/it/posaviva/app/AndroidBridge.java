@@ -1,5 +1,6 @@
 package it.posaviva.app;
 
+import android.app.ActivityManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ContentResolver;
@@ -11,6 +12,7 @@ import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -24,6 +26,7 @@ import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -217,8 +220,11 @@ final class AndroidBridge {
     }
 
     /**
-     * JSON: {model, manufacturer, sdkInt, release, density, refreshRate, maxRefreshRate,
-     * widthPx, heightPx, appVersion, appVersionCode}.
+     * JSON: {model, manufacturer, brand, device, hardware, board, socModel, socManufacturer
+     * (Android 12+), sdkInt, release, density, refreshRate, maxRefreshRate, refreshRates[],
+     * widthPx, heightPx, smallestWidthDp, tablet, ramMB, lowRam, memoryClassMB, cores,
+     * thermalStatus (0 none .. 6 shutdown), powerSave, webView, appVersion, appVersionCode}.
+     * The page uses it to pick the device tier (render/device.js).
      */
     @JavascriptInterface
     public String getDeviceInfo() {
@@ -226,6 +232,14 @@ final class AndroidBridge {
         try {
             o.put("model", Build.MODEL);
             o.put("manufacturer", Build.MANUFACTURER);
+            o.put("brand", Build.BRAND);
+            o.put("device", Build.DEVICE);
+            o.put("hardware", Build.HARDWARE);
+            o.put("board", Build.BOARD);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                o.put("socModel", Build.SOC_MODEL);              // e.g. SM8750 (Snapdragon 8 Elite), MT6893
+                o.put("socManufacturer", Build.SOC_MANUFACTURER);
+            }
             o.put("sdkInt", Build.VERSION.SDK_INT);
             o.put("release", Build.VERSION.RELEASE);
             DisplayMetrics dm = app.getResources().getDisplayMetrics();
@@ -234,12 +248,43 @@ final class AndroidBridge {
             if (display != null) {
                 o.put("refreshRate", round2(display.getRefreshRate()));
                 float max = 0f;
-                for (Display.Mode m : display.getSupportedModes()) max = Math.max(max, m.getRefreshRate());
+                JSONArray rates = new JSONArray();
+                Display.Mode cur = display.getMode();
+                for (Display.Mode m : display.getSupportedModes()) {
+                    max = Math.max(max, m.getRefreshRate());
+                    if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight()) {
+                        rates.put(round2(m.getRefreshRate()));
+                    }
+                }
                 o.put("maxRefreshRate", round2(max));
+                o.put("refreshRates", rates);
             }
             Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
             o.put("widthPx", bounds.width());
             o.put("heightPx", bounds.height());
+            int sw = app.getResources().getConfiguration().smallestScreenWidthDp;
+            o.put("smallestWidthDp", sw);
+            o.put("tablet", sw >= 600);
+            ActivityManager am = app.getSystemService(ActivityManager.class);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                o.put("ramMB", mi.totalMem / (1024L * 1024L));
+                o.put("lowRam", am.isLowRamDevice());
+                o.put("memoryClassMB", am.getMemoryClass());
+            }
+            o.put("cores", Runtime.getRuntime().availableProcessors());
+            PowerManager pm = app.getSystemService(PowerManager.class);
+            if (pm != null) {
+                o.put("thermalStatus", pm.getCurrentThermalStatus());
+                o.put("powerSave", pm.isPowerSaveMode());
+            }
+            try {
+                PackageInfo wv = androidx.webkit.WebViewCompat.getCurrentWebViewPackage(app);
+                if (wv != null) o.put("webView", wv.versionName);
+            } catch (Throwable ignored) {
+                // informative only
+            }
             PackageInfo pi = app.getPackageManager().getPackageInfo(app.getPackageName(), 0);
             o.put("appVersion", pi.versionName);
             o.put("appVersionCode", pi.getLongVersionCode());
@@ -247,6 +292,17 @@ final class AndroidBridge {
             Log.w(TAG, "getDeviceInfo incomplete", t);
         }
         return o.toString();
+    }
+
+    /**
+     * Preferred display refresh rate for the app window: 0 = the fastest the panel offers
+     * (120 Hz on the S25 Ultra / Tab S9), otherwise the slowest supported rate that is at
+     * least {@code fps} (60 on mid-tier devices: less heat and battery). Remembered for
+     * the next start.
+     */
+    @JavascriptInterface
+    public void setPreferredFrameRate(float fps) {
+        activity.runOnUiThread(() -> activity.setPreferredFrameRate(fps));
     }
 
     // ---------------------------------------------------------------------------------

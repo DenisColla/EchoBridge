@@ -98,6 +98,11 @@ const P = {
   section: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M10 10v10"/>',
   arrowUp: '<path d="M12 19V5m0 0-6 6m6-6 6 6"/>',
   arrowDown: '<path d="M12 5v14m0 0-6-6m6 6 6-6"/>',
+  // tablets: stylus (S Pen settings), side panel wider / narrower
+  pen: '<path d="M15.5 4.5 19.5 8.5 9 19l-5 1 1-5z"/><path d="m13.5 6.5 4 4M5 15l4 4"/>',
+  // (the side panel is on the right: widening moves its edge to the left)
+  panelWide: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16M11.5 12h-5m0 0 2-2m-2 2 2 2"/>',
+  panelNarrow: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M11.5 12h5m0 0-2-2m2 2-2 2"/>',
 };
 
 export function icon(name, size = 22) {

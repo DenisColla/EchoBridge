@@ -69,6 +69,8 @@ async function boot() {
   app.history.reset();
 
   watchGpuContext(app);
+  // Android onTrimMemory / onLowMemory (MainActivity): modules drop caches, GPU buffers come back on demand
+  window.__onTrimMemory = (level) => { try { app.trimMemory(+level || 15); } catch (e) { console.warn('[PosaViva] trim memory failed', e); } };
   window.__pv = { app, shell, THREE, model, materials };
   revealWhenDrawn(app);
 }
@@ -81,24 +83,60 @@ async function boot() {
  * more than MAX_SPLASH_MS.
  */
 const MAX_SPLASH_MS = 3500;
+const SPLASH_BUILD_BUDGET_MS = 40; // nothing is drawn behind the splash: frames are pure garment building
 function revealWhenDrawn(app) {
   const loading = document.getElementById('pv-loading');
   if (!loading) return;
   let done = false;
+  // While the splash hides the canvas and garments are still building, frames only run the
+  // build (no drawing: a hidden half-dressed scene is wasted GPU time on every frame) with a
+  // larger time budget. Drawing resumes when the queue drains (the next frames compile the
+  // programs) or at the latest when the splash goes.
+  const mgr = app.clothing?.manager;
+  const budget0 = mgr && typeof mgr.budget === 'number' ? mgr.budget : null;
+  const resumeDrawing = () => {
+    if (!app.drawSuspended) return;
+    app.drawSuspended = false;
+    if (budget0 !== null && mgr.budget === SPLASH_BUILD_BUDGET_MS) mgr.budget = budget0;
+    app.invalidate();
+  };
   const reveal = () => {
     if (done) return;
     done = true;
+    resumeDrawing();
     loading.style.opacity = 0;
     setTimeout(() => loading.remove(), 450);
   };
   setTimeout(reveal, MAX_SPLASH_MS);
   const built = app.clothing?.whenIdle?.() || Promise.resolve();
-  built.then(() => {
-    // two complete frames after the build queue drained (the first one compiles the programs)
+  if (mgr && budget0 !== null) { app.drawSuspended = true; mgr.budget = SPLASH_BUILD_BUDGET_MS; }
+  // the driver compiles the programs of what already exists (body, hair, props) on its
+  // own threads while the garments build on the main thread
+  precompile(app);
+  built.then(async () => {
+    await precompile(app); // the garments' programs
+    resumeDrawing();
+    // two complete frames after the build queue drained (the first one links what is left)
     let frames = 0;
     const off = app.addAfterRenderHook(() => { if (++frames >= 2) { off(); requestAnimationFrame(reveal); } else app.invalidate(); });
     app.invalidate();
-  }, reveal);
+  }, () => { resumeDrawing(); reveal(); });
+}
+
+/**
+ * Parallel shader compilation (KHR_parallel_shader_compile, available on Adreno / Mali
+ * WebViews): compiles the scene's programs without blocking, so the first frames do not
+ * stall for each new material. Resolves when done (at most PRECOMPILE_MAX_MS); without the
+ * extension it does nothing (compileAsync would block just like the first frame).
+ */
+const PRECOMPILE_MAX_MS = 2500;
+function precompile(app) {
+  const r = app.renderer;
+  if (!r.compileAsync || !r.extensions.has('KHR_parallel_shader_compile') || app.contextLost) return Promise.resolve();
+  return Promise.race([
+    r.compileAsync(app.scene, app.camera).catch(() => {}),
+    new Promise((res) => setTimeout(res, PRECOMPILE_MAX_MS)),
+  ]);
 }
 
 /**

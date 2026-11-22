@@ -127,3 +127,21 @@
 @keyframes pvSpotRing { 0% { opacity: .9; transform: scale(.94); } 100% { opacity: 0; transform: scale(1.16); } }
 @keyframes pvSpotIn { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .pv-io-spot::after, .pv-io-gd-article.pv-enter { animation: none; } }
+
+/* ---------------------------------------------------------------- tablets: two-pane reader, larger type */
+html.pv-tablet .pv-modal-sheet .pv-modal-card.pv-io-guide { width: min(1120px, 100%); height: min(1000px, 100%); }
+html.pv-tablet .pv-io-gd.wide .pv-io-gd-index { flex-basis: min(370px, 38%); }
+html.pv-tablet .pv-io-gd.wide .pv-io-gd-topic { padding: 0 30px 28px; }
+html.pv-tablet .pv-io-gd-row-title { font-size: 15.5px; }
+html.pv-tablet .pv-io-gd-row-sub { font-size: 13px; }
+html.pv-tablet .pv-io-gd-title { font-size: 24px; }
+html.pv-tablet .pv-io-gd-summary { font-size: 15px; }
+html.pv-tablet .pv-io-gd-step { font-size: 16.5px; line-height: 1.6; }
+html.pv-tablet .pv-io-gd-tips li { font-size: 15px; }
+html.pv-tablet .pv-io-gd-art { height: 170px; }
+html.pv-tablet .pv-io-gd-welcome .pv-io-gd-art { height: 190px; }
+html.pv-tablet .pv-io-gd-qchip { height: 42px; font-size: 14px; }
+html.pv-tablet .pv-io-gd-relchip { min-height: 44px; font-size: 14px; }
+html.pv-tablet .pv-io-gd-go { height: 52px; font-size: 16px; }
+/* the reading column keeps a comfortable line length on the widest screens */
+html.pv-tablet .pv-io-gd.wide .pv-io-gd-article { max-width: 680px; }

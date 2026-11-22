@@ -20,6 +20,9 @@ const SIDES = ['L', 'R'];
 const DASH = [3, 4], DASH2 = [4, 4], NODASH = [];
 const RING_PX = { l: 70, m: 58, s: 44 };
 const HIT_RING = 20, HIT_BALL = 22, BALL_R = 13, HIT_EFF = 27, EFF_R = 13, HIT_DOT = 20;
+/** Hit radius scale per pointer type: a pen tip (S Pen) or a mouse is far more precise than a finger. */
+const HIT_SCALE = { pen: 0.55, mouse: 0.75 };
+const reach = (px, pointerType) => px * (HIT_SCALE[pointerType] || 1);
 const EFFECTORS = [
   { id: 'hand.L', color: '#b69bff' }, { id: 'hand.R', color: '#b69bff' },
   { id: 'foot.L', color: '#4fd1c5' }, { id: 'foot.R', color: '#4fd1c5' },
@@ -450,18 +453,18 @@ export class PoseGizmo {
   }
 
   // ------------------------------------------------------------ hit tests
-  /** nearest joint dot within reach (client px) */
-  hitDot(x, y) {
-    let best = null, bd = HIT_DOT;
+  /** nearest joint dot within reach (client px); pointerType 'pen' / 'mouse' reach less far */
+  hitDot(x, y, pointerType) {
+    let best = null, bd = reach(HIT_DOT, pointerType);
     for (const d of this.dots) { const dd = Math.hypot(d.x - x, d.y - y); if (dd < bd) { bd = dd; best = d; } }
     return best ? best.id : null;
   }
 
-  hitTest(x, y) {
+  hitTest(x, y, pointerType) {
     const mode = this.ctx.mode();
     if (mode === 'rotate') {
-      if (this.center.ok && Math.hypot(x - this.center.x, y - this.center.y) < HIT_BALL) return { kind: 'ball' };
-      let best = null, bd = HIT_RING;
+      if (this.center.ok && Math.hypot(x - this.center.x, y - this.center.y) < reach(HIT_BALL, pointerType)) return { kind: 'ball' };
+      let best = null, bd = reach(HIT_RING, pointerType);
       for (const ring of this.rings) {
         if (!ring.ok) continue;
         const d = this._distRing(ring, x, y);
@@ -469,7 +472,7 @@ export class PoseGizmo {
       }
       if (best) return { kind: 'ring', k: best.k, ring: best };
     } else if (mode === 'ik') {
-      let best = null, bd = HIT_EFF;
+      let best = null, bd = reach(HIT_EFF, pointerType);
       for (const e of this.effectors) { if (!e.ok) continue; const d = Math.hypot(e.x - x, e.y - y); if (d < bd) { bd = d; best = e; } }
       if (best) return { kind: 'effector', id: best.id };
     } else if (mode === 'line') {
@@ -523,10 +526,11 @@ export class PoseGizmo {
       const busy = downIds.size > 0;
       downIds.add(e.pointerId);
       if (this.drag) { if (e.pointerId !== this.drag.pointerId) e.stopImmediatePropagation(); return; }
-      if (busy || e.button > 0 || !this.ctx.isActive()) return;
+      // pen barrel (side) button held: the press orbits the camera (io/pen.js), no handle
+      if (busy || e.button > 0 || (e.pointerType === 'pen' && ((e.buttons & 2) || this.app.penBarrel)) || !this.ctx.isActive()) return;
       const ch = this.ctx.sel().character;
       if (!ch) return;
-      let hit = this.hitTest(e.clientX, e.clientY);
+      let hit = this.hitTest(e.clientX, e.clientY, e.pointerType);
       if (!hit && this.ctx.mode() === 'move') {
         // drag the character itself
         this.app.pointerToNDC(e, _ndc);

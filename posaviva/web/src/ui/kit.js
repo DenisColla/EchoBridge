@@ -155,6 +155,8 @@ export function swatches(opts) {
  */
 export function cardGrid(opts) {
   const el = h('div', { class: 'pv-cards', style: { gridTemplateColumns: `repeat(${opts.columns || 3}, minmax(0, 1fr))` } });
+  // tablets: a panel wider than a phone fits more columns of the same card size (tablet.css)
+  el.style.setProperty('--pv-cols', opts.columns || 3);
   const cards = opts.items.map((it) => {
     let visual = null;
     if (it.thumb instanceof HTMLCanvasElement) visual = it.thumb;

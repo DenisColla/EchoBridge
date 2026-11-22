@@ -130,6 +130,8 @@ export class VoiceUI {
       if (this.shell.panelOpen) this.shell.closePanel();
       this.panel.classList.add('open');
       this.fab.classList.add('hidden');
+      // tablets: docked in the side-panel slot (voice.css); the shell makes room for it
+      this.shell.setDock?.('voice', this.panel);
       this._popBack = this.app.pushBackHandler(() => { this.close(); return true; });
       this.getEngine().catch((e) => console.error('[voice] engine', e)); // warm up the vocabulary
     }
@@ -142,6 +144,7 @@ export class VoiceUI {
     if (this.speech.listening) this.speech.cancel();
     this.panel.classList.remove('open');
     this.fab.classList.remove('hidden');
+    this.shell.setDock?.('voice', null);
     this._popBack?.(); this._popBack = null;
     this.input.blur();
   }

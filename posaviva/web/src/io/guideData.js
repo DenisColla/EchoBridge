@@ -51,6 +51,11 @@ const hasVoice = (e) => typeof e.app?.voice?.open === 'function' || typeof e.app
 const hasMyPoses = (e) => hasProjects(e) && typeof e.app?.projects?.openSaveSheet === 'function' && e.tool('poselib');
 const hasAdjust = (e) => e.posing('dynamism') && e.posing('setNaturalness');
 const hasSoftSpine = (e) => e.poseState('softSpine');
+/** Tablets (Galaxy Tab: >= 700 px wide, both sides >= 600 px): rail + side panel in any orientation */
+const isTablet = (e) => !!e.shell?.tablet;
+const notTablet = (e) => !isTablet(e);
+/** S Pen options exist (io/pen.js) and matter: a tablet, or a pen already used on this device */
+const hasPen = (e) => !!e.app?.modules?.ui?.pen && (isTablet(e) || !!e.app.modules.ui.pen.state?.seen);
 
 export const TOPICS = [
   // ------------------------------------------------------------------ primi passi
@@ -59,19 +64,42 @@ export const TOPICS = [
     summary: 'Barra degli strumenti, pannello, tasti in alto',
     keywords: 'interfaccia barra strumenti pannello menu schede orizzontale verticale indietro chiudere',
     steps: [
-      'In basso c\'è la barra degli strumenti: **Personaggi**, **Posa**, **Aspetto**, **Scena**, **Camera**, **Stile**. Toccane uno per aprire il suo pannello.',
-      'Alcuni gruppi hanno più strumenti: li trovi come schede in cima al pannello (per esempio **Posa** › **Pose pronte** › **Mani** › **Viso**).',
-      'Trascina la maniglia del pannello in su o in giù per allargarlo o ridurlo; toccala per cambiare altezza. Trascinalo tutto in giù, o tocca [close], per chiuderlo.',
+      { t: 'In basso c\'è la barra degli strumenti: **Personaggi**, **Posa**, **Aspetto**, **Scena**, **Camera**, **Stile**. Toccane uno per aprire il suo pannello.', when: notTablet },
+      { t: 'Alcuni gruppi hanno più strumenti: li trovi come schede in cima al pannello (per esempio **Posa** › **Pose pronte** › **Mani** › **Viso**).', when: notTablet },
+      { t: 'Trascina la maniglia del pannello in su o in giù per allargarlo o ridurlo; toccala per cambiare altezza. Trascinalo tutto in giù, o tocca [close], per chiuderlo.', when: notTablet },
+      { t: 'A sinistra c\'è la colonna degli strumenti: **Personaggi**, **Posa**, **Aspetto**, **Scena**, **Camera**, **Stile**. Toccane uno per aprire il suo pannello a destra, accanto alla vista.', when: isTablet },
+      { t: 'Sotto il gruppo aperto compaiono i suoi strumenti (per esempio **Posa**: **Pose pronte**, **Mani**, **Viso**): toccane uno per passare a quello.', when: isTablet },
+      { t: 'Tocca [panelWide] in cima al pannello per allargarlo, oppure trascina il suo bordo sinistro. Tocca [close], o di nuovo il gruppo nella colonna, per chiuderlo e avere tutta la vista.', when: isTablet },
       'In alto a sinistra c\'è il personaggio selezionato: toccalo per aprire l\'elenco dei personaggi.',
       { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con **Progetti**, salvataggio, esportazione e impostazioni.', when: hasProjects },
       { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con scene, esportazione e impostazioni.', when: noProjects },
       { t: 'In basso sulla vista: a sinistra [mic] apre i **Comandi** vocali, a destra [zoom] lo zoom rapido.', when: hasVoice },
     ],
     tips: [
-      'Con il telefono in orizzontale gli strumenti diventano una colonna a sinistra e il pannello si apre a destra.',
+      { t: 'Con il telefono in orizzontale gli strumenti diventano una colonna a sinistra e il pannello si apre a destra.', when: notTablet },
+      { t: 'Quando la barra in alto ha spazio mostra anche [book] **Progetti**, [save] **Salva** ed [image] **Esporta**.', when: isTablet },
       'Il tasto Indietro di Android chiude prima menu e finestre, poi il pannello. Con niente aperto, premilo due volte per uscire.',
     ],
     go: { spot: 'toolbar' }, related: ['vista', 'annulla'],
+  },
+  {
+    id: 'penna', chapter: 'basi', icon: 'pen', title: 'Tablet e S Pen',
+    summary: 'Pannello laterale, penna di precisione, palmo appoggiato',
+    keywords: 'tablet galaxy tab s pen penna stilo palmo mano appoggiata tasto laterale pulsante evidenzia hover precisione pannello largo stretto',
+    when: hasPen,
+    steps: [
+      'Sul tablet gli strumenti sono nella colonna a sinistra e il pannello resta aperto a destra, accanto alla vista, in verticale e in orizzontale.',
+      'Per un pannello più largo tocca [panelWide] in cima al pannello, oppure trascina il suo bordo sinistro; tocca due volte il bordo per passare tra larghezza normale e ampia.',
+      'Con la **S Pen** tocca parti del corpo, articolazioni e anelli con precisione: la punta raggiunge anche dita e articolazioni piccole.',
+      'Avvicina la penna allo schermo senza toccarlo: con **Posa** o **Mani** aperti la parte del corpo sotto la punta si illumina di azzurro.',
+      'Tieni premuto il tasto laterale della penna e trascina: giri attorno alla scena anche sopra il personaggio, senza muovere anelli o parti.',
+      'Mentre la penna tocca o sfiora la vista puoi appoggiare il palmo sullo schermo: viene ignorato.',
+    ],
+    tips: [
+      'In [menu] › **Impostazioni** › **Penna (S Pen)**: **La penna non muove la vista** fa girare la vista solo con le dita (o con il tasto laterale), così un tratto di penna fuori dagli anelli non sposta l\'inquadratura.',
+      'Con il pannello largo le griglie di pose, oggetti, animali, edifici e paesaggi mostrano più colonne.',
+    ],
+    go: { action: 'openSettings', label: 'Apri Impostazioni' }, related: ['interfaccia', 'posa-ruota', 'vista'],
   },
   {
     id: 'vista', chapter: 'basi', icon: 'orbit', art: 'pinch', title: 'Muovere la vista',

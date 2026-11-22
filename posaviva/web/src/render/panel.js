@@ -109,7 +109,9 @@ export function buildStylePanel(el, ctx) {
   const aoAmount = slider({ label: 'Intensità AO', min: 0, max: 1.5, step: 0.01, value: S().aoIntensity, defaultValue: 0.8,
     format: (v) => Math.round(v * 100) + '%',
     onInput: (v) => ctx.set({ aoIntensity: v }), onChange: () => ctx.app.commit('occlusione') });
-  const lightSec = section('Resa', [exposure, aoToggle, aoAmount]);
+  // the quality preset may keep AO out of the moving image (Media) or the screen (Bassa)
+  const aoNote = h('div', { class: 'pv-note', style: { marginTop: '6px', fontSize: '12px', color: 'var(--muted)' } });
+  const lightSec = section('Resa', [exposure, aoToggle, aoAmount, aoNote]);
 
   // --- ink outlines
   const inkToggle = toggle({ label: 'Contorni a china', value: false, onChange: (v) => ctx.set({ outline: { [S().style]: v } }, { commit: 'contorni' }) });
@@ -166,8 +168,10 @@ export function buildStylePanel(el, ctx) {
   const sceneSec = section('Pavimento e ombre', [groundT, gridT, shadowT]);
 
   // --- quality / performance (device preferences, not part of the scene)
-  const qSeg = segmented({ options: Object.values(QUALITY).map((q) => ({ value: q.id, label: q.label })), value: ctx.getPrefs().quality, onChange: (v) => ctx.setQuality(v) });
-  const qInfo = h('div', { style: { fontSize: '12px', color: 'var(--muted)', margin: '8px 0 2px' } });
+  // 'Auto' follows the device tier (render/device.js); a level picked here is remembered
+  const qOpts = [{ value: 'auto', label: 'Auto' }, ...Object.values(QUALITY).map((q) => ({ value: q.id, label: q.label }))];
+  const qSeg = segmented({ options: qOpts, value: ctx.getPrefs().quality, onChange: (v) => ctx.setQuality(v) });
+  const qInfo = h('div', { style: { fontSize: '12px', color: 'var(--muted)', margin: '8px 0 2px', lineHeight: '1.45' } });
   const dynT = toggle({ label: 'Risoluzione dinamica durante i gesti', value: ctx.getPrefs().dynamic, onChange: (v) => ctx.setPref('dynamic', v) });
   const fpsT = toggle({ label: 'Mostra FPS', value: ctx.getPrefs().fps, onChange: (v) => ctx.setPref('fps', v) });
   const perfSec = section('Qualità e prestazioni', [qSeg, qInfo, dynT, fpsT], { collapsible: true });
@@ -183,6 +187,11 @@ export function buildStylePanel(el, ctx) {
     aoToggle.setValue(s.ao);
     aoAmount.setValue(s.aoIntensity);
     aoAmount.style.display = s.ao ? '' : 'none';
+    const qa = ctx.getQuality?.();
+    aoNote.textContent = !s.ao || !qa || qa.ao === 'on' ? ''
+      : qa.ao === 'rest' ? `Qualità ${qa.label}: l'occlusione compare quando l'immagine è ferma (gesti più fluidi).`
+        : `Qualità ${qa.label}: l'occlusione è calcolata solo nelle immagini esportate.`;
+    aoNote.style.display = aoNote.textContent ? '' : 'none';
     // ink
     const inkOn = !!s.outline[s.style];
     inkToggle.setValue(inkOn);
@@ -211,9 +220,18 @@ export function buildStylePanel(el, ctx) {
     groundT.setValue(s.ground); gridT.setValue(s.grid); shadowT.setValue(s.shadows);
     // prefs
     qSeg.setValue(p.quality);
-    const q = QUALITY[p.quality];
-    const pr = Math.min(window.devicePixelRatio || 1, q.prCap);
-    qInfo.textContent = `Risoluzione ${it(pr, pr % 1 ? 1 : 0)}× · ombre ${q.shadow}px · AO ${q.aoSamples} campioni`;
+    const q = ctx.getQuality ? ctx.getQuality() : QUALITY[p.quality] || QUALITY.alta;
+    const dev = ctx.device;
+    const pr = ctx.perf ? ctx.perf.basePixelRatio : Math.min(window.devicePixelRatio || 1, q.prCap);
+    const W = Math.round((window.innerWidth || 0) * pr), H = Math.round((window.innerHeight || 0) * pr);
+    const ao = q.ao === 'rest' ? 'AO a riposo' : q.ao === 'off' ? 'AO solo export' : `AO ${q.aoSamples} campioni`;
+    const fps = ctx.app.frameRateCap ? `max ${ctx.app.frameRateCap} fps` : 'fps pieni';
+    const rec = dev ? QUALITY[dev.quality]?.label : null;
+    const head = p.quality === 'auto'
+      ? `Automatica: ${q.label}${dev ? ` (dispositivo di ${ctx.TIER_LABEL?.[dev.tier] || dev.tier})` : ''}`
+      : `Scelta manuale: ${q.label}${rec ? ` · consigliata ${rec}` : ''}`;
+    qInfo.textContent = `${head}\n${W}×${H} px (${it(pr, 2)}×) · ombre ${q.shadow}px · ${ao} · ${fps}`;
+    qInfo.style.whiteSpace = 'pre-line';
     dynT.setValue(p.dynamic); fpsT.setValue(p.fps);
   }
   sync();

@@ -310,11 +310,13 @@ export function openExport(ctx, { share = false } = {}) {
 }
 
 // ---------------------------------------------------------------- settings
-export const QUALITY_OPTS = [{ value: 'alta', label: 'Alta' }, { value: 'media', label: 'Media' }, { value: 'bassa', label: 'Bassa' }];
-export const QUALITY_CAP = { alta: 2, media: 1.5, bassa: 1 };
+export const QUALITY_OPTS = [{ value: 'auto', label: 'Auto' }, { value: 'alta', label: 'Alta' }, { value: 'media', label: 'Media' }, { value: 'bassa', label: 'Bassa' }];
+export const QUALITY_CAP = { auto: 2, alta: 2, media: 1.5, bassa: 1 };
 
 export function currentQuality(ctx) {
-  return ctx.app.modules.render?.prefs?.quality || ctx.settings.get('quality') || 'alta';
+  const rp = ctx.app.modules.render?.prefs;
+  if (rp) return rp.auto ? 'auto' : (rp.quality || 'alta');
+  return ctx.settings.get('quality') || 'auto';
 }
 
 /** Applies a quality level (render module when present, else a pixel-ratio cap). */
@@ -349,7 +351,7 @@ export function openSettings(ctx) {
     section('Grafica', [
       h('div', { class: 'pv-io-setting-label' }, icon('gauge', 20), h('span', {}, 'Qualità di resa')),
       segmented({ options: QUALITY_OPTS, value: currentQuality(ctx), onChange: (v) => { haptic('tick'); applyQuality(ctx, v); } }),
-      h('p', { class: 'pv-io-note' }, 'Alta: massimo dettaglio. Bassa: più fluida e consuma meno batteria.'),
+      h('p', { class: 'pv-io-note' }, 'Auto: sceglie da sola in base al dispositivo. Alta: massimo dettaglio. Media: 60 fps, occlusione a riposo. Bassa: più fluida e consuma meno batteria.'),
     ]),
     section('Interazione', [
       settingToggle('vibrate', 'Vibrazione', 'Piccolo feedback al tocco', settings.get('haptics') !== false, (v) => { settings.set('haptics', v); if (v) haptic('medium'); }),
@@ -359,6 +361,13 @@ export function openSettings(ctx) {
         ? row('mic', 'Comandi vocali', 'Lingua, modalità offline / ibrida, chiave API Claude', 'Apri', () => { m.close(null); setTimeout(() => voice.openSettings(), 0); })
         : null,
     ]),
+    // tablets / a pen already used here: S Pen options (io/pen.js)
+    ctx.pen && (ctx.shell?.tablet || ctx.pen.state.seen) ? section('Penna (S Pen)', [
+      settingToggle('hand', 'Ignora il palmo', 'Mentre la penna tocca o sfiora la vista, le dita e il palmo appoggiati non contano', ctx.pen.opt('penPalm'), (v) => ctx.pen.setOption('penPalm', v)),
+      settingToggle('orbit', 'Tasto laterale: ruota la vista', 'Tieni premuto il tasto della penna e trascina per girare attorno alla scena', ctx.pen.opt('penBarrel'), (v) => ctx.pen.setOption('penBarrel', v)),
+      settingToggle('pen', 'La penna non muove la vista', 'La penna serve solo a posare: la vista si gira con le dita (o con il tasto laterale)', ctx.pen.opt('penNoOrbit'), (v) => ctx.pen.setOption('penNoOrbit', v)),
+      settingToggle('eye', 'Evidenzia la parte sotto la penna', 'In Posa e Mani, la parte del corpo sotto la punta si illumina prima del tocco', ctx.pen.opt('penHover'), (v) => ctx.pen.setOption('penHover', v)),
+    ]) : null,
     section('Lingua', [
       h('div', { class: 'pv-io-setting-row static' }, icon('globe', 20), h('div', { class: 'pv-io-setting-text' }, h('span', {}, 'Lingua dell\'app'), h('small', {}, 'Altre lingue in arrivo')), h('span', { class: 'pv-io-setting-value' }, 'Italiano')),
     ]),

@@ -33,7 +33,18 @@ export class TopBar {
     this.helpBtn = iconButton({ icon: 'help', title: 'Guida', onClick: () => { haptic('tick'); ctx.actions.openGuide({ context: true }); } });
     this.helpBtn.classList.add('pv-io-help-btn');
     this.undo.disabled = this.redo.disabled = true;
-    shell.topRight.append(h('div', { class: 'pv-io-history' }, this.undo, this.redo), h('div', { class: 'pv-io-pill' }, this.helpBtn, this.menuBtn));
+    // tablets: the most used menu actions stay in sight (io.css shows them when the bar has room:
+    // icons from 600 px of bar, with labels from 860 px; phones never show them)
+    const quick = (ic, label, title, fn) => {
+      const b = h('button', { type: 'button', class: 'pv-io-qbtn', title, 'aria-label': title }, icon(ic, 21), h('span', { class: 'pv-io-qlabel' }, label));
+      b.addEventListener('click', () => { haptic('tick'); fn(); });
+      return b;
+    };
+    this.quick = h('div', { class: 'pv-io-quick' },
+      quick('book', 'Progetti', 'Progetti', () => ctx.actions.openProjects()),
+      quick('save', 'Salva', 'Salva scena', () => ctx.actions.saveScene()),
+      quick('image', 'Esporta', 'Esporta immagine', () => ctx.actions.exportImage(false)));
+    shell.topRight.append(this.quick, h('div', { class: 'pv-io-history' }, this.undo, this.redo), h('div', { class: 'pv-io-pill' }, this.helpBtn, this.menuBtn));
 
     app.addEventListener('history', (e) => { this.undo.disabled = !e.canUndo; this.redo.disabled = !e.canRedo; });
     for (const ev of ['selection', 'characters', 'loaded']) app.addEventListener(ev, () => this.refresh());

@@ -60,3 +60,6 @@
 .pv-sc-status { min-height: 16px; }
 .pv-sc-wrapchips { flex-wrap: wrap; overflow: visible; }
 .pv-sc-wrapchips .pv-chip { min-height: 38px; }
+
+/* tablets: >= 44 px touch targets (ui/tablet.css) */
+html.pv-tablet .pv-sc-tab { min-height: 44px; font-size: 14px; }

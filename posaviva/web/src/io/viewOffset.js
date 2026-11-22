@@ -38,7 +38,7 @@ export class ViewOffset {
     shell.addEventListener('layout', (e) => this.update({ live: e.live }));
     app.addEventListener('resize', () => this._apply());
     app.addEventListener('selection', () => {
-      if (!this.shell.panelOpen || performance.now() < this._holdUntil) return;
+      if (!this._covered() || performance.now() < this._holdUntil) return;
       // let a framing tween (e.g. after adding a character) start first
       clearTimeout(this._selT);
       this._selT = setTimeout(() => this.update({ keepIfVisible: true }), 90);
@@ -52,7 +52,7 @@ export class ViewOffset {
       if (this._propsHooked || !app.props?.addEventListener) return;
       this._propsHooked = true;
       app.props.addEventListener('select', () => {
-        if (!this.shell.panelOpen || this.shell.activeToolId !== 'props') return;
+        if (!this._covered() || this.shell.activeToolId !== 'props') return;
         clearTimeout(this._selT);
         this._selT = setTimeout(() => this.update({ keepIfVisible: true }), 60);
       });
@@ -64,7 +64,7 @@ export class ViewOffset {
     this._shapeCh = null;
     this._shapeT = 0;
     this._onShape = () => {
-      if (!this.shell.panelOpen) return;
+      if (!this._covered()) return;
       clearTimeout(this._shapeT);
       this._shapeT = setTimeout(() => this.update({ keepIfVisible: true }), 250);
     };
@@ -81,6 +81,9 @@ export class ViewOffset {
     this._basePan = null;
     app.addRenderHook(() => this._tick());
   }
+
+  /** A tool panel or (tablets) a docked panel such as the voice commands covers part of the view. */
+  _covered() { return this.shell.viewCovered ?? this.shell.panelOpen; }
 
   /** True while a non-identity offset is applied. */
   get active() { return !!this.camera.view?.enabled; }
@@ -108,7 +111,7 @@ export class ViewOffset {
   /** Full refit after ms (e.g. once a framing tween has ended). */
   refreshAfter(ms) {
     clearTimeout(this._refreshT);
-    this._refreshT = setTimeout(() => { if (this.shell.panelOpen) this.update(); }, ms);
+    this._refreshT = setTimeout(() => { if (this._covered()) this.update(); }, ms);
   }
 
   /**
@@ -162,7 +165,7 @@ export class ViewOffset {
 
   // ---------------------------------------------------------------- target
   _computeTarget(keepIfVisible) {
-    if (!this.enabled || !this.shell.panelOpen) return { s: 1, ox: 0, oy: 0 };
+    if (!this.enabled || !this._covered()) return { s: 1, ox: 0, oy: 0 };
     const W = this.app.canvas.clientWidth, H = this.app.canvas.clientHeight;
     if (!W || !H) return null;
     const ins = this.shell.getViewInsets();

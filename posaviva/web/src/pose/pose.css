@@ -77,3 +77,6 @@
 /* hands */
 .pv-pose-actions.pv-pose-view { margin: 10px 0 12px; }
 .pv-pose-hand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+
+/* tablets: >= 44 px touch targets (ui/tablet.css) */
+html.pv-tablet .pv-pose-map-btn { min-height: 44px; font-size: 14px; }

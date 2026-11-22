@@ -10,6 +10,9 @@ let _uid = 0;
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const _m1 = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
 const _q1 = new THREE.Quaternion();
+const _m1c = new THREE.Matrix4(), _boxC = new THREE.Box3(), _vC = new THREE.Vector3();
+/** cull sphere margin around the joints (rig units = m): head top / hair, fingertips, skirts, soles */
+const CULL_MARGIN = 0.4;
 
 export const DEFAULT_APPEARANCE = {
   skin: '#e0b49a',
@@ -131,6 +134,10 @@ export class Character extends THREE.EventDispatcher {
     this.rootOffset = new THREE.Vector3();
     this.jointPositions = new Map();
     this.skeleton = new THREE.Skeleton(this.bones, this.restGlobal.map(() => new THREE.Matrix4()));
+    // Frustum culling: every skinned mesh of the character (body, eyes, garments, hair…)
+    // shares this rig-space sphere, refitted to the posed joints in applyPose(). three.js
+    // would otherwise either never cull them or compute a sphere from every skinned vertex.
+    this._cullSphere = new THREE.Sphere(new THREE.Vector3(0, 0.9, 0), 1.6);
     this.skinMatrices = new Float32Array(NB * 16); // rig-space skinning matrices (bone * inverse)
 
     this._buildBodyMesh();
@@ -192,7 +199,7 @@ export class Character extends THREE.EventDispatcher {
     geo.setIndex(new THREE.BufferAttribute(this._IndexArray.from(idx), 1));
     const mesh = new THREE.SkinnedMesh(geo, []);
     mesh.name = 'body';
-    mesh.frustumCulled = false;
+    this._cullWithSkeleton(mesh);
     mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.character = this;
     mesh.userData.pickable = true;
@@ -253,7 +260,7 @@ export class Character extends THREE.EventDispatcher {
     geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
     const mesh = new THREE.SkinnedMesh(geo, []);
     mesh.name = 'eyes';
-    mesh.frustumCulled = false;
+    this._cullWithSkeleton(mesh);
     mesh.userData.character = this;
     mesh.bind(this.skeleton, new THREE.Matrix4());
     this.rig.add(mesh);
@@ -678,9 +685,30 @@ export class Character extends THREE.EventDispatcher {
       bone.quaternion.copy(this.restLocalQuat[i]).multiply(this.poseQuat[i]);
     }
     this.rig.updateMatrixWorld(true);
+    this._fitCullSphere();
     this._skinnedDirty = true;
     this._updateCorrectiveDrivers();
     this.dispatchEvent({ type: 'pose' });
+  }
+
+  /**
+   * Culls a skinned mesh with the character's joint sphere (rig space). Only meshes
+   * drawn in rig space qualify (identity local transform): others are never culled.
+   */
+  _cullWithSkeleton(mesh) {
+    const ok = Character.frustumCulling && mesh.isSkinnedMesh && mesh.position.lengthSq() === 0
+      && mesh.quaternion.w === 1 && mesh.scale.x === 1 && mesh.scale.y === 1 && mesh.scale.z === 1;
+    if (ok) { mesh.boundingSphere = this._cullSphere; mesh.frustumCulled = true; } else mesh.frustumCulled = false;
+  }
+
+  /** Refits the cull sphere to the posed joints (+ room for skin, hair, flared garments, fingertips). */
+  _fitCullSphere() {
+    _m1c.copy(this.rig.matrixWorld).invert();
+    _boxC.makeEmpty();
+    for (const b of this.bones) _boxC.expandByPoint(_vC.setFromMatrixPosition(b.matrixWorld).applyMatrix4(_m1c));
+    if (_boxC.isEmpty()) return;
+    _boxC.getCenter(this._cullSphere.center);
+    this._cullSphere.radius = _boxC.getSize(_vC).length() * 0.5 + CULL_MARGIN;
   }
 
   /** Raise the whole body (e.g. shoe sole thickness) without rebuilding the shape. */
@@ -839,7 +867,7 @@ export class Character extends THREE.EventDispatcher {
   // ------------------------------------------------------------ attachments
   /** Adds a SkinnedMesh (geometry in rig rest space, skinIndex/skinWeight using this.bones). */
   addAttachment(mesh) {
-    mesh.frustumCulled = false;
+    this._cullWithSkeleton(mesh);
     mesh.userData.character = this;
     if (mesh.isSkinnedMesh) mesh.bind(this.skeleton, new THREE.Matrix4());
     this.rig.add(mesh);
@@ -905,3 +933,6 @@ export class Character extends THREE.EventDispatcher {
     _live.delete(this);
   }
 }
+
+/** Frustum culling of characters with their joint sphere (false = never cull, as before). */
+Character.frustumCulling = true;

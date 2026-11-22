@@ -2,15 +2,23 @@ package it.posaviva.app;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.AlertDialog;
+import android.content.pm.PackageInfo;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ComponentCallbacks2;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.Display;
 import android.view.View;
@@ -55,6 +63,9 @@ import java.util.Locale;
  *     + CSS vars --safe-top/right/bottom/left and --gesture-left/right
  *     (gesture* = width of the system back-gesture zones at the screen edges, 0 with
  *      3-button navigation: a horizontal drag that starts there is taken by the system)
+ *   window.__onTrimMemory(level)  -> onTrimMemory / onLowMemory: the page drops caches
+ *   window.__onDeviceState({thermal, powerSave}) -> heat / battery saver: lower fps, resolution
+ *   AndroidBridge.setPreferredFrameRate(fps) <- the page's quality preset (0 = fastest panel rate)
  */
 public class MainActivity extends Activity {
     private static final String TAG = "PosaViva";
@@ -86,6 +97,20 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> pendingFileCallback;
     private String insetsJson = "{\"top\":0,\"right\":0,\"bottom\":0,\"left\":0,\"gestureLeft\":0,\"gestureRight\":0}";
     private int imePaddingPx = -1;
+    private static final String PREFS = "posaviva.shell";
+    /**
+     * Oldest WebView (Chromium major) that runs the web app: the bundled three.js r187 uses
+     * class static blocks (Chrome 94). Older WebViews would fail on the first script and
+     * leave the splash on screen, so the user is sent to the Play Store instead.
+     */
+    static final int MIN_WEBVIEW_MAJOR = 94;
+    /** frame rate asked by the page (0 = fastest), remembered so the next start uses it at once */
+    private float preferredFps = 0f;
+    /** total RAM (MB): decides how hard the WebView renderer holds on to memory */
+    private long ramMB = 0;
+    private PowerManager powerManager;
+    private PowerManager.OnThermalStatusChangedListener thermalListener;
+    private BroadcastReceiver powerSaveReceiver;
 
     // ---------------------------------------------------------------------------------
     // Lifecycle
@@ -93,12 +118,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        preferredFps = getSharedPreferences(PREFS, MODE_PRIVATE).getFloat("fps", 0f);
+        ActivityManager am = getSystemService(ActivityManager.class);
+        if (am != null) {
+            ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(mi);
+            ramMB = mi.totalMem / (1024L * 1024L);
+        }
 
         Window window = getWindow();
         enableEdgeToEdge(window);
         WindowManager.LayoutParams lp = window.getAttributes();
         lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
-        applyHighestRefreshRate(lp);                        // 120 Hz on the S25 Ultra
+        applyRefreshRate(lp);                               // 120 Hz on the S25 Ultra / Tab S9, 60 on mid tier
         window.setAttributes(lp);
 
         root = new FrameLayout(this);
@@ -112,7 +144,8 @@ public class MainActivity extends Activity {
         assetServer = new AssetServer(this);
         speech = new SpeechBridge(this, this::emitSpeech);
         createWebView();
-        webView.loadUrl(AssetServer.START_URL);
+        if (checkWebViewVersion()) webView.loadUrl(AssetServer.START_URL);
+        watchDeviceState();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             backCallback = this::handleBack;
@@ -124,7 +157,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (webView != null) webView.onResume();
+        if (webView != null) {
+            webView.onResume();
+            webView.getSettings().setOffscreenPreRaster(preRasterWanted());
+        }
         enterImmersive();
     }
 
@@ -167,8 +203,134 @@ public class MainActivity extends Activity {
             pendingFileCallback = null;
         }
         if (speech != null) speech.release();
+        unwatchDeviceState();
         destroyWebView();
         super.onDestroy();
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Memory, heat, battery
+
+    /**
+     * Memory pressure: the page drops caches (screen render targets, materials of styles not
+     * shown, thumbnails); in the background it also releases its big GPU buffers, which lowers
+     * the chance that Android kills the WebView renderer (the scene is autosaved anyway).
+     */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) notifyTrim(level);
+        if (webView != null && (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+                || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)) {
+            webView.getSettings().setOffscreenPreRaster(false);   // restored in onResume
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        notifyTrim(ComponentCallbacks2.TRIM_MEMORY_COMPLETE);
+    }
+
+    private void notifyTrim(int level) {
+        if (webView != null) webView.evaluateJavascript("window.__onTrimMemory&&window.__onTrimMemory(" + level + ")", null);
+    }
+
+    /**
+     * True when the installed WebView can run the app. Otherwise shows a dialog that opens
+     * the Play Store page of Android System WebView ("Prova comunque" loads the app anyway).
+     */
+    private boolean checkWebViewVersion() {
+        String version = null;
+        int major = Integer.MAX_VALUE;
+        try {
+            PackageInfo pi = WebViewCompat.getCurrentWebViewPackage(this);
+            if (pi != null && pi.versionName != null) {
+                version = pi.versionName;
+                major = Integer.parseInt(version.split("\\.")[0].trim());
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot read the WebView version", e);
+        }
+        if (major >= MIN_WEBVIEW_MAJOR) return true;
+        Log.w(TAG, "WebView too old: " + version);
+        final String pkg = WebViewCompat.getCurrentWebViewPackage(this) != null
+                ? WebViewCompat.getCurrentWebViewPackage(this).packageName : "com.google.android.webview";
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.webview_old_title)
+                .setMessage(getString(R.string.webview_old_text, version, MIN_WEBVIEW_MAJOR))
+                .setCancelable(false)
+                .setPositiveButton(R.string.webview_old_update, (d, w) -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + pkg)));
+                    } catch (ActivityNotFoundException e) {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=" + pkg)));
+                    }
+                    finish();
+                })
+                .setNegativeButton(R.string.webview_old_try, (d, w) -> {
+                    if (webView != null) webView.loadUrl(AssetServer.START_URL);
+                })
+                .show();
+        return false;
+    }
+
+    /** Thermal status (API 29+) and battery saver -> window.__onDeviceState. */
+    private void watchDeviceState() {
+        powerManager = getSystemService(PowerManager.class);
+        if (powerManager == null) return;
+        thermalListener = status -> pushDeviceState();
+        try {
+            powerManager.addThermalStatusListener(getMainExecutor(), thermalListener);
+        } catch (RuntimeException e) {
+            thermalListener = null;
+        }
+        powerSaveReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                pushDeviceState();
+            }
+        };
+        IntentFilter filter = new IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(powerSaveReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(powerSaveReceiver, filter);
+        }
+    }
+
+    private void unwatchDeviceState() {
+        if (powerManager != null && thermalListener != null) {
+            try {
+                powerManager.removeThermalStatusListener(thermalListener);
+            } catch (RuntimeException ignored) {
+                // already gone
+            }
+        }
+        thermalListener = null;
+        if (powerSaveReceiver != null) {
+            try {
+                unregisterReceiver(powerSaveReceiver);
+            } catch (RuntimeException ignored) {
+                // not registered
+            }
+            powerSaveReceiver = null;
+        }
+    }
+
+    private void pushDeviceState() {
+        if (webView == null || powerManager == null) return;
+        String js = String.format(Locale.US, "window.__onDeviceState&&window.__onDeviceState({thermal:%d,powerSave:%b})",
+                powerManager.getCurrentThermalStatus(), powerManager.isPowerSaveMode());
+        webView.evaluateJavascript(js, null);
+    }
+
+    /**
+     * Rasterise the (small) DOM layers while the WebView is off screen (recents, split screen
+     * transitions): it comes back without a blank flash. Skipped on devices with little RAM.
+     */
+    private boolean preRasterWanted() {
+        return ramMB == 0 || ramMB >= 5000;
     }
 
     // ---------------------------------------------------------------------------------
@@ -181,7 +343,11 @@ public class MainActivity extends Activity {
         wv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         wv.setVerticalScrollBarEnabled(false);
         wv.setHorizontalScrollBarEnabled(false);
-        wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
+        // The renderer (WebGL scene) keeps an important priority while visible. With 8 GB of
+        // RAM or more (S25 Ultra, Tab S9 / S9+, Nord 2 8-12 GB) it also keeps it in the
+        // background, so switching to a drawing app and back does not reload the scene; on
+        // smaller devices (Tab S6 6 GB) it is waived in the background, as Android advises.
+        wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, ramMB > 0 && ramMB < 7000);
 
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
@@ -196,6 +362,11 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setSupportMultipleWindows(false);
         s.setUserAgentString(s.getUserAgentString() + " PosaVivaAndroid/" + versionName());
+        s.setOffscreenPreRaster(preRasterWanted());
+        // Everything is served from the APK by AssetServer: no HTTP cache needed.
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        // GPU compositing is on (application hardwareAccelerated="true"). The WebView keeps the
+        // default LAYER_TYPE_NONE: a hardware layer would add an extra full-screen copy per frame.
         if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
             // Never let the system "force dark" recolour the 3D app's UI.
             WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, false);
@@ -256,6 +427,7 @@ public class MainActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             pushInsets();
+            pushDeviceState();
         }
 
         @Override
@@ -464,32 +636,47 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Asks for the fastest refresh rate available at the current resolution (120 Hz on the
-     * S25 Ultra). Only the rate is requested, never a display mode id: a mode id also pins
-     * the resolution, so after the user switches FHD+/QHD+ in Settings (the activity is
-     * kept, see configChanges) the window would force the old resolution back.
-     * Returns true when the window attributes changed.
+     * Asks for the refresh rate wanted by the page at the current resolution: the fastest
+     * the panel offers (120 Hz on the S25 Ultra / Tab S9 / S9+) when preferredFps is 0,
+     * otherwise the slowest supported rate >= preferredFps (60 Hz on mid-tier devices such
+     * as the Nord 2, whose 90 Hz panel would only spend battery and heat). Only the rate is
+     * requested, never a display mode id: a mode id also pins the resolution, so after the
+     * user switches FHD+/QHD+ in Settings (the activity is kept, see configChanges) the
+     * window would force the old resolution back. Returns true when the attributes changed.
      */
-    private boolean applyHighestRefreshRate(WindowManager.LayoutParams lp) {
+    private boolean applyRefreshRate(WindowManager.LayoutParams lp) {
         try {
             Display display = getDisplay();
             if (display == null) return false;
             Display.Mode current = display.getMode();
-            float best = current.getRefreshRate();
+            float best = 0f, fit = Float.MAX_VALUE;
             for (Display.Mode m : display.getSupportedModes()) {
-                if (m.getPhysicalWidth() == current.getPhysicalWidth()
-                        && m.getPhysicalHeight() == current.getPhysicalHeight()) {
-                    best = Math.max(best, m.getRefreshRate());
-                }
+                if (m.getPhysicalWidth() != current.getPhysicalWidth()
+                        || m.getPhysicalHeight() != current.getPhysicalHeight()) continue;
+                float r = m.getRefreshRate();
+                best = Math.max(best, r);
+                if (preferredFps > 0 && r >= preferredFps - 0.5f) fit = Math.min(fit, r);
             }
-            if (lp.preferredDisplayModeId == 0 && Math.abs(lp.preferredRefreshRate - best) < 0.01f) return false;
+            if (best <= 0) best = current.getRefreshRate();
+            float rate = preferredFps > 0 ? (fit < Float.MAX_VALUE ? fit : best) : best;
+            if (lp.preferredDisplayModeId == 0 && Math.abs(lp.preferredRefreshRate - rate) < 0.01f) return false;
             lp.preferredDisplayModeId = 0;
-            lp.preferredRefreshRate = best;
+            lp.preferredRefreshRate = rate;
             return true;
         } catch (RuntimeException e) {
             Log.w(TAG, "Cannot select refresh rate", e);
             return false;
         }
+    }
+
+    /** Called by AndroidBridge.setPreferredFrameRate on the UI thread. */
+    void setPreferredFrameRate(float fps) {
+        float f = Float.isNaN(fps) || fps < 0 ? 0f : fps;
+        if (Math.abs(f - preferredFps) < 0.01f) return;
+        preferredFps = f;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat("fps", f).apply();
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (applyRefreshRate(lp)) getWindow().setAttributes(lp);
     }
 
     @Override
@@ -498,7 +685,7 @@ public class MainActivity extends Activity {
         // Resolution, density or display changes keep this activity (configChanges):
         // re-pick the refresh rate for the new mode list.
         WindowManager.LayoutParams lp = getWindow().getAttributes();
-        if (applyHighestRefreshRate(lp)) getWindow().setAttributes(lp);
+        if (applyRefreshRate(lp)) getWindow().setAttributes(lp);
     }
 
     private String versionName() {

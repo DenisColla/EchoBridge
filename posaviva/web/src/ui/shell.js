@@ -7,12 +7,22 @@
 //
 // Layout API (used by the io module to keep the 3D view centered in the
 // uncovered area, and by anything that positions floating UI):
-//   shell.mode                     'sheet' (portrait phone) | 'side' (landscape / wide)
+//   shell.mode                     'sheet' (portrait phone) | 'side' (landscape / wide / tablets)
+//   shell.tier                     'phone' | 'tablet' (>= 700 px wide, both sides >= 600 px: portrait or
+//                                  split screen) | 'tablet-wide' (landscape >= 1000 px); shell.tablet (bool)
 //   shell.sheetSnap                'peek' | 'half' | 'full' (portrait sheet height), shell.setSheetSnap(name)
+//   shell.sideWidth / shell.sideWidths() / shell.setSideWidth(px | 'normal' | 'wide' | 'toggle')
+//                                  tablets: side panel width (two presets + drag on the panel edge, remembered per tier)
+//   shell.setDock(id, el | null)   tablets: a floating panel (e.g. the voice panel) docked in the side-panel slot
+//                                  counts as covering the view; shell.viewCovered = tool panel or dock open
 //   shell.getViewInsets()          {top, right, bottom, left} CSS px of the canvas covered by opaque UI
 //   shell.addEventListener('layout', e => e.live)  fired on open/close/snap/drag/resize (live = while dragging)
 //   app event 'uilayout' {insets, live}            same, on the app
-// CSS vars on <html>: --cover-top/right/bottom/left (px), --pv-free-cx (center of the free area, px).
+// CSS vars on <html>: --cover-top/right/bottom/left (px), --pv-free-cx (center of the free area, px),
+// --side-w (tablets: side panel width). Classes on #app and <html>: pv-tablet, pv-tablet-wide (tablet tiers).
+// On tablets the sub-tools of the active group are listed in the rail under the group
+// (the panel header then shows the tool title); without room they fall back to header chips.
+import './tablet.css';
 import { h, icon, iconButton, hasOpenLayer, closeTopLayer, haptic, toast } from './kit.js';
 
 /** Toolbar groups. A tool declares `group`; a group with several tools shows sub-tabs. */
@@ -30,8 +40,17 @@ const SNAPS = { peek: 0.31, half: 0.47, full: 1 };
 const SNAP_ORDER = ['peek', 'half', 'full'];
 const SNAP_KEY = 'posaviva.ui.sheet';
 const SIDE_QUERY = '(orientation: landscape) and (min-width: 700px)';
+/** Tablets (Galaxy Tab S6 / S9 / S9+ in either orientation, or a big split-screen window): side layout. */
+const TABLET_QUERY = '(min-width: 700px) and (min-height: 600px)';
+/** Wide tablets (landscape, 1280 x 800 and up): wider rail and panel. */
+const TABLET_WIDE_QUERY = '(min-width: 1000px) and (min-height: 600px) and (orientation: landscape)';
+/** Rail width per tier (CSS px): keep in sync with --rail-w in tablet.css. */
+const RAIL_W = { tablet: 88, 'tablet-wide': 96 };
+const SIDE_KEY = 'posaviva.ui.side';
+const SIDE_MIN = 320;
 /** Free view (CSS px) below which the floating buttons (mic, quick zoom) are hidden: two 48 px buttons + margins side by side, room above the sheet. */
 const FAB_MIN_FREE_H = 230, FAB_MIN_FREE_W = 150;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 export class Shell extends EventTarget {
   constructor(app, root) {
@@ -59,21 +78,34 @@ export class Shell extends EventTarget {
     this.subTabs.addEventListener('scroll', () => this._subTabsFade(), { passive: true });
     // a hairline under the header once the content scrolls beneath it
     this.panelBody.addEventListener('scroll', () => this.panel.classList.toggle('scrolled', this.panelBody.scrollTop > 2), { passive: true });
-    this.panelHead = h('div', { class: 'pv-panel-head' }, this.panelTitle, this.subTabs, closeBtn);
-    this.panel = h('div', { class: 'pv-panel', role: 'region', 'aria-label': 'Strumenti' }, this.handle, this.panelHead, this.panelBody);
+    // tablets: panel width (two presets; the left edge of the panel can also be dragged)
+    this.widthBtn = iconButton({ icon: 'panelWide', title: 'Pannello più largo', variant: 'ghost', onClick: () => { if (this._suppressClick) return; haptic('tick'); this.setSideWidth('toggle'); } });
+    this.widthBtn.classList.add('pv-panel-width');
+    this.grip = h('div', { class: 'pv-panel-grip', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Larghezza del pannello', title: 'Trascina per allargare o restringere il pannello' }, h('span'));
+    this.panelHead = h('div', { class: 'pv-panel-head' }, this.panelTitle, this.subTabs, this.widthBtn, closeBtn);
+    this.panel = h('div', { class: 'pv-panel', role: 'region', 'aria-label': 'Strumenti' }, this.handle, this.grip, this.panelHead, this.panelBody);
     this.toolbar = h('nav', { class: 'pv-toolbar', 'aria-label': 'Strumenti' });
     // measures env(safe-area-inset-*) / the --safe-* vars injected by the Android shell
     this._probe = h('div', { class: 'pv-safe-probe', 'aria-hidden': 'true' });
     root.append(this.viewport, this.overlay, this.topBar, this.hintEl, this.panel, this.toolbar, this._probe);
 
     this._mq = window.matchMedia(SIDE_QUERY);
+    this._mqTab = window.matchMedia(TABLET_QUERY);
+    this._mqWide = window.matchMedia(TABLET_WIDE_QUERY);
     let snap = 'half';
     try { snap = localStorage.getItem(SNAP_KEY) || 'half'; } catch { /* private mode */ }
     this.sheetSnap = SNAP_ORDER.includes(snap) ? snap : 'half';
     this._sheetPx = 0; // current sheet height (px) in portrait
     this._insets = { top: 0, right: 0, bottom: 0, left: 0 };
+    this._sidePref = {}; // tier -> chosen side panel width (px)
+    try { const s = JSON.parse(localStorage.getItem(SIDE_KEY) || '{}'); if (s && typeof s === 'object') this._sidePref = s; } catch { /* private mode */ }
+    this._docks = new Map(); // id -> element docked in the side-panel slot (tablets)
+    this._railSubsOk = true; // the rail has room for the sub-tool list (tablets)
+    this._tier = null;
 
+    this._applyTier();
     this._setupSheetDrag();
+    this._setupSideResize();
     this._setupBack();
     this._setupLayoutWatch();
     this._applySheetHeight();
@@ -83,10 +115,151 @@ export class Shell extends EventTarget {
   /** The element that should host the WebGL canvas. */
   get canvasHost() { return this.viewport; }
 
-  /** 'sheet' (portrait: bottom toolbar + bottom sheet) or 'side' (landscape: left rail + right panel). */
-  get mode() { return this._mq.matches ? 'side' : 'sheet'; }
+  /** 'sheet' (portrait phone: bottom toolbar + bottom sheet) or 'side' (landscape, tablets: left rail + right panel). */
+  get mode() { return this._mqTab.matches || this._mq.matches ? 'side' : 'sheet'; }
+
+  /** 'phone' | 'tablet' (portrait or split screen, >= 700 px wide) | 'tablet-wide' (landscape >= 1000 px). */
+  get tier() { return this._mqWide.matches ? 'tablet-wide' : this._mqTab.matches ? 'tablet' : 'phone'; }
+
+  get tablet() { return this.tier !== 'phone'; }
 
   get panelOpen() { return !!this.active; }
+
+  /** True while a tool panel, or (tablets) a docked panel such as the voice commands, covers part of the view. */
+  get viewCovered() { return !!this.active || this._dockOpen(); }
+
+  _dockOpen() { return this.tablet && this._docks.size > 0; }
+
+  /**
+   * Tablets: docks a floating panel (e.g. the voice commands) in the side-panel slot, so that
+   * the view insets, the top bar and the 3D framing make room for it. el = null undocks.
+   * On phones it is recorded but has no effect on the layout.
+   */
+  setDock(id, el) {
+    const had = this._dockOpen();
+    if (el) this._docks.set(id, el); else this._docks.delete(id);
+    this.root.classList.toggle('pv-docked', this._docks.size > 0);
+    if (had || this._dockOpen()) this._emitLayout(false);
+  }
+
+  // ------------------------------------------------------------ tablets: side panel width
+  /** Side panel widths at the current window size (CSS px): {normal, wide, min, max}. */
+  sideWidths() {
+    const W = this.root.clientWidth || window.innerWidth;
+    const tier = this.tier;
+    const safe = this.safeInsets();
+    const free = W - (RAIL_W[tier] || 84) - safe.left - safe.right;
+    // the view keeps at least 300 px next to the panel
+    const max = Math.max(SIDE_MIN, Math.min(640, free - 300));
+    const normal = tier === 'tablet-wide' ? clamp(Math.round(W * 0.3125), 380, 440) : clamp(Math.round(W * 0.44), SIDE_MIN, 360);
+    const wide = tier === 'tablet-wide' ? 560 : 440;
+    return { normal: Math.min(normal, max), wide: Math.min(wide, max), min: SIDE_MIN, max };
+  }
+
+  /** Current side panel width (CSS px) on tablets; null on phones (CSS default). */
+  get sideWidth() {
+    if (!this.tablet) return null;
+    const ws = this.sideWidths();
+    const p = this._liveSideW ?? this._sidePref[this.tier];
+    return Math.round(clamp(typeof p === 'number' ? p : ws.normal, ws.min, ws.max));
+  }
+
+  /** True when the side panel is closer to the wide preset than to the normal one. */
+  get sideIsWide() {
+    const w = this.sideWidth, ws = this.sideWidths();
+    return w != null && ws.wide > ws.normal && w > (ws.normal + ws.wide) / 2;
+  }
+
+  /**
+   * Tablets: sets the side panel width. w = px | 'normal' | 'wide' | 'toggle'.
+   * opts.live: while dragging (not remembered); opts.persist (default true).
+   */
+  setSideWidth(w, { live = false, persist = true } = {}) {
+    if (!this.tablet) return;
+    const ws = this.sideWidths();
+    if (w === 'toggle') w = this.sideIsWide ? 'normal' : 'wide';
+    const px = Math.round(clamp(w === 'wide' ? ws.wide : w === 'normal' ? ws.normal : +w || ws.normal, ws.min, ws.max));
+    if (live) this._liveSideW = px;
+    else {
+      this._liveSideW = null;
+      this._sidePref[this.tier] = px;
+      if (persist) { try { localStorage.setItem(SIDE_KEY, JSON.stringify(this._sidePref)); } catch { /* ignore */ } }
+    }
+    this._applySideWidth();
+    this._fitSubTabs();
+    this._emitLayout(live);
+  }
+
+  _applySideWidth() {
+    const ds = document.documentElement.style;
+    const w = this.sideWidth;
+    if (w == null) { ds.removeProperty('--side-w'); return; }
+    ds.setProperty('--side-w', w + 'px');
+    // a window too narrow for two distinct widths: no width button (the edge still drags)
+    const ws = this.sideWidths();
+    this.widthBtn.classList.toggle('off', ws.wide - ws.normal < 24);
+    const wide = this.sideIsWide;
+    if (this._widthBtnWide !== wide) {
+      this._widthBtnWide = wide;
+      this.widthBtn.setIcon(wide ? 'panelNarrow' : 'panelWide');
+      this.widthBtn.title = wide ? 'Pannello più stretto' : 'Pannello più largo';
+      this.widthBtn.setAttribute('aria-label', this.widthBtn.title);
+    }
+  }
+
+  /** Tier classes on #app and <html> (body-level layers such as dialogs and the voice panel read them). */
+  _applyTier() {
+    const tier = this.tier;
+    const changed = tier !== this._tier;
+    this._tier = tier;
+    for (const el of [this.root, document.documentElement]) {
+      el.classList.toggle('pv-tablet', tier !== 'phone');
+      el.classList.toggle('pv-tablet-wide', tier === 'tablet-wide');
+    }
+    this.root.classList.toggle('pv-side', this.mode === 'side');
+    this._applySideWidth();
+    return changed;
+  }
+
+  /** Drag the left edge of the side panel (tablets) to resize it; a double tap toggles the two presets. */
+  _setupSideResize() {
+    let d = null, lastTap = 0;
+    const g = this.grip;
+    g.addEventListener('pointerdown', (e) => {
+      if (!this.tablet || this.mode !== 'side' || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      d = { id: e.pointerId, x0: e.clientX, w0: this.sideWidth, moved: false };
+      try { g.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      this.panel.classList.add('resizing');
+    });
+    g.addEventListener('pointermove', (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      const dx = d.x0 - e.clientX;
+      if (!d.moved && Math.abs(dx) < 4) return;
+      d.moved = true;
+      this.setSideWidth(d.w0 + dx, { live: true });
+    });
+    const end = (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      const dd = d; d = null;
+      this.panel.classList.remove('resizing');
+      try { g.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+      if (dd.moved) {
+        // close to a preset: snap to it
+        const ws = this.sideWidths(), w = this._liveSideW ?? this.sideWidth;
+        const snap = Math.abs(w - ws.normal) < 18 ? 'normal' : Math.abs(w - ws.wide) < 18 ? 'wide' : w;
+        haptic('tick');
+        this.setSideWidth(snap);
+        return;
+      }
+      if (e.type !== 'pointerup') return;
+      const now = performance.now();
+      if (now - lastTap < 350) { lastTap = 0; haptic('tick'); this.setSideWidth('toggle'); } else lastTap = now;
+    };
+    g.addEventListener('pointerup', end);
+    g.addEventListener('pointercancel', end);
+  }
 
   registerTool(tool) {
     tool.order ??= this.tools.length * 10;
@@ -110,8 +283,12 @@ export class Shell extends EventTarget {
   _renderToolbar() {
     const groups = this._groups();
     const activeGroup = this.active ? this._groupOf(this.active.tool) : null;
+    const ag = groups.find((g) => g.id === activeGroup);
+    // tablets: the sub-tools of the active group are listed in the rail, under the group
+    const railSubs = this.tablet && this.mode === 'side' && this._railSubsOk && !!ag && ag.tools.length > 1;
     this.toolbar.replaceChildren();
     this.toolbar.style.setProperty('--n', groups.length);
+    this.toolbar.classList.toggle('has-subs', railSubs);
     for (const g of groups) {
       const on = activeGroup === g.id;
       const b = h('button', { type: 'button', class: 'pv-tool' + (on ? ' active' : ''), 'aria-pressed': on ? 'true' : 'false', title: g.label },
@@ -124,11 +301,31 @@ export class Shell extends EventTarget {
         this.openTool(last.id);
       });
       this.toolbar.appendChild(b);
+      if (railSubs && on) {
+        // the list slides in when the group opens, not on every switch between its tools
+        const list = h('div', { class: 'pv-rail-subs' + (this._railGroup !== g.id ? ' enter' : ''), role: 'tablist', 'aria-label': g.label });
+        for (const t of ag.tools) {
+          const sel = this.active.tool === t;
+          const s = h('button', { type: 'button', role: 'tab', class: 'pv-rail-sub' + (sel ? ' active' : ''), 'aria-selected': sel ? 'true' : 'false', title: t.title || t.label },
+            icon(t.icon, 18), h('span', { class: 'pv-rail-sub-label' }, t.label));
+          s.dataset.tool = t.id;
+          s.addEventListener('click', () => { haptic('tick'); this.openTool(t.id); });
+          list.appendChild(s);
+        }
+        this.toolbar.appendChild(list);
+      }
+    }
+    this._railGroup = railSubs ? activeGroup : null;
+    if (railSubs) {
+      // no room in the rail (short window, split screen): header chips instead
+      requestAnimationFrame(() => {
+        if (!this.toolbar.classList.contains('has-subs')) return;
+        if (this.toolbar.scrollHeight > this.toolbar.clientHeight + 1) { this._railSubsOk = false; this._renderToolbar(); }
+      });
     }
     // sub-tabs for the active group (in the header row, replacing the title)
     this.subTabs.replaceChildren();
-    const ag = groups.find((g) => g.id === activeGroup);
-    const show = !!ag && ag.tools.length > 1;
+    const show = !!ag && ag.tools.length > 1 && !railSubs;
     this.subTabs.style.display = show ? '' : 'none';
     this.panelTitle.style.display = show ? 'none' : '';
     this.panelHead.classList.toggle('tabs', show);
@@ -266,8 +463,13 @@ export class Shell extends EventTarget {
     const ins = { top: 0, right: 0, bottom: 0, left: 0 };
     if (this.mode === 'side') {
       ins.left = this.toolbar.getBoundingClientRect().right - r.left;
+      // tablets: the target width (the panel may still be animating to it after a rotation or a resize)
+      const sideW = this.tablet ? this.sideWidth + this.safeInsets().right : 0;
       if (this.active) {
-        ins.right = this.panel.offsetWidth;
+        ins.right = sideW || this.panel.offsetWidth;
+        ins.top = this.topBar.offsetTop + this.topBar.offsetHeight;
+      } else if (this._dockOpen()) {
+        ins.right = sideW;
         ins.top = this.topBar.offsetTop + this.topBar.offsetHeight;
       }
     } else {
@@ -308,13 +510,23 @@ export class Shell extends EventTarget {
   }
 
   _setupLayoutWatch() {
-    let raf = 0;
+    let raf = 0, lastH = 0;
     const relayout = () => {
       if (raf) return;
-      raf = requestAnimationFrame(() => { raf = 0; this.root.classList.toggle('pv-side', this.mode === 'side'); this._applySheetHeight(); this._fitSubTabs(); this._emitLayout(false); });
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const tierChanged = this._applyTier();
+        // rotation / split screen: try the rail sub-tool list again
+        const H = this.root.clientHeight;
+        if (tierChanged || H !== lastH) { lastH = H; this._railSubsOk = true; this._renderToolbar(); }
+        this._applySheetHeight(); this._fitSubTabs(); this._emitLayout(false);
+      });
     };
     this.root.classList.toggle('pv-side', this.mode === 'side');
+    lastH = this.root.clientHeight;
     this._mq.addEventListener?.('change', relayout);
+    this._mqTab.addEventListener?.('change', relayout);
+    this._mqWide.addEventListener?.('change', relayout);
     window.addEventListener('resize', relayout);
     new ResizeObserver(relayout).observe(this.root);
     // the Android shell reports system bar / cutout insets here

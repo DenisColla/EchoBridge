@@ -30,6 +30,42 @@ export const STYLES = [
 
 const texId = (t) => (t ? t.uuid : null);
 
+/**
+ * Keeps a texture within the quality preset's size cap (render/device.js texMax).
+ * three.js already scales HTMLImageElement / canvas images down at upload when they
+ * exceed renderer.capabilities.maxTextureSize (set to the cap by the render module),
+ * but for an ImageBitmap (glTF textures) it skips the UNPACK_FLIP_Y / premultiply
+ * state of the scaled copy, so those are converted here to a canvas of the capped
+ * size once (same orientation: glTF textures have flipY = false). cap 0 = no cap.
+ */
+export function fitTextureToCap(tex, cap) {
+  // a higher cap later: give back the full-size original
+  const full = tex?.userData?.pvFullImage;
+  if (full && (!cap || (full.width <= cap && full.height <= cap))) {
+    tex.image = full;
+    delete tex.userData.pvFullImage;
+    tex.dispose();
+    tex.needsUpdate = true;
+    return true;
+  }
+  const im = full || tex?.image;
+  if (!cap || !im || typeof ImageBitmap === 'undefined' || !(im instanceof ImageBitmap)) return false;
+  if (im.width <= cap && im.height <= cap) return false;
+  if (tex.image !== im && tex.image?.width === Math.floor(im.width * (cap / Math.max(im.width, im.height)))) return false;
+  const k = cap / Math.max(im.width, im.height);
+  const w = Math.max(1, Math.floor(im.width * k)), h = Math.max(1, Math.floor(im.height * k));
+  try {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(im, 0, 0, w, h);
+    tex.userData.pvFullImage = im;
+    tex.image = c;
+    tex.dispose(); // a smaller image needs new GPU storage (immutable texStorage2D)
+    tex.needsUpdate = true;
+    return true;
+  } catch { return false; }
+}
+
 // Neutral artist-mannequin palette (sRGB).
 const CLAY = { skin: '#aca59c', eye: '#cfcac3', lashes: '#5f5a55', brows: '#77726d', teeth: '#d6d1ca', tongue: '#9a8f88', cloth: '#8f9499', hair: '#77726d', prop: '#a19b93', ground: '#96938e' };
 
@@ -474,6 +510,8 @@ class MaterialLibrary extends THREE.EventDispatcher {
     this.uvMask = null;
     /** dual-quaternion skinning switch ('Deformazione morbida'), see softskin.js */
     this.softSkin = softSkin;
+    /** largest texture side of the quality preset (0 = none), set by the render module */
+    this.textureCap = 0;
   }
 
   /** Gives the library a renderer: GPU-derived maps (anatomy) become available. */
@@ -554,6 +592,7 @@ class MaterialLibrary extends THREE.EventDispatcher {
     const key = this._key(spec);
     let m = this.cache.get(key);
     if (!m) {
+      if (this.textureCap) for (const v of Object.values(spec)) if (v && v.isTexture) fitTextureToCap(v, this.textureCap);
       const f = this.factories[this.style] || defaultFactories[this.style];
       m = f.call(this, spec);
       m.userData.kind = spec.kind;

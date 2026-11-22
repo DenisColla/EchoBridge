@@ -151,10 +151,12 @@ export function uvIslandMask(renderer, model, size = 1024) {
   return rt.texture;
 }
 
-/** Forgets the UV mask of a model (GPU content lost). */
+/**
+ * Forgets the UV mask of a model (GPU content lost). Not disposed: its GL objects died
+ * with the old context, and disposing would make three.js delete stale handles.
+ */
 export function invalidateUvMask(model) {
-  const e = model?._pvUvMask;
-  if (e) { try { e.target.dispose(); } catch { /* lost context */ } model._pvUvMask = null; }
+  if (model?._pvUvMask) model._pvUvMask = null;
 }
 
 /**
@@ -167,7 +169,9 @@ export function anatomyTexture(renderer, normalTex, uvMask = null) {
   if (hit && !hit.lost) return hit.texture;
   const img = normalTex.image;
   if (!img || !img.width) return null;
-  const N = Math.min(1024, img.width);
+  // the GPU copy may be smaller than the image (quality preset texture cap, see device.js)
+  const srcW = Math.min(img.width, renderer.capabilities.maxTextureSize || img.width);
+  const N = Math.min(1024, srcW);
   const opts = { type: THREE.UnsignedByteType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: false, depthBuffer: false, wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping };
   // the groove field is differentiated twice: keep it in a float target when renderable
   const ext = renderer.extensions;
@@ -176,7 +180,7 @@ export function anatomyTexture(renderer, normalTex, uvMask = null) {
   const rt2 = new THREE.WebGLRenderTarget(N, N, { ...opts, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   rt2.texture.name = 'pv:anatomy';
   rt2.texture.colorSpace = THREE.NoColorSpace;
-  const m1 = new THREE.ShaderMaterial({ vertexShader: vert, fragmentShader: cavityFrag, uniforms: { tN: { value: normalTex }, srcSize: { value: img.width }, tMask: { value: uvMask }, useMask: { value: uvMask ? 1 : 0 } }, depthTest: false, depthWrite: false });
+  const m1 = new THREE.ShaderMaterial({ vertexShader: vert, fragmentShader: cavityFrag, uniforms: { tN: { value: normalTex }, srcSize: { value: srcW }, tMask: { value: uvMask }, useMask: { value: uvMask ? 1 : 0 } }, depthTest: false, depthWrite: false });
   const m2 = new THREE.ShaderMaterial({ vertexShader: vert, fragmentShader: lineFrag, uniforms: { tC: { value: rt1.texture }, size: { value: N } }, depthTest: false, depthWrite: false });
   const quad = new FullScreenQuad(m1);
   const prevTarget = renderer.getRenderTarget();
@@ -190,7 +194,9 @@ export function anatomyTexture(renderer, normalTex, uvMask = null) {
   } finally {
     renderer.setRenderTarget(prevTarget);
     if (renderer.xr) renderer.xr.enabled = prevXr;
-    quad.dispose(); m1.dispose(); m2.dispose(); rt1.dispose();
+    // the quad itself is not disposed: three.js shares its full-screen triangle geometry
+    // with every other FullScreenQuad (the pipeline passes)
+    m1.dispose(); m2.dispose(); rt1.dispose();
   }
   const entry = { texture: rt2.texture, target: rt2, ms: performance.now() - t0, lost: false };
   _cache.set(normalTex, entry);
@@ -200,8 +206,8 @@ export function anatomyTexture(renderer, normalTex, uvMask = null) {
 }
 anatomyTexture.stats = [];
 
-/** After a WebGL context loss the GPU-made maps are gone: forget them (rebuilt on demand). */
+/** After a WebGL context loss the GPU-made maps are gone: forget them (rebuilt on demand; nothing to dispose). */
 export function invalidateAnatomy(normalTex) {
   const e = normalTex && _cache.get(normalTex);
-  if (e) { e.lost = true; try { e.target.dispose(); } catch { /* lost context */ } _cache.delete(normalTex); }
+  if (e) { e.lost = true; _cache.delete(normalTex); }
 }

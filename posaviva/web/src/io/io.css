@@ -198,3 +198,21 @@
   .pv-io-scene-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .pv-io-export-preview { min-height: 170px; }
 }
+
+/* ------------------------------------------------------------------ tablets: top bar quick actions */
+.pv-io-quick { display: none; }
+html.pv-tablet .pv-topbar { container: pvtop / inline-size; }
+.pv-io-quick { border-radius: 14px; border: 1px solid var(--line); background: rgba(20, 22, 28, .66); backdrop-filter: var(--glass); -webkit-backdrop-filter: var(--glass);
+  box-shadow: 0 4px 14px rgba(0,0,0,.22); overflow: hidden; }
+.pv-io-qbtn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 46px; height: 44px; padding: 0 11px; border: 0; background: transparent;
+  color: var(--text); font-size: 14px; font-weight: 560; white-space: nowrap; transition: background .15s; }
+.pv-io-qbtn:active { background: var(--elev-2); }
+.pv-io-qbtn + .pv-io-qbtn { border-left: 1px solid var(--line); }
+.pv-io-qbtn .pv-icon { color: #d8dbe6; }
+.pv-io-qlabel { display: none; }
+@container pvtop (min-width: 600px) { html.pv-tablet .pv-io-quick { display: flex; } }
+@container pvtop (min-width: 860px) { html.pv-tablet .pv-io-qlabel { display: inline; } html.pv-tablet .pv-io-qbtn { padding: 0 14px 0 12px; } }
+/* tablets: a slightly larger character chip */
+html.pv-tablet .pv-io-chip { height: 48px; max-width: 320px; }
+html.pv-tablet .pv-io-chip-name { font-size: 15px; }
+html.pv-tablet .pv-io-chip-sub { font-size: 12.5px; }

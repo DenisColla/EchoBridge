@@ -286,12 +286,21 @@ export function openBrowser(ctx, opts = {}) {
   search.addEventListener('input', () => setQuery(search.value));
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); search.blur(); } });
   const content = h('div', { class: 'pv-pj-content' });
+  // tablets: the projects (and, in landscape, the sections of the open project) are listed in
+  // panes beside the content: 0 = one pane (phones), 2 = projects | content, 3 = projects | sections | content
+  const nav = h('nav', { class: 'pv-pj-nav', 'aria-label': 'Progetti' });
+  const secnav = h('nav', { class: 'pv-pj-secnav', 'aria-label': 'Sezioni' });
+  const main = h('div', { class: 'pv-pj' }, bar, content);
+  const frame = h('div', { class: 'pv-pj-frame' }, nav, secnav, main);
+  const panes = () => (app.shell?.tablet ? (app.shell.tier === 'tablet-wide' ? 3 : 2) : 0);
+  let split = 0;
+  let secFocus = null; // section highlighted in the sections pane ('all' | 'root' | id)
 
   const m = modal({
-    title: 'Progetti', icon: 'book', kind: 'sheet', className: 'pv-pj-browser', body: h('div', { class: 'pv-pj' }, bar, content),
+    title: 'Progetti', icon: 'book', kind: 'sheet', className: 'pv-pj-browser', body: frame,
     onBack: () => {
       if (query) { search.value = ''; setQuery(''); return true; }
-      if (view === 'project' && entered) { goHome(); return true; }
+      if (view === 'project' && entered && !split) { goHome(); return true; }
       return false;
     },
   });
@@ -303,12 +312,16 @@ export function openBrowser(ctx, opts = {}) {
   P.addEventListener('change', onChange);
   const onSel = () => schedule();
   app.addEventListener('selection', onSel);
-  m.result.then(() => { P.removeEventListener('change', onChange); app.removeEventListener('selection', onSel); clearTimeout(renderT); });
+  // rotation / split screen while open: switch between one and several panes
+  const onLayout = () => { if (panes() !== split) schedule(); };
+  app.shell?.addEventListener?.('layout', onLayout);
+  m.result.then(() => { P.removeEventListener('change', onChange); app.removeEventListener('selection', onSel); app.shell?.removeEventListener?.('layout', onLayout); clearTimeout(renderT); });
 
   function schedule() { clearTimeout(renderT); renderT = setTimeout(render, 30); }
   function setQuery(q) { query = q.trim(); bar.classList.toggle('has-query', !!query); schedule(); }
-  function goHome() { view = 'home'; filter = null; entered = true; render(); m.body.scrollTop = 0; }
-  function goProject(id, type = null) { projectId = id; view = 'project'; filter = type; render(); m.body.scrollTop = 0; }
+  const scroller = () => (split ? main : m.body);
+  function goHome() { view = 'home'; filter = null; entered = true; render(); scroller().scrollTop = 0; }
+  function goProject(id, type = null) { if (id !== projectId) secFocus = null; projectId = id; view = 'project'; filter = type; render(); scroller().scrollTop = 0; }
 
   // ---- thumbnails (batch read, cached for this browser)
   async function fillThumbs(root) {
@@ -327,11 +340,84 @@ export function openBrowser(ctx, opts = {}) {
   // ---- render
   function render() {
     if (!P.get(projectId)) projectId = P.current?.id || P.list()[0]?.id;
-    backBtn.hidden = view !== 'project' && !query;
+    split = panes();
+    frame.classList.toggle('split', !!split);
+    frame.classList.toggle('three', split === 3);
+    m.card.classList.toggle('split', !!split);
+    // several panes: the projects are always listed on the left, the content shows one of them
+    if (split && view === 'home' && projectId) view = 'project';
+    backBtn.hidden = split ? true : view !== 'project' && !query;
     if (query) renderSearch();
     else if (view === 'project') renderProject();
     else renderHome();
-    fillThumbs(content);
+    if (split) renderNav(); else nav.replaceChildren();
+    if (split === 3) renderSecNav(); else secnav.replaceChildren();
+    fillThumbs(frame);
+  }
+
+  // ---------------------------------------------------------------- tablets: panes
+  function homeSummary() {
+    return `${plural(P.list().length, 'fumetto', 'fumetti')} · ${plural(P.items().length, 'elemento salvato', 'elementi salvati')} · ${formatBytes(P.usage())}`;
+  }
+
+  function renderNav() {
+    const list = P.list();
+    const rows = list.map((p) => {
+      const on = !query && view === 'project' && p.id === projectId;
+      const latest = P.items({ projectId: p.id })[0];
+      const cover = h('span', { class: `pv-pj-navcover ${latest ? '' : 'blank'}`.trim(), 'data-thumb': latest?.id }, latest ? typeBadge(latest.type, 12) : (p.name.trim()[0] || '?').toUpperCase());
+      const c = p.counts || {};
+      const b = h('button', { type: 'button', class: `pv-pj-navrow ${on ? 'active' : ''}`.trim(), title: p.name, 'aria-current': on ? 'true' : null },
+        cover,
+        h('span', { class: 'pv-pj-navtext' }, h('span', { class: 'pv-pj-navname' }, p.name),
+          h('small', {}, c.total ? plural(c.total, 'elemento', 'elementi') : 'Vuoto', p.sectionCount ? ` · ${plural(p.sectionCount, 'sezione', 'sezioni')}` : '')),
+        p.id === P.current?.id ? h('span', { class: 'pv-pj-navcur', title: 'In uso per i salvataggi' }) : null);
+      b.addEventListener('click', () => {
+        haptic('tick');
+        if (query) { search.value = ''; query = ''; bar.classList.remove('has-query'); }
+        goProject(p.id);
+      });
+      return b;
+    });
+    nav.replaceChildren(
+      h('div', { class: 'pv-pj-navhead' }, h('span', {}, 'Fumetti'), h('small', {}, String(list.length))),
+      h('div', { class: 'pv-pj-navactions' },
+        button({ label: 'Nuovo', icon: 'plus', variant: 'primary', small: true, onClick: newProject }),
+        button({ label: 'Importa', icon: 'upload', small: true, onClick: importFile })),
+      h('div', { class: 'pv-pj-navlist' }, rows),
+      h('p', { class: 'pv-pj-note' }, `Archivio: ${formatBytes(P.usage())}`));
+  }
+
+  function renderSecNav() {
+    const p = P.get(projectId);
+    if (!p || query || view !== 'project') { secnav.replaceChildren(); return; }
+    const all = P.items({ projectId }), secs = P.sections(projectId);
+    const row = (id, label, n, kind, here) => {
+      const b = h('button', { type: 'button', class: `pv-pj-secrow ${(secFocus || 'all') === id ? 'active' : ''}`.trim(), title: label },
+        icon(id === 'all' ? 'library' : kind ? 'section' : 'folder', 17),
+        h('span', { class: 'pv-pj-sectext' }, h('span', { class: 'pv-pj-secname' }, label),
+          kind || here ? h('span', { class: 'pv-pj-secsub' }, kind ? h('span', { class: 'pv-pj-kind' }, kindLabel(kind)) : null, here ? h('span', { class: 'pv-pj-here', title: 'Qui vanno i salvataggi' }, 'in uso') : null) : null),
+        h('small', {}, String(n)));
+      b.addEventListener('click', () => { haptic('tick'); focusSection(id); });
+      return b;
+    };
+    const rootN = all.filter((i) => !i.sectionId).length;
+    secnav.replaceChildren(
+      h('div', { class: 'pv-pj-navhead' }, h('span', {}, 'Sezioni'), h('small', {}, String(secs.length))),
+      h('div', { class: 'pv-pj-navlist' },
+        row('all', 'Tutto il progetto', all.length),
+        rootN || !secs.length ? row('root', 'Generale', rootN) : null,
+        secs.map((s) => row(s.id, s.name, all.filter((i) => i.sectionId === s.id).length, s.kind, P.current?.id === projectId && P.currentSection?.id === s.id))),
+      button({ label: 'Nuova sezione', icon: 'plus', small: true, onClick: () => newSection() }));
+  }
+
+  /** Sections pane: scrolls the content to a section (expanding it). */
+  function focusSection(id) {
+    secFocus = id;
+    if (id !== 'all') collapsed.delete(id);
+    render();
+    const el = id === 'all' ? null : content.querySelector(`[data-sec="${id}"]`);
+    main.scrollTop = el ? Math.max(0, el.offsetTop - bar.offsetHeight - 10) : 0;
   }
 
   function setTitle(t, sub) { titleEl.textContent = t; subEl.textContent = sub || ''; }
@@ -436,7 +522,9 @@ export function openBrowser(ctx, opts = {}) {
     if (!p) { goHome(); return; }
     const all = P.items({ projectId });
     const secs = P.sections(projectId);
-    setTitle(p.name, `${plural(secs.length, 'sezione', 'sezioni')} · ${plural(all.length, 'elemento', 'elementi')} · ${formatBytes(P.usage(projectId))}`);
+    const sub = `${plural(secs.length, 'sezione', 'sezioni')} · ${plural(all.length, 'elemento', 'elementi')} · ${formatBytes(P.usage(projectId))}`;
+    // several panes: the dialog title stays «Progetti», the project is named above its content
+    if (split) setTitle('Progetti', homeSummary()); else setTitle(p.name, sub);
     const isCur = p.id === P.current?.id;
 
     const more = iconButton({ icon: 'more', title: 'Azioni del progetto', onClick: () => projectMenu(p, more) });
@@ -456,6 +544,7 @@ export function openBrowser(ctx, opts = {}) {
     if (root.length || !secs.length) groups.appendChild(group(null, 'Generale', root));
     for (const s of secs) groups.appendChild(group(s, s.name, all.filter((i) => i.sectionId === s.id)));
     content.replaceChildren(...[
+      split ? h('div', { class: 'pv-pj-phead' }, h('div', { class: 'pv-pj-ptitle' }, p.name), h('div', { class: 'pv-pj-psub2' }, sub)) : null,
       isCur ? null : h('button', { type: 'button', class: 'pv-pj-usehint', onClick: () => { haptic('tick'); P.setCurrent(p.id, null); } }, icon('checkCircle', 16), 'Usa questo progetto per i salvataggi'),
       actions, all.length ? chipsEl : null, groups].filter(Boolean));
   }
@@ -483,7 +572,7 @@ export function openBrowser(ctx, opts = {}) {
     const add = iconButton({ icon: 'save', title: 'Salva qui…', size: 19, onClick: () => saveHere(s?.id || null) });
     head.appendChild(add);
     if (s) { const more = iconButton({ icon: 'more', title: 'Azioni della sezione', size: 20, onClick: () => sectionMenu(s, more) }); head.appendChild(more); }
-    const el = h('section', { class: `pv-pj-group ${isClosed ? 'closed' : ''}`.trim() }, head);
+    const el = h('section', { class: `pv-pj-group ${isClosed ? 'closed' : ''}`.trim(), 'data-sec': id }, head);
     if (isClosed) return el;
     if (!shown.length) {
       el.appendChild(h('div', { class: 'pv-pj-gempty' },

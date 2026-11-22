@@ -6,8 +6,9 @@
 //   app.capture({scale=2, transparent, width, height}) -> Promise<HTMLCanvasElement>
 //   mod.getSettings() / mod.set(patch, {commit})  scene-level style settings (serialized)
 //   mod.setStyle(id)                              'realistic' | 'clay' | 'toon' | 'lines'
-//   mod.setQuality('alta'|'media'|'bassa')        device preference (localStorage)
-//   mod.quality                                   current preset {id, prCap, shadow, aoScale, aoSamples}
+//   mod.setQuality('auto'|'alta'|'media'|'bassa') device preference (localStorage); 'auto' = tier default
+//   mod.quality                                   effective preset (device.js QUALITY) + {auto}
+//   mod.device                                    detected device {tier, quality, gpu, memoryGB, tablet, …}
 //   settings.softSkin (bool, default true)        'Deformazione morbida': dual-quaternion skinning
 //   settings.anatomy (0..1, 0 = off)              'Linee anatomiche': skin crease lines (toon / lines + ink)
 // Events on app: 'renderstyle' {settings} after any style setting changes,
@@ -19,6 +20,10 @@ import { invalidateAnatomy, uvIslandMask, invalidateUvMask } from './anatomy.js'
 import { RenderPipeline } from './pipeline.js';
 import { PerfController } from './perf.js';
 import { buildStylePanel } from './panel.js';
+import { QUALITY, TIER_LABEL, detectDevice } from './device.js';
+import { fitTextureToCap } from './materials.js';
+
+export { QUALITY };
 
 /** Renderer configuration per style. env = environment (IBL) intensity. */
 // skinWarm = subsurface warmth of the ambient occlusion on skin (0..1)
@@ -31,11 +36,6 @@ const STYLE_RENDER = {
 /** styles whose skin can draw anatomical crease lines (with the ink outlines on) */
 const ANATOMY_LINE_STYLES = new Set(['toon', 'lines']);
 
-export const QUALITY = {
-  alta: { id: 'alta', label: 'Alta', prCap: 2, shadow: 2048, aoScale: 0.5, aoSamples: 12 },
-  media: { id: 'media', label: 'Media', prCap: 1.5, shadow: 1024, aoScale: 0.5, aoSamples: 8 },
-  bassa: { id: 'bassa', label: 'Bassa', prCap: 1, shadow: 512, aoScale: 0.5, aoSamples: 6 },
-};
 
 export const DEFAULT_BG = '#2a2c33';
 /** app.capture() rejects with this message while the WebGL context is lost. */
@@ -61,11 +61,38 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 /** JSON with sorted keys: settings comparison independent of key order. */
 const stableKey = (o) => JSON.stringify(o, (k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((x) => [x, v[x]])) : v));
 
+/**
+ * Device preferences. quality 'auto' follows the device tier (render/device.js). Version 1
+ * stored 'alta' at every start whatever the user did, so its quality is only kept when the
+ * user had picked one in Menu › Impostazioni (io settings key 'quality').
+ */
 function loadPrefs() {
-  const p = { quality: 'alta', dynamic: true, fps: false };
-  try { Object.assign(p, JSON.parse(localStorage.getItem(PREFS_KEY) || '{}')); } catch { /* private mode */ }
-  if (!QUALITY[p.quality]) p.quality = 'alta';
+  const p = { v: 2, quality: 'auto', dynamic: true, fps: false };
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null'); } catch { /* private mode */ }
+  if (stored && typeof stored === 'object') {
+    p.dynamic = stored.dynamic !== false;
+    p.fps = !!stored.fps;
+    if (stored.v === 2) p.quality = stored.quality;
+    else {
+      try { const io = JSON.parse(localStorage.getItem('posaviva.settings') || '{}'); if (QUALITY[io?.quality]) p.quality = io.quality; } catch { /* ignore */ }
+    }
+  }
+  if (p.quality !== 'auto' && !QUALITY[p.quality]) p.quality = 'auto';
   return p;
+}
+
+/** three.js warns once per upload of every texture it scales down to the preset's size cap: expected, not news. */
+let consoleFiltered = false;
+function filterResizeWarnings() {
+  if (consoleFiltered || typeof THREE.setConsoleFunction !== 'function') return;
+  consoleFiltered = true;
+  const prev = THREE.getConsoleFunction?.() || null;
+  THREE.setConsoleFunction((type, message, ...params) => {
+    if (type === 'warn' && /Texture has been resized|DataTexture is too big/.test(String(message))) return;
+    if (prev) prev(type, message, ...params);
+    else (console[type] || console.log)(message, ...params);
+  });
 }
 
 export function create(app, shell) {
@@ -75,6 +102,11 @@ export function create(app, shell) {
   const state = clone(DEFAULTS);
   state.style = materials.style;
   const prefs = loadPrefs();
+  // device tier -> default quality; the real texture limit is kept for captures
+  const device = detectDevice(renderer.getContext());
+  const realMaxTexture = device.maxTextureSize || renderer.capabilities.maxTextureSize || 4096;
+  filterResizeWarnings();
+  console.info(`[PosaViva] dispositivo: ${device.tier} (${TIER_LABEL[device.tier]}) · qualità predefinita ${device.quality} · ${device.reasons.join(' · ')}`);
   let envTex = null;
   let holdFrames = false; // true while new shader programs compile after a style switch
   let compileToken = 0;
@@ -97,7 +129,7 @@ export function create(app, shell) {
     return envTex;
   }
 
-  const quality = () => QUALITY[prefs.quality];
+  const quality = () => QUALITY[prefs.quality === 'auto' ? device.quality : prefs.quality] || QUALITY.alta;
   const styleCfg = () => STYLE_RENDER[state.style] || STYLE_RENDER.realistic;
 
   // -------------------------------------------------------------- apply settings
@@ -150,6 +182,7 @@ export function create(app, shell) {
     o.aoIntensity = state.aoIntensity;
     o.aoScale = q.aoScale;
     o.aoSamples = q.aoSamples;
+    o.aoMode = q.ao || 'on';
     o.bg = state.bg;
     o.shadowMapSize = q.shadow;
     o.skinWarm = sr.skinWarm || 0;
@@ -198,8 +231,76 @@ export function create(app, shell) {
     pipeline.applyShadowSizes(scene);
   }
 
+  // -------------------------------------------------------------- quality preset
+  /** Thermal / battery saving state pushed by the Android shell (window.__onDeviceState). */
+  const devState = { thermal: 0, powerSave: false };
+
+  /** Frame-rate cap of the preset (lowered further by heat / battery saving). */
+  function frameCap() {
+    let fps = quality().fps || 0;
+    if (devState.powerSave || devState.thermal >= 2) fps = fps ? Math.min(fps, 60) : 60;
+    if (devState.thermal >= 4) fps = 30;
+    return fps;
+  }
+
+  /** Display rate on Android (60 Hz on mid tier / Media saves battery and heat), page-side cap elsewhere. */
+  let lastFps = -1;
+  function applyFrameRate() {
+    const fps = frameCap();
+    app.setFrameRateCap?.(fps);
+    if (fps === lastFps) return;
+    lastFps = fps;
+    try { window.AndroidBridge?.setPreferredFrameRate?.(fps); } catch { /* older shell */ }
+  }
+
+  /** Largest texture side uploaded (preset texMax): three.js scales images down at upload. */
+  let texCap = realMaxTexture;
+  function applyTextureCap() {
+    const q = quality();
+    const cap = q.texMax > 0 ? Math.min(realMaxTexture, q.texMax) : realMaxTexture;
+    if (cap === texCap) return;
+    const lower = Math.min(cap, texCap);
+    texCap = cap;
+    renderer.capabilities.maxTextureSize = cap;
+    materials.textureCap = q.texMax > 0 ? cap : 0;
+    // textures uploaded under the previous limit are uploaded again
+    const seen = new Set();
+    const visit = (t) => {
+      if (!t || !t.isTexture || seen.has(t) || t.isRenderTargetTexture) return;
+      seen.add(t);
+      const im = t.userData?.pvFullImage || t.image;
+      if (!im || !(im.width > lower || im.height > lower) || ('data' in im)) return;
+      fitTextureToCap(t, materials.textureCap);
+      // the GPU copy changes size: three.js allocates immutable storage (texStorage2D),
+      // so the texture must be released and uploaded again, not just updated
+      t.dispose();
+      t.needsUpdate = true;
+    };
+    const visitMat = (m) => { if (!m) return; for (const v of Object.values(m)) if (v && v.isTexture) visit(v); if (m.uniforms) for (const u of Object.values(m.uniforms)) if (u?.value?.isTexture) visit(u.value); };
+    scene.traverse((o) => { if (o.material) (Array.isArray(o.material) ? o.material.forEach(visitMat) : visitMat(o.material)); });
+    for (const m of materials.cache.values()) visitMat(m);
+    for (const t of Object.values(materials.textures)) visit(t);
+    app.invalidate();
+  }
+
+  /** Garment build time per frame (ms): smaller on slower presets keeps gestures fluid while outfits rebuild. */
+  function applyBudgets() {
+    const mgr = app.clothing?.manager;
+    if (mgr && typeof mgr.budget === 'number') mgr.budget = quality().buildBudget || mgr.budget;
+  }
+
+  function applyQualityPreset() {
+    const q = quality();
+    perf.setQuality(q);
+    pipeline.opts.aoMode = q.ao || 'on';
+    app.shadowEvery = q.shadowEvery || 1;
+    applyTextureCap();
+    applyFrameRate();
+    applyBudgets();
+  }
+
   function applyPrefs() {
-    perf.setCap(quality().prCap);
+    applyQualityPreset();
     perf.setDynamic(prefs.dynamic);
     perf.setMeter(prefs.fps);
     try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
@@ -240,8 +341,9 @@ export function create(app, shell) {
     else { applyAll(); if (opts.commit) app.commit(opts.commit); }
   }
 
+  /** 'alta' | 'media' | 'bassa' (manual, remembered) or 'auto' (follows the device tier). */
   function setQuality(id) {
-    if (!QUALITY[id]) return;
+    if (!QUALITY[id] && id !== 'auto') return;
     prefs.quality = id;
     applyPrefs();
     applyShadowQuality();
@@ -272,7 +374,8 @@ export function create(app, shell) {
     else if (width) { W = width; H = Math.round((width * cssH) / cssW); }
     else if (height) { H = height; W = Math.round((height * cssW) / cssH); }
     else { W = Math.round(cssW * scale); H = Math.round(cssH * scale); }
-    const maxSide = Math.min(renderer.capabilities.maxTextureSize || 4096, 8192);
+    // the real GPU limit (renderer.capabilities.maxTextureSize may hold the preset's texture cap)
+    const maxSide = Math.min(realMaxTexture || 4096, 8192);
     const k = Math.min(1, maxSide / W, maxSide / H, Math.sqrt(36e6 / (W * H)));
     W = Math.max(1, Math.floor(W * k)); H = Math.max(1, Math.floor(H * k));
     const pxScale = H / cssH; // the vertical field of view is preserved -> scale lines by height
@@ -314,9 +417,11 @@ export function create(app, shell) {
   // -------------------------------------------------------------- module object
   let panel = null;
   const mod = {
-    pipeline, perf, materials,
-    get quality() { return quality(); },
-    get prefs() { return { ...prefs }; },
+    pipeline, perf, materials, device,
+    /** effective preset (+ auto: true when it follows the device tier) */
+    get quality() { return { ...quality(), auto: prefs.quality === 'auto' }; },
+    /** device preferences; quality is the EFFECTIVE level (auto resolved), auto tells which */
+    get prefs() { return { ...prefs, quality: quality().id, auto: prefs.quality === 'auto' }; },
     getSettings, set, setStyle, setQuality, setPref, capture,
     /** dual-quaternion skinning controller ({enabled, supported, active}); toggle with set({softSkin}) */
     softSkin,
@@ -344,8 +449,8 @@ export function create(app, shell) {
     id: 'style', group: 'style', label: 'Stile', icon: 'palette', order: 100, title: 'Stile e resa',
     build(container) {
       panel = buildStylePanel(container, {
-        app, STYLES, QUALITY, STYLE_RENDER, softSkin, ANATOMY_LINE_STYLES,
-        getState: () => state, getPrefs: () => prefs,
+        app, STYLES, QUALITY, STYLE_RENDER, softSkin, ANATOMY_LINE_STYLES, device, TIER_LABEL, perf,
+        getState: () => state, getPrefs: () => prefs, getQuality: () => quality(),
         set, setStyle: (id) => setStyle(id).then(() => app.commit('stile')), setQuality, setPref,
       });
       return { onShow: () => panel.sync() };
@@ -356,11 +461,31 @@ export function create(app, shell) {
   let lastLightScan = 0;
   app.addAfterRenderHook(() => {
     const now = performance.now();
-    if (!app.renderOverride && now - lastLightScan > 1000) { lastLightScan = now; pipeline.applyShadowSizes(scene); }
+    if (!app.renderOverride && now - lastLightScan > 1000) { lastLightScan = now; if (pipeline.applyShadowSizes(scene)) app.invalidate(); }
   });
 
-  // the scene module (light rig) registers after this one
+  // the scene module (light rig) and clothing register after this one
   app.addEventListener('ready', applyShadowQuality);
+  app.addEventListener('ready', applyBudgets);
+
+  // memory pressure (Android onTrimMemory -> app.trimMemory): screen buffers and the
+  // materials of styles no longer shown are dropped; both come back on demand
+  app.addEventListener('memorypressure', (e) => {
+    try {
+      materials._sweep?.();
+      if (e.background || e.level >= 15) pipeline.releaseTargets();
+    } catch (err) { console.warn('[render] memory trim failed', err); }
+  });
+
+  // heat / battery saving (Android shell): lower frame rate first, then resolution
+  window.__onDeviceState = (st = {}) => {
+    if (typeof st.thermal === 'number') devState.thermal = st.thermal;
+    if (typeof st.powerSave === 'boolean') devState.powerSave = st.powerSave;
+    perf.setThrottle(devState.thermal >= 3 ? 0.8 : 1);
+    applyFrameRate();
+    panel?.sync();
+  };
+  if (device.android && (device.android.thermalStatus || device.android.powerSave)) window.__onDeviceState({ thermal: device.android.thermalStatus || 0, powerSave: !!device.android.powerSave });
   // light rig ambient -> environment fill (when the rig exposes envScale, see applyEnv)
   let rigHooked = null;
   const hookRig = () => {
@@ -377,17 +502,17 @@ export function create(app, shell) {
   // GPU (it would come back black): build a new one. The pipeline's targets and
   // GTAO buffers are re-rendered every frame; shadow maps are flagged by the app.
   app.addEventListener('contextrestored', () => {
+    // three.js rebuilds renderer.capabilities on restore: keep the preset's texture cap
+    renderer.capabilities.maxTextureSize = texCap;
     // the anatomy maps were rendered on the GPU as well: rebuild them (and the materials using them)
     for (const k of ['skinNormal', 'skinNormalM']) invalidateAnatomy(materials.textures[k]);
     invalidateUvMask(app.model);
     materials.uvMask = uvIslandMask(renderer, app.model);
     materials.rebuildAll();
+    // the old PMREM map died with the context: drop it (disposing would delete stale handles)
     const old = envTex;
     envTex = null;
-    if (old) {
-      if (scene.environment === old) scene.environment = null;
-      try { old.dispose(); } catch { /* objects of the lost context */ }
-    }
+    if (old && scene.environment === old) scene.environment = null;
     applyRendererState();
     app.dispatchEvent({ type: 'renderstyle', settings: getSettings() }); // the rig rescales the new environment
     app.invalidate();

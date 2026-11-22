@@ -9,6 +9,7 @@
 // - first-run onboarding and first-use tips per tool group
 // - "Guida": in-app step-by-step guide (menu › Guida, "?" in the top bar), see guide.js / guideData.js
 // - keeps the 3D subject visible when the sheet / side panel is open (camera view offset)
+// - S Pen on tablets: palm rejection, barrel button orbits, hover highlight (pen.js; Impostazioni › Penna)
 //
 // Public API: app.modules.ui = { scenes, exporter, settings, thumbs, viewOffset, people,
 //   openPeople({add}), addCharacter(presetId), saveScene(), newScene(), openScenes(), openExport({share}),
@@ -25,6 +26,7 @@ import { Exporter } from './exporter.js';
 import { SceneManager } from './scenes.js';
 import { PeopleTool, setCharacterHidden, isDefaultName, SEX_LABEL } from './people.js';
 import { TopBar } from './topbar.js';
+import { PenInput } from './pen.js';
 import { showOnboarding, isOnboarded, resetOnboarding } from './onboarding.js';
 import * as S from './sheets.js';
 
@@ -48,6 +50,9 @@ export function create(app, shell) {
   const splashSvg = document.querySelector('#pv-loading .logo svg');
   const logoSVG = splashSvg ? splashSvg.outerHTML.replace(/\bpvl(g|r)\b/g, 'pvInfo$1') : null;
   const ctx = { app, shell, settings, thumbs, viewOffset, exporter, scenes, logoSVG };
+  // S Pen / stylus: palm rejection, barrel button = orbit, hover highlight (pen.js)
+  const pen = new PenInput(ctx);
+  ctx.pen = pen;
 
   const actions = {
     newScene: () => S.newScene(ctx),
@@ -142,7 +147,7 @@ export function create(app, shell) {
       return earlyRestored;
     },
     // public API
-    scenes, exporter, settings, thumbs, viewOffset, people, actions,
+    scenes, exporter, settings, thumbs, viewOffset, people, actions, pen,
     openPeople: (o) => people.open(o),
     addCharacter: (presetId) => people.add(presetId),
     saveScene: actions.saveScene, newScene: actions.newScene, openScenes: actions.openScenes,

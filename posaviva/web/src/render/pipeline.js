@@ -67,6 +67,9 @@ export class RenderPipeline {
     this.opts = {
       ink: false, inkWidth: 1.5, inkColor: '#111111', inkOpacity: 1, crease: 0.5,
       ao: false, aoIntensity: 0.85, aoScale: 0.5, aoSamples: 12, aoRadius: 0.32,
+      // quality preset: 'on' | 'rest' (the perf controller suspends AO while frames flow) |
+      // 'off' (screen only: captures always get AO when the style setting is on)
+      aoMode: 'on',
       skinWarm: 0, // warm (subsurface) tint of the AO on skin, 0..1 (set per style)
       bg: { type: 'solid', color: '#2a2c33', top: '#4b5262', bottom: '#1d1f25' },
       shadowMapSize: 2048,
@@ -97,6 +100,10 @@ export class RenderPipeline {
 
     /** what the last screen frame used (FPS meter) */
     this.stats = { ao: false, ink: false };
+    // targets that lived through a context restore still carry three.js' dispose listener
+    // of the old context: dropping them is enough (disposing would delete stale handles)
+    this._preRestore = false;
+    app.addEventListener?.('contextrestored', () => { this._preRestore = true; });
   }
 
   dispose() {
@@ -129,16 +136,35 @@ export class RenderPipeline {
    * app.lightRig.setShadowQuality() instead (it picks per-light sizes for softness).
    */
   _enforceShadowSize(light) {
-    if (light.userData.pvManagedShadow) return;
+    if (light.userData.pvManagedShadow) return false;
     const cap = light.isPointLight ? this.opts.shadowMapSize >> 1 : this.opts.shadowMapSize;
     const ms = light.shadow.mapSize;
-    if (ms.x <= cap && ms.y <= cap) return;
+    if (ms.x <= cap && ms.y <= cap) return false;
     ms.set(Math.min(ms.x, cap), Math.min(ms.y, cap));
     if (light.shadow.map) { light.shadow.map.dispose(); light.shadow.map = null; }
+    // shadow maps are cached between frames (app._shadowPolicy): the new map must be drawn
+    // in this frame's shadow pass, never sampled empty
+    this.app.renderer.shadowMap.needsUpdate = true;
+    return true;
   }
 
-  /** Scans the scene once (outside the frame loop) so shadow sizes apply immediately. */
-  applyShadowSizes(scene) { scene.traverse((o) => { if (o.isLight && o.castShadow && o.shadow) this._enforceShadowSize(o); }); }
+  /** Scans the scene once (outside the frame loop) so shadow sizes apply immediately. Returns true if a map changed. */
+  applyShadowSizes(scene) {
+    let changed = false;
+    scene.traverse((o) => { if (o.isLight && o.castShadow && o.shadow && this._enforceShadowSize(o)) changed = true; });
+    return changed;
+  }
+
+  /** Drops the screen-sized buffers (memory pressure / app in background); rebuilt on the next post-processed frame. */
+  releaseTargets() {
+    if (!this._preRestore) {
+      this.screen.dispose();
+      this._gtao?.dispose();
+    }
+    this._preRestore = false;
+    this.screen = new TargetSet(this.floatTargets);
+    this._gtao = null;
+  }
 
   _hide(list) { for (const o of list) { if (o.visible) { o.visible = false; this._hidden.push(o); } } }
 
@@ -362,16 +388,19 @@ export class RenderPipeline {
     inkColorLinear.value.set(o.inkColor);
 
     // GTAO needs half-float targets: without color-buffer-float support AO is skipped
-    const useAO = o.ao && !this.suspendAO && this.floatTargets;
+    const useAO = o.ao && o.aoMode !== 'off' && !this.suspendAO && this.floatTargets;
     const usePre = o.ink || useAO;
     const transparent = o.bg.type === 'transparent';
     renderer.autoClear = false;
     if (usePre) {
-      renderer.shadowMap.autoUpdate = false;
-      this._prepass(renderer, scene, camera, set, !transparent);
-      if (useAO) this._ao(renderer, camera, set);
-      if (o.ink) this._edges(renderer, camera, set, pxScale);
-      renderer.shadowMap.autoUpdate = state.shadowAuto;
+      // the G-buffer pass never draws shadow maps: a pending update runs in the colour pass
+      const sm = renderer.shadowMap, pending = sm.needsUpdate;
+      sm.autoUpdate = false; sm.needsUpdate = false;
+      try {
+        this._prepass(renderer, scene, camera, set, !transparent);
+        if (useAO) this._ao(renderer, camera, set);
+        if (o.ink) this._edges(renderer, camera, set, pxScale);
+      } finally { sm.autoUpdate = state.shadowAuto; sm.needsUpdate = pending; }
     }
 
     // color: background + scene (helpers deferred above the ink)
@@ -406,9 +435,10 @@ export class RenderPipeline {
     this._hide(this.content); this._hide(this.grounds);
     const grid = this.app.grid;
     if (grid.visible) { grid.visible = false; this._hidden.push(grid); }
-    const auto = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+    const sm = renderer.shadowMap, auto = sm.autoUpdate, pending = sm.needsUpdate;
+    sm.autoUpdate = false; sm.needsUpdate = false;
     try { renderer.render(scene, camera); } finally {
-      renderer.shadowMap.autoUpdate = auto;
+      sm.autoUpdate = auto; sm.needsUpdate = pending;
       this._unhideAll();
     }
   }
@@ -472,6 +502,7 @@ export class RenderPipeline {
     const usePre = o.ink || useAO;
     renderer.autoClear = false;
     renderer.shadowMap.autoUpdate = false; // G-buffer passes never need shadow maps
+    renderer.shadowMap.needsUpdate = false;
     if (usePre) {
       this._prepass(renderer, scene, camera, set, !transparent);
       // exports are not time critical: full-resolution AO (finer, cleaner contact shadows)
@@ -484,7 +515,10 @@ export class RenderPipeline {
     for (const hlp of this.helpers) if (hlp.userData.export === true) hlp.visible = true;
     if (transparent) this._transparentGrounds(renderer);
     scene.background = null;
+    // exports always get freshly drawn shadow maps (maps are cached between screen frames,
+    // and capture-only changes such as full building detail must cast)
     renderer.shadowMap.autoUpdate = state.shadowAuto;
+    renderer.shadowMap.needsUpdate = true;
     renderer.setRenderTarget(color);
     renderer.setClearColor(0x000000, 0);
     renderer.clear(true, true, true);

@@ -9,7 +9,7 @@
   background: var(--panel2, rgba(255,255,255,.06)); color: inherit; font: inherit; font-size: 15px; padding: 8px 12px; margin: 2px 0 8px; }
 .pv-ct-subs { margin: 2px 0 8px; }
 .pv-ct-subs .pv-chip { min-height: 38px; }
-.pv-ct-grid { gap: 7px; }
+.pv-ct-grid { gap: 7px; --pv-cols: 3; }
 .pv-ct-card { position: relative; padding: 6px 4px 8px; min-height: 118px; gap: 4px; justify-content: flex-start; }
 .pv-ct-card:active { transform: scale(.96); }
 .pv-ct-card .pv-card-label { font-size: 11.5px; line-height: 1.15; text-align: center; }

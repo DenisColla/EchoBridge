@@ -272,12 +272,12 @@ export function create(app, shell) {
   }
 
   // ---------------------------------------------------------------- picking (tap)
-  function onTap({ ndc, x, y }) {
+  function onTap({ ndc, x, y, event }) {
     const tool = shell.activeToolId;
     const posing = ctx.isActive();
     const mode = ctx.mode();
     if (posing && state.showJoints && mode === 'rotate') {
-      const id = gizmo.hitDot(x, y);
+      const id = gizmo.hitDot(x, y, event?.pointerType);
       if (id) { app.select(app.selection.character, id); haptic(10); return true; }
     }
     const hit = picker.pick(ndc);

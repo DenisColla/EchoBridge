@@ -1,0 +1,100 @@
+/* Tablets (Galaxy Tab S6 / S9 / S9+): classes set by the shell on #app and <html>.
+   .pv-tablet       >= 700 px wide and >= 600 px tall (portrait 800 x 1280, split screen)
+   .pv-tablet-wide  landscape >= 1000 px (1280 x 800, 1400 x 876)
+   Phones never get these classes: nothing here changes the phone layout.
+   Rules are prefixed with html.pv-tablet so they win over module styles of equal weight
+   (module stylesheets load later). Touch targets >= 44 px, type one step larger. */
+
+/* ------------------------------------------------------------------ rail */
+.pv-root.pv-tablet { --rail-w: 88px; }
+.pv-root.pv-tablet-wide { --rail-w: 96px; }
+.pv-root.pv-tablet .pv-toolbar { gap: 4px; padding-top: calc(var(--safe-top) + 10px); }
+.pv-root.pv-tablet .pv-tool { min-height: 66px; font-size: 12.5px; gap: 5px; letter-spacing: 0; }
+.pv-root.pv-tablet .pv-tool-pill { width: 60px; height: 34px; border-radius: 17px; }
+.pv-root.pv-tablet .pv-tool .pv-icon { width: 24px; height: 24px; }
+/* sub-tools of the active group, listed under it (replace the header chips) */
+.pv-rail-subs { display: flex; flex-direction: column; gap: 2px; margin: -2px 0 6px; padding: 4px; border-radius: 16px;
+  background: rgba(255, 255, 255, .035); border: 1px solid var(--line); }
+.pv-rail-subs.enter { animation: pvRailIn .22s var(--ease-out); }
+@keyframes pvRailIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.pv-rail-sub { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 50px; padding: 5px 2px 4px;
+  border: 0; border-radius: 12px; background: none; color: var(--muted); font-size: 11.5px; font-weight: 550; line-height: 1.15; text-align: center;
+  transition: background .18s var(--ease), color .18s; }
+.pv-rail-sub .pv-icon { color: var(--faint); transition: color .18s; }
+.pv-rail-sub:active { background: var(--elev-2); }
+.pv-rail-sub.active { background: var(--accent-soft); color: var(--text); }
+.pv-rail-sub.active .pv-icon { color: var(--accent-hi); }
+.pv-rail-sub-label { max-width: 100%; overflow-wrap: anywhere; }
+.pv-tablet-wide .pv-rail-sub { font-size: 12px; min-height: 52px; }
+
+/* ------------------------------------------------------------------ side panel */
+.pv-panel-grip, .pv-panel-width { display: none; }
+.pv-root.pv-tablet.pv-side .pv-panel { transition: transform .32s var(--ease-out), width .22s var(--ease-out), visibility 0s linear .32s; }
+.pv-root.pv-tablet.pv-side.panel-open .pv-panel { transition: transform .32s var(--ease-out), width .22s var(--ease-out), visibility 0s; }
+.pv-root.pv-tablet .pv-panel.resizing { transition: none !important; }
+.pv-root.pv-tablet .pv-panel.resizing .pv-panel-body { pointer-events: none; }
+/* drag the left edge to resize (double tap: normal / wide) */
+.pv-root.pv-tablet.pv-side .pv-panel-grip { display: flex; position: absolute; left: -13px; top: 0; bottom: 0; width: 26px; z-index: 3;
+  align-items: center; justify-content: center; cursor: ew-resize; touch-action: none; }
+.pv-panel-grip span { width: 5px; height: 46px; border-radius: 3px; background: rgba(255, 255, 255, .2); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+  transition: background .2s, height .2s; }
+.pv-panel-grip:hover span, .pv-panel.resizing .pv-panel-grip span { background: var(--accent-hi); height: 64px; }
+.pv-root.pv-tablet.pv-side .pv-panel-width { display: inline-flex; color: var(--muted); }
+.pv-root.pv-tablet.pv-side .pv-panel-width.off { display: none; }
+.pv-root.pv-tablet .pv-panel-head { min-height: 60px; gap: 4px; padding: calc(var(--safe-top) + 8px) 8px 6px 22px; }
+.pv-root.pv-tablet .pv-panel-head.tabs { padding-left: 12px; }
+.pv-root.pv-tablet .pv-panel-title { font-size: 19px; font-weight: 680; letter-spacing: -.003em; }
+.pv-root.pv-tablet .pv-panel-body { padding: 4px 20px calc(var(--safe-bottom) + 28px) 22px; font-size: 15px; container: pvpanel / inline-size; }
+.pv-root.pv-tablet .pv-subtabs .pv-chip { min-height: 44px; }
+/* a docked panel (voice commands) takes the side-panel slot: the top bar makes room */
+.pv-root.pv-tablet.pv-docked .pv-topbar { right: calc(var(--side-w) + var(--safe-right) + 10px); }
+
+/* ------------------------------------------------------------------ type & touch targets (kit) */
+html.pv-tablet { font-size: 15px; }
+html.pv-tablet body { font-size: 15px; }
+html.pv-tablet .pv-section { margin: 14px 0 18px; }
+html.pv-tablet .pv-section-title { font-size: 12.5px; margin-bottom: 11px; }
+html.pv-tablet .pv-section-title.collapsible { min-height: 44px; }
+html.pv-tablet .pv-slider { margin: 4px 0 10px; }
+html.pv-tablet .pv-slider-head { font-size: 14.5px; }
+html.pv-tablet .pv-slider input { height: 44px; }
+html.pv-tablet .pv-slider input::-webkit-slider-runnable-track { height: 6px; }
+html.pv-tablet .pv-slider input::-webkit-slider-thumb { width: 28px; height: 28px; margin-top: -11px; }
+html.pv-tablet .pv-toggle { min-height: 50px; font-size: 15px; }
+html.pv-tablet .pv-seg-btn { min-height: 44px; font-size: 14.5px; }
+html.pv-tablet .pv-btn { min-height: 48px; font-size: 15px; border-radius: 14px; }
+html.pv-tablet .pv-btn.small { min-height: 44px; font-size: 14px; padding: 8px 12px; }
+html.pv-tablet .pv-icon-btn { width: 44px; height: 44px; }
+html.pv-tablet .pv-chip { min-height: 44px; font-size: 14.5px; padding: 8px 15px; }
+html.pv-tablet .pv-card { font-size: 13.5px; }
+html.pv-tablet .pv-card-label { font-size: 12.5px; }
+html.pv-tablet .pv-swatches { gap: 10px; }
+html.pv-tablet .pv-swatch { width: 44px; height: 44px; }
+html.pv-tablet .pv-body .pv-swatches { grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); justify-content: start; gap: 8px; }
+html.pv-tablet .pv-body .pv-swatch { max-width: 48px; }
+html.pv-tablet .pv-input { min-height: 50px; font-size: 16px; }
+html.pv-tablet .pv-field-label { font-size: 13.5px; }
+html.pv-tablet .pv-hint { font-size: 14.5px; padding: 9px 16px; }
+html.pv-tablet .pv-toast { font-size: 14.5px; max-width: min(600px, 100%); }
+html.pv-tablet .pv-toast-action { min-height: 44px; }
+html.pv-tablet .pv-body-empty { font-size: 14px; }
+html.pv-tablet .pv-body-type-label { font-size: 14.5px; }
+
+/* card grids: more columns when the panel is wider than a phone (cards keep their phone size).
+   kit.cardGrid sets --pv-cols; hand-built grids declare it in their module stylesheet. */
+@container pvpanel (min-width: 450px) {
+  .pv-cards { grid-template-columns: repeat(auto-fill, minmax(calc((356px - (var(--pv-cols, 3) - 1) * 8px) / var(--pv-cols, 3)), 1fr)) !important; }
+}
+
+/* ------------------------------------------------------------------ dialogs, sheets, menus: centered modals
+   (sheets are already centered cards from 700 px; :where() keeps these at the weight of the
+   base rules, so cards that set their own size in a module stylesheet keep it) */
+:where(html.pv-tablet) .pv-modal-card { width: min(470px, 100%); }
+:where(html.pv-tablet) .pv-modal-sheet .pv-modal-card { width: min(600px, 100%); }
+html.pv-tablet .pv-modal-title { font-size: 19.5px; }
+html.pv-tablet .pv-modal-subtitle { font-size: 13.5px; }
+html.pv-tablet .pv-modal-text { font-size: 16px; }
+html.pv-tablet .pv-modal-actions { gap: 10px; margin-top: 20px; }
+html.pv-tablet .pv-modal-actions .pv-btn { min-width: 112px; }
+html.pv-tablet .pv-menu-item { min-height: 52px; font-size: 15.5px; }
+html.pv-tablet .pv-menu-label small { font-size: 13px; }
