@@ -878,8 +878,10 @@ export class GarmentRuntime {
     // closest vertex of the layers below for each vertex of this garment
     const pd2 = new Float32Array(n).fill(Infinity), pr = new Int8Array(n).fill(-1), pj = new Int32Array(n);
     rts.forEach((r, ri) => {
-      const Q = r.fine.P, M = r.dirN;
+      const Q = r.fine.P, M = r.dirN, onlyCoarse = r.layerCoarse ? r.fine.coarse : null;
       for (let j = 0; j < r.fine.n; j++) {
+        // a layer with almost no folds of its own (underwear) is sampled at its coarse vertices
+        if (onlyCoarse && !onlyCoarse[j]) continue;
         // every fine vertex of the layer below: a garment resting close on it
         // (T-shirt hem on jeans) would let fold crests between coarse vertices through
         const x = Q[j * 3], y = Q[j * 3 + 1], z = Q[j * 3 + 2];
@@ -1126,17 +1128,24 @@ export class GarmentRuntime {
         for (let q = o0 * 3; q < o1 * 3; q++) if (fl3[q]) { fl3[q] = 0; changed = true; }
         continue;
       }
+      const s3 = this.seat?.on ? this.s3 : null, liftY = this.liftY;
       for (let i = o0; i < o1; i++) {
-        const a = blendMatrix(M, si, sw, i, _ma);
         const d = disp[i] + push[i], o = i * 3;
         let x = P[o] + N[o] * d, y = P[o + 1] + N[o + 1] * d, z = P[o + 2] + N[o + 2] * d;
         if (off3) { x += off3[o]; y += off3[o + 1]; z += off3[o + 2]; }
-        if (this.seat?.on) { x += this.s3[o]; y += this.s3[o + 1]; z += this.s3[o + 2]; }
-        if (this.liftY) y += this.liftY[i];
-        const py = a[1] * x + a[4] * y + a[7] * z + a[10];
+        if (s3) { x += s3[o]; y += s3[o + 1]; z += s3[o + 2]; }
+        if (liftY) y += liftY[i];
+        // posed height first (the y row of the blended matrix only): most vertices are well above the floor
+        let py = 0;
+        for (let k = 0; k < 4; k++) {
+          const w = sw[i * 4 + k];
+          if (!w) continue;
+          const q = si[i * 4 + k] * 16;
+          py += w * (M[q + 1] * x + M[q + 5] * y + M[q + 9] * z + M[q + 13]);
+        }
         let rx = 0, ry = 0, rz = 0;
         if (py < FLOOR_Y) {
-          inv3(a, 0, FLOOR_Y - py, 0, _pa);
+          inv3(blendMatrix(M, si, sw, i, _ma), 0, FLOOR_Y - py, 0, _pa);
           rx = _pa[0]; ry = _pa[1]; rz = _pa[2];
           any = true;
         }

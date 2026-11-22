@@ -316,6 +316,8 @@ export class ClothingManager extends THREE.EventDispatcher {
     // (an outer layer rests on the top under it: the underwear is not its business)
     if (g.def.slot !== 'shoes') g.runtime.bindLayers(st.garments.slice(0, i).filter((x) => x.def.slot !== 'underwear' || g.def.slot !== 'outer').map((x) => x.runtime));
     seatFlags(st.garments);
+    // the underwear barely folds: the layers over it pair with its coarse vertices only (cheaper layer pass)
+    if (g.def.slot === 'underwear') g.runtime.layerCoarse = true;
     // fine adjacency is only needed by the layer pass
     if (!g.runtime.layers && g.runtime.fine) g.runtime.fine.adj = null;
     // loose fabric lies on the floor (shoes define the contact themselves)
