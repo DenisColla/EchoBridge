@@ -229,19 +229,21 @@ export function creaseSetup(draft, bi, o) {
       if (js < 0 || v < 2e-5) return;
       tIdx.push(i); tVal.push(v); tJ.push(js);
     };
-    for (const r of [1, 2]) {
-      const J = bi.limbs[r].J;
-      bi.torsoCyl(J[0], J[1], J[2], tmp);
-      const thAp = tmp[0], yAp = J[1] - 0.075;
-      for (let i = 0; i < nf; i++) {
-        if (C.limb[i] && C.wT[i] < 0.55) continue;
-        const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-        const dy = y - yAp;
+    // armpits (torso coords), then one pass over the torso vertices for both arms
+    const ap = [1, 2].map((r) => { const J = bi.limbs[r].J; bi.torsoCyl(J[0], J[1], J[2], tmp); return { r, th: tmp[0], y: J[1] - 0.075 }; });
+    const yHi = Math.max(ap[0].y, ap[1].y) + 0.02, yLo = Math.min(ap[0].y, ap[1].y) - 0.34;
+    for (let i = 0; i < nf; i++) {
+      if (C.limb[i] && C.wT[i] < 0.55) continue;
+      const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+      if (y > yHi || y < yLo) continue;
+      bi.torsoCyl(x, y, z, tmp);
+      const thV = tmp[0], rV = tmp[1];
+      for (const a of ap) {
+        const dy = y - a.y;
         if (dy > 0.02 || dy < -0.34) continue;
-        bi.torsoCyl(x, y, z, tmp);
-        const dth = angDiff(tmp[0], thAp);
+        const dth = angDiff(thV, a.th);
         if (Math.abs(dth) > 1.7) continue;
-        const dx = tmp[1] * dth, rho = Math.hypot(dx, dy);
+        const dx = rV * dth, rho = Math.hypot(dx, dy);
         if (rho < 0.025 || rho > 0.32) continue;
         const psi = Math.atan2(dx, -dy);
         if (Math.abs(psi) > 1.35) continue;
@@ -249,7 +251,7 @@ export function creaseSetup(draft, bi, o) {
         const envA = Math.cos((psi / 1.35) * Math.PI * 0.5);
         const b = base ? base[i] : 1;
         const n1 = noise3(x * 8.3 + 1, y * 8.3 - 5, z * 8.3 + 2);
-        push(i, tDepth * envR * envA * b * prof(TPROF, 14 * psi + 1.1 * n1) * (0.75 + 0.3 * n1), r);
+        push(i, tDepth * envR * envA * b * prof(TPROF, 14 * psi + 1.1 * n1) * (0.75 + 0.3 * n1), a.r);
       }
     }
     // crotch -> knee drag lines (legs: theta 0 = outer side, front = +z)
@@ -304,7 +306,8 @@ export function creaseSetup(draft, bi, o) {
 /**
  * Wrinkle runtime of one garment part.
  * src: {coarse:{n, G, adj, skin:{idx,w}, coordsFrame}, nf, parents, profiles Float32Array(nf*4),
- *       amp Float32Array(nf), room Float32Array(nf), stat Float32Array(nf), pvCap?, vcap?, crease?}
+ *       amp Float32Array(nf), room Float32Array(nf), stat Float32Array(nf), pvCap? [base, perRoom],
+ *       vcap?, crease? (creaseSetup)}
  */
 export class WrinklePart {
   constructor(src) {
@@ -325,7 +328,10 @@ export class WrinklePart {
     this.room = src.room;
     /** per fine vertex: depth (m) below which valleys are squeezed (taut spans), or null */
     this.vcap = src.vcap || null;
-    /** per fine vertex: most peak-to-valley height (m, at intensity 1) of the strain folds, or null */
+    /**
+     * slack bound of the strain folds [base, per m of room]: most peak-to-valley
+     * height (m, at intensity 1) = base + room * perRoom; null = unbounded
+     */
     this.pvCap = src.pvCap || null;
     this.stat = src.stat;
     this.kc = src.kc ?? 1;
@@ -532,7 +538,7 @@ export class WrinklePart {
         // (a crease keeps most of its V valley on the body: clipped valleys read as
         // lumps), by at most CREASE_LIFT of its depth: the joint zone does not inflate
         const i = idx[r];
-        let lift = CREASE_BIAS * ae - room[i];
+        const lift = CREASE_BIAS * ae - room[i];
         if (lift > 0) d += lift < CREASE_LIFT * ae ? lift : CREASE_LIFT * ae;
         cd[i] += d;
         if (ae > mx) mx = ae;
@@ -606,7 +612,8 @@ export class WrinklePart {
       const t = src; src = dst; dst = t;
     }
     const AF = src;
-    const { pIdx, pW, prof: pf, amp, room, stat, disp, bias, vcap, pvCap, cd } = this;
+    const { pIdx, pW, prof: pf, amp, room, stat, disp, bias, vcap, cd } = this;
+    const capOn = !!this.pvCap, cap0 = capOn ? this.pvCap[0] * k : 0, capR = capOn ? this.pvCap[1] * k : 0;
     for (let i = 0; i < nf; i++) {
       let a0 = 0, a1 = 0, a2 = 0, a3 = 0;
       const o4 = i * 4;
@@ -620,12 +627,12 @@ export class WrinklePart {
       // peak-to-valley height bounded by the slack of the fabric here
       const sa = a0 + a1 + a2 + a3;
       let pv = ai * sa;
-      if (pvCap && pv > pvCap[i] * k) { pv = pvCap[i] * k; ai = pv / sa; }
+      if (capOn) { const cap = cap0 + capR * room[i]; if (pv > cap) { pv = cap; ai = pv / sa; } }
       let d = stat[i] * k + ai * (1 / PROF_Q) * (a0 * pf[o4] + a1 * pf[o4 + 1] + a2 * pf[o4 + 2] + a3 * pf[o4 + 3]);
       // the fabric cannot fold into the body: where the inward room is smaller
       // than the valleys, the pattern rises a little (it buckles outwards); the
       // rest of the valley is clipped flat on the body below
-      let lift = pv * bias - room[i];
+      const lift = pv * bias - room[i];
       if (lift > 0) d += lift < LIFT_CAP * pv ? lift : LIFT_CAP * pv;
       // a taut span does not sag into the hollow it bridges: soft knee on valleys
       if (vcap && d < -vcap[i]) d = -vcap[i] + (d + vcap[i]) * 0.2;

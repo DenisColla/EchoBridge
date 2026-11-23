@@ -303,11 +303,9 @@ export function assemble(pieces, bi, opts = {}) {
     const crease = d.kind === 'skirt' ? null : creaseSetup(d, bi, { wr, fabric: d.def?.fabric, fitT: d.fitT ?? 0.5, base, spacing: fr.h, ring: anyRing ? ringStat : null });
     // ring stacks the crease runtime did not take (no joint to ease them) stay static
     if (anyRing) for (let i = 0; i < nf; i++) stat[i] += ringStat[i];
-    // where the crease folds own the compression the strain folds only add a little
+    // where the crease folds own the compression the strain folds only add a little;
+    // the strain folds are bounded by the slack of the fabric (pvCap below)
     if (crease) { for (let i = 0; i < nf; i++) amp[i] *= 1 - 0.65 * crease.cover[i]; crease.cover = null; }
-    // slack bound of the strain folds (peak to valley): a close fit cannot buckle deep
-    const pvCap = new Float32Array(nf);
-    for (let i = 0; i < nf; i++) pvCap[i] = (PV_MIN + PV_ROOM * d.room[i]) * fab.pv;
     const coarse = d.coarse;
     const basis = coarseBasis(d, bi);
     // taut spans (fabric bridging a hollow: under the bust, across the cleavage,
@@ -319,7 +317,7 @@ export function assemble(pieces, bi, opts = {}) {
     }
     const wp = new WrinklePart({
       coarse: { n: coarse.n, G: coarse.G, adj: coarse.adj || buildAdjacency(coarse.n, buildEdges(coarse.n, coarse.quads)), skin: coarse.skin, basis },
-      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, pvCap, stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 2,
+      nf, parents: coarse.parents, profiles: prof, amp, room: d.room, vcap, pvCap: [PV_MIN * fab.pv, PV_ROOM * fab.pv], stat, bias, refM: opts.refM, kc: wr.kc ?? 1, kt: wr.kt ?? 0.35, spread: wr.spread ?? 2,
       crease: crease && (crease.rec.n || crease.ten.n || crease.ring) ? crease : null,
     });
     parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });

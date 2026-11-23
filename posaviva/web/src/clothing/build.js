@@ -823,7 +823,11 @@ export function staticFolds(draft, features, noise, strength = 1, ringOut = null
       const ids = Array.isArray(f.near) ? f.near : [f.near];
       const sel = ids.map((id) => draft.cons.findIndex((c) => c.id === id)).filter((i) => i >= 0).map((i) => draft.cvals[i]);
       if (!sel.length) continue;
-      cv = sel.length === 1 ? sel[0] : new Float32Array(nf).map((_, i) => Math.min(...sel.map((a) => a[i])));
+      cv = sel[0];
+      if (sel.length > 1) {
+        cv = Float32Array.from(sel[0]);
+        for (let k = 1; k < sel.length; k++) { const a = sel[k]; for (let i = 0; i < nf; i++) if (a[i] < cv[i]) cv[i] = a[i]; }
+      }
     }
     for (let i = 0; i < nf; i++) {
       const isLimb = C.limb[i] && C.wT[i] < 0.5;
