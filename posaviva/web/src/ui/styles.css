@@ -296,6 +296,10 @@ input.pv-swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; op
 .pv-modal-popover .pv-modal-backdrop { background: rgba(6,7,10,.18); }
 .pv-modal-popover .pv-modal-card { position: absolute; width: 280px; padding: 6px; border-radius: 18px; transform: scale(.94); overflow-y: auto; }
 .pv-modal-popover .pv-modal-body { margin: 0; padding: 0; }
+.pv-stage-menu .pv-modal-head { padding: 6px 8px 4px; gap: 8px; }
+.pv-stage-menu .pv-modal-title { font-size: 15px; }
+.pv-stage-menu .pv-modal-body { display: flex; flex-direction: column; gap: 4px; }
+.pv-stage-menu .pv-menu-item { min-height: 44px; }
 
 /* action lists */
 .pv-menu { display: flex; flex-direction: column; padding: 2px 0; }

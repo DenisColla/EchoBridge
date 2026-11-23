@@ -1,6 +1,7 @@
 // Application core: renderer, scene, camera, characters, selection, modules,
 // on-demand rendering, undo/redo history and (de)serialization.
 import * as THREE from 'three';
+import { haptic } from './ui/kit.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Character } from './core/Character.js';
 import { materials } from './render/materials.js';
@@ -114,6 +115,7 @@ export class App extends THREE.EventDispatcher {
     this.history = new History(this);
     this.raycaster = new THREE.Raycaster();
     this._tapHandlers = [];
+    this._holdHandlers = [];
     this._backHandlers = [];
     this._setupTapRouter();
 
@@ -249,6 +251,24 @@ export class App extends THREE.EventDispatcher {
     return () => { const i = this._tapHandlers.indexOf(h); if (i >= 0) this._tapHandlers.splice(i, 1); };
   }
 
+  /**
+   * Register a long-press handler: fn({ndc, event, x, y}) -> false (not mine) | true (consumed) |
+   * a press-and-drag session {move(e), end(e, cancelled)}: while the finger stays down the
+   * camera does not orbit and every move goes to the session. A press held HOLD_MS without
+   * moving more than 10 px (one finger, nothing else down) fires the handlers, highest
+   * priority first; its release is never a tap. Priorities as for addTapHandler (100 modes,
+   * 60 characters, 50 objects, 0 empty space). Returns an unregister function.
+   */
+  addHoldHandler(fn, priority = 0) {
+    const h = { fn, priority };
+    this._holdHandlers.push(h);
+    this._holdHandlers.sort((a, b) => b.priority - a.priority);
+    return () => { const i = this._holdHandlers.indexOf(h); if (i >= 0) this._holdHandlers.splice(i, 1); };
+  }
+
+  /** True while a long-press drag session (addHoldHandler) owns the pointer. */
+  get holdActive() { return !!this._holdSession; }
+
   /** Android back handler stack: fn() -> true if handled (e.g. exit a mode). */
   pushBackHandler(fn) { this._backHandlers.push(fn); return () => { const i = this._backHandlers.indexOf(fn); if (i >= 0) this._backHandlers.splice(i, 1); }; }
 
@@ -263,15 +283,58 @@ export class App extends THREE.EventDispatcher {
     const c = this.canvas;
     let down = null;
     const pointers = new Set(); // pointers currently down anywhere (multi-touch never taps)
+    const HOLD_MS = 480;
+    const cancelHold = () => { if (down?.timer) { clearTimeout(down.timer); down.timer = 0; } };
+    const fireHold = () => {
+      const d = down;
+      if (!d || d.multi) return;
+      d.timer = 0;
+      d.held = true;
+      if (!this._holdHandlers.length) return;
+      const e = d.last;
+      const ndc = this.pointerToNDC(e);
+      for (const h of this._holdHandlers) {
+        let r = false;
+        try { r = h.fn({ ndc, event: e, x: e.clientX, y: e.clientY }); } catch (err) { console.error(err); }
+        if (!r) continue;
+        haptic('medium');
+        if (typeof r === 'object') {
+          this._holdSession = { s: r, id: d.id, controls: this.controls.enabled };
+          this.controls.enabled = false;
+        }
+        this.invalidate();
+        return;
+      }
+    };
+    const endSession = (e, cancelled) => {
+      const hs = this._holdSession;
+      if (!hs || e.pointerId !== hs.id) return false;
+      this._holdSession = null;
+      this.controls.enabled = hs.controls;
+      try { hs.s.end?.(e, cancelled); } catch (err) { console.error(err); }
+      this.invalidate();
+      return true;
+    };
     c.addEventListener('pointerdown', (e) => {
       pointers.add(e.pointerId);
-      if (down && pointers.size > 1) { down.multi = true; return; }
-      down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false };
+      if (down && pointers.size > 1) { down.multi = true; cancelHold(); return; }
+      down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false, held: false, timer: 0, last: e };
+      // a press already taken by a gizmo / mode (capture listeners) never becomes a long press
+      if (!e.defaultPrevented) down.timer = setTimeout(fireHold, HOLD_MS);
+    });
+    c.addEventListener('pointermove', (e) => {
+      const hs = this._holdSession;
+      if (hs && e.pointerId === hs.id) { try { hs.s.move?.(e); } catch (err) { console.error(err); } this.invalidate(); return; }
+      if (!down || e.pointerId !== down.id) return;
+      down.last = e;
+      if (down.timer && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 10) cancelHold();
     });
     const up = (e) => {
+      if (endSession(e, e.type === 'pointercancel')) { if (down?.id === e.pointerId) down = null; return; }
       if (!down || e.pointerId !== down.id) return;
       const d = down; down = null;
-      if (d.multi || e.type === 'pointercancel') return;
+      if (d.timer) clearTimeout(d.timer);
+      if (d.multi || d.held || e.type === 'pointercancel') return;
       // event timestamps: a long frame between down and up must not swallow the tap
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 450) return;
       this.routeTap(e);
@@ -282,10 +345,14 @@ export class App extends THREE.EventDispatcher {
     // the toolbar) must not leave the router believing it is still down
     const forget = (e) => {
       pointers.delete(e.pointerId);
-      if (down && e.pointerId === down.id && e.target !== c) down = null;
+      if (endSession(e, true)) { if (down?.id === e.pointerId) down = null; return; }
+      if (down && e.pointerId === down.id && e.target !== c) { cancelHold(); down = null; }
     };
     window.addEventListener('pointerup', forget, true);
     window.addEventListener('pointercancel', forget, true);
+    // a gizmo / mode that captured the press (pointerdown in the capture phase calling
+    // stopPropagation) never reaches the router; one that only marks it with
+    // preventDefault() is honored above
   }
 
   /**

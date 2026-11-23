@@ -416,6 +416,49 @@ export function promptDialog(label, value = '', opts = {}) {
 }
 
 /**
+ * Context menu at a point of the 3D view (long press on a character, an object,
+ * an empty spot...). items like sheetMenu (+ keepOpen: the menu stays open after
+ * the click). opts: {x, y (screen px of the finger), title, subtitle, body: Node|Node[]
+ * shown above the items (e.g. a slider), width, onClose}. Returns the modal api
+ * ({el, card, body, close, result}).
+ */
+export function stageMenu(items, opts = {}) {
+  const list = h('div', { class: 'pv-menu pv-stage-menu-list', role: 'menu' });
+  let m;
+  for (const it of items) {
+    if (!it) continue;
+    if (it.separator) { list.appendChild(h('div', { class: 'pv-menu-sep' })); continue; }
+    if (it.header) { list.appendChild(h('div', { class: 'pv-menu-header' }, it.header)); continue; }
+    const b = h('button', { type: 'button', role: 'menuitem', class: `pv-menu-item ${it.danger ? 'danger' : ''} ${it.checked ? 'checked' : ''}`.trim(), disabled: it.disabled },
+      it.icon ? icon(it.icon, 20) : h('span', { class: 'pv-menu-noicon' }),
+      h('span', { class: 'pv-menu-label' }, it.label, it.hint ? h('small', {}, it.hint) : null),
+      it.checked ? icon('check', 18) : null);
+    b.addEventListener('click', () => { haptic('tick'); if (!it.keepOpen) m.close(it.id ?? it.label); setTimeout(() => it.onClick?.(), 0); });
+    list.appendChild(b);
+  }
+  const body = [opts.body || null, list.children.length ? list : null];
+  m = modal({ title: opts.title, subtitle: opts.subtitle, body, kind: 'popover', className: 'pv-popover pv-stage-menu', onClose: opts.onClose });
+  const card = m.card;
+  const W = window.innerWidth, H = window.innerHeight;
+  const w = Math.min(opts.width || 264, W - 16);
+  const x = opts.x ?? W / 2, y = opts.y ?? H / 2;
+  card.style.width = w + 'px';
+  card.style.left = Math.round(Math.min(Math.max(8, x - w / 2), W - w - 8)) + 'px';
+  // below the finger when there is room, otherwise above it (measured after layout)
+  card.style.top = Math.round(Math.min(y + 18, H - 120)) + 'px';
+  card.style.maxHeight = `calc(100vh - 16px - var(--safe-bottom, 0px))`;
+  requestAnimationFrame(() => {
+    const ch = card.getBoundingClientRect().height;
+    let top = y + 18;
+    if (top + ch > H - 8) top = Math.max(8, y - 18 - ch);
+    if (top + ch > H - 8) top = Math.max(8, H - 8 - ch);
+    card.style.top = Math.round(top) + 'px';
+  });
+  card.style.transformOrigin = 'top center';
+  return m;
+}
+
+/**
  * Action list. items: [{id, label, icon, hint, danger, disabled, checked, onClick}] or {separator:true}.
  * opts: {title, anchor: Element} — with an anchor on wide screens it opens as a
  * popover next to it, otherwise as a bottom action sheet. -> Promise<id|null>
