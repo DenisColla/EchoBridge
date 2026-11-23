@@ -51,6 +51,8 @@ export class Prop {
     this.hangTwist = 0;
     /** room preset / group id (props added together, e.g. a furnished room) */
     this.group = typeof state.group === 'string' ? state.group : null;
+    /** practical light state set by the user ({on, intensity, color, mode}; scene/practicals.js), null = defaults */
+    this.light = state.light && typeof state.light === 'object' ? { ...state.light } : null;
     /** called when an asynchronously loaded model replaced the placeholder */
     this.onAsync = null;
     /** model types: true while the placeholder box is shown */
@@ -291,6 +293,7 @@ export class Prop {
     const g = this.grip;
     if (g.slide || g.twist || g.flip) j.grip = { slide: r4(g.slide), twist: r4(g.twist), flip: !!g.flip };
     if (this.group) j.group = this.group;
+    if (this.light) j.light = { ...this.light };
     return j;
   }
 

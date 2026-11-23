@@ -76,4 +76,19 @@ export const LIGHT_PRESETS = [
   },
 ];
 
-export const presetById = new Map(LIGHT_PRESETS.map((p) => [p.id, p]));
+/**
+ * Presets of the "Luce ambientale" menu (long press on an empty spot) that are not
+ * in the Luci panel strip: soft daylight from a window-high sun with a sky fill.
+ */
+export const AMBIENT_PRESETS = [
+  {
+    id: 'day', label: 'Giorno',
+    ambient: { intensity: 0.95, kelvin: 9000, ground: '#4a4339' },
+    lights: [
+      { role: 'key', type: 'sun', relAz: 50, el: 42, intensity: 2.7, kelvin: 5600, shadow: true, soft: 0.22 },
+      { role: 'rim', type: 'sun', relAz: -140, el: 35, intensity: 0.9, kelvin: 8500, shadow: false },
+    ],
+  },
+];
+
+export const presetById = new Map([...LIGHT_PRESETS, ...AMBIENT_PRESETS].map((p) => [p.id, p]));

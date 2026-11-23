@@ -189,6 +189,17 @@ const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _dir = new THREE.Vect
 const _box = new THREE.Box3(), _m = new THREE.Matrix4(), _sphere = new THREE.Sphere();
 const _ndc = new THREE.Vector2(), _plane = new THREE.Plane();
 const _white = new THREE.Color(1, 1, 1);
+const _tint = new THREE.Color(1, 1, 1), _warmF = new THREE.Color(1, 0.8, 0.6), _coolF = new THREE.Color(0.7, 0.85, 1);
+
+/**
+ * Colour filter of the global warm / cool slider (-1 warm .. +1 cool), normalized to
+ * unit luminance so the slider changes the hue, not the exposure.
+ */
+function tintFilter(t, out) {
+  out.copy(_white).lerp(t < 0 ? _warmF : _coolF, Math.min(1, Math.abs(t)));
+  const lum = 0.2126 * out.r + 0.7152 * out.g + 0.0722 * out.b;
+  return out.multiplyScalar(1 / Math.max(1e-3, lum));
+}
 
 export class LightRig extends THREE.EventDispatcher {
   constructor(app) {
@@ -208,7 +219,10 @@ export class LightRig extends THREE.EventDispatcher {
     this.handleGroup.add(this.targetMarker);
 
     /** live state (plain JSON) */
-    this.state = { v: 1, preset: null, ambient: { intensity: 0.8, kelvin: 7500, color: null, ground: '#3e3833' }, lights: [], handles: true };
+    // level (0..2) and tint (-1 warm .. +1 cool): global "Luce ambientale" controls over every rig light
+    this.state = { v: 1, preset: null, ambient: { intensity: 0.8, kelvin: 7500, color: null, ground: '#3e3833' }, lights: [], handles: true, level: 1, tint: 0 };
+    /** runtime scale of the studio rig set by the practicals ('Accendi solo questa', 'Solo luci della scena'); not serialized here */
+    this._studio = { lights: 1, ambient: 1 };
     /** id -> {light, type, handle, line, kind} */
     this.entries = new Map();
     this.selectedId = null;
@@ -282,6 +296,8 @@ export class LightRig extends THREE.EventDispatcher {
       v: 1, preset: s.preset ?? null,
       ambient: { intensity: 0.8, kelvin: 7500, color: null, ground: null, ...(s.ambient || {}) },
       lights, handles: s.handles !== false,
+      level: Number.isFinite(+s.level) ? Math.max(0, Math.min(2, +s.level)) : 1,
+      tint: Number.isFinite(+s.tint) ? Math.max(-1, Math.min(1, +s.tint)) : 0,
     };
     this._syncAll();
     this._appliedKey = JSON.stringify(this.state);
@@ -314,6 +330,35 @@ export class LightRig extends THREE.EventDispatcher {
     this._emit('change');
     this.app.commit(label);
   }
+
+  /** Global level of the rig (0..2, 1 = as designed): the "Intensità" of the ambient light menu. */
+  setLevel(v, opts = {}) {
+    this.state.level = Math.max(0, Math.min(2, +v || 0));
+    this._syncAll();
+    this._afterChange(opts.live);
+  }
+
+  /** Global warm (-1) / cool (+1) tint of every rig light and the ambient. */
+  setTint(v, opts = {}) {
+    this.state.tint = Math.max(-1, Math.min(1, +v || 0));
+    this._syncAll();
+    this._afterChange(opts.live);
+  }
+
+  /**
+   * Runtime scale of the studio rig (practical lights: 'Accendi solo questa' and
+   * 'Solo luci della scena' turn the studio down to a faint fill). Not part of the
+   * rig state: the practicals module serializes its own mode.
+   */
+  setStudioScale(lights = 1, ambient = 1) {
+    if (this._studio.lights === lights && this._studio.ambient === ambient) return;
+    this._studio.lights = lights;
+    this._studio.ambient = ambient;
+    this._syncAll();
+    this._emit('studio');
+  }
+
+  get studioScale() { return { ...this._studio }; }
 
   setHandlesPref(on) { this.state.handles = !!on; this._updateHandleVisibility(); this._emit('handles'); }
 
@@ -366,6 +411,11 @@ export class LightRig extends THREE.EventDispatcher {
   applyPreset(id) {
     const p = presetById.get(id);
     if (!p) return;
+    this.applyPresetDef(p, id);
+  }
+
+  /** Applies a preset definition (LIGHT_PRESETS format) that may not be in the list (ambient menu presets). */
+  applyPresetDef(p, id = p.id) {
     const center = this.subjectCenter(new THREE.Vector3());
     const camAz = this._cameraAzimuth(center);
     const prevSel = this.selected?.role;
@@ -382,6 +432,8 @@ export class LightRig extends THREE.EventDispatcher {
     this.state.lights = lights;
     this.state.ambient = { intensity: 0.8, kelvin: 7500, color: null, ground: null, ...p.ambient };
     this.state.preset = id;
+    this.state.level = 1;
+    this.state.tint = 0;
     this.selectedId = (lights.find((l) => l.role === prevSel) || lights[0]).id;
     this._syncAll();
     this._afterChange(false);
@@ -421,7 +473,8 @@ export class LightRig extends THREE.EventDispatcher {
     if (a.color) this.hemi.color.set(a.color); else setColorFromKelvin(this.hemi.color, a.kelvin ?? 7500);
     if (a.ground) this.hemi.groundColor.set(a.ground);
     else this.hemi.groundColor.copy(this.hemi.color).multiplyScalar(0.18).add(_v.set(0.05, 0.04, 0.035));
-    this.hemi.intensity = a.intensity;
+    if (this.state.tint) { tintFilter(this.state.tint, _tint); this.hemi.color.multiply(_tint); this.hemi.groundColor.multiply(_tint); }
+    this.hemi.intensity = a.intensity * (this.state.level ?? 1) * this._studio.ambient;
   }
 
   /**
@@ -430,7 +483,8 @@ export class LightRig extends THREE.EventDispatcher {
    * are not flattened by a constant environment light.
    */
   get envScale() {
-    return Math.max(0, Math.min(ENV_MAX_SCALE, (this.state.ambient.intensity ?? ENV_REF_AMBIENT) / ENV_REF_AMBIENT));
+    const k = (this.state.level ?? 1) * this._studio.ambient;
+    return Math.max(0, Math.min(ENV_MAX_SCALE * Math.max(1, k), k * (this.state.ambient.intensity ?? ENV_REF_AMBIENT) / ENV_REF_AMBIENT));
   }
 
   _disposeEntry(id) {
@@ -461,13 +515,15 @@ export class LightRig extends THREE.EventDispatcher {
     const L = e.light;
     L.visible = !!d.on;
     if (d.color) L.color.set(d.color); else setColorFromKelvin(L.color, d.kelvin);
+    if (this.state.tint) L.color.multiply(tintFilter(this.state.tint, _tint));
+    const k = (this.state.level ?? 1) * this._studio.lights;
     dirFromAzEl(d.az, d.el, _dir);
     if (d.type === 'sun') {
-      L.intensity = d.intensity;
+      L.intensity = d.intensity * k;
       this._placeSun(d, L);
     } else {
       L.position.fromArray(d.target).addScaledVector(_dir, d.dist);
-      L.intensity = d.intensity * d.dist * d.dist;
+      L.intensity = d.intensity * d.dist * d.dist * k;
       if (d.type === 'spot') {
         L.target.position.fromArray(d.target);
         L.angle = Math.max(2, Math.min(170, d.angle)) * 0.5 * DEG;
@@ -581,6 +637,7 @@ export class LightRig extends THREE.EventDispatcher {
     this._forcedRes.d2 = this._forcedRes.point = 0;
     this._fitAllShadows();
     this.app.invalidate();
+    this._emit('quality'); // practical lights follow the quality preset (budget, shadows)
   }
 
   /**
