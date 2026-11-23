@@ -302,7 +302,15 @@ export class CameraRig extends THREE.EventDispatcher {
    * (not the area above the tool panel) is used so the framing matches exports.
    */
   frameSubject({ animate = true, commit = true } = {}) {
-    const box = this._subject().box;
+    this.frameBox(this._subject().box, { animate, commit });
+  }
+
+  /**
+   * Frames any world box with the frameSubject rules (e.g. every character: the stage
+   * shortcut "Centra personaggi"). Returns false for an empty box.
+   */
+  frameBox(box, { animate = true, commit = true } = {}) {
+    if (!box || box.isEmpty()) return false;
     const cam = this.camera;
     const C = box.getCenter(new THREE.Vector3());
     const d = this._frameDist(box, C, cam.aspect);
@@ -312,9 +320,10 @@ export class CameraRig extends THREE.EventDispatcher {
       if (this.tween) this._endTween(false);
       this.controls.target.copy(C); cam.position.copy(P); this.controls.update(); this._changed();
       if (commit) this.commit('inquadra');
-      return;
+      return true;
     }
     this._startTween({ target: C, position: P }, { duration: 520, commit: commit ? 'inquadra' : null, mode: 'linear' });
+    return true;
   }
 
   /**
