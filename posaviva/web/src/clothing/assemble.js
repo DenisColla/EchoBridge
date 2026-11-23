@@ -5,35 +5,246 @@
 // outward push) and skirts off the legs (leg capsules, 3D offsets).
 //
 // UV sets:
-//   uv  (channel 0): metric cylindrical coords (arc length around the region at a
-//                    reference radius, axial distance) for the tiling weave map
-//   uv1 (channel 1): garment atlas (one rect per region, angle x normalized body
-//                    coordinate) for the per-garment detail map (seams, pockets…)
-// Seams: vertices are split where the angle wraps and between regions.
+//   uv  (channel 0): metric cylindrical coords (arc length around the region at
+//                    its own mean radius, axial distance) for the tiling weave map
+//   uv1 (channel 1): garment atlas (one rect per panel, angle x body coordinate,
+//                    see atlasLayout) for the per-garment detail map (seams, pockets…)
+// Seams: vertices are split where the angle wraps and between panels.
+// Extra attributes (fabric shading, see render/materials.js cloth): pvEdge =
+// (distance to the nearest garment edge (m), 1 at a top edge: waist / neck),
+// pvCav = fold cavity (fold valleys, written while posing).
 import * as THREE from 'three';
 import { quadNormals, buildAdjacency, buildEdges, len3 } from './mesh.js';
 import { WrinklePart, foldFields, noise3, FOLD_BIAS, scratch } from './wrinkles.js';
 import { staticFolds } from './build.js';
 
-/** Atlas rects [x0, y0, w, h] per region (0 torso, 1 arm L, 2 arm R, 3 leg L, 4 leg R). */
-export const ATLAS = [
-  [0.01, 0.01, 0.56, 0.44],
-  [0.59, 0.01, 0.19, 0.44],
-  [0.80, 0.01, 0.19, 0.44],
-  [0.01, 0.47, 0.30, 0.52],
-  [0.33, 0.47, 0.30, 0.52],
+// ------------------------------------------------------------------ fold cavity (fabric shading)
+/** Fold curvature (1/m) where the fold cavity shading starts / is full (see GarmentRuntime._cavityPass). */
+const CAV_K0 = 12, CAV_K1 = 80;
+/** Smoothing passes of the fold curvature before it becomes the cavity. */
+const CAV_SMOOTH = 1;
+/** Garment slots without fold cavity shading (they barely fold: no per-frame cost). */
+const NO_CAVITY = new Set(['shoes', 'socks', 'underwear']);
+/** Laplacian weights of the fine rest surface for the fold cavity: 4 / sum of squared edge lengths per vertex. */
+function foldCavity(F) {
+  const { off, adj } = F.adj, P = F.P, n = F.n, inv = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let k = off[i]; k < off[i + 1]; k++) { const j = adj[k] * 3; s += (P[j] - P[i * 3]) ** 2 + (P[j + 1] - P[i * 3 + 1]) ** 2 + (P[j + 2] - P[i * 3 + 2]) ** 2; }
+    inv[i] = s > 1e-10 ? 4 / s : 0;
+  }
+  return { off, adj, inv, f: new Float32Array(n), g: new Float32Array(n) };
+}
+
+// ------------------------------------------------------------------ garment atlas (uv1)
+/**
+ * Representative body extents (m) that size the atlas rects. The drawings are in
+ * body coordinates (they fit every body); these only set a uniform texel density:
+ * per unit of the body coordinate its length and the circumference around it.
+ * Torso T: 0 crotch, 1 hip joint, 2 waist, 3 bust, 4 shoulder, 5 neck base
+ * (below the crotch, for skirts, the crotch..hip length per unit).
+ */
+const EXT = [
+  { len: [0.085, 0.13, 0.15, 0.12, 0.075], circ: [1.0, 1.0, 0.82, 0.96, 0.9] },
+  { len: [0.28, 0.25, 0.19], circ: [0.31, 0.25, 0.2] },
+  { len: [0.42, 0.42, 0.22], circ: [0.58, 0.38, 0.3] },
 ];
-/** uv1 of plain (detail-free) geometry: a white corner of every detail map. */
-export const WHITE_UV1 = [0.9, 0.9];
-export const T_RANGE = [-0.6, 5.8];
-export const A_RANGE = [-0.35, 3.0];
-/** atlas coordinate of region r at angle theta and normalized body coordinate (T or limb param) */
-export function atlasUV(r, theta, coord, out, o = 0) {
-  const R = ATLAS[r];
-  const norm = r === 0 ? (coord - T_RANGE[0]) / (T_RANGE[1] - T_RANGE[0]) : (coord - A_RANGE[0]) / (A_RANGE[1] - A_RANGE[0]);
+const extOf = (r) => EXT[r === 0 ? 0 : r <= 2 ? 1 : 2];
+/** Body extent length (m) from coordinate 0 to c along region r. */
+export function atlasLen(r, c) {
+  const L = extOf(r).len, n = L.length;
+  if (c <= 0) return c * L[0];
+  let s = 0;
+  for (let i = 0; i < n; i++) { if (c <= i + 1) return s + (c - i) * L[i]; s += L[i]; }
+  return s + (c - n) * L[n - 1];
+}
+/** Length (m) of one unit of body coordinate at c (region r). */
+export function atlasUnit(r, c) { const L = extOf(r).len; return L[Math.max(0, Math.min(L.length - 1, Math.floor(c)))]; }
+/** Circumference (m) of region r at coordinate c. */
+export function atlasCirc(r, c) { const C = extOf(r).circ; return C[Math.max(0, Math.min(C.length - 1, Math.floor(c)))]; }
+/** Free margin between atlas rects (half on each side: wrap seams and mip levels sample into it). */
+export const ATLAS_GAP = 0.03;
+/** Packing height: the strip above it stays neutral (see NEUTRAL_UV1). */
+const ATLAS_H = 0.975;
+/** uv1 of plain (detail-free) geometry: a neutral corner of every detail map. */
+export const NEUTRAL_UV1 = [0.995, 0.995];
+export const WHITE_UV1 = NEUTRAL_UV1;
+/** Default atlas spec: torso, sleeves and legs over their whole range. */
+const DEFAULT_ATLAS = { t: [-0.6, 5.8], arm: [-0.35, 2.1], leg: [-0.3, 2.1] };
+const _layouts = new Map();
+
+/**
+ * Atlas layout of a garment (cached per spec). spec (catalog `atlas`):
+ * {t: [T0, T1] torso range, arm: [a0, a1], leg: [l0, l1], c: torso circumference
+ * override (skirts), legCut: torso T above which a leg face is part of the torso
+ * panel (default 0, the crotch: seat, pockets and fly live on the torso panel),
+ * armCut: arm param below which a sleeve face is part of the torso (armhole)}.
+ * Panels get one rect each, packed (shelves) at one texel density for all of them.
+ * Returns {key, rects[5] ([x, y, w, h] | null), ranges[5], len0[5], len1[5], legCut, armCut, s}
+ * (s = atlas units per metre).
+ */
+export function atlasLayout(spec) {
+  spec = spec || DEFAULT_ATLAS;
+  const key = JSON.stringify(spec);
+  let lay = _layouts.get(key);
+  if (lay) return lay;
+  const items = [];
+  const add = (r, rg, c) => {
+    const l0 = atlasLen(r, rg[0]), l1 = atlasLen(r, rg[1]);
+    let w = c || 0;
+    if (!w) for (let k = Math.floor(rg[0]); k <= Math.floor(rg[1]); k++) w = Math.max(w, atlasCirc(r, k));
+    items.push({ r, rg, l0, l1, w, h: Math.max(0.02, l1 - l0) });
+  };
+  if (spec.t) add(0, spec.t, spec.c);
+  if (spec.arm) { add(1, spec.arm); add(2, spec.arm); }
+  if (spec.leg) { add(3, spec.leg); add(4, spec.leg); }
+  items.sort((a, b) => b.h - a.h || a.r - b.r);
+  const G = ATLAS_GAP;
+  const pack = (s) => {
+    const out = [];
+    let x = 0, y = 0, rowH = 0;
+    for (const it of items) {
+      const w = it.w * s, h = it.h * s;
+      if (w + G > 1) return null;
+      if (x + w + G > 1) { y += rowH; x = 0; rowH = 0; }
+      out.push([it.r, x + G / 2, y + G / 2, w, h]);
+      x += w + G; rowH = Math.max(rowH, h + G);
+    }
+    return y + rowH <= ATLAS_H ? out : null;
+  };
+  let lo = 0, hi = 10, best = pack(1e-3);
+  for (let it = 0; it < 28; it++) { const m = (lo + hi) / 2, p = pack(m); if (p) { lo = m; best = p; } else hi = m; }
+  lay = { key, rects: [null, null, null, null, null], ranges: [null, null, null, null, null], len0: [0, 0, 0, 0, 0], len1: [1, 1, 1, 1, 1], legCut: spec.legCut ?? 0, armCut: spec.armCut ?? 0, s: lo };
+  for (const [r, x, y, w, h] of best) lay.rects[r] = [x, y, w, h];
+  for (const it of items) { lay.ranges[it.r] = it.rg; lay.len0[it.r] = it.l0; lay.len1[it.r] = it.l1; }
+  _layouts.set(key, lay);
+  return lay;
+}
+
+/**
+ * Atlas coordinate (uv1) of panel r of a layout at angle theta and body
+ * coordinate (T or limb param). Along the region the atlas follows the body
+ * extent length (uniform texel density); outside the range it is clamped.
+ */
+export function atlasUV(lay, r, theta, coord, out, o = 0) {
+  const R = lay.rects[r];
+  if (!R) { out[o] = NEUTRAL_UV1[0]; out[o + 1] = NEUTRAL_UV1[1]; return out; }
+  const norm = (atlasLen(r, coord) - lay.len0[r]) / (lay.len1[r] - lay.len0[r]);
   out[o] = R[0] + R[2] * (theta / (2 * Math.PI) + 0.5);
   out[o + 1] = R[1] + R[3] * Math.max(0, Math.min(1, norm));
   return out;
+}
+
+/** Weave uv scale per region: arc length per radian = the region's mean radius (bins along its axis for limbs). */
+const RADIUS_BIN = 0.02;
+/**
+ * UV frame of a draft (both uv sets, the panel of each face, the distance of
+ * each vertex to the garment edges for the stitched hems).
+ * Returns {lay, panel(vs) -> region, uv0(v, R, th, out), coord(v, R), edge: Float32Array(nf*2) | null}.
+ */
+function uvFrame(d, bi, pc) {
+  const C = d.coords, P = d.P, nf = d.nf, tmp = new Float32Array(9);
+  const lay = atlasLayout(pc.atlas || d.def?.atlas);
+  const hasRing = d.kind === 'skirt' && d.ring;
+  // torso: mean radius over the draft; limbs: radius binned along the limb axis
+  let rT = 0, nT = 0;
+  const bins = [null, new Map(), new Map(), new Map(), new Map()];
+  for (let i = 0; i < nf; i++) {
+    const L = C.limb[i], x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+    if (!L || C.wT[i] > 0.5) { bi.torsoCyl(x, y, z, tmp); rT += tmp[1]; nT++; }
+    if (L) {
+      bi.limbs[L].cyl(Math.max(0, C.aL[i]), x, y, z, tmp);
+      const b = Math.round(C.sL[i] / RADIUS_BIN), m = bins[L], e = m.get(b);
+      if (e) { e[0] += tmp[1]; e[1]++; } else m.set(b, [tmp[1], 1]);
+    }
+  }
+  rT = nT ? rT / nT : 0.15;
+  const limbR = (L, s) => {
+    const m = bins[L], b = s / RADIUS_BIN, b0 = Math.floor(b);
+    const at = (k) => { for (let q = 0; q < 6; q++) { const e = m.get(k + q) || m.get(k - q); if (e) return e[0] / e[1]; } return 0.06; };
+    const t = b - b0;
+    return at(b0) * (1 - t) + at(b0 + 1) * t;
+  };
+  // skirts: per ring mean radius and slant length from the waist (rings x segs grid)
+  let ringR = null, ringS = null;
+  if (hasRing) {
+    const { rings, segs, ys, R } = d.ring;
+    ringR = new Float32Array(rings); ringS = new Float32Array(rings);
+    for (let k = 0; k < rings; k++) { let s = 0; for (let j = 0; j < segs; j++) s += R[k * segs + j]; ringR[k] = s / segs; }
+    for (let k = 1; k < rings; k++) ringS[k] = ringS[k - 1] + Math.hypot(ys[k - 1] - ys[k], ringR[k] - ringR[k - 1]);
+  }
+  const coord = (v, R) => (R === 0 ? C.tT[v] : (C.limb[v] === R ? C.aL[v] : 0));
+  const uv0 = (v, R, th, out) => {
+    if (R === 0) {
+      if (hasRing && v < d.ring.rings * d.ring.segs) { const k = Math.floor(v / d.ring.segs); out[0] = th * ringR[k]; out[1] = ringS[k]; }
+      else { out[0] = th * rT; out[1] = C.sT[v]; }
+    } else { out[0] = th * limbR(R, C.sL[v]); out[1] = C.sL[v]; }
+    return out;
+  };
+  // panel of a face: a sleeve / trouser leg only where all its corners are on that
+  // limb, past the armhole line (arm param) or below the crotch line (torso T):
+  // straight panel borders instead of the skin-weight boundary
+  const panel = (vs) => {
+    if (pc.uvRegion !== undefined) return pc.uvRegion;
+    const L = C.limb[vs[0]];
+    if (!L || !lay.rects[L]) return lay.rects[0] || !L ? 0 : L;
+    for (let k = 1; k < 4; k++) if (C.limb[vs[k]] !== L) return lay.rects[0] ? 0 : L;
+    if (!lay.rects[0]) return L;
+    if (L >= 3) { for (let k = 0; k < 4; k++) if (C.tT[vs[k]] > lay.legCut) return 0; }
+    else for (let k = 0; k < 4; k++) if (C.aL[vs[k]] < lay.armCut) return 0;
+    return L;
+  };
+  return { lay, panel, uv0, coord, edge: edgeDistance(d) };
+}
+
+/** Edge distance (m) beyond which no stitch is drawn (the stored distance is capped there). */
+const EDGE_REACH = 0.075;
+/**
+ * Distance of every fine vertex to the nearest garment edge (boundary loop
+ * polylines, rest space, spatial hash) and whether that edge is a top edge
+ * (waist, neck): Float32Array(nf * 2) or null without loops. Euclidean distance
+ * to the loop, not a constraint value: stitches keep their distance all along
+ * curved necklines and over the shoulders.
+ */
+function edgeDistance(d) {
+  const loops = d.loops || [], P = d.P, nf = d.nf;
+  if (!loops.length) return null;
+  const TOP = /^(waist|neck)/, R = EDGE_REACH, cell = R;
+  const grid = new Map(), segs = [];
+  const key = (x, y, z) => ((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) | 0;
+  for (const l of loops) {
+    const V = l.verts, top = TOP.test(l.id || '') ? 1 : 0;
+    for (let k = 0; k < V.length; k++) {
+      const a = V[k], b = V[(k + 1) % V.length], s = segs.length;
+      segs.push([a, b, top]);
+      const lo = [0, 1, 2].map((j) => Math.floor((Math.min(P[a * 3 + j], P[b * 3 + j]) - R) / cell));
+      const hi = [0, 1, 2].map((j) => Math.floor((Math.max(P[a * 3 + j], P[b * 3 + j]) + R) / cell));
+      for (let x = lo[0]; x <= hi[0]; x++) for (let y = lo[1]; y <= hi[1]; y++) for (let z = lo[2]; z <= hi[2]; z++) {
+        const h = key(x, y, z);
+        let c = grid.get(h);
+        if (!c) grid.set(h, (c = []));
+        c.push(s);
+      }
+    }
+  }
+  const edge = new Float32Array(nf * 2);
+  for (let i = 0; i < nf; i++) {
+    const px = P[i * 3], py = P[i * 3 + 1], pz = P[i * 3 + 2];
+    const c = grid.get(key(Math.floor(px / cell), Math.floor(py / cell), Math.floor(pz / cell)));
+    let m2 = R * R, top = 0;
+    if (c) for (const s of c) {
+      const [a, b, tp] = segs[s];
+      const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2];
+      const ex = P[b * 3] - ax, ey = P[b * 3 + 1] - ay, ez = P[b * 3 + 2] - az;
+      const l2 = ex * ex + ey * ey + ez * ez;
+      let t = l2 > 1e-12 ? ((px - ax) * ex + (py - ay) * ey + (pz - az) * ez) / l2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const dx = px - ax - ex * t, dy = py - ay - ey * t, dz = pz - az - ez * t, q = dx * dx + dy * dy + dz * dz;
+      if (q < m2) { m2 = q; top = tp; }
+    }
+    edge[i * 2] = Math.sqrt(m2); edge[i * 2 + 1] = top;
+  }
+  return edge;
 }
 
 const R_REF = [0.15, 0.05, 0.05, 0.075, 0.075];
@@ -156,11 +367,11 @@ function coarseBasis(draft, bi) {
  * pieces: [{draft, extras: Extras[], faceGroup?(f)->group, wrinkle: def.wrinkle, folds: features, uvRegion?}]
  */
 export function assemble(pieces, bi, opts = {}) {
-  const pos = [], uv = [], uv1 = [], skI = [], skW = [], rv2v = [], nid = [], main = [];
+  const pos = [], uv = [], uv1 = [], skI = [], skW = [], rv2v = [], nid = [], main = [], edgeA = [];
   const groupsTris = [[], [], []];
   const parts = [];
   let fineOffset = 0, nslot = 0;
-  const uvTmp = [0, 0];
+  const uvTmp = [0, 0], uv0Tmp = [0, 0];
   for (const pc of pieces) {
     const d = pc.draft;
     if (!d) continue;
@@ -171,9 +382,8 @@ export function assemble(pieces, bi, opts = {}) {
     const keyMap = new Map();
     const nq = d.quads.length >> 2;
     const thetaOf = (v, R) => (R === 0 ? C.thT[v] : (C.limb[v] === R ? C.thL[v] : C.thT[v]));
-    const coordOf = (v, R) => (R === 0 ? C.tT[v] : (C.limb[v] === R ? C.aL[v] : 0));
-    const sOf = (v, R) => (R === 0 ? C.sT[v] : (C.limb[v] === R ? C.sL[v] : C.sT[v]));
-    const rRef = pc.uvRadius || [0.15, 0.05, 0.05, 0.07, 0.07];
+    // uv sets, panels and edge distances (fabric shading)
+    const uvf = uvFrame(d, bi, pc), fineUV1 = new Float32Array(nf * 2).fill(-1), edge = uvf.edge;
     const getRV = (v, R, th) => {
       const shift = Math.round((th - thetaOf(v, R)) / (2 * Math.PI));
       const key = (v * 8 + R) * 4 + (shift + 1);
@@ -185,22 +395,20 @@ export function assemble(pieces, bi, opts = {}) {
       nid.push(nslot + v);
       main.push(1);
       pos.push(P[v * 3], P[v * 3 + 1], P[v * 3 + 2]);
-      uv.push(th * rRef[R], sOf(v, R));
-      atlasUV(R, th, coordOf(v, R), uvTmp);
+      uvf.uv0(v, R, th, uv0Tmp);
+      uv.push(uv0Tmp[0], uv0Tmp[1]);
+      atlasUV(uvf.lay, R, th, uvf.coord(v, R), uvTmp);
       uv1.push(uvTmp[0], uvTmp[1]);
+      if (fineUV1[v * 2] < 0) { fineUV1[v * 2] = uvTmp[0]; fineUV1[v * 2 + 1] = uvTmp[1]; }
+      if (edge) edgeA.push(edge[v * 2], edge[v * 2 + 1]); else edgeA.push(1, 0);
       for (let k = 0; k < 4; k++) { skI.push(d.skin.idx[v * 4 + k]); skW.push(d.skin.w[v * 4 + k]); }
       return r;
     };
     const ths = [0, 0, 0, 0];
     for (let f = 0; f < nq; f++) {
       const vs = [d.quads[f * 4], d.quads[f * 4 + 1], d.quads[f * 4 + 2], d.quads[f * 4 + 3]];
-      // face region
-      let wt = 0;
-      const lc = [0, 0, 0, 0, 0];
-      for (const v of vs) { const L = C.limb[v]; wt += L ? C.wT[v] : 1; if (L) lc[L] += 1 - C.wT[v]; }
-      let R = 0;
-      if (pc.uvRegion !== undefined) R = pc.uvRegion;
-      else if (wt < 2) { let b = 0; for (let r = 1; r <= 4; r++) if (lc[r] > b) { b = lc[r]; R = r; } }
+      // face region (garment panel)
+      const R = uvf.panel(vs);
       const ref = thetaOf(vs[0], R);
       for (let k = 0; k < 4; k++) {
         let th = thetaOf(vs[k], R);
@@ -236,7 +444,11 @@ export function assemble(pieces, bi, opts = {}) {
         main.push(0);
         pos.push(ex.pos[i * 3], ex.pos[i * 3 + 1], ex.pos[i * 3 + 2]);
         uv.push(ex.uv[i * 2], ex.uv[i * 2 + 1]);
-        uv1.push(ex.uv1 ? ex.uv1[i * 2] : WHITE_UV1[0], ex.uv1 ? ex.uv1[i * 2 + 1] : WHITE_UV1[1]);
+        // edge finishes take the atlas texel of their fine vertex (hem stitching, waistband details)
+        if (ex.uv1) uv1.push(ex.uv1[i * 2], ex.uv1[i * 2 + 1]);
+        else if (v >= 0 && fineUV1[v * 2] >= 0) uv1.push(fineUV1[v * 2], fineUV1[v * 2 + 1]);
+        else uv1.push(NEUTRAL_UV1[0], NEUTRAL_UV1[1]);
+        edgeA.push(0, 0);
         if (ex.skinIdx) for (let k = 0; k < 4; k++) { skI.push(ex.skinIdx[i * 4 + k]); skW.push(ex.skinW[i * 4 + k]); }
         else for (let k = 0; k < 4; k++) { skI.push(d.skin.idx[v * 4 + k]); skW.push(d.skin.w[v * 4 + k]); }
       }
@@ -307,6 +519,8 @@ export function assemble(pieces, bi, opts = {}) {
   geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(count * 3), 3).setUsage(THREE.DynamicDrawUsage));
   geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
   geo.setAttribute('uv1', new THREE.BufferAttribute(new Float32Array(uv1), 2));
+  geo.setAttribute('pvEdge', new THREE.BufferAttribute(new Float32Array(edgeA), 2));
+  geo.setAttribute('pvCav', new THREE.BufferAttribute(new Float32Array(count), 1).setUsage(THREE.DynamicDrawUsage));
   geo.setAttribute('skinIndex', new THREE.BufferAttribute(new Uint16Array(skI), 4));
   geo.setAttribute('skinWeight', new THREE.BufferAttribute(new Float32Array(skW), 4));
   const index = [];
@@ -343,6 +557,9 @@ export function assemble(pieces, bi, opts = {}) {
   const adjL = new Int32Array(deg[fineOffset]);
   for (const p of lists) { const a = p.adj; for (let i = 0; i < p.nf; i++) for (let k = a.off[i], o = deg[p.offset + i]; k < a.off[i + 1]; k++, o++) adjL[o] = a.adj[k] + p.offset; delete p.adj; }
   rt.fine = { P: fineP, si: fineSI, sw: fineSW, n: fineOffset, adj: { off: deg, adj: adjL }, lift: fineLift, coarse: fineCoarse };
+  // fold cavity shading (not for garments that barely fold: shoes, socks, underwear)
+  const slot = pieces.find((p) => p.draft)?.draft.def?.slot;
+  if (!NO_CAVITY.has(slot)) rt.cav = foldCavity(rt.fine);
   if (parts.some((p) => p.ring)) rt.setLegs(legColliders(bi));
   return rt;
 }
@@ -776,6 +993,7 @@ export class GarmentRuntime {
       changed = this._floorPass(M) || changed;
     }
     if (changed) this.write();
+    if (changed && this.cav) this._cavityPass();
     return changed;
   }
 
@@ -884,6 +1102,45 @@ export class GarmentRuntime {
     }
     posAttr.needsUpdate = true;
     nrmAttr.needsUpdate = true;
+  }
+
+  /**
+   * Fold cavity per render vertex (attribute pvCav, 0..1): the Laplacian of the
+   * fold displacement field (curvature of the folds, 1/m) mapped from CAV_K0 to
+   * CAV_K1. Fold valleys get light-independent cavity shading (they read in back
+   * and raking light too); crests and the smooth body shape get none.
+   */
+  _cavityPass() {
+    const { off, adj, inv } = this.cav, d = this.disp, n = d.length;
+    let f = this.cav.f, g = this.cav.g;
+    for (let i = 0; i < n; i++) {
+      const a = off[i], b = off[i + 1], di = d[i];
+      let s = 0;
+      for (let k = a; k < b; k++) s += d[adj[k]];
+      f[i] = (s - (b - a) * di) * inv[i];
+    }
+    // low-pass along the surface: a fold valley keeps its cavity, the pits of a
+    // lumpy fold field (high curvature at one vertex) do not read as rows of dots
+    for (let pass = 0; pass < CAV_SMOOTH; pass++) {
+      for (let i = 0; i < n; i++) {
+        const a = off[i], b = off[i + 1];
+        let s = 0;
+        for (let k = a; k < b; k++) s += f[adj[k]];
+        g[i] = b > a ? 0.25 * f[i] + (0.75 * s) / (b - a) : f[i];
+      }
+      const t = f; f = g; g = t;
+    }
+    this.cav.f = f; this.cav.g = g;
+    const A = this.geometry.attributes.pvCav;
+    if (!A) return;
+    const c = A.array, rv2v = this.rv2v, K0 = CAV_K0, dk = 1 / (CAV_K1 - CAV_K0);
+    for (let r = 0, m = rv2v.length; r < m; r++) {
+      const v = rv2v[r];
+      let x = v >= 0 ? (f[v] - K0) * dk : 0;
+      x = x <= 0 ? 0 : x >= 1 ? 1 : x;
+      c[r] = x * x * (3 - 2 * x);
+    }
+    A.needsUpdate = true;
   }
 
   dispose() { this.geometry.dispose(); }

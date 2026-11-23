@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { BodyTopo, BodyInfo } from './body.js';
 import { GARMENT_BY_ID, SLOTS, newItem, defaultOutfit } from './catalog.js';
 import { buildGarmentSteps } from './garment.js';
-import { FABRICS, weaveNormal, detailMap, HARDWARE } from './fabrics.js';
+import { FABRICS, weaveNormal, fabricChar, fabricScale, detailMap, threadColor, HARDWARE, whenFabricsReady, onFabricUpdate } from './fabrics.js';
 
 const SLOT_ORDER = new Map(SLOTS.map((s, i) => [s, i]));
 /** build work per frame (ms): a new build stage starts only while below it (one stage can take ~10-40 ms) */
@@ -45,6 +45,8 @@ export class ClothingManager extends THREE.EventDispatcher {
     this._idle = [];
     app.addRenderHook(() => this._frame());
     app.materials.addEventListener('style', () => { for (const st of this.states.values()) for (const g of st.garments) this._applyMaterials(g); this.app.invalidate(); });
+    // fabric textures are generated in idle time: redraw when one is ready
+    onFabricUpdate(() => this.app.invalidate());
   }
 
   // ------------------------------------------------------------ characters
@@ -133,10 +135,10 @@ export class ClothingManager extends THREE.EventDispatcher {
     this.app.invalidate();
   }
 
-  /** Resolves when no build is pending. */
+  /** Resolves when no build is pending (and the fabric textures of the built garments are generated). */
   whenIdle() {
-    if (![...this.states.values()].some((s) => s.queue)) return Promise.resolve();
-    return new Promise((r) => this._idle.push(r));
+    if (![...this.states.values()].some((s) => s.queue)) return whenFabricsReady();
+    return new Promise((r) => this._idle.push(r)).then(whenFabricsReady);
   }
 
   /**
@@ -357,21 +359,18 @@ export class ClothingManager extends THREE.EventDispatcher {
   _applyMaterials(g) {
     if (!g.mesh) return;
     const style = this.app.materials.style;
-    const def = g.def, fab = FABRICS[def.fabric] || FABRICS.jersey;
-    const detailed = style === 'realistic' || style === 'clay';
-    const nm = detailed ? weaveNormal(def.fabric) : null;
-    const map = style === 'realistic' || style === 'toon' ? detailMap(def.details) : null;
+    const def = g.def;
     const color = g.item.color;
     // shoes and socks are closed shells over the foot: their toe box keeps a few
     // inverted faces where the toe gaps were bridged; drawn front-only those stay
     // hidden behind the outer surface (double-sided they show as dark crumples)
     const side = def.fit?.envelope ? 'front' : 'double';
-    const main = { kind: 'cloth', color, roughness: fab.roughness, sheen: fab.sheen, side };
-    if (nm) { main.normalMap = nm; main.normalScale = fab.ns; }
-    if (map) main.map = map;
+    const main = clothSpec(def, def.fabric, color, style, side);
+    // bands: rib knit on knitted garments, else the garment's own cloth (a waistband
+    // is the same denim / wool); the detail atlas continues over them
+    const trimFabric = def.trimFabric || (FABRICS[def.fabric]?.knit && def.fabric !== 'lycra' ? 'rib' : def.fabric);
     const trimColor = def.trim || shade(color, def.fabric === 'denim' ? 0.92 : 0.96);
-    const trim = { kind: 'cloth', color: trimColor, roughness: Math.min(1, fab.roughness + 0.04), sheen: fab.sheen, side };
-    if (detailed) { trim.normalMap = weaveNormal(def.fabric === 'leather' || def.fabric === 'sneaker' ? def.fabric : 'rib'); trim.normalScale = 0.7; }
+    const trim = clothSpec(def, trimFabric, trimColor, style, side, color);
     let hw;
     if (def.sole) hw = { kind: 'prop', color: def.sole.color, roughness: 0.75, metalness: 0 };
     else {
@@ -381,6 +380,39 @@ export class ClothingManager extends THREE.EventDispatcher {
     }
     this.app.materials.apply(g.mesh, [main, trim, hw]);
   }
+}
+
+/** Fold valley cavity of the cloth shading: [diffuse, specular] darkening at full cavity. */
+const FOLD_CAVITY = [0.42, 0.6];
+/** Relief (m) of a full step of the detail atlas height (seams, pocket edges, welts). */
+const DETAIL_RELIEF = 0.0012;
+/** Stitched hems [first line, second line (0 = none), thread width, stitch length] (m) from the garment edges. */
+const HEM_DEFAULT = [0.016, 0, 0.0011, 0.0042];
+
+/**
+ * Material spec of a garment surface (main fabric or trim band) for a render
+ * style: fabric BRDF, weave + fabric character maps (realistic, clay), the detail
+ * atlas (seams, pockets, thread; relief in clay), stitched hems, fold cavity.
+ * threadOf: garment colour the thread tone is derived from.
+ */
+function clothSpec(def, fabric, color, style, side, threadOf = color) {
+  const fab = FABRICS[fabric] || FABRICS.jersey;
+  const spec = { kind: 'cloth', color, roughness: fab.roughness, sheen: fab.sheen, sheenRough: fab.sheenRough, specular: fab.spec, sheenTint: fab.sheenTint, side };
+  if (fab.clearcoat) spec.clearcoat = fab.clearcoat;
+  if (style === 'lines') return spec;
+  if (style === 'realistic' || style === 'clay') {
+    spec.normalMap = weaveNormal(fabric); spec.normalScale = fab.ns;
+    spec.fabricMap = fabricChar(fabric); spec.fabricK = [fabricScale(fabric), fab.tone, fab.rough, fab.mid];
+    spec.weaveTone = fab.wt;
+  }
+  const map = detailMap(def);
+  if (map) { spec.map = map; spec.relief = DETAIL_RELIEF; }
+  spec.thread = threadColor(def, threadOf);
+  const st = def.stitch || {};
+  spec.hem = st.hem || HEM_DEFAULT;
+  spec.hemTop = st.top || spec.hem;
+  spec.cavity = FOLD_CAVITY;
+  return spec;
 }
 
 /** Garments fully hidden by outer layers: their folds are never seen, skip the update. */

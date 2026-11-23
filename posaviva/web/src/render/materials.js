@@ -171,6 +171,166 @@ function wrapDiffuseHook(material, wrap, key) {
   return material;
 }
 
+// ---------------------------------------------------------------- cloth (garments)
+// Garment specs (clothing/manager.js) may carry, besides map / normalMap:
+//   fabricMap  mid-scale fabric character (uv0): R tone, G roughness, BA relief normal xy
+//   fabricK    [uv scale of fabricMap relative to the weave uv, tone, roughness, relief]
+//   weaveTone  diffuse strength of the weave map's alpha (yarn tops / gaps)
+//   map        garment detail atlas (uv1, no colour space): R tone (x255/128),
+//              G thread paint, B relief height (128 = flat), see clothing/fabrics.js
+//   relief     relief height (m) of a full B step (bump mapped)
+//   thread     thread / paint colour
+//   hem, hemTop [d1, d2, width, stitch] stitch lines at d1 and d2 (m, 0 = none) from
+//              the garment edges (attribute pvEdge: distance, 1 at a top edge)
+//   cavity     [diffuse, specular] darkening of the fold valleys (attribute pvCav)
+// The style decides what is used: realistic everything, clay the relief only (no
+// colour), toon colour + thread + cavity as cel shadow (no relief), lines nothing.
+const CLOTH_VERT_PARS = /* glsl */`
+  attribute vec2 pvEdge;
+  attribute float pvCav;
+  varying vec2 vPvEdge;
+  varying vec2 vPvUv0;
+  varying float vPvCav;
+`;
+const CLOTH_FRAG_PARS = /* glsl */`
+  varying vec2 vPvEdge;
+  varying vec2 vPvUv0;
+  varying float vPvCav;
+  uniform vec4 pvClothK;   // x weave tone, y relief (m), z cavity diffuse, w cavity specular
+  uniform vec2 pvClothUse; // x colour (tone + thread), y relief
+  uniform vec3 pvThread;
+  uniform vec4 pvHem, pvHemTop;
+  #ifdef PV_FAB
+    uniform sampler2D pvFab;
+    uniform vec4 pvFabK;
+  #endif
+  // box-filtered coverage of the band [-w/2, w/2] by a pixel of footprint fw centred at x
+  float pvBox( float x, float w, float fw ) {
+    return clamp( ( min( x + 0.5 * fw, 0.5 * w ) - max( x - 0.5 * fw, -0.5 * w ) ) / fw, 0.0, 1.0 );
+  }
+  // stitch lines at d.x and d.y (m) from the garment edge e: dashed thread, averaged when
+  // sub-pixel. fw, fu: screen derivatives of e and of the arc length (taken in uniform flow)
+  float pvStitch( vec4 d, float e, float fw, float fu ) {
+    float c = 0.0;
+    if ( d.x > 0.0 ) c = max( c, pvBox( e - d.x, d.z, fw ) );
+    if ( d.y > 0.0 ) c = max( c, pvBox( e - d.y, d.z, fw ) );
+    float t = vPvUv0.x / d.w, ft = fu / d.w;
+    float dash = smoothstep( 0.0, 0.12 + ft, fract( t ) ) * ( 1.0 - smoothstep( 0.66 - ft, 0.78 + ft, fract( t ) ) );
+    return c * mix( dash, 0.62, smoothstep( 0.25, 0.8, ft ) );
+  }
+  // bump mapping from a height in metres, screen-space derivatives (no tangents needed)
+  vec3 pvPerturb( vec3 p, vec3 n, vec2 dH, float fd ) {
+    vec3 sx = dFdx( p ), sy = dFdy( p );
+    vec3 r1 = cross( sy, n ), r2 = cross( n, sx );
+    float det = dot( sx, r1 ) * fd;
+    vec3 g = sign( det ) * ( dH.x * r1 + dH.y * r2 );
+    return normalize( abs( det ) * n - g );
+  }
+`;
+const CLOTH_MAP = /* glsl */`
+  float pvPaintA = 0.0;
+  #ifdef USE_MAP
+    vec4 pvD = texture2D( map, vMapUv );
+    diffuseColor.rgb *= mix( 1.0, pvD.r * ( 255.0 / 128.0 ), pvClothUse.x );
+    pvPaintA = pvD.g;
+  #endif
+  #ifdef PV_FAB
+    vec4 pvF = texture2D( pvFab, vNormalMapUv * pvFabK.x );
+    diffuseColor.rgb *= 1.0 + ( pvF.r - 0.5 ) * 2.0 * pvFabK.y * pvClothUse.x;
+    diffuseColor.rgb *= 1.0 + ( texture2D( normalMap, vNormalMapUv ).a - 0.5 ) * 2.0 * pvClothK.x * pvClothUse.x;
+  #endif
+  {
+    float pvFw = max( fwidth( vPvEdge.x ), 1e-5 ), pvFu = fwidth( vPvUv0.x );
+    float pvS = pvStitch( vPvEdge.y > 0.5 ? pvHemTop : pvHem, vPvEdge.x, pvFw, pvFu );
+    diffuseColor.rgb *= 1.0 - 0.12 * pvS * pvClothUse.x;
+    pvPaintA = max( pvPaintA, pvS );
+  }
+  diffuseColor.rgb = mix( diffuseColor.rgb, pvThread, pvPaintA * pvClothUse.x );
+`;
+const CLOTH_NORMAL = /* glsl */`
+  #ifdef PV_FAB
+    mapN.xy += ( pvF.ba * 2.0 - 1.0 ) * pvFabK.w;
+  #endif
+  normal = normalize( tbn * mapN );
+`;
+const CLOTH_RELIEF = /* glsl */`
+  #ifdef USE_MAP
+  if ( pvClothUse.y > 0.0 ) {
+    vec2 pvDx = dFdx( vMapUv ), pvDy = dFdy( vMapUv );
+    float pvH0 = texture2D( map, vMapUv ).b;
+    vec2 pvDH = vec2( texture2D( map, vMapUv + pvDx ).b - pvH0, texture2D( map, vMapUv + pvDy ).b - pvH0 ) * pvClothK.y * pvClothUse.y;
+    normal = pvPerturb( - vViewPosition, normal, pvDH, faceDirection );
+  }
+  #endif
+`;
+const CLOTH_CAVITY = /* glsl */`
+  {
+    float pvC = vPvCav * pvClothK.z, pvCs = vPvCav * pvClothK.w;
+    reflectedLight.directDiffuse *= 1.0 - pvC;
+    reflectedLight.indirectDiffuse *= 1.0 - pvC;
+    reflectedLight.directSpecular *= 1.0 - pvCs;
+    reflectedLight.indirectSpecular *= 1.0 - pvCs;
+    #ifdef USE_SHEEN
+      sheenSpecularDirect *= 1.0 - pvCs;
+      sheenSpecularIndirect *= 1.0 - pvCs;
+    #endif
+  }
+`;
+/** Style use of the cloth features: [colour (tone, thread, stitches), relief, cavity]. */
+const CLOTH_USE = { realistic: [1, 1, 1], clay: [0, 1, 1], toon: [1, 0, 1], lines: [0, 0, 0] };
+/** Cavity strength in the toon style: fold valleys fall into the darker cel band. */
+const TOON_CAV = 0.55;
+
+/** Is this a garment spec with fabric features? */
+const isCloth = (s) => s.kind === 'cloth' && !!(s.map || s.fabricMap || s.hem || s.cavity);
+
+/**
+ * Fabric shading of a garment material (see the spec fields above): detail atlas
+ * tone + thread, weave tone, fabric character (tone, roughness, relief), relief
+ * bump of seams and pockets, stitched hems along the real edges, fold cavity.
+ */
+function clothHook(material, s, style) {
+  const use = CLOTH_USE[style] || CLOTH_USE.realistic;
+  const fab = s.fabricMap && material.normalMap ? s.fabricMap : null;
+  const cav = s.cavity || [0, 0];
+  const u = {
+    pvClothK: { value: new THREE.Vector4(s.weaveTone || 0, (s.relief || 0) * 2, cav[0] * use[2], cav[1] * use[2]) },
+    pvClothUse: { value: new THREE.Vector2(use[0], material.map ? use[1] : 0) },
+    pvThread: { value: colorOf(s.thread, '#808080') },
+    pvHem: { value: new THREE.Vector4(...(s.hem || [0, 0, 0.001, 0.004])) },
+    pvHemTop: { value: new THREE.Vector4(...(s.hemTop || s.hem || [0, 0, 0.001, 0.004])) },
+  };
+  if (fab) { u.pvFab = { value: fab }; u.pvFabK = { value: new THREE.Vector4(...(s.fabricK || [0.2, 0, 0, 0])) }; }
+  if (fab) material.defines = { ...(material.defines || {}), PV_FAB: '' };
+  if (style === 'toon') { material.defines = { ...(material.defines || {}), PV_TOON_CAV: '' }; u.pvToonCavK = { value: TOON_CAV * cav[0] > 0 ? TOON_CAV : 0 }; }
+  return addHook(material, 'pv-cloth', (shader) => {
+    Object.assign(shader.uniforms, u);
+    let vs = shader.vertexShader, fs = shader.fragmentShader;
+    vs = CLOTH_VERT_PARS + patch(vs, '#include <begin_vertex>', '#include <begin_vertex>\n vPvEdge = pvEdge; vPvCav = pvCav; vPvUv0 = uv;', 'cloth-vert');
+    fs = CLOTH_FRAG_PARS + (style === 'toon' ? 'uniform float pvToonCavK;\n' : '') + fs;
+    fs = patch(fs, '#include <map_fragment>', CLOTH_MAP, 'cloth-map');
+    if (fab) fs = patch(fs, '#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n roughnessFactor = clamp( roughnessFactor + ( pvF.g - 0.5 ) * 2.0 * pvFabK.z, 0.04, 1.0 );', 'cloth-rough');
+    if (use[1]) fs = patch(fs, '#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + CLOTH_RELIEF, 'cloth-relief');
+    if (fab) fs = patch(fs, '#include <normal_fragment_maps>', patch(THREE.ShaderChunk.normal_fragment_maps, 'normal = normalize( tbn * mapN );', CLOTH_NORMAL, 'cloth-normal-chunk'), 'cloth-normal');
+    if (use[2] && style !== 'toon') fs = patch(fs, '#include <aomap_fragment>', CLOTH_CAVITY + '#include <aomap_fragment>', 'cloth-cavity');
+    shader.vertexShader = vs;
+    shader.fragmentShader = fs;
+  });
+}
+
+/** Physical cloth BRDF of a garment spec: low, broad specular; sheen at grazing angles for knits and wool. */
+function clothPhysical(s, c, color) {
+  const o = {
+    ...c, color, map: s.map || null, ...normals(s),
+    roughness: s.roughness ?? 0.82, metalness: s.metalness ?? 0,
+    sheen: s.sheen ?? 0.55, sheenRoughness: s.sheenRough ?? 0.7,
+    sheenColor: color.clone().lerp(new THREE.Color('#ffffff'), s.sheenTint ?? 0.3),
+    specularIntensity: s.specular ?? 0.5,
+  };
+  if (s.clearcoat) { o.clearcoat = s.clearcoat; o.clearcoatRoughness = 0.3; }
+  return new THREE.MeshPhysicalMaterial(o);
+}
+
 // ---------------------------------------------------------------- anatomy (skin)
 /**
  * normalScale of the anatomical skin normal map per style, per unit of
@@ -395,6 +555,10 @@ const toonResolve = /* glsl */`
   {
     float pvE = dot( pvDirSum, PV_LUM );
     float pvF = pvKey > 1e-6 ? pvE / pvKey : 0.0;
+    #ifdef PV_TOON_CAV
+      // garment fold valleys fall into the darker band first (painted fold shadows)
+      pvF *= 1.0 - pvToonCavK * vPvCav;
+    #endif
     #ifdef PV_TOON_ANAT
       // muscle separations (blurred cavity) fall into the darker band first: painted anatomy shapes
       pvF *= 1.0 - pvToonCav * smoothstep( 0.1, 0.6, textureLod( pvAnat, vNormalMapUv, 1.5 ).r );
@@ -669,13 +833,8 @@ const defaultFactories = {
       case 'tongue': // always deep inside the mouth: built-in cavity darkening, no plastic gloss
         return new THREE.MeshStandardMaterial({ ...c, color: color.multiplyScalar(MOUTH_CAVITY), map: s.map || null, roughness: 0.55 });
       case 'cloth': {
-        const m = new THREE.MeshPhysicalMaterial({
-          ...c, color, map: s.map || null, ...normals(s),
-          roughness: s.roughness ?? 0.82, metalness: s.metalness ?? 0,
-          sheen: s.sheen ?? 0.55, sheenRoughness: 0.7, sheenColor: color.clone().lerp(new THREE.Color('#ffffff'), 0.3),
-          specularIntensity: 0.5,
-        });
-        return wrapDiffuseHook(m, [0.14, 0.14, 0.14], 'pv-wrap-soft');
+        const m = wrapDiffuseHook(clothPhysical(s, c, color), [0.14, 0.14, 0.14], 'pv-wrap-soft');
+        return isCloth(s) ? clothHook(m, s, 'realistic') : m;
       }
       case 'brows': // eyebrow hairs: shaded like hair, but never inked (see the prepass)
       case 'hair': {
@@ -713,6 +872,11 @@ const defaultFactories = {
       const anat = this.anatomyFor(sn.map);
       return anat ? anatomyHook(m, anat, ANAT_CLAY, sn.def) : m;
     }
+    if (isCloth(s)) {
+      // garments: the fabric relief (weave, seams, pockets, fold cavity), no colour
+      const m = new THREE.MeshStandardMaterial({ ...c, color, ...normals(s), map: s.map || null, roughness: 0.88, metalness: 0, side: sideOf(s.side, THREE.FrontSide) });
+      return clothHook(m, s, 'clay');
+    }
     const cut = !!(s.map && (s.alphaTest || s.transparent));
     const m = new THREE.MeshStandardMaterial({
       ...c, color, ...normals(s), map: cut ? s.map : null,
@@ -737,11 +901,13 @@ const defaultFactories = {
       return m;
     }
     if (s.kind === 'tongue') color.multiplyScalar(MOUTH_CAVITY);
-    return toonHook(new THREE.MeshToonMaterial({
-      ...c, color, ...normals(s), ...emissiveOf(s),
-      map: s.map || null, // garment prints, hair cards, prop textures
+    const m = toonHook(new THREE.MeshToonMaterial({
+      ...c, color, ...(isCloth(s) ? {} : normals(s)), ...emissiveOf(s),
+      map: s.map || null, // garment details, hair cards, prop textures
       side: sideOf(s.side, s.kind === 'lashes' ? THREE.DoubleSide : THREE.FrontSide),
     }), TOON_BASE);
+    // garments: flat colour with seams, pockets and stitching; fold valleys in the cel shadow
+    return isCloth(s) ? clothHook(m, s, 'toon') : m;
   },
 
   /**
