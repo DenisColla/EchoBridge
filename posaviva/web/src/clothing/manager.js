@@ -379,6 +379,8 @@ export class ClothingManager extends THREE.EventDispatcher {
       hw = { kind: 'prop', color: h.color, roughness: h.roughness, metalness: h.metalness };
     }
     this.app.materials.apply(g.mesh, [main, trim, hw]);
+    // the fold cavity of a settled pose is written after the frame: redraw then
+    if (g.runtime) g.runtime.onCavity = () => this.app.invalidate();
   }
 }
 

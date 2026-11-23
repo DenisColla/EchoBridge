@@ -21,6 +21,8 @@ import { staticFolds } from './build.js';
 // ------------------------------------------------------------------ fold cavity (fabric shading)
 /** Fold curvature (1/m) where the fold cavity shading starts / is full (see GarmentRuntime._cavityPass). */
 const CAV_K0 = 12, CAV_K1 = 80;
+/** While posing continuously the cavity is refreshed at most every CAV_INTERVAL ms, and CAV_SETTLE ms after the last change. */
+const CAV_INTERVAL = 45, CAV_SETTLE = 60;
 /** Smoothing passes of the fold curvature before it becomes the cavity. */
 const CAV_SMOOTH = 1;
 /** Garment slots without fold cavity shading (they barely fold: no per-frame cost). */
@@ -993,7 +995,7 @@ export class GarmentRuntime {
       changed = this._floorPass(M) || changed;
     }
     if (changed) this.write();
-    if (changed && this.cav) this._cavityPass();
+    if (changed && this.cav) this._cavityLater();
     return changed;
   }
 
@@ -1105,6 +1107,25 @@ export class GarmentRuntime {
   }
 
   /**
+   * Fold cavity after a geometry change: at once when the last pass is older than
+   * CAV_INTERVAL (a single pose change), else (continuous posing) once the pose
+   * settles, CAV_SETTLE ms after the last change; onCavity() then asks for a redraw.
+   */
+  _cavityLater() {
+    const now = performance.now();
+    clearTimeout(this._cavTimer);
+    this._cavTimer = 0;
+    if (now - (this._cavT || -1e9) >= CAV_INTERVAL) { this._cavT = now; this._cavityPass(); return; }
+    this._cavTimer = setTimeout(() => {
+      this._cavTimer = 0;
+      if (!this.cav) return;
+      this._cavT = performance.now();
+      this._cavityPass();
+      this.onCavity?.();
+    }, CAV_SETTLE);
+  }
+
+  /**
    * Fold cavity per render vertex (attribute pvCav, 0..1): the Laplacian of the
    * fold displacement field (curvature of the folds, 1/m) mapped from CAV_K0 to
    * CAV_K1. Fold valleys get light-independent cavity shading (they read in back
@@ -1143,5 +1164,8 @@ export class GarmentRuntime {
     A.needsUpdate = true;
   }
 
-  dispose() { this.geometry.dispose(); }
+  dispose() {
+    clearTimeout(this._cavTimer); this.cav = null;
+    this.geometry.dispose();
+  }
 }
