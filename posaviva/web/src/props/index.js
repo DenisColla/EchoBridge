@@ -15,6 +15,7 @@
 //   app.props.create(state, {emit, select, ground}) prop from a state object; emit announces it
 //                                                ('list' event, as add() does), ground lands it
 //   app.props.floorAt(x, z) / floorUnder(prop, {lowest}) the floor: app.landscapes.heightAt or 0
+//   app.objectActions                          long-press menu + character actions on objects (actions.js)
 // Events on app.props: 'list', 'select' {prop}, 'change' {prop}.
 //
 // Library: ~100 procedural types (gen/*.js, parameters + "Rigenera") and ~280
@@ -26,8 +27,10 @@ import { PropGizmo } from './gizmo.js';
 import { ThumbRenderer } from './thumbs.js';
 import { registerPropsTool } from './panel.js';
 import { haptic } from '../ui/kit.js';
+import { createObjectActions } from './actions.js';
 
 export { PROP_TYPES, CATEGORIES, registerPropTypes, registerPropRoles, onPropTypesChanged } from './catalog.js';
+export { affordancesOf } from './actions.js';
 export { ROOM_PRESETS } from './gen/rooms.js';
 export { loadModel } from './models.js';
 
@@ -62,6 +65,10 @@ export function create(app, shell) {
   };
   manager.addEventListener('select', syncBack);
   app.addEventListener('tool', syncBack);
+
+  // ---- long press on props, exterior items, buildings and animals: what a character can do
+  // with it (app.objectActions, actions.js). A tap still selects.
+  try { createObjectActions(app, shell); } catch (e) { console.error('[props] object actions', e); }
 
   // held props keep real size when a character is rescaled
   app.addRenderHook(() => { if (manager.checkHeldScale()) app.invalidate(); return false; });

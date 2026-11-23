@@ -1,6 +1,6 @@
 // Storage furniture: bookshelves (filled with books and objects), wardrobes,
 // chests of drawers, wall shelves, TV units, coat stands, shoe cabinets.
-import { add, box, boxOn, cylinder, rod, sphere, lathe, range, int, seg, flag, seed, rng, fillShelf, handle, knob, centerParts } from './util.js';
+import { add, box, boxOn, cylinder, rod, sphere, lathe, range, int, seg, flag, seed, rng, fillShelf, handle, knob, centerParts, merge, hollowBox, hangingClothes, pulledDrawer } from './util.js';
 
 const STYLE_WOOD = [['legno', 'Legno'], ['bianco', 'Bianco'], ['scuro', 'Scuro']];
 const carcassRole = (style) => (style === 'bianco' ? 'lacquer' : style === 'scuro' ? 'woodDark' : 'main');
@@ -37,17 +37,32 @@ function armadio(p) {
   const parts = {};
   const role = carcassRole(p.style === 'specchio' || p.style === 'scorrevole' ? 'legno' : p.finish);
   const front = p.finish === 'bianco' ? 'lacquer' : p.finish === 'scuro' ? 'woodDark' : 'main';
-  add(parts, front === 'main' ? 'mainShade' : front, boxOn(W, H - plinth, D - 0.025, { y: plinth, z: -0.0125, r: 0.004 }));
-  add(parts, 'dark', boxOn(W - 0.06, plinth, D - 0.08, { z: -0.03 }));
-  add(parts, front === 'main' ? 'mainShade' : front, boxOn(W + 0.01, 0.025, D, { y: H, r: 0.006 }));
+  const shell = front === 'main' ? 'mainShade' : front;
   const zf = D / 2 - 0.025;
   const drawerH = p.drawers ? 0.42 : 0;
+  // open: hollow carcass (doors swung out / sliding panels pushed aside) with clothes on a rod
+  if (p.open) {
+    if (drawerH) add(parts, shell, boxOn(W, drawerH, D - 0.025, { y: plinth, z: -0.0125, r: 0.004 }));
+    const y0 = plinth + drawerH, hh = H - plinth - drawerH;
+    hollowBox(parts, shell, W, hh, D - 0.025, { y: y0, z: -0.0125, t: T });
+    const cols = Math.max(1, Math.round(W / 1.0));
+    for (let c = 1; c < cols; c++) add(parts, shell, boxOn(T, hh - 2 * T, D - 0.06, { x: -W / 2 + (c * W) / cols, y: y0 + T, z: -0.03 }));
+    add(parts, shell, boxOn(W - 2 * T, T, D - 0.06, { y: H - 0.36, z: -0.03 })); // hat shelf
+    for (let c = 0; c < cols; c++) {
+      const x0 = -W / 2 + (c * W) / cols + T, x1 = -W / 2 + ((c + 1) * W) / cols - T;
+      hangingClothes(parts, x0, x1, H - 0.46, -0.03, D - 0.12, 11 + c);
+    }
+  } else add(parts, shell, boxOn(W, H - plinth, D - 0.025, { y: plinth, z: -0.0125, r: 0.004 }));
+  add(parts, 'dark', boxOn(W - 0.06, plinth, D - 0.08, { z: -0.03 }));
+  add(parts, shell, boxOn(W + 0.01, 0.025, D, { y: H, r: 0.006 }));
   const doors = Math.max(1, Math.min(6, p.doors || Math.round(W / 0.5)));
   const dw = W / doors, g = 0.004;
   if (p.style === 'scorrevole') {
     const n = Math.max(2, Math.round(W / 0.9)), sw = W / n + 0.02;
     for (let i = 0; i < n; i++) {
-      const x = -W / 2 + (i + 0.5) * (W / n), z = zf + (i % 2 ? 0.012 : 0.034);
+      // open: every front panel slides onto its neighbour (the last one slides back)
+      const slide = p.open ? (i % 2 === 0 ? (i < n - 1 ? 1 : -1) * (W / n) * 0.92 : 0) : 0;
+      const x = -W / 2 + (i + 0.5) * (W / n) + slide, z = zf + (i % 2 ? 0.012 : 0.034);
       add(parts, front, boxOn(sw - 0.004, H - plinth - 0.02, 0.02, { x, y: plinth + 0.01, z: z - 0.01, r: 0.004 }));
       add(parts, 'mirror', boxOn(sw * 0.62, (H - plinth) * 0.78, 0.004, { x, y: plinth + (H - plinth) * 0.11, z: z + 0.001 }));
       add(parts, 'metal', boxOn(0.012, 0.5, 0.012, { x: x + (i % 2 ? -1 : 1) * (sw / 2 - 0.03), y: plinth + (H - plinth) * 0.42, z: z + 0.006 }));
@@ -58,18 +73,23 @@ function armadio(p) {
   for (let i = 0; i < doors; i++) {
     const x = -W / 2 + (i + 0.5) * dw;
     const y0 = plinth + drawerH + g, h = H - plinth - drawerH - 2 * g;
-    add(parts, front, boxOn(dw - g * 2, h, 0.02, { x, y: y0, z: zf, r: 0.003 }));
+    // each door is drawn around its hinge (the side opposite its handle), then swung
+    // open by 80° (two doors sharing a hinge line open in a V, never through each other)
+    const hs = i % 2 ? 1 : -1, hingeX = x + hs * (dw / 2), dp = {};
+    const lx = x - hingeX;
+    add(dp, front, boxOn(dw - g * 2, h, 0.02, { x: lx, y: y0, z: 0, r: 0.003 }));
     if (p.style === 'riquadri') {
       for (const [yy, hh] of [[y0 + 0.08, h * 0.52], [y0 + h * 0.62, h * 0.32]]) {
         const fw = dw - 0.14;
-        add(parts, front, boxOn(fw, 0.025, 0.012, { x, y: yy, z: zf + 0.016 }), boxOn(fw, 0.025, 0.012, { x, y: yy + hh - 0.025, z: zf + 0.016 }),
-          boxOn(0.025, hh, 0.012, { x: x - fw / 2 + 0.0125, y: yy, z: zf + 0.016 }), boxOn(0.025, hh, 0.012, { x: x + fw / 2 - 0.0125, y: yy, z: zf + 0.016 }));
+        add(dp, front, boxOn(fw, 0.025, 0.012, { x: lx, y: yy, z: 0.016 }), boxOn(fw, 0.025, 0.012, { x: lx, y: yy + hh - 0.025, z: 0.016 }),
+          boxOn(0.025, hh, 0.012, { x: lx - fw / 2 + 0.0125, y: yy, z: 0.016 }), boxOn(0.025, hh, 0.012, { x: lx + fw / 2 - 0.0125, y: yy, z: 0.016 }));
       }
     } else if (p.style === 'specchio' && i % 2 === 0) {
-      add(parts, 'mirror', boxOn(dw - 0.1, h - 0.16, 0.004, { x, y: y0 + 0.08, z: zf + 0.021 }));
+      add(dp, 'mirror', boxOn(dw - 0.1, h - 0.16, 0.004, { x: lx, y: y0 + 0.08, z: 0.021 }));
     }
     const hx = x + (i % 2 ? -1 : 1) * (dw / 2 - 0.05);
-    handle(parts, hx, y0 + h * 0.48, zf + 0.02, 0.22, true);
+    handle(dp, hx - hingeX, y0 + h * 0.48, 0.02, 0.22, true);
+    merge(parts, dp, { x: hingeX, z: zf, ry: p.open ? hs * 80 : 0 });
   }
   if (drawerH) {
     const nd = Math.max(1, Math.round(W / 0.8)), ddw = W / nd;
@@ -97,12 +117,16 @@ function cassettiera(p) {
   for (let i = 0; i < n; i++) {
     const y = LEG + i * dh + 0.004;
     const split = W > 1.0 && i === n - 1;
-    for (const [x, w] of split ? [[-W / 4, W / 2], [W / 4, W / 2]] : [[0, W]]) {
-      add(parts, front, boxOn(w - 0.018, dh - 0.008, 0.02, { x, y, z: zf, r: 0.003 }));
-      if (p.style === 'moderno') add(parts, 'metal', box(Math.min(0.3, w * 0.4), 0.012, 0.012, { x, y: y + dh - 0.03, z: zf + 0.026 }));
-      else if (p.style === 'classico') { knob(parts, x - w * 0.22, y + dh / 2, zf + 0.02, 'gold'); knob(parts, x + w * 0.22, y + dh / 2, zf + 0.02, 'gold'); }
-      else handle(parts, x, y + dh / 2, zf + 0.02, 0.14);
-    }
+    // open: the top drawer (the left one of a split row) is pulled out with clothes inside
+    const sides = split ? [[-W / 4, W / 2], [W / 4, W / 2]] : [[0, W]];
+    sides.forEach(([x, w], k) => {
+      const pull = p.open && i === n - 1 && k === 0 ? Math.min(0.3, D * 0.62) : 0, z = zf + pull;
+      if (pull) pulledDrawer(parts, front === 'main' ? 'mainShade' : front, x, y, w - 0.018, dh - 0.008, zf, pull, 'clothes', 3 + i);
+      add(parts, front, boxOn(w - 0.018, dh - 0.008, 0.02, { x, y, z, r: 0.003 }));
+      if (p.style === 'moderno') add(parts, 'metal', box(Math.min(0.3, w * 0.4), 0.012, 0.012, { x, y: y + dh - 0.03, z: z + 0.026 }));
+      else if (p.style === 'classico') { knob(parts, x - w * 0.22, y + dh / 2, z + 0.02, 'gold'); knob(parts, x + w * 0.22, y + dh / 2, z + 0.02, 'gold'); }
+      else handle(parts, x, y + dh / 2, z + 0.02, 0.14);
+    });
   }
   return parts;
 }
@@ -179,11 +203,11 @@ export const STORAGE_TYPES = [
   ], build: libreria },
   { id: 'armadio', label: 'Armadio', cat: 'armadi', sub: 'armadi', color: '#b98c5f', tags: 'guardaroba camera vestiti ante', params: [
     seg('style', 'Ante', [['liscio', 'Lisce'], ['riquadri', 'Riquadri'], ['specchio', 'Specchio'], ['scorrevole', 'Scorrevoli']], 'liscio'),
-    seg('finish', 'Finitura', STYLE_WOOD, 'bianco'), range('width', 'Larghezza', 0.5, 3.5, 0.05, 1.6), range('height', 'Altezza', 1.6, 2.7, 0.05, 2.2), int('doors', 'Numero ante', 1, 6, 3), flag('drawers', 'Cassetti in basso', false),
+    seg('finish', 'Finitura', STYLE_WOOD, 'bianco'), range('width', 'Larghezza', 0.5, 3.5, 0.05, 1.6), range('height', 'Altezza', 1.6, 2.7, 0.05, 2.2), int('doors', 'Numero ante', 1, 6, 3), flag('drawers', 'Cassetti in basso', false), flag('open', 'Ante aperte', false),
   ], build: armadio },
   { id: 'cassettiera', label: 'Cassettiera / comò', cat: 'armadi', sub: 'cassettiere', color: '#8a5a3b', tags: 'comò cassetti camera', params: [
     seg('style', 'Stile', [['moderno', 'Moderno'], ['classico', 'Classico'], ['semplice', 'Semplice']], 'semplice'), seg('finish', 'Finitura', STYLE_WOOD, 'legno'),
-    range('width', 'Larghezza', 0.4, 1.8, 0.05, 1.0), range('height', 'Altezza', 0.5, 1.4, 0.05, 0.85), int('drawers', 'Cassetti', 2, 7, 4),
+    range('width', 'Larghezza', 0.4, 1.8, 0.05, 1.0), range('height', 'Altezza', 0.5, 1.4, 0.05, 0.85), int('drawers', 'Cassetti', 2, 7, 4), flag('open', 'Cassetto aperto', false),
   ], build: cassettiera },
   { id: 'mensola', label: 'Mensole con libri', cat: 'armadi', sub: 'librerie', color: '#b98c5f', mount: 'wall', spawnY: 1.1, tags: 'mensola parete libri', params: [
     seg('finish', 'Finitura', STYLE_WOOD, 'legno'), range('width', 'Larghezza', 0.4, 2.4, 0.05, 1.0), int('levels', 'Ripiani', 1, 4, 2), range('fill', 'Riempimento', 0, 1, 0.05, 0.6, ''), flag('brackets', 'Staffe', true), seed(5),

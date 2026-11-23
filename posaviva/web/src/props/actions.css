@@ -1,0 +1,19 @@
+/* Long-press menu of scene objects (props/actions.js): kit.stageMenu + "Chi?" chooser + tool row. */
+.pv-oa .pv-modal-card { max-height: calc(100vh - 16px - var(--safe-bottom, 0px)); overflow-y: auto; overscroll-behavior: contain; }
+.pv-oa .pv-modal-subtitle { color: var(--accent-hi, var(--muted)); }
+.pv-oa-who { display: flex; align-items: center; gap: 8px; padding: 2px 6px 6px; border-bottom: 1px solid var(--line); margin-bottom: 2px; }
+.pv-oa-who-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--muted); flex: none; }
+.pv-oa-who-chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px 0; }
+.pv-oa-who-chips::-webkit-scrollbar { display: none; }
+.pv-oa-who-chips .pv-chip { flex: none; min-height: 36px; }
+.pv-oa-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 2px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+.pv-oa-tool { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 52px; padding: 4px 2px; border: 0; border-radius: 12px; background: none; color: var(--text); font: inherit; font-size: 11px; line-height: 1.1; text-align: center; }
+.pv-oa-tool .pv-icon { color: var(--muted); }
+.pv-oa-tool:active { background: var(--elev-2); }
+.pv-oa-tool.danger, .pv-oa-tool.danger .pv-icon { color: var(--danger); }
+@media (max-height: 520px) {
+  .pv-oa-tool { min-height: 44px; font-size: 10.5px; }
+  .pv-oa-who { padding-bottom: 3px; }
+}
+:where(html.pv-tablet) .pv-oa-tool { min-height: 56px; font-size: 12px; }
+:where(html.pv-tablet) .pv-oa-who-chips .pv-chip { min-height: 40px; }

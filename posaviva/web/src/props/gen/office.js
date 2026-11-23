@@ -1,7 +1,7 @@
 // Office, electronics and lights: open-space workstation (cubicle), filing
 // cabinet, whiteboard, printer, water cooler; flat TV, monitor, PC tower,
 // laptop, speaker; floor lamp, table lamp, pendant, ceiling lamp, studio light.
-import { add, box, boxOn, cylinder, lathe, rod, sphere, torus, tube, planeXY, range, int, seg, flag, seed, rng, handle, merge, centerParts } from './util.js';
+import { add, box, boxOn, cylinder, lathe, rod, sphere, torus, tube, planeXY, range, int, seg, flag, seed, rng, handle, merge, centerParts, pulledDrawer } from './util.js';
 import { board, screen } from '../textures.js';
 
 // ------------------------------------------------------------------------------------------ office
@@ -61,8 +61,11 @@ function schedario(p) {
   add(parts, 'main', boxOn(0.46, H, 0.62, { r: 0.006 }));
   for (let i = 0; i < n; i++) {
     const y = 0.03 + i * 0.33;
-    add(parts, 'main', boxOn(0.43, 0.31, 0.015, { y, z: 0.31, r: 0.004 }));
-    add(parts, 'chrome', box(0.12, 0.02, 0.02, { y: y + 0.22, z: 0.33, r: 0.006 }), box(0.07, 0.035, 0.004, { y: y + 0.26, z: 0.318 }));
+    // open: the top drawer pulled out, full of folders
+    const pull = p.open && i === n - 1 ? 0.38 : 0;
+    if (pull) pulledDrawer(parts, 'main', 0, y, 0.43, 0.31, 0.31, pull, 'papers', 4);
+    add(parts, 'main', boxOn(0.43, 0.31, 0.015, { y, z: 0.31 + pull, r: 0.004 }));
+    add(parts, 'chrome', box(0.12, 0.02, 0.02, { y: y + 0.22, z: 0.33 + pull, r: 0.006 }), box(0.07, 0.035, 0.004, { y: y + 0.26, z: 0.318 + pull }));
   }
   return parts;
 }
@@ -244,7 +247,7 @@ export const OFFICE_TYPES = [
     seg('shape', 'Pannelli', [['L', 'Ad angolo'], ['U', 'Su tre lati']], 'U'), range('width', 'Larghezza', 1.4, 2.6, 0.05, 1.8), range('depth', 'Profondità', 1.4, 2.4, 0.05, 1.8),
     range('wallH', 'Altezza pannelli', 1.0, 1.8, 0.05, 1.35), int('monitors', 'Monitor', 1, 3, 2), flag('chair', 'Sedia', true), range('clutter', 'Disordine', 0, 1, 0.05, 0.5, ''), seed(8),
   ], build: postazione },
-  { id: 'schedario', label: 'Schedario metallico', cat: 'ufficio', sub: 'mobili', color: '#8c949c', tags: 'archivio cassetti ufficio', params: [int('drawers', 'Cassetti', 2, 5, 4)], build: schedario },
+  { id: 'schedario', label: 'Schedario metallico', cat: 'ufficio', sub: 'mobili', color: '#8c949c', tags: 'archivio cassetti ufficio', params: [int('drawers', 'Cassetti', 2, 5, 4), flag('open', 'Cassetto aperto', false)], build: schedario },
   { id: 'lavagna', label: 'Lavagna', cat: 'ufficio', sub: 'scuola', color: '#c3c7ce', tags: 'lavagna bianca nera aula riunione', params: [seg('kind', 'Tipo', [['bianca', 'Bianca'], ['nera', 'Nera (gesso)']], 'bianca'), range('width', 'Larghezza', 0.8, 3.0, 0.1, 1.6), flag('stand', 'Con cavalletto', true)], build: lavagna },
   { id: 'stampante', label: 'Stampante', cat: 'ufficio', sub: 'mobili', color: '#e8e4dc', tags: 'fotocopiatrice', params: [], build: stampante },
   { id: 'erogatore', label: 'Erogatore d’acqua', cat: 'ufficio', sub: 'mobili', color: '#e8e4dc', tags: 'acqua boccione distributore', params: [], build: erogatore },

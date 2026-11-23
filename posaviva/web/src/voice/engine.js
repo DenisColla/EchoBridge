@@ -52,6 +52,10 @@ export async function createEngine(app) {
    * offline parse on any failure. Returns {plan, source: 'offline'|'cloud', note}.
    */
   async function understand(text, { mode = 'offline', apiKey = '', signal, client } = {}) {
+    // verbs on an object of the scene ("siediti sul divano", "prendi il vaso", "apri
+    // l'armadio"…): the same actions as the long-press menu (props/actions.js)
+    const oa = app.objectActions?.voiceMatch?.(text);
+    if (oa) return { plan: { actions: [{ type: 'objectAction' }], unknown: [], objectAction: oa }, source: 'offline' };
     if (mode === 'hybrid' && (apiKey || client)) {
       try {
         const { cloudPlan } = await import('./cloud.js');
@@ -71,5 +75,5 @@ export async function createEngine(app) {
     return { plan: parseOffline(text), source: 'offline' };
   }
 
-  return { cat, lex, executor, sceneCtx, parseOffline, understand, run: (plan) => executor.run(plan) };
+  return { cat, lex, executor, sceneCtx, parseOffline, understand, run: (plan) => (plan.objectAction && app.objectActions ? app.objectActions.voiceRun(plan.objectAction) : executor.run(plan)) };
 }

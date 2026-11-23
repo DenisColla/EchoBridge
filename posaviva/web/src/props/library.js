@@ -137,7 +137,7 @@ export function buildLibrary({ thumbs, onAdd, onAddPreset, panelBody }) {
     if (c?.presets) return ROOM_PRESETS.map((p) => ({ preset: p }));
     let list = typesOf(cur);
     // "In mano" also lists the hand-held items of the other categories (bottle, glass, guitar…)
-    if (cur === 'mano') list = [...list, ...PROP_TYPES.filter((t) => t.hand && t.cat !== 'mano' && CATEGORIES.some((c) => c.id === t.cat && !c.ownTool))];
+    if (cur === 'mano') list = [...list, ...PROP_TYPES.filter((t) => t.hand && !t.hand.carry && t.cat !== 'mano' && CATEGORIES.some((c) => c.id === t.cat && !c.ownTool))];
     if (subId !== 'all') list = list.filter((t) => t.sub === subId);
     // parametric (procedural) items first inside a sub-category: they have the most options
     return list;
