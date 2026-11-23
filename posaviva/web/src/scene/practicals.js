@@ -5,6 +5,8 @@
 //
 // app.practicals (this class) — contract shared with the objects / touch workstreams:
 //   isSource(prop) -> bool              lamp-like source or a prop with a window opening
+//   hitsSource(prop, point) -> bool     a long press at that world point concerns the light (rooms and
+//                                       walls: only near the window opening; their floor is "space")
 //   state(prop) -> {on, intensity 0..2, color, kind: 'lamp'|'window', mode?, setting?, label}
 //   set(prop, patch {on?, intensity?, color?, mode?}, commit = true)
 //   solo(prop) / mix(prop)              'Accendi solo questa' / 'Combina con la luce di studio'
@@ -26,7 +28,8 @@ import * as THREE from 'three';
 import { setColorFromKelvin, kelvinToHex } from './color.js';
 import { ROLES, TYPE_BY_ID } from '../props/catalog.js';
 import { partSpec } from '../props/models.js';
-import { sourceOf, val, windowsOf, isWindowType } from './practicalSources.js';
+import { screen as screenPicture } from '../props/textures.js';
+import { sourceOf, sourceOfProp, val, windowsOf, isWindowType } from './practicalSources.js';
 import { buildMenuSection, openAmbientMenu, openPracticalMenu } from './practicalsUI.js';
 
 const DEG = Math.PI / 180;
@@ -52,7 +55,7 @@ export const WINDOW_MODES = {
 const TIME_TO_MODE = { alba: 'tramonto', mattino: 'giorno', mezzogiorno: 'giorno', tramonto: 'tramonto', sera: 'notte', notte: 'notte' };
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _n = new THREE.Vector3();
-const _m3 = new THREE.Matrix3(), _box = new THREE.Box3(), _c = new THREE.Color();
+const _m3 = new THREE.Matrix3(), _m4 = new THREE.Matrix4(), _box = new THREE.Box3(), _c = new THREE.Color(), _c2 = new THREE.Color();
 
 let _skyCache = new Map();
 function skyTexture(cols) {
@@ -106,11 +109,30 @@ export class Practicals extends THREE.EventDispatcher {
   /** True for light sources (lamps, screens, flames...) and props with a window opening. */
   isSource(prop) {
     if (!prop?.type) return false;
-    if (sourceOf(prop.type)) return true;
+    if (sourceOfProp(prop)) return true;
     return isWindowType(prop.type) && windowsOf(prop).length > 0;
   }
 
-  isWindow(prop) { return !!prop?.type && !sourceOf(prop.type) && isWindowType(prop.type) && windowsOf(prop).length > 0; }
+  isWindow(prop) { return !!prop?.type && !sourceOfProp(prop) && isWindowType(prop.type) && windowsOf(prop).length > 0; }
+
+  /**
+   * True when a long press at `point` (world) on `prop` is about its light: any part of a lamp
+   * or of a window prop; on a room (Stanza) or a wall only near its window opening (their floor
+   * and walls are the empty space of the set: the long press there is the ambient light).
+   */
+  hitsSource(prop, point) {
+    if (!this.isSource(prop)) return false;
+    if (!this.isWindow(prop) || !point || (prop.type.variantOf || prop.type.id) === 'finestra') return true;
+    prop.pivot.updateWorldMatrix(true, false);
+    const q = _v.copy(point).applyMatrix4(_m4.copy(prop.pivot.matrixWorld).invert());
+    for (const o of windowsOf(prop)) {
+      const d = _v2.subVectors(q, o.c);
+      if (Math.abs(d.dot(o.n)) > 0.4) continue;
+      const along = Math.abs(d.dot(_v3.set(0, 1, 0).cross(o.n).normalize()));
+      if (along < o.w / 2 + 0.3 && Math.abs(d.y) < o.h / 2 + 0.3) return true;
+    }
+    return false;
+  }
 
   /** Current state of a source (defaults resolved). */
   state(prop) {
@@ -119,15 +141,16 @@ export class Practicals extends THREE.EventDispatcher {
     if (this.isWindow(prop)) {
       const setting = L.mode || 'auto';
       const mode = setting === 'auto' ? this._autoWindowMode() : setting;
-      return { kind: 'window', on: mode !== 'chiusa', mode, setting, intensity: L.intensity ?? 1, color: null, label: prop.type.label, explicit: !!prop.light };
+      const label = (prop.type.variantOf || prop.type.id) === 'finestra' ? prop.type.label : `Finestra · ${prop.type.label}`;
+      return { kind: 'window', on: mode !== 'chiusa', mode, setting, intensity: L.intensity ?? 1, color: null, label, explicit: !!prop.light };
     }
-    const src = sourceOf(prop.type), p = prop.params;
+    const src = sourceOfProp(prop), p = prop.params;
     let on;
     if (src.onParam && src.onParam in p) on = !!p[src.onParam];
     else if (typeof L.on === 'boolean') on = L.on;
     else on = this._defaultOn(src);
     if (src.offWhen?.(p)) on = false;
-    return { kind: 'lamp', on, intensity: L.intensity ?? 1, color: L.color || this._defaultHex(src, p), customColor: !!L.color, label: src.label || prop.type.label, explicit: !!prop.light };
+    return { kind: 'lamp', on, intensity: L.intensity ?? 1, color: L.color || this._defaultHex(src, p), customColor: !!L.color, label: val(src.label, p) || prop.type.label, explicit: !!prop.light };
   }
 
   /**
@@ -136,7 +159,7 @@ export class Practicals extends THREE.EventDispatcher {
    */
   set(prop, patch = {}, commit = true) {
     if (!this.isSource(prop)) return false;
-    const src = sourceOf(prop.type);
+    const src = sourceOfProp(prop);
     const L = { ...(prop.light || {}) };
     if ('intensity' in patch) L.intensity = Math.max(0, Math.min(2, +patch.intensity || 0));
     if ('color' in patch) { if (patch.color) L.color = patch.color; else delete L.color; }
@@ -215,7 +238,9 @@ export class Practicals extends THREE.EventDispatcher {
   getState() { return { v: 1, mode: this.mode, solo: this.soloId }; }
   setState(s) {
     const mode = s && ['mix', 'solo', 'scene'].includes(s.mode) ? s.mode : 'mix';
-    this._setMode(mode, mode === 'solo' ? s.solo || null : null, false);
+    const solo = mode === 'solo' ? s.solo || null : null;
+    // undo / load: open menus and the Luci panel follow (only when something changed)
+    this._setMode(mode, solo, mode !== this.mode || solo !== this.soloId);
   }
 
   /** Diagnostics / tests: counts of the last assignment. */
@@ -250,8 +275,9 @@ export class Practicals extends THREE.EventDispatcher {
   }
 
   _defaultOn(src) {
+    if (src.defaultOn === false) return false;
     const landscape = !!this.app.landscapes?.current;
-    if (landscape) return this._isNight() || (src.night ? false : this.app.landscapes.current.resolved?.weather === 'pioggia');
+    if (landscape) return this._isNight() || !!src.day || (src.night ? false : this.app.landscapes.current.resolved?.weather === 'pioggia');
     return true;
   }
 
@@ -286,8 +312,7 @@ export class Practicals extends THREE.EventDispatcher {
     app.addEventListener('renderstyle', () => { this._dirty = true; this._glowCheck = true; });
     this.rig.addEventListener('change', (e) => {
       if (e.what === 'live' || e.what === 'select' || e.what === 'handles' || e.what === 'studio') return;
-      this._dirty = true;
-      if (e.what === 'quality') this._budgetKey = null;
+      this._dirty = true; // includes 'quality': the budget follows the render quality preset
     });
     app.materials?.addEventListener?.('refresh', () => { this._glowCheck = true; this._dirty = true; app.invalidate(); });
   }
@@ -333,7 +358,7 @@ export class Practicals extends THREE.EventDispatcher {
   _scan() {
     const M = this.app.props, seen = new Set();
     for (const p of M.props) {
-      const src = sourceOf(p.type);
+      const src = sourceOfProp(p);
       const win = !src && isWindowType(p.type) ? windowsOf(p) : null;
       if (!src && !win?.length) continue;
       seen.add(p);
@@ -346,6 +371,8 @@ export class Practicals extends THREE.EventDispatcher {
       this.entries.set(p, e);
     }
     for (const p of [...this.entries.keys()]) if (!seen.has(p)) this._forget(p);
+    // a solo source that is not in the scene (deleted, or a scene loaded without it): back to the studio
+    if (this.mode === 'solo' && ![...this.entries.keys()].some((p) => p.id === this.soloId)) this._setMode('mix', null);
     const key = [...this.entries.keys()].map((p) => p.id).join();
     if (key !== this._listKey) { this._listKey = key; this._emit('list'); }
     this._glowCheck = true;
@@ -368,7 +395,7 @@ export class Practicals extends THREE.EventDispatcher {
     else if (typeof at === 'string') {
       atMesh = p.meshes.find((m) => m.userData.role === at) || null;
       if (atMesh) {
-        atMesh.updateMatrix();
+        if (atMesh.matrixAutoUpdate) atMesh.updateMatrix();
         if (!atMesh.geometry.boundingBox) atMesh.geometry.computeBoundingBox();
         _box.copy(atMesh.geometry.boundingBox).applyMatrix4(atMesh.matrix).getCenter(bulb);
       } else at = [0.5, 0.8, 0.5];
@@ -635,11 +662,18 @@ export class Practicals extends THREE.EventDispatcher {
       if (e.src.keepEmissive) {
         if (!on) { spec = { ...base }; delete spec.emissive; delete spec.emissiveMap; delete spec.emissiveIntensity; }
         else spec = { ...base, emissiveIntensity: (base.emissiveIntensity ?? 1) * k };
+      } else if (e.src.screenMap && !base.map) {
+        // screens built into furniture: a picture while on, dark glass while off
+        const pic = screenPicture(val(e.src.screenMap, e.prop.params));
+        spec = on ? { ...base, color: '#ffffff', map: pic, emissive: '#ffffff', emissiveMap: pic, emissiveIntensity: 0.9 * k, metalness: 0 } : { ...base, color: '#0d0f13', roughness: 0.12 };
       } else if (on) {
         const role = m.userData.role || '';
         if (e.kind === 'screen' && base.map) spec = { ...base, emissive: '#ffffff', emissiveMap: base.map, emissiveIntensity: 0.95 * k };
-        else {
-          const strong = /bulb|flame|lampGlass|diffuser|lamp/i.test(role) || !!m.userData.part;
+        else if (/flame/i.test(role)) {
+          // flames: saturated orange core, never blown out to white
+          spec = { ...base, color: '#ff9a3c', emissive: '#' + _c.set(st.color).lerp(_c2.set('#ff5a0a'), 0.65).getHexString(), emissiveIntensity: 0.85 * k };
+        } else {
+          const strong = /bulb|lampGlass|diffuser|lamp/i.test(role) || !!m.userData.part;
           spec = { ...base, emissive: st.color, emissiveIntensity: (strong ? 2.4 : 0.85) * k };
         }
       }

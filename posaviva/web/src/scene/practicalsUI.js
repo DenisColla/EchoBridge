@@ -140,6 +140,9 @@ export function applyAmbient(pr, id) {
     if (a.time && L?.current && L.setAtmosphere) L.setAtmosphere({ time: a.time });
     else if (a.preset === 'day') pr.rig.applyPresetDef(AMBIENT_PRESETS.find((p) => p.id === 'day'));
     else pr.rig.applyPreset(a.preset);
+    // the windows show that time of day (a window set by hand to Giorno / Tramonto / Notte follows
+    // again; a closed one stays closed)
+    for (const s of pr.sources()) if (s.kind === 'window' && s.state.setting !== 'auto' && s.state.setting !== 'chiusa') pr.set(s.prop, { mode: 'auto' }, false);
     app.commit('luce ambientale');
   });
 }
@@ -164,7 +167,8 @@ export function openAmbientMenu(pr, x, y) {
     format: (v) => (Math.abs(v) < 0.03 ? 'neutra' : v < 0 ? `calda ${Math.round(-v * 100)}%` : `fredda ${Math.round(v * 100)}%`),
     onInput: (v) => rig.setTint(v, { live: true }), onChange: () => rig.endLive('luce ambientale'),
   });
-  tint.classList.add('pv-pl-tint');
+  tint.classList.add('pv-sc-kelvin');
+  tint.input.style.setProperty('--kgrad', 'linear-gradient(90deg, #ffb469, #f2efe8 50%, #9cc4ff)');
   const only = toggle({ label: 'Solo luci della scena', value: pr.sceneOnly, onChange: (v) => { pr.setSceneOnly(v); haptic('tick'); sync(); } });
   const note = h('div', { class: 'pv-pl-note' });
   const body = h('div', { class: 'pv-pl-section' }, chips, level, tint, only, note);

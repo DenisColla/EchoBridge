@@ -11,6 +11,8 @@
 //   range    distance (m) where the light fades out (smooth cutoff, keeps light inside rooms)
 //   glow     material roles that glow (emissive) only while the light is on
 //   hideOff  roles hidden while off (candle flames)
+//   screenMap picture shown by the glowing parts while on ('video' | 'desktop' | 'codice', see
+//            props/textures.js screen()), dark glass while off: screens built into furniture
 //   at       where the bulb is: a role name (centre of that part) or [fx, fy, fz] fraction of
 //            the prop bounds (realistic models); may be fn(params) returning either
 //   pos      fn(params) -> [x, y, z] bulb position in pivot space (instead of `at`)
@@ -19,7 +21,11 @@
 //   angle    full cone (deg) and penumbra (0..1) of spots
 //   onParam  boolean parameter that already means on / off (lanterns and bonfires: 'lit')
 //   offWhen  fn(params) -> true when the object is off by itself (TV with a blank screen)
+//   when     fn(params) -> false when this prop has no light at all with its current params
+//            (bedside table without its lamp, desk without a computer): not a source then
 //   night    true: on by default only at evening / night when a landscape sets the time
+//   defaultOn false: off until the user switches it on (a TV in a furnished living room)
+//   day      true: on by default also by day in a landscape (work screens in an office)
 //   label    short Italian name used in lists ("Lampada", "Candela"...)
 import * as THREE from 'three';
 import { box, boxOn, cylinder, lathe, rod, sphere, tube, colorize } from '../props/geo.js';
@@ -31,6 +37,8 @@ const LAMP = { kind: 'point', kelvin: 2700, cd: 2.6, range: 9, glow: ['bulb', 's
 const CANDLE = { kind: 'point', kelvin: 1900, cd: 0.22, range: 3.5, label: 'Candela' };
 const SCREEN = { kind: 'screen', kelvin: 7800, angle: 150, penumbra: 1, range: 6, offWhen: (p) => p.content === 'spento', label: 'Schermo' };
 const MODEL = (at, extra = {}) => ({ kind: 'point', kelvin: 2700, cd: 2.4, range: 9, at, ...extra });
+/** computer screens built into furniture (role 'screenOn', facing the pivot's +Z) */
+const DESK_SCREEN = { kind: 'spot', kelvin: 7000, dir: [0, -0.12, 1], angle: 150, penumbra: 1, at: 'screenOn', offset: [0, 0, 0.06], glow: ['screenOn'], screenMap: 'desktop', day: true, label: 'Monitor' };
 
 export const SOURCES = {
   // ------------------------------------------------------------ procedural lamps (props/gen/office.js)
@@ -60,6 +68,14 @@ export const SOURCES = {
   tv: { ...SCREEN, cd: (p) => 0.6 + p.size / 60, glow: ['tvScreen'], at: 'tvScreen', label: 'TV' },
   monitor: { ...SCREEN, cd: 0.45, range: 4, glow: ['monScreen'], at: 'monScreen', label: 'Monitor' },
   laptop: { ...SCREEN, cd: 0.25, range: 3, glow: ['lapScreen'], at: 'lapScreen', offWhen: (p) => p.open < 20, label: 'Portatile' },
+  // ------------------------------------------------------------ furniture with a lamp or a screen (furnished rooms)
+  comodino: { ...LAMP, cd: 1.1, range: 6, at: 'shade', glow: ['shade'], when: (p) => !!p.lamp, label: 'Abat-jour' },
+  mobile_tv: {
+    kind: 'spot', kelvin: 7800, cd: 0.9, range: 6, at: 'screen', offset: [0, 0, 0.05], dir: [0, 0, 1], angle: 150, penumbra: 1,
+    glow: ['screen'], screenMap: 'video', when: (p) => !!p.tv, defaultOn: false, label: 'TV',
+  },
+  postazione: { ...DESK_SCREEN, cd: (p) => 0.2 + 0.12 * p.monitors, range: 4 },
+  scrivania: { ...DESK_SCREEN, cd: (p) => (p.pc === 'laptop' ? 0.18 : 0.28), range: 3.5, when: (p) => p.pc === 'monitor' || p.pc === 'laptop', label: (p) => (p.pc === 'laptop' ? 'Portatile' : 'Monitor') },
   // ------------------------------------------------------------ realistic models (Poly Haven)
   ph_Chandelier_01: MODEL([0.5, 0.42, 0.5], { cd: 3.4, range: 11, label: 'Lampadario' }),
   ph_Chandelier_02: MODEL([0.5, 0.42, 0.5], { cd: 3.4, range: 11, label: 'Lampadario' }),
@@ -103,8 +119,9 @@ export const SOURCES = {
   },
   // ------------------------------------------------------------ PosaViva practicals (registered below)
   candela: { ...CANDLE, cd: (p) => 0.16 + 0.07 * p.count, at: 'pl:flame', offset: [0, 0.02, 0], glow: ['pl:flame'], hideOff: ['pl:flame'], label: 'Candela' },
-  lucine: { kind: 'point', kelvin: 2400, color: (p) => (p.colors === 'multicolore' ? '#ffd9a8' : null), cd: (p) => 0.35 + p.length * 0.12, range: 6, pos: (p) => [0, p.height - p.sag * 0.9 - 0.05, 0.05], glow: ['pl:bulbs'], label: 'Lucine' },
-  camino: { kind: 'point', kelvin: 1800, cd: 2.4, range: 9, at: 'pl:flame', offset: [0, 0.05, 0.12], glow: ['pl:flame', 'pl:embers'], hideOff: ['pl:flame'], label: 'Camino' },
+  lucine: { kind: 'point', kelvin: 2400, color: (p) => (p.colors === 'multicolore' ? '#ffd9a8' : null), cd: (p) => 0.3 + p.length * 0.1, range: 6, pos: (p) => [0, p.height - p.sag * 0.9 - 0.25, 0.55], glow: ['pl:bulbs'], label: 'Lucine' },
+  // the fireplace's flame geometry follows its 'Acceso' parameter (onParam)
+  camino: { kind: 'point', kelvin: 1800, cd: 2.4, range: 9, onParam: 'lit', at: (p) => (p.lit ? 'pl:flame' : 'pl:embers'), offset: [0, 0.05, 0.12], glow: ['pl:flame', 'pl:embers'], label: 'Camino' },
 };
 
 /** Source description of a prop type (own `light` field, table entry, or the base type of a variant). */
@@ -116,6 +133,13 @@ export function sourceOf(type) {
 
 /** Resolves a field that may be a function of the params. */
 export const val = (v, params, prop) => (typeof v === 'function' ? v(params, prop) : v);
+
+/** Source description of a prop with its current params, or null (no source, or `when` says it has no light now). */
+export function sourceOfProp(prop) {
+  const src = sourceOf(prop?.type);
+  if (!src) return null;
+  return !src.when || src.when(prop.params || {}) ? src : null;
+}
 
 // ============================================================================= windows
 /**
@@ -233,7 +257,13 @@ function camino(p) {
   out['pl:embers'].push(box(ow * 0.6, 0.03, D * 0.5, { y: 0.065, z: 0.0 }));
   if (p.lit) {
     out['pl:flame'] = [];
-    for (let i = 0; i < 5; i++) out['pl:flame'].push(lathe([[0, 0], [0.06, 0.05], [0.045, 0.16], [0.02, 0.26], [0, 0.32 + 0.06 * (i % 2)]], { x: (i - 2) * ow * 0.11, y: 0.1, z: 0.01 * (i % 3), seg: 9 }));
+    // tongues of fire of different heights, leaning a little, over the logs
+    const hs = [0.2, 0.3, 0.24, 0.34, 0.18];
+    for (let i = 0; i < 5; i++) {
+      const f = lathe([[0, 0], [0.055, 0.03], [0.05, hs[i] * 0.4], [0.025, hs[i] * 0.75], [0, hs[i]]], { seg: 9 });
+      f.rotateZ((i - 2) * 0.12).translate((i - 2) * ow * 0.1, 0.1, 0.02 * ((i * 7) % 3) - 0.02);
+      out['pl:flame'].push(f);
+    }
   }
   return out;
 }
@@ -250,6 +280,3 @@ export const PRACTICAL_TYPES = [
     range('width', 'Larghezza', 1.0, 2.2, 0.05, 1.4), flag('lit', 'Acceso', true),
   ], build: camino },
 ];
-// the fireplace keeps its flame geometry in sync with the light (onParam)
-SOURCES.camino.onParam = 'lit';
-SOURCES.camino.hideOff = [];

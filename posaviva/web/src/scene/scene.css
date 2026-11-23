@@ -71,11 +71,10 @@ html.pv-tablet .pv-sc-tab { min-height: 44px; font-size: 14px; }
 .pv-pl-modes .pv-seg-btn { min-height: 40px; padding: 0 6px; font-size: 12px; }
 .pv-pl-colors { display: flex; align-items: center; gap: 6px; }
 .pv-pl-colors .pv-swatches { flex: 1; gap: 6px; }
-.pv-pl-colors .pv-swatch { width: 30px; height: 30px; }
+.pv-pl-colors .pv-swatch { width: 36px; height: 36px; }
 .pv-pl-reset { min-height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line); background: rgba(255,255,255,.05); color: var(--text); font-size: 12px; }
 .pv-pl-amb { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .pv-pl-amb-btn { flex-direction: column; justify-content: center; gap: 2px; min-height: 54px; padding: 6px 2px; font-size: 12px; }
-.pv-pl-tint input { background: linear-gradient(90deg, #ffb469, #f2efe8 50%, #9cc4ff) !important; border-radius: 99px; }
 .pv-pl-note { font-size: 12px; color: var(--muted); line-height: 1.3; }
 .pv-pl-sources { display: flex; flex-direction: column; gap: 8px; }
 .pv-pl-list { display: flex; flex-direction: column; gap: 8px; }
@@ -89,4 +88,4 @@ html.pv-tablet .pv-sc-tab { min-height: 44px; font-size: 14px; }
 .pv-pl-solo.active { background: rgba(255,200,116,.22); border-color: rgba(255,200,116,.6); }
 .pv-pl-row .pv-pl-section { padding: 0 0 4px; }
 .pv-pl-empty { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-html.pv-tablet .pv-pl-name, html.pv-tablet .pv-pl-solo { min-height: 44px; }
+html.pv-tablet .pv-pl-name, html.pv-tablet .pv-pl-solo, html.pv-tablet .pv-pl-reset { min-height: 44px; }

@@ -39,12 +39,17 @@ export function create(app, shell) {
   registerPropTypes(PRACTICAL_TYPES, []);
   const practicals = new Practicals(app, lights);
   app.practicals = practicals;
-  // long press on an empty spot (floor, sky, walls nobody else handles): "Luce ambientale";
-  // on a light source no other module took (objects workstream absent): its own menu
+  // long press on an empty spot (floor, sky, the floor and walls of a room, anything nobody
+  // else handles): "Luce ambientale"; on a light source no other module took (a lamp, a
+  // window or the window of a room): its own menu. Characters and animals are never "space".
   app.addHoldHandler?.(({ ndc, x, y }) => {
-    if (app.posing?.pick?.(ndc)?.character) return false;
     const hit = app.props?.pick?.(ndc);
-    if (hit?.prop && practicals.isSource(hit.prop)) { practicals.openMenu(hit.prop, x, y); return true; }
+    const far = hit ? hit.distance : Infinity;
+    const ch = app.posing?.pick?.(ndc);
+    if (ch?.character && ch.distance < far) return false;
+    const an = app.animals?.pick?.(ndc);
+    if (an && an.distance < far) return false;
+    if (hit?.prop && practicals.hitsSource(hit.prop, hit.point)) { practicals.openMenu(hit.prop, x, y); return true; }
     practicals.ambientMenu(x, y);
     return true;
   }, 0);
