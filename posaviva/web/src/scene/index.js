@@ -49,9 +49,10 @@ export function create(app, shell) {
     if (ch?.character && ch.distance < far) return false;
     const an = app.animals?.pick?.(ndc);
     if (an && an.distance < far) return false;
-    if (hit?.prop && practicals.hitsSource(hit.prop, hit.point)) { practicals.openMenu(hit.prop, x, y); return true; }
-    practicals.ambientMenu(x, y);
-    return true;
+    if (hit?.prop && practicals.hitsSource(hit.prop, hit.point)) practicals.openMenu(hit.prop, x, y);
+    else practicals.ambientMenu(x, y);
+    // the finger is still down: no orbit until it lifts (a press-and-drag session that does nothing)
+    return { move() {}, end() {} };
   }, 0);
 
   // ---------------------------------------------------------------- camera & guides

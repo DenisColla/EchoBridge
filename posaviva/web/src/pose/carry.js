@@ -11,7 +11,6 @@
 import * as THREE from 'three';
 import { haptic, stageMenu, toast } from '../ui/kit.js';
 import { EFFECTOR_LABEL } from './contacts.js';
-import { guardGhostClick } from './direct.js';
 
 const LIFT = 0.05; // m (scaled)
 const FOOT_R = 0.17; // footprint radius (m, scaled)
@@ -329,7 +328,7 @@ export class CharacterCarry {
       { separator: true },
       { id: 'del', label: 'Elimina', icon: 'trash', danger: true, onClick: () => { if (people?.remove) people.remove(ch); else { app.removeCharacter(ch); app.commit('elimina personaggio'); } } },
     ];
-    // opened by the release of the finger: its click must not close it or pick an item
-    return guardGhostClick(stageMenu(items, { x, y, title: ch.name, subtitle: 'Tieni premuto e trascina per spostarlo', width: 264 }), x, y);
+    // opened by the release of the finger: kit.stageMenu ignores the click of that release
+    return stageMenu(items, { x, y, title: ch.name, subtitle: 'Tieni premuto e trascina per spostarlo', width: 264 });
   }
 }

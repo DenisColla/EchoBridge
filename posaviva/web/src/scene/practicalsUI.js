@@ -24,19 +24,6 @@ const MODE_LABEL = { giorno: 'Giorno', tramonto: 'Tramonto', notte: 'Notte', chi
 const LAMP_COLORS = ['#ffb067', '#ffd6a0', '#fff4e5', '#d6e6ff', '#ff5d8f', '#5ab8ff', '#7dff9a'];
 const pct = (v) => `${Math.round(v * 100)}%`;
 
-/**
- * A long press opens the menu while the finger is still down; on release the browser may
- * still send the compatibility mouse events of that touch (mousedown / mouseup / click)
- * to whatever is under the finger now, i.e. the popover's backdrop (which would close it at
- * once) or one of its items. Clicks count only after a real press inside the popover layer.
- */
-export function guardGhostClick(m) {
-  let armed = false;
-  m.el.addEventListener('pointerdown', () => { armed = true; }, true);
-  m.el.addEventListener('click', (e) => { if (!armed) { e.stopPropagation(); e.preventDefault(); } }, true);
-  return m;
-}
-
 function subtitleOf(pr, prop) {
   const st = pr.state(prop);
   if (!st) return '';
@@ -108,7 +95,7 @@ export function openPracticalMenu(pr, prop, x, y) {
   m = stageMenu([...sec.items, { separator: true }, { id: 'pl-panel', label: 'Pannello Luci', icon: 'sliders', onClick: () => app.shell?.openTool('lights') }], {
     x, y, title: pr.state(prop).label, subtitle: subtitleOf(pr, prop), body: sec.body, width: 300,
   });
-  return guardGhostClick(m);
+  return m;
 }
 
 // ============================================================================= ambient light
@@ -186,10 +173,10 @@ export function openAmbientMenu(pr, x, y) {
   rig.addEventListener('change', onRig);
   pr.addEventListener('change', sync);
   const L = app.landscapes?.current;
-  return guardGhostClick(stageMenu([{ id: 'pl-panel', label: 'Pannello Luci', icon: 'sliders', onClick: () => app.shell?.openTool('lights') }], {
+  return stageMenu([{ id: 'pl-panel', label: 'Pannello Luci', icon: 'sliders', onClick: () => app.shell?.openTool('lights') }], {
     x, y, title: 'Luce ambientale', subtitle: L ? 'Segue il paesaggio' : 'Luce di studio', body, width: 312,
     onClose: () => { rig.removeEventListener('change', onRig); pr.removeEventListener('change', sync); },
-  }));
+  });
 }
 
 // ============================================================================= Luci panel section

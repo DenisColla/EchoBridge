@@ -44,21 +44,6 @@ const _m = new THREE.Matrix4();
 const _ndc = new THREE.Vector2();
 const _s = { x: 0, y: 0 }, _s2 = { x: 0, y: 0 };
 
-/**
- * A menu opened by the release of a finger (tap, long press): the browser's click that
- * follows that release must not land on the new menu (its backdrop, or an item when the
- * card sits under the finger on a short screen). Swallows a click near (x, y) until the
- * next press (a slow frame can delay that click by more than a second).
- */
-export function guardGhostClick(m, x, y) {
-  let ghost = true;
-  window.addEventListener('pointerdown', () => { ghost = false; }, { once: true, capture: true });
-  m.el.addEventListener('click', (e) => {
-    if (ghost && Math.hypot(e.clientX - x, e.clientY - y) < 24) { ghost = false; e.stopPropagation(); e.preventDefault(); }
-  }, true);
-  return m;
-}
-
 export class DirectTouch {
   /** ctx: pose module context (+ contacts, api) */
   constructor(ctx) {
@@ -83,6 +68,8 @@ export class DirectTouch {
     app.addEventListener('selection', (e) => { if (this.armed && e.character !== this.armed.ch) this.disarm(); });
     app.addEventListener('characters', () => { if (this.armed && !app.characters.includes(this.armed.ch)) this.disarm(); });
     app.addEventListener('loaded', () => { this.closeMenu(); this.disarm(); });
+    // Vista pulita: the touch menu closes (kit.stageMenu) and a pending "Tocca un punto" ends
+    app.addEventListener('cleanview', (e) => { if (e.on) { this.closeMenu(); this.disarm(); } });
   }
 
   /**
@@ -115,6 +102,15 @@ export class DirectTouch {
 
   /** a long press took the pending press (A4): forget it */
   cancelPress() { this.press = null; }
+
+  /**
+   * The palm is mostly metacarpal bones (finger controls 'f{n}0'): outside the Mani tool a
+   * touch there means the hand (drag = IK, tap = hand menu), not the finger.
+   */
+  palmAsHand(ctrl) {
+    if (!ctrl || ctrl.region !== 'finger' || ctrl.phalanx !== 0 || !this.enabled || this.shell.activeToolId === 'hands') return ctrl;
+    return this.ctx.controls.get('hand.' + ctrl.side) || ctrl;
+  }
 
   _allowed(e) {
     const ctx = this.ctx;
@@ -149,7 +145,7 @@ export class DirectTouch {
     const ctrl = this.ctx.sel().control;
     if (!ctrl || !['hand', 'foot', 'head'].includes(ctrl.baseId)) return false;
     const hit = this.pickBody(e, { occlusion: false });
-    return !!hit && hit.character === ch && hit.control === ctrl;
+    return !!hit && hit.character === ch && this.palmAsHand(hit.control) === ctrl;
   }
 
   // ------------------------------------------------------------ input
@@ -188,9 +184,11 @@ export class DirectTouch {
     if (this.press && e.pointerId === this.press.id) { this.press = null; return; } // tap or long press: the router decides
     const d = this.drag;
     if (!d || e.pointerId !== d.id) return;
+    // a move still waiting for its frame (slow frames: every move of a quick drag) is applied now
+    const pending = !!d.raf;
     if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
     const cancelled = e.type === 'pointercancel';
-    if (!cancelled && (e.clientX !== d.x || e.clientY !== d.y)) { d.x = e.clientX; d.y = e.clientY; this._safeUpdate(d); }
+    if (!cancelled && (pending || e.clientX !== d.x || e.clientY !== d.y)) { d.x = e.clientX; d.y = e.clientY; this._safeUpdate(d); }
     this.drag = null;
     this._eat = e;
     this._end(d, cancelled);
@@ -210,7 +208,7 @@ export class DirectTouch {
     if (!app.characters.includes(ch)) return;
     // the hips (lowest lumbar bone, pelvis bones) move the whole pelvis: crouch, sit, lean
     const hips = ch.bones[hit.bone]?.name === 'spine05' || hit.control.baseId === 'pelvis';
-    const ctrl = hips ? ctx.controls.get('pelvis') : hit.control;
+    const ctrl = hips ? ctx.controls.get('pelvis') : this.palmAsHand(hit.control);
     // selection exactly as a tap would make it
     const mode = ctx.mode();
     const part = mode === 'rotate' ? ctrl.id : null;
@@ -478,7 +476,7 @@ export class DirectTouch {
   /** after a tap selected a part: a hand or a foot opens its menu at the finger */
   maybeMenu(hit, x, y) {
     if (!this.enabled || !hit?.control || this.armed) return false;
-    const c = hit.control;
+    const c = this.palmAsHand(hit.control);
     const eff = c.baseId === 'hand' ? 'hand.' + c.side : c.baseId === 'foot' || c.baseId === 'toes' ? 'foot.' + c.side : null;
     if (!eff) return false;
     this.openMenu(hit.character, eff, x, y);
@@ -524,7 +522,6 @@ export class DirectTouch {
     });
     // never in the way: no dimming, touches outside go to the scene (and close it)
     m.el.classList.add('pv-pose-touchmenu');
-    guardGhostClick(m, x, y);
     this.menu = m;
     return m;
   }

@@ -299,7 +299,8 @@ export function create(app, shell) {
     if (hit) {
       let part = null;
       if (posing && mode === 'rotate') {
-        part = hit.control?.id || null;
+        // (a tap on the palm selects the hand outside the Mani tool: direct.palmAsHand)
+        part = direct.palmAsHand(hit.control)?.id || null;
         // the hands tool only poses hands: other parts just select the character
         if (tool === 'hands' && hit.control && !['hand', 'finger'].includes(hit.control.region)) part = null;
       }
@@ -326,7 +327,7 @@ export function create(app, shell) {
   // ---------------------------------------------------------------- highlight & UI sync
   function syncHighlight() {
     const { character: ch, control } = ctx.sel();
-    const show = !!(ch && control && ctx.isActive() && ctx.mode() === 'rotate');
+    const show = !!(ch && control && ctx.isActive() && ctx.mode() === 'rotate' && !shell.cleanView);
     if (show) highlight.set(ch, control, control.own.map((n) => app.model.boneIndex.get(n)));
     else highlight.set(null, null);
     app.invalidate();
@@ -361,6 +362,8 @@ export function create(app, shell) {
     });
   });
   app.addEventListener('tool', () => { syncHighlight(); app.invalidate(); });
+  // Vista pulita: the selected part keeps its selection but shows no colour and no handles
+  app.addEventListener('cleanview', () => { syncHighlight(); app.invalidate(); });
   // the faint line-of-action stroke belongs to the pose it produced
   app.addEventListener('loaded', () => ctx.line.clear());
   app.addEventListener('characters', () => notify('characters'));

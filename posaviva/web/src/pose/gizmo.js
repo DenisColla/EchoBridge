@@ -111,7 +111,8 @@ export class PoseGizmo {
   // ------------------------------------------------------------ drawing
   draw() {
     const ctx = this.ctx;
-    const active = ctx.isActive();
+    // Vista pulita: no handles (direct touch still poses); hidden handles are not hit either
+    const active = ctx.isActive() && !this.shell.cleanView;
     const ch = ctx.sel().character;
     if (!active || !ch || !ch.root.visible) {
       for (const r of this.rings) r.ok = false;

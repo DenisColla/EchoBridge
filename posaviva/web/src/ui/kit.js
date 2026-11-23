@@ -421,6 +421,13 @@ export function promptDialog(label, value = '', opts = {}) {
  * the click). opts: {x, y (screen px of the finger), title, subtitle, body: Node|Node[]
  * shown above the items (e.g. a slider), width, onClose}. Returns the modal api
  * ({el, card, body, close, result}).
+ *
+ * Ghost clicks: a stage menu is usually opened by a finger that is still down (long press)
+ * or that has just lifted (tap). The browser then sends the click of that release to
+ * whatever is under the finger now: the backdrop (which would close the menu at once) or
+ * an item. A click counts only after a real press inside the menu (scripted clicks and
+ * keyboard activation always count). The on-stage shortcut buttons step aside while a
+ * menu card covers them; closeStageMenus() closes every open one (Vista pulita).
  */
 export function stageMenu(items, opts = {}) {
   const list = h('div', { class: 'pv-menu pv-stage-menu-list', role: 'menu' });
@@ -437,7 +444,23 @@ export function stageMenu(items, opts = {}) {
     list.appendChild(b);
   }
   const body = [opts.body || null, list.children.length ? list : null];
-  m = modal({ title: opts.title, subtitle: opts.subtitle, body, kind: 'popover', className: 'pv-popover pv-stage-menu', onClose: opts.onClose });
+  let aside = false;
+  m = modal({
+    title: opts.title, subtitle: opts.subtitle, body, kind: 'popover', className: 'pv-popover pv-stage-menu',
+    onClose: (v) => {
+      stageMenus.delete(m);
+      if (aside) { aside = false; fabsAside(-1); }
+      opts.onClose?.(v);
+    },
+  });
+  stageMenus.add(m);
+  // ghost clicks of the finger that opened the menu (see above)
+  let pressed = false;
+  m.el.addEventListener('pointerdown', () => { pressed = true; }, true);
+  m.el.addEventListener('click', (e) => {
+    if (pressed || !e.isTrusted || e.detail === 0) return;
+    e.stopPropagation(); e.preventDefault();
+  }, true);
   const card = m.card;
   const W = window.innerWidth, H = window.innerHeight;
   const w = Math.min(opts.width || 264, W - 16);
@@ -448,14 +471,35 @@ export function stageMenu(items, opts = {}) {
   card.style.top = Math.round(Math.min(y + 18, H - 120)) + 'px';
   card.style.maxHeight = `calc(100vh - 16px - var(--safe-bottom, 0px))`;
   requestAnimationFrame(() => {
+    if (!stageMenus.has(m)) return;
     const ch = card.offsetHeight; // layout height: the card is still scaled by its opening transition
     let top = y + 18;
     if (top + ch > H - 8) top = Math.max(8, y - 18 - ch);
     if (top + ch > H - 8) top = Math.max(8, H - 8 - ch);
     card.style.top = Math.round(top) + 'px';
+    // the on-stage shortcut buttons (and the quick zoom button under them) step aside when covered
+    const l = parseFloat(card.style.left), t = top, r = l + card.offsetWidth, b = top + ch;
+    for (const f of document.querySelectorAll('.pv-stage-fabs, .pv-focus-wrap')) {
+      const q = f.getBoundingClientRect();
+      if (q.width && q.left < r + 6 && q.right > l - 6 && q.top < b + 6 && q.bottom > t - 6) { aside = true; fabsAside(1); break; }
+    }
   });
   card.style.transformOrigin = 'top center';
   return m;
+}
+
+/** Open stage menus (closeStageMenus) and the count of those covering the shortcut buttons. */
+const stageMenus = new Set();
+let fabsAsideN = 0;
+function fabsAside(d) {
+  fabsAsideN = Math.max(0, fabsAsideN + d);
+  document.documentElement.classList.toggle('pv-fabs-aside', fabsAsideN > 0);
+}
+/** Closes every open stage menu (e.g. entering Vista pulita). Returns how many were open. */
+export function closeStageMenus() {
+  const n = stageMenus.size;
+  for (const m of [...stageMenus]) m.close(null);
+  return n;
 }
 
 /**

@@ -627,7 +627,9 @@ export class ContactPins {
   draw() {
     const app = this.app;
     let any = this.decorators.size > 0;
-    const show = this.ctx.isActive() || this.decorators.size > 0;
+    // Vista pulita: no contact markers (the transient rings of a carry / reach still show)
+    const markers = this.ctx.isActive() && !this.ctx.shell.cleanView;
+    const show = markers || this.decorators.size > 0;
     if (show && !any) for (const c of app.characters) if (c.root.visible && this.list(c).length) { any = true; break; }
     const g = this.g;
     if (!show || !any) {
@@ -642,7 +644,7 @@ export class ContactPins {
     const pt = { x: 0, y: 0 };
     /** decorators: world -> client px object, or null when behind the camera */
     const project = (p, out = pt) => (this.project(p, out) ? out : null);
-    if (this.ctx.isActive()) {
+    if (markers) {
       for (const c of app.characters) {
         if (!c.root.visible) continue;
         for (const pin of this.list(c)) {

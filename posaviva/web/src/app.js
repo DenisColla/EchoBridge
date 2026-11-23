@@ -319,8 +319,10 @@ export class App extends THREE.EventDispatcher {
       pointers.add(e.pointerId);
       if (down && pointers.size > 1) { down.multi = true; cancelHold(); return; }
       down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false, held: false, timer: 0, last: e };
-      // a press already taken by a gizmo / mode (capture listeners) never becomes a long press
-      if (!e.defaultPrevented) down.timer = setTimeout(fireHold, HOLD_MS);
+      // a press already taken by a gizmo / mode (capture listeners) never becomes a long press,
+      // nor does a camera gesture: mouse middle / right button, S Pen with its barrel button held
+      const camera = e.button > 0 || (e.pointerType === 'pen' && ((e.buttons & 2) || this.penBarrel));
+      if (!e.defaultPrevented && !camera) down.timer = setTimeout(fireHold, HOLD_MS);
     });
     c.addEventListener('pointermove', (e) => {
       const hs = this._holdSession;

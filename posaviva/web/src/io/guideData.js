@@ -20,6 +20,11 @@
 //
 // Text markup: **Etichetta** = a label as written in the app, [icon] = small inline icon.
 //
+// Phase A (touch, objects, light, stage UI): tocco-diretto, menu-mano, contatti,
+// sposta-premendo, azioni-oggetti, luci-scena, luce-ambientale, vista-pulita, pannello,
+// scorciatoie — each guarded by `when` on its module API (app.posing.pinTo / touchMenu /
+// carry, app.objectActions, app.practicals, shell.setCleanView / shortcuts).
+//
 // PLACEHOLDERS for the next phases are at the end of TOPICS (status: 'planned'): animali
 // (novità), libreria oggetti/edifici (novità), linea d'azione (avanzata), definizione
 // muscolare (novità). Animali, Esterni, Edifici, Oggetti, Paesaggi, Progetti, Comandi vocali,
@@ -41,7 +46,7 @@ export const CHAPTERS = [
 ];
 
 /** Topics suggested at the top of the index ("Inizia da qui"). */
-export const START_HERE = ['vista', 'posa-ruota', 'zoom-rapido', 'esportare'];
+export const START_HERE = ['vista', 'tocco-diretto', 'zoom-rapido', 'esportare'];
 
 const hasLine = (e) => e.posing('drawLine');
 const hasProjects = (e) => typeof e.app?.projects?.open === 'function';
@@ -56,6 +61,19 @@ const isTablet = (e) => !!e.shell?.tablet;
 const notTablet = (e) => !isTablet(e);
 /** S Pen options exist (io/pen.js) and matter: a tablet, or a pen already used on this device */
 const hasPen = (e) => !!e.app?.modules?.ui?.pen && (isTablet(e) || !!e.app.modules.ui.pen.state?.seen);
+/** Phase A: direct touch on the body (pose/direct.js), hand / foot menu, contacts, long-press carry */
+const hasDirect = (e) => e.posing('pinTo') && e.poseState('direct');
+const hasTouchMenu = (e) => e.posing('touchMenu');
+const hasContacts = (e) => e.posing('pinTo');
+const hasCarry = (e) => !!e.app?.posing?.carry;
+/** long-press actions on objects (props/actions.js), practical lights (scene/practicals.js) */
+const hasActions = (e) => typeof e.app?.objectActions?.openMenu === 'function';
+const hasPracticals = (e) => typeof e.app?.practicals?.ambientMenu === 'function';
+/** stage UI (ui/shell.js, ui/shortcuts.js) */
+const hasClean = (e) => typeof e.shell?.setCleanView === 'function';
+const hasResize = (e) => typeof e.shell?.sheetRange === 'function';
+const hasShortcuts = (e) => !!e.shell?.shortcuts;
+const hasLandscapes = (e) => typeof e.app?.landscapes?.generate === 'function';
 
 export const TOPICS = [
   // ------------------------------------------------------------------ primi passi
@@ -74,6 +92,7 @@ export const TOPICS = [
       { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con **Progetti**, salvataggio, esportazione e impostazioni.', when: hasProjects },
       { t: 'In alto a destra: [undo] [redo] annulla e ripeti, [help] questa guida, [menu] il menu con scene, esportazione e impostazioni.', when: noProjects },
       { t: 'In basso sulla vista: a sinistra [mic] apre i **Comandi** vocali, a destra [zoom] lo zoom rapido.', when: hasVoice },
+      { t: 'In alto [cleanView] **Vista pulita** nasconde tutto tranne la scena.', when: hasClean },
     ],
     tips: [
       { t: 'Con il telefono in orizzontale gli strumenti diventano una colonna a sinistra e il pannello si apre a destra.', when: notTablet },
@@ -114,8 +133,40 @@ export const TOPICS = [
     tips: [
       'Girare o zoomare la vista non è una modifica della scena: **Annulla** non la tocca.',
       'Per un\'inquadratura precisa usa gli strumenti di **Camera** (obiettivo, punto focale, angolazioni, viste salvate).',
+      { t: '[frameAll] **Centra personaggi**, sopra lo zoom rapido, inquadra tutti i personaggi in un tocco.', when: hasShortcuts },
+      { t: 'Tenendo premuto uno spazio vuoto si apre invece la **Luce ambientale**.', when: hasPracticals },
     ],
-    related: ['zoom-rapido', 'punto-focale'],
+    related: ['zoom-rapido', 'punto-focale', 'scorciatoie'],
+  },
+  {
+    id: 'vista-pulita', chapter: 'basi', icon: 'cleanView', title: 'Vista pulita',
+    summary: 'Solo la scena, senza pulsanti né pannelli',
+    keywords: 'vista pulita nascondi interfaccia comandi pulsanti pannelli schermo intero solo scena guardare composizione',
+    when: hasClean,
+    steps: [
+      'Tocca [cleanView] **Vista pulita** nella barra in alto, oppure [menu] › **Vista pulita**: spariscono barre, pannello, pulsanti e i menu aperti sulla scena.',
+      'Puoi ancora girare la vista, zoomare e posare con le dita.',
+      'Per tornare tocca [cleanExit] in alto a destra, premi Indietro oppure tocca due volte con due dita.',
+    ],
+    tips: [
+      'Il pannello che avevi aperto si riapre da solo.',
+      'Le immagini esportate non cambiano: l\'interfaccia non c\'è mai.',
+      { t: 'Sul tablet in verticale, con il pannello aperto, il pulsante non sta nella barra: usa [menu] › **Vista pulita**.', when: isTablet },
+    ],
+    go: { spot: 'clean' }, related: ['vista', 'pannello'],
+  },
+  {
+    id: 'pannello', chapter: 'basi', icon: 'sliders', title: 'Pannello più alto o più largo',
+    summary: 'Trascina la maniglia o il bordo del pannello',
+    keywords: 'pannello altezza larghezza ridimensionare dimensione maniglia bordo mini medio alto allargare restringere',
+    when: hasResize,
+    steps: [
+      { t: 'Trascina la maniglia in cima al pannello: si ferma all\'altezza che vuoi, con tre scatti «Mini», «Medio» e «Alto» (mentre trascini un\'etichetta dice dove sei).', when: notTablet },
+      { t: 'Una spinta veloce porta allo scatto successivo; tirala tutta in giù per chiudere il pannello. Un tocco sulla maniglia passa all\'altezza successiva.', when: notTablet },
+      { t: 'Trascina il bordo sinistro del pannello per allargarlo o restringerlo: si aggancia alle due larghezze di [panelWide].', when: isTablet },
+      'La vista 3D si sposta da sola per restare libera, e la misura scelta resta anche alla prossima apertura.',
+    ],
+    related: ['interfaccia', 'vista-pulita'],
   },
   {
     id: 'selezionare', chapter: 'basi', icon: 'tap', art: 'tap', title: 'Selezionare personaggi e parti',
@@ -125,6 +176,7 @@ export const TOPICS = [
       'Tocca un personaggio nella vista per selezionarlo: il suo nome compare in alto a sinistra.',
       'Con **Posa** aperta, oppure con il pannello chiuso, tocca una parte del corpo (braccio, mano, testa…): si colora e compaiono gli anelli per ruotarla.',
       'Tocca lo sfondo per lasciare la parte selezionata.',
+      { t: 'Toccando una mano o un piede si apre anche il suo menu: forma della mano, raggiungere un punto, appoggiare.', when: hasTouchMenu },
       'Parte troppo piccola o nascosta? In **Posa** apri **Scegli parte** (colonne Destra, Centro, Sinistra) oppure **Dita della mano** per ogni falange.',
     ],
     tips: [
@@ -230,7 +282,61 @@ export const TOPICS = [
       'Con **Mostra articolazioni** (in **Opzioni**) compare un punto toccabile su ogni giuntura.',
       { t: '**Colonna morbida** (in **Opzioni**): ruotando busto, addome o collo la schiena curva tutta insieme, senza angoli.', when: hasSoftSpine },
     ],
-    go: { tool: 'pose', mode: 'rotate' }, context: ['pose:rotate', 'pose'], related: ['trascina', 'linea', 'zoom-rapido'],
+    go: { tool: 'pose', mode: 'rotate' }, context: ['pose:rotate', 'pose'], related: ['tocco-diretto', 'trascina', 'linea', 'zoom-rapido'],
+  },
+  {
+    id: 'tocco-diretto', chapter: 'posa', icon: 'tap', art: 'tap', title: 'Tocco diretto: trascinare il corpo',
+    summary: 'Trascina col dito mani, piedi, braccia, gambe e testa',
+    keywords: 'tocco diretto trascinare dito corpo mano piede braccio avambraccio gamba coscia testa bacino fianchi accovacciare dita piegare touch arto',
+    when: hasDirect,
+    steps: [
+      'Con il pannello chiuso, oppure con **Posa** o **Mani** aperti, appoggia il dito su una parte del corpo e trascinalo: la parte segue il dito.',
+      'Mano o piede: si spostano e braccio o gamba li seguono; il piede d\'appoggio resta a terra.',
+      'Braccio, avambraccio, coscia, gamba, busto, collo: ruotano entro i limiti anatomici. La testa guarda verso dove la porti.',
+      'Fianchi: abbassali per accovacciare o far sedere il personaggio, i piedi restano dove sono.',
+      'Un dito della mano: trascinalo per piegarlo.',
+    ],
+    tips: [
+      'Ogni trascinamento è un passo: [undo] Annulla lo toglie.',
+      'Due dita, anche partendo dal corpo, muovono la vista; un dito sullo sfondo la fa girare.',
+      'Per spegnerlo: **Posa** › **Opzioni** › **Tocco diretto**, oppure [menu] › **Impostazioni** › **Tocco diretto**.',
+      'In **Sposta** il dito sposta il personaggio invece di posarlo; in **Linea** disegna la linea d\'azione.',
+    ],
+    go: { tool: 'pose', mode: 'rotate' }, related: ['menu-mano', 'contatti', 'posa-ruota'],
+  },
+  {
+    id: 'menu-mano', chapter: 'posa', icon: 'hand', title: 'Il menu della mano e del piede',
+    summary: 'Pugno, mano aperta, raggiungere un punto, appoggiare',
+    keywords: 'menu mano piede pugno aperta afferra indica rilassata raggiungere tocca un punto fissa superficie libera appoggia a terra',
+    when: hasTouchMenu,
+    steps: [
+      'Con il pannello chiuso, oppure con **Posa** aperta, tocca una mano: accanto al dito si apre il suo menu.',
+      'Scegli la forma: **Pugno**, **Aperta**, **Afferra**, **Indica**, **Rilassata**.',
+      '**Tocca un punto da raggiungere**, poi tocca un oggetto, il pavimento o un altro personaggio: la mano ci arriva e resta appoggiata.',
+      '**Fissa a superficie** blocca la mano dov\'è; **Libera contatto** la lascia andare.',
+      'Toccando un piede: **Appoggia a terra** lo posa piatto su quello che ha sotto, **Tocca un punto** lo porta su un gradino o una sedia, **Libera** lo stacca.',
+    ],
+    tips: ['Il menu non copre la scena: tocca la vista per chiuderlo. Indietro annulla un «Tocca un punto» in attesa.'],
+    go: { tool: 'pose', mode: 'rotate' }, related: ['contatti', 'tocco-diretto', 'mani'],
+  },
+  {
+    id: 'contatti', chapter: 'posa', icon: 'lock', title: 'Mani e piedi appoggiati (contatti)',
+    summary: 'Una mano sul tavolo o sulla spalla di qualcuno, che resta lì',
+    keywords: 'contatti contatto appoggiare appoggiata mano tavolo spalla piede gradino sedia fissare mantieni il contatto libera spostare corpo',
+    when: hasContacts,
+    steps: [
+      'Dal menu della mano o del piede: **Tocca un punto da raggiungere** (poi tocca la superficie) oppure **Fissa a superficie**.',
+      'Il palmo o la pianta si appoggiano sulla superficie e compare un anellino: turchese su un oggetto o sul pavimento, arancione su un personaggio.',
+      'Ora muovi il corpo, i fianchi o tutto il personaggio: la mano resta appoggiata e il braccio la segue.',
+      'Su un oggetto la mano lo segue quando lo sposti; sulla spalla di un altro personaggio segue lui.',
+      'In **Posa** la sezione **Contatti** elenca mani e piedi appoggiati: **Libera** ne stacca uno.',
+    ],
+    tips: [
+      'Con **Mantieni il contatto** spento (in **Posa** › **Opzioni**) i contatti restano salvati ma non trattengono la mano.',
+      'Una posa pronta, **Azzera posa** o **Specchia posa** lasciano andare i contatti.',
+      'Spostando lontano un personaggio, la mano che non arriva più viene lasciata e compare un avviso.',
+    ],
+    related: ['menu-mano', 'tocco-diretto', 'sposta-premendo'],
   },
   {
     id: 'trascina', chapter: 'posa', icon: 'tap', title: 'Trascinare mani e piedi',
@@ -244,8 +350,11 @@ export const TOPICS = [
       'Trascina la maniglia gialla per far girare testa e sguardo verso un punto.',
       'Con **Piedi fissi** acceso, abbassa il bacino per accovacciare o far sedere il personaggio: i piedi restano dove sono.',
     ],
-    tips: ['Per rifinire una singola articolazione torna a **Ruota**.'],
-    go: { tool: 'pose', mode: 'ik' }, context: ['pose:ik'], related: ['posa-ruota', 'sposta'],
+    tips: [
+      'Per rifinire una singola articolazione torna a **Ruota**.',
+      { t: 'Con **Tocco diretto** trascini mani e piedi anche senza maniglie, direttamente sul corpo.', when: hasDirect },
+    ],
+    go: { tool: 'pose', mode: 'ik' }, context: ['pose:ik'], related: ['posa-ruota', 'tocco-diretto', 'sposta'],
   },
   {
     id: 'linea', chapter: 'posa', icon: 'edit', art: 'line', title: 'Disegnare la linea d\'azione',
@@ -278,7 +387,23 @@ export const TOPICS = [
       'Trascina il pomello sull\'anello per girarlo su se stesso, oppure usa il cursore **Rotazione**.',
       '**Altezza da terra** lo solleva (salti, tuffi); **Appoggia a terra** lo riporta giù con i piedi sul pavimento.',
     ],
-    go: { tool: 'pose', mode: 'move' }, context: ['pose:move'], related: ['personaggi', 'trascina'],
+    tips: [{ t: 'Più veloce, senza aprire nulla: tieni premuto il personaggio e fallo scorrere.', when: hasCarry }],
+    go: { tool: 'pose', mode: 'move' }, context: ['pose:move'], related: ['sposta-premendo', 'personaggi', 'trascina'],
+  },
+  {
+    id: 'sposta-premendo', chapter: 'posa', icon: 'move', title: 'Spostare un personaggio tenendolo premuto',
+    summary: 'Pressione lunga e trascina: il personaggio scivola nella scena',
+    keywords: 'pressione lunga tieni premuto spostare trascinare personaggio scivolare ruotare girare due dita menu duplica specchia elimina primo piano',
+    when: hasCarry,
+    steps: [
+      'Tieni il dito fermo su un personaggio per un attimo: si solleva un poco e un cerchio tratteggiato segna il suo posto.',
+      'Senza alzare il dito, fallo scorrere: segue il terreno e non attraversa mobili, pareti e altri personaggi.',
+      'Appoggia un secondo dito e giralo: il personaggio ruota su se stesso.',
+      'Alza il dito per lasciarlo lì. È un solo passo: [undo] Annulla lo riporta dov\'era.',
+      'Se alzi il dito senza muoverlo si apre un menu: **Seleziona e posa**, **Duplica**, **Specchia posa**, **Appoggia a terra**, **Ruota di 45°**, **Primo piano**, **Elimina**.',
+    ],
+    tips: ['Gli oggetti che ha in mano vengono con lui, e così i piedi appoggiati a terra; le mani appoggiate su altro restano dove sono.'],
+    related: ['sposta', 'contatti', 'azioni-oggetti'],
   },
   {
     id: 'pose-pronte', chapter: 'posa', icon: 'people', art: 'poses', title: 'Partire da una posa pronta',
@@ -364,6 +489,20 @@ export const TOPICS = [
     ],
     go: { spot: 'zoom' }, context: ['focus'], related: ['mani', 'viso', 'vista'],
   },
+  {
+    id: 'scorciatoie', chapter: 'inquadrare', icon: 'frameAll', title: 'Centra personaggi e Cambia ambiente',
+    summary: 'I pulsanti rotondi sopra lo zoom rapido',
+    keywords: 'scorciatoie centra personaggi inquadra tutti cambia ambiente stanza paesaggio studio vuoto pulsanti rotondi',
+    when: hasShortcuts,
+    steps: [
+      'Sopra [zoom] lo zoom rapido, in basso a destra, ci sono due pulsanti rotondi.',
+      '[frameAll] **Centra personaggi** inquadra tutti i personaggi visibili (e lascia un primo piano).',
+      { t: '[landscape] **Cambia ambiente** apre un menu: gli ultimi usati, **Studio vuoto**, le **Stanze** e gli **Altri ambienti** (**Città**, **Natura**, **Fantasy**). Toccane uno per costruirlo attorno ai personaggi.', when: hasLandscapes },
+      'Ogni scelta è un passo: [undo] Annulla torna a prima.',
+    ],
+    tips: ['Quando lo spazio è poco i pulsanti si mettono in fila accanto allo zoom rapido, o si nascondono.'],
+    go: { spot: 'fabs' }, related: ['zoom-rapido', 'paesaggi', 'vista'],
+  },
 
   // ------------------------------------------------------------------ aspetto
   {
@@ -434,7 +573,43 @@ export const TOPICS = [
       '**Punta sul personaggio** riorienta le luci sul soggetto selezionato.',
       'Spegni **Maniglie delle luci nella vista** per una vista pulita.',
     ],
-    go: { tool: 'lights' }, context: ['lights'], related: ['stili', 'oggetti'],
+    go: { tool: 'lights' }, context: ['lights'], related: ['luci-scena', 'luce-ambientale', 'stili'],
+  },
+  {
+    id: 'luci-scena', chapter: 'scena', icon: 'bulb', title: 'Lampade, candele e finestre che illuminano',
+    summary: 'Le luci degli oggetti della scena fanno luce davvero',
+    keywords: 'lampade lampada candele candela abat-jour lampione schermo tv falò camino finestra luce dalla finestra accendi spegni accesa intensità colore solo questa giorno tramonto notte chiusa auto fonti nella scena',
+    when: hasPracticals,
+    steps: [
+      'Lampade, candele, schermi, lampioni, falò e finestre della scena illuminano davvero i personaggi.',
+      'Tieni premuta una lampada: in cima al menu trovi **Accesa**, **Intensità** e il colore della luce (**Originale** torna al suo).',
+      '**Accendi solo questa** lascia la scena alla lampada (lo studio resta un riempimento debole); **Combina con la luce di studio** le somma.',
+      'Tieni premuta una finestra (o la finestra di una stanza): scegli **Auto**, **Giorno**, **Tramonto**, **Notte** o **Chiusa** e regola **Luce dalla finestra**.',
+      'In **Scena** › **Luci** la sezione **Fonti nella scena** elenca lampade e finestre, con interruttore e intensità.',
+    ],
+    tips: [
+      'In **Auto** la finestra segue l\'ora del paesaggio o della luce ambientale.',
+      'Con tante lampade accese le più lontane si limitano a brillare, per tenere fluida la scena.',
+    ],
+    go: { tool: 'lights' }, related: ['luce-ambientale', 'luci', 'azioni-oggetti'],
+  },
+  {
+    id: 'luce-ambientale', chapter: 'scena', icon: 'sun', title: 'Luce ambientale',
+    summary: 'Tieni premuto uno spazio vuoto: giorno, tramonto, notte',
+    keywords: 'luce ambientale ambiente giorno tramonto notte studio calda fredda intensità solo luci della scena pressione lunga pavimento cielo spazio vuoto',
+    when: hasPracticals,
+    steps: [
+      'Tieni premuto uno spazio vuoto della vista: il pavimento, il cielo, il pavimento di una stanza.',
+      'Nel menu **Luce ambientale** scegli **Giorno**, **Tramonto**, **Notte** o **Studio**: con un paesaggio cambia la sua ora, altrimenti la luce di studio.',
+      'Regola **Intensità** e **Calda · Fredda**.',
+      '**Solo luci della scena** lascia accese solo lampade e finestre (lo studio resta un riempimento debole).',
+    ],
+    tips: [
+      'Le finestre seguono la scelta, anche quelle impostate a mano; quelle chiuse restano chiuse.',
+      'Su una parete di una stanza: tieni premuto e scegli **Luce ambientale…** in fondo al menu.',
+      'Ogni scelta è un passo: [undo] Annulla torna alla luce di prima. **Pannello Luci** apre **Scena** › **Luci**.',
+    ],
+    related: ['luci-scena', 'luci', 'paesaggi'],
   },
   {
     id: 'oggetti', chapter: 'scena', icon: 'cube', title: 'Aggiungere oggetti e stanze',
@@ -449,7 +624,8 @@ export const TOPICS = [
       '★ lo aggiunge ai preferiti; il simbolo ⚙ indica un oggetto con misure modificabili, ∞ uno con varianti casuali (**Rigenera**).',
       '**Stanze pronte**: soggiorno, cucina, aula, bar… ogni mobile resta un oggetto; **Muovi tutta la stanza** li sposta insieme.',
     ],
-    go: { tool: 'props' }, context: ['props'], related: ['in-mano', 'edifici'],
+    tips: [{ t: 'Tieni premuto un oggetto per farci qualcosa con un personaggio: sedersi, prendere, aprire…', when: hasActions }],
+    go: { tool: 'props' }, context: ['props'], related: ['azioni-oggetti', 'in-mano', 'edifici'],
   },
   {
     id: 'in-mano', chapter: 'scena', icon: 'hand', title: 'Mettere un oggetto in mano',
@@ -462,8 +638,32 @@ export const TOPICS = [
       'Nel pannello, sezione **Mano**: **Sinistra** / **Destra**, **Posizione presa**, **Rotazione presa**, **Presa invertita** e **Chiudi la mano**.',
       '**Stacca** lascia l\'oggetto dov\'è; **Attacca alla mano** lo rimette in mano.',
     ],
-    tips: ['L\'oggetto segue la mano: muovi il braccio con **Ruota** o **Trascina** e l\'oggetto lo accompagna.'],
-    go: { tool: 'props' }, related: ['oggetti', 'mani'],
+    tips: [
+      'L\'oggetto segue la mano: muovi il braccio con **Ruota** o **Trascina** e l\'oggetto lo accompagna.',
+      { t: 'Vasi, libri, bottiglie e attrezzi posati nella scena: tienili premuti e scegli **Prendi**.', when: hasActions },
+    ],
+    go: { tool: 'props' }, related: ['oggetti', 'azioni-oggetti', 'mani'],
+  },
+  {
+    id: 'azioni-oggetti', chapter: 'scena', icon: 'chair', title: 'Azioni sugli oggetti',
+    summary: 'Tieni premuto un oggetto: siediti, sdraiati, prendi, apri…',
+    keywords: 'azioni oggetti pressione lunga tieni premuto siediti sedia divano letto sdraiati prendi posa a terra apri chiudi armadio frigo cassetto guarda avvicinati appoggiati inginocchiati accarezza guarda fuori finestra chi animale',
+    when: hasActions,
+    steps: [
+      'Tieni premuto un oggetto, un mobile, un edificio o un animale: accanto al dito si apre il menu di quello che si può fare.',
+      'Agisce il personaggio selezionato (o il più vicino); con più personaggi scegli chi in **Chi?**.',
+      'Sedia, poltrona, panchina: **Siediti**. Letto o divano: **Sdraiati** › **Sulla schiena**, **Su un fianco** o **A pancia in giù**. Tavolo: Siediti al tavolo (aggiunge una sedia se serve).',
+      'Oggetti piccoli (vaso, libro, bottiglia, attrezzi): **Prendi**. Tieni premuto l\'oggetto in mano per **Posa a terra**, posarlo su un tavolo vicino o **Cambia mano**.',
+      'Armadio, cassettiera, frigo, porta, portatile: **Apri** / **Chiudi**. Finestra: **Guarda fuori**. Parete, armadio, albero, auto: **Appoggiati**.',
+      'Inoltre **Guarda**, **Avvicinati**, **Inginocchiati**, e su un animale **Accarezza**. In fondo: **Sposta**, **Ruota 90°**, **Duplica**, **Elimina**, **Dettagli**.',
+    ],
+    tips: [
+      'Ogni azione è un solo passo: [undo] Annulla la toglie tutta.',
+      'Un tocco breve sull\'oggetto lo seleziona come sempre e apre il suo pannello.',
+      { t: 'Su una lampada o una finestra, in cima al menu ci sono anche i comandi della luce.', when: hasPracticals },
+      { t: 'Le stesse azioni a voce: «siediti sul divano», «prendi il vaso», «apri l\'armadio».', when: hasVoice },
+    ],
+    related: ['oggetti', 'in-mano', 'luci-scena'],
   },
   {
     id: 'edifici', chapter: 'scena', icon: 'building', title: 'Aggiungere edifici',
@@ -660,6 +860,7 @@ export const TOPICS = [
       'Tocca [menu] › **Impostazioni**.',
       '**Qualità di resa**: Alta per il massimo dettaglio, Bassa per più fluidità e meno batteria.',
       '**Vibrazione** e **Suggerimenti** si accendono e spengono.',
+      { t: '**Tocco diretto**: trascini mani, piedi, braccia e gambe toccando il corpo (spento: solo con anelli e maniglie).', when: hasDirect },
       { t: '**Comandi vocali** › **Apri**: lingua e modalità dei comandi a voce (solo offline o con Claude).', when: hasVoice },
       '**Tutorial iniziale** › **Ripristina** fa rivedere le schede di benvenuto.',
       { t: '**Archivio** mostra quanto spazio occupano i progetti salvati; **Gestisci** apre **Progetti**.', when: hasProjects },

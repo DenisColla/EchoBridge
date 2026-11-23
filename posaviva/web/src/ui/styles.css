@@ -171,6 +171,8 @@ html.pv-clean body > [data-pv-chrome] { opacity: 0 !important; visibility: hidde
 .pv-root[data-fabs="none"] .pv-stage-fabs { visibility: hidden; opacity: 0; }
 /* the quick zoom menu opens upwards over the column: step aside meanwhile */
 .pv-overlay:has(> .pv-focus-wrap.open) > .pv-stage-fabs { visibility: hidden; opacity: 0; }
+/* a stage menu (kit.stageMenu: hand, character, object, light menus) whose card covers the column */
+html.pv-fabs-aside .pv-overlay > .pv-stage-fabs, html.pv-fabs-aside .pv-overlay > .pv-focus-wrap { visibility: hidden; opacity: 0; pointer-events: none; }
 .pv-stage-fab { pointer-events: auto; position: relative; width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(255,255,255,.16); background: rgba(20, 22, 28, .82);
   color: #fff; display: flex; align-items: center; justify-content: center; padding: 0; box-shadow: 0 6px 18px rgba(0,0,0,.35); transition: transform .14s var(--ease), opacity .2s, background .2s; }
 .pv-stage-fab:active { transform: scale(.92); background: rgba(40, 42, 52, .92); }

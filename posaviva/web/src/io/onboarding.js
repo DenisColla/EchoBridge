@@ -9,7 +9,8 @@ export const ONBOARDED_KEY = 'posaviva.onboarded';
 
 const CARDS = [
   { art: 'tap', title: 'Tocca per selezionare', text: 'Tocca un personaggio per selezionarlo. Con Posa aperta, o col pannello chiuso, tocca una parte del corpo: braccio, mano, testa…' },
-  { art: 'rotate', title: 'Trascina gli anelli', text: 'Gli anelli colorati ruotano la parte selezionata. In Posa trovi anche Trascina per mani e piedi. Ogni gesto si può annullare.' },
+  { art: 'rotate', title: 'Tocca e trascina', text: 'Trascina col dito una mano, un piede, un braccio o la testa: la parte segue il dito. Gli anelli colorati ruotano la parte selezionata con precisione. Ogni gesto si può annullare.' },
+  { art: 'tap', title: 'Tieni premuto', text: 'Tieni premuto un personaggio e fallo scorrere per spostarlo. Su un oggetto scegli cosa fare (sedersi, prendere, aprire…); su uno spazio vuoto cambi la luce ambientale.' },
   { art: 'pinch', title: 'Muovi la vista', text: 'Un dito sullo sfondo gira attorno alla scena. Con due dita sposti e zoomi, come in una foto.' },
   { art: 'zoom', title: 'Zoom rapido', text: 'Il tasto con la lente, in basso a destra, inquadra al volo testa, mani o piedi. «Torna alla vista» (o Indietro) ti riporta dov\'eri.' },
   { art: 'poses', title: 'Parti da una posa pronta', text: 'In Posa › Pose pronte trovi pose da rifinire. In Personaggi aggiungi fino a 8 personaggi nella stessa inquadratura.' },

@@ -34,6 +34,7 @@ const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _q = new THREE.Quater
 const _box = new THREE.Box3();
 const UP = new THREE.Vector3(0, 1, 0), DOWN = new THREE.Vector3(0, -1, 0);
 const HALF_PI = Math.PI / 2;
+const ROOM_PARTS = new Set(['stanza', 'pavimento', 'muro']);
 
 class ActionError extends Error {}
 const fail = (msg) => { throw new ActionError(msg); };
@@ -345,7 +346,8 @@ export function createObjectActions(app, shell) {
   function standAt(ch, spot, face) {
     const P = app.posing;
     if (P?.approach && face) {
-      try { if (P.approach(ch, new THREE.Vector3(spot.x, floorY(spot.x, spot.z), spot.z), face.clone ? face.clone() : face) !== false) return; } catch (e) { console.warn('[actions] posing.approach', e); }
+      // app.posing.approach: {position, rotationY} | null (floor contacts travel, unreachable ones are let go)
+      try { if (P.approach(ch, new THREE.Vector3(spot.x, floorY(spot.x, spot.z), spot.z), face.clone ? face.clone() : face)) return; } catch (e) { console.warn('[actions] posing.approach', e); }
     }
     place(ch, spot.x, spot.z, spot.yaw);
   }
@@ -723,7 +725,12 @@ export function createObjectActions(app, shell) {
         const pt = edge.clone().addScaledVector(inward, 0.12 * s).addScaledVector(lat, k * 0.2 * s);
         pt.y = top.y + 0.012;
         if (app.posing?.pinTo) {
-          try { if (app.posing.pinTo(ch, 'hand.' + side, pt, UP.clone(), { keep: true }) !== false) return; } catch (e) { console.warn('[actions] posing.pinTo', e); }
+          // a contact on the top (it follows the table; kept while the body moves), palm flat and open
+          try {
+            app.posing.pinTo(ch, 'hand.' + side, pt, UP.clone(), { keep: true, target: { prop: T } });
+            app.posing.handShape?.(ch, side, 'aperta');
+            return;
+          } catch (e) { console.warn('[actions] posing.pinTo', e); }
         }
         reachHand(ch, side, pt, { palmDir: DOWN, knuckles: inward, body: true });
         applyHandPreset(ch, 'open', side, 0.85);
@@ -838,6 +845,8 @@ export function createObjectActions(app, shell) {
   }
 
   // ---------------------------------------------------------------- object tools
+  /** structure of a room: Stanza, Pavimento, Muro (and their variants) */
+  const roomPart = (p) => ROOM_PARTS.has(p.type.variantOf || p.type.id);
   const isBuilding = (p) => p.type.cat === 'edifici';
   const isCity = (p) => p.type.cat === 'esterni';
   function toolFor(t) {
@@ -947,6 +956,8 @@ export function createObjectActions(app, shell) {
       act('kneel', 'Inginocchiati accanto', 'pose', () => kneel(ch, t));
     }
     if (!items.length && !ch) items.push({ id: 'none', label: 'Aggiungi un personaggio per farlo agire', icon: 'userPlus', onClick: () => app.modules.ui?.openPeople?.({ add: true }) });
+    // the walls of a room are part of the set: its ambient light is one step away
+    if (isProp(t) && roomPart(t.obj) && app.practicals?.ambientMenu) items.push({ id: 'ambient', label: 'Luce ambientale…', icon: 'sun', hint: 'Giorno, tramonto, notte', onClick: () => app.practicals.ambientMenu(hit.x, hit.y) });
     return items;
   }
   const isOpen = (p) => { const v = p.params.open; return typeof v === 'boolean' ? v : v > (p.type.params.find((q) => q.id === 'open')?.min ?? 0) + 1e-3; };
@@ -962,7 +973,6 @@ export function createObjectActions(app, shell) {
     ]));
     const m = stageMenu([], { x: hit.x, y: hit.y, title: 'Sdraiati', subtitle: `${ch.name} · ${nameOf(t)}`, width: 250, body: list, onClose: () => { if (current === m) current = null; } });
     m.el.classList.add('pv-oa');
-    guardRelease(m.el, false);
     current = m;
   }
 
@@ -1000,27 +1010,13 @@ export function createObjectActions(app, shell) {
 
   let current = null;
   function closeMenu() { const m = current; current = null; m?.close?.(null); }
-  /**
-   * The finger that long-pressed is still down when the menu opens: its release (and the
-   * click some browsers synthesize from it) must not dismiss the menu through the backdrop.
-   */
-  function guardRelease(el, pressed) {
-    // the click a browser synthesizes from the release carries the release's timestamp
-    let upStamp = null;
-    const opened = performance.now();
-    const lift = (e) => { upStamp = e.timeStamp; window.removeEventListener('pointerup', lift, true); window.removeEventListener('pointercancel', lift, true); };
-    if (pressed) { window.addEventListener('pointerup', lift, true); window.addEventListener('pointercancel', lift, true); }
-    el.addEventListener('click', (e) => {
-      const stray = pressed ? upStamp === null || Math.abs(e.timeStamp - upStamp) < 120 : performance.now() - opened < 250 && e.target?.classList?.contains('pv-modal-backdrop');
-      if (stray) { e.stopPropagation(); e.preventDefault(); }
-    }, true);
-  }
+  // (the click of the finger that opened a menu is ignored by kit.stageMenu itself)
 
   /**
    * Opens the long-press menu of a target at screen point (x, y). opts.point / normal:
    * the pressed surface point (world) and its normal; opts.actor: who acts.
    */
-  function openMenu(target, { x, y, point = null, normal = null, actor, pressed = false } = {}) {
+  function openMenu(target, { x, y, point = null, normal = null, actor } = {}) {
     const t = asTarget(target);
     if (!t) return null;
     closeMenu();
@@ -1029,8 +1025,11 @@ export function createObjectActions(app, shell) {
     const chars = visibleChars();
     const list = h('div', { class: 'pv-menu pv-stage-menu-list pv-oa-list', role: 'menu' });
     let section = null;
-    if (isProp(t) && app.practicals?.isSource?.(t.obj)) {
-      try { section = app.practicals.menuSection(t.obj); } catch (e) { console.warn('[actions] practicals.menuSection', e); }
+    // a light source (lamp, screen, flame, window; a room or a wall only near its window): its
+    // controls first (app.practicals, scene module)
+    const PR = app.practicals;
+    if (isProp(t) && PR?.menuSection && (PR.hitsSource ? PR.hitsSource(t.obj, point) : PR.isSource?.(t.obj))) {
+      try { section = PR.menuSection(t.obj); } catch (e) { console.warn('[actions] practicals.menuSection', e); }
     }
     const subtitle = () => (ch ? `${ch.name}` : 'Nessun personaggio');
     let who = null;
@@ -1063,7 +1062,6 @@ export function createObjectActions(app, shell) {
       onClose: () => { if (current === m) current = null; },
     });
     m.el.classList.add('pv-oa');
-    guardRelease(m.el, pressed);
     current = m;
     return m;
   }
@@ -1096,7 +1094,13 @@ export function createObjectActions(app, shell) {
   app.addHoldHandler(({ ndc, x, y }) => {
     const hit = pickAt(ndc);
     if (!hit) return false;
-    openMenu(hit.target, { x, y, point: hit.point, normal: hit.normal || null, pressed: true });
+    // the floor and the ceiling of a room are the empty space of the set: the long press
+    // there is "Luce ambientale" (scene module, priority 0); its walls keep their actions
+    const t = hit.target;
+    if (isProp(t) && roomPart(t.obj) && !app.practicals?.hitsSource?.(t.obj, hit.point)) {
+      if ((t.obj.type.variantOf || t.obj.type.id) === 'pavimento' || !hit.normal || Math.abs(hit.normal.y) > 0.6) return false;
+    }
+    openMenu(t, { x, y, point: hit.point, normal: hit.normal || null });
     // the finger stays down until released: no orbit meanwhile, the release is not a tap
     return { move() {}, end() {} };
   }, 50);

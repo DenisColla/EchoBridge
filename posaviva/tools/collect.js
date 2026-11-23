@@ -213,6 +213,63 @@ module.exports = async (page, shot, log = console.log) => {
     await ev(() => window.__pv.shell.closePanel()); await wait(300);
   });
 
+  // menus on the stage (kit.stageMenu): hand / foot (tap), character (long press), objects and
+  // light sources (long press), "Luce ambientale", "Cambia ambiente"; the stage buttons; Vista pulita
+  if (await ev(() => !!window.__pv.app.objectActions && !!window.__pv.app.posing?.touchMenu)) await block('stage', async () => {
+    await ev(() => window.__pv.shell.closePanel()); await wait(300);
+    const at = { x: 200, y: 260 };
+    await ev((at) => { const { app } = window.__pv; app.posing.touchMenu(app.characters[0], 'hand.R', at.x, at.y); }, at); await wait(500); await grab('#pv-layers'); await escAll();
+    await ev((at) => { const { app } = window.__pv; app.posing.pinTo(app.characters[0], 'foot.L', app.posing.ik.effectorPoint(app.characters[0], 'foot.L', new window.__pv.THREE.Vector3()).setY(0), [0, 1, 0], { commit: false }); app.posing.touchMenu(app.characters[0], 'foot.L', at.x, at.y); }, at); await wait(500); await grab('#pv-layers'); await escAll();
+    await ev((at) => { const { app } = window.__pv; app.posing.touchMenu(app.characters[0], 'hand.L', at.x, at.y); }, at); await wait(300);
+    await ev(() => { const { app } = window.__pv; app.posing.unpin(app.characters[0], 'foot.L', { commit: false }); }); await escAll();
+    await ev(() => { const { app } = window.__pv; app.posing.pinTo(app.characters[0], 'hand.L', [0.3, 0.8, 0.3], [0, 1, 0], { commit: false }); }); await wait(200);
+    await ev((at) => { const { app } = window.__pv; app.posing.touchMenu(app.characters[0], 'hand.L', at.x, at.y); }, at); await wait(400); await grab('#pv-layers'); await escAll();
+    await ev(() => { const { app, shell } = window.__pv; shell.openTool('pose'); app.posing.setMode('rotate'); app.select(app.characters[0], 'hand.L'); }); await wait(600); await expand(); await grab('.pv-panel');
+    await ev(() => { const { app, shell } = window.__pv; app.posing.unpin(app.characters[0], 'hand.L', { commit: false }); shell.closePanel(); }); await wait(300);
+    await ev((at) => { const { app } = window.__pv; app.posing.carry.openMenu(app.characters[0], at.x, at.y); }, at); await wait(500); await grab('#pv-layers'); await escAll();
+    // a furnished corner: room with a window, table, bed, wardrobe, floor lamp, a vase
+    const made = await ev(async () => {
+      const { app } = window.__pv, P = app.props;
+      const mk = (type, pos, params = {}) => P.create({ type, params, pos, rot: [0, 0, 0] }, { emit: true });
+      const ids = {
+        room: mk('stanza', [0, 0, -0.9], { width: 5, depth: 4.2, height: 2.7, walls: '3', window: 'fondo', ceiling: false }).id,
+        table: mk('tavolo', [1.2, 0, 0.6]).id, bed: mk('letto', [-1.4, 0, -1.6]).id, ward: mk('armadio', [1.6, 0, -2.4]).id,
+        lamp: mk('lampada_terra', [-2.0, 0, 0.4]).id, vase: mk('ph_ceramic_vase_02', [0.6, 0, 0.9]).id,
+      };
+      await new Promise((r) => setTimeout(r, 1500));
+      return ids;
+    });
+    const menu = async (key, opts = '{}') => {
+      await ev(([id, at, o]) => { const { app } = window.__pv; const p = app.props.props.find((q) => q.id === id); app.objectActions.openMenu(p, { x: at.x, y: at.y, ...JSON.parse(o) }); }, [made[key], at, opts]);
+      await wait(600); await grab('#pv-layers');
+    };
+    for (const k of ['table', 'ward', 'lamp', 'vase']) { await menu(k); await escAll(); }
+    await menu('bed'); await click('#pv-layers .pv-menu-item:has-text("Sdraiati")', 600); await grab('#pv-layers'); await escAll();
+    // the window of the room (its light controls) and a held object (Posa a terra, Cambia mano)
+    const win = await ev((id) => { const { app } = window.__pv; const p = app.props.props.find((q) => q.id === id); const b = p.worldBox(new window.__pv.THREE.Box3()); return JSON.stringify({ point: { x: 0, y: 1.4, z: b.min.z + 0.05 } }); }, made.room);
+    await ev(([id, at, o]) => { const { app, THREE } = window.__pv; const p = app.props.props.find((q) => q.id === id); const q = JSON.parse(o).point; app.objectActions.openMenu(p, { x: at.x, y: at.y, point: new THREE.Vector3(q.x, q.y, q.z) }); }, [made.room, at, win]);
+    await wait(600); await grab('#pv-layers'); await escAll();
+    await ev(async (id) => { const { app } = window.__pv; const p = app.props.props.find((q) => q.id === id); app.modules.ui.addCharacter?.('m_normal'); await app.objectActions.take(app.characters[0], p); }, made.vase); await wait(800);
+    await menu('vase'); await escAll();
+    // an animal (Accarezza, Inginocchiati accanto)
+    if (await ev(async (at) => {
+      const { app } = window.__pv; if (!app.animals?.add) return false;
+      const d = await app.animals.add('cane_medio', { select: false, position: [-1.2, 0, 1.2] });
+      app.objectActions.openMenu(d, { x: at.x, y: at.y }); return true;
+    }, at)) { await wait(600); await grab('#pv-layers'); await escAll(); await ev(() => { const A = window.__pv.app.animals; for (const d of [...A.animals]) A.remove(d); }); }
+    await ev((at) => { window.__pv.app.practicals.ambientMenu(at.x, at.y); }, at); await wait(600); await grab('#pv-layers'); await escAll();
+    await ev(() => { window.__pv.shell.openTool('lights'); }); await wait(700); await expand(); await grab('.pv-panel');
+    await ev(() => window.__pv.shell.closePanel()); await wait(300);
+    if (await ev(() => typeof window.__pv.app.landscapes?.generate === 'function')) {
+      await ev(() => { window.__pv.shell.shortcuts?.openEnvironments(); }); await wait(700); await grab('#pv-layers');
+      await click('#pv-layers .pv-env-group:has-text("Natura")', 500); await grab('#pv-layers'); await escAll();
+    }
+    await grab('.pv-overlay');
+    await ev(() => window.__pv.shell.setCleanView(true)); await wait(500); await grab('body');
+    await ev(() => window.__pv.shell.setCleanView(false)); await wait(500);
+    await ev(() => { const { app } = window.__pv; app.props.clear(); while (app.characters.length > 1) app.removeCharacter(app.characters[app.characters.length - 1]); });
+  });
+
   // the guide topics as the running app shows them (each when() resolved), for checklabels.mjs
   const topics = await ev(async () => {
     try {

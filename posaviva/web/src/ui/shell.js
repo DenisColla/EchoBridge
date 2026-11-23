@@ -37,7 +37,7 @@
 // On tablets the sub-tools of the active group are listed in the rail under the group
 // (the panel header then shows the tool title); without room they fall back to header chips.
 import './tablet.css';
-import { h, icon, iconButton, hasOpenLayer, closeTopLayer, haptic, toast } from './kit.js';
+import { h, icon, iconButton, hasOpenLayer, closeTopLayer, haptic, toast, closeStageMenus } from './kit.js';
 import { StageShortcuts } from './shortcuts.js';
 
 /** Toolbar groups. A tool declares `group`; a group with several tools shows sub-tabs. */
@@ -595,6 +595,8 @@ export class Shell extends EventTarget {
       if (this._docks.size) { try { app?.voice?.close?.(); } catch (e) { console.warn('[PosaViva] voice close failed', e); } }
       this._clean = true;
       if (this.active) this.closePanel();
+      // context menus on the stage (hand, character, object, light) belong to the interface
+      closeStageMenus();
       for (const el of [this.root, document.documentElement]) el.classList.add('pv-clean');
       this.cleanBtn.setAttribute('aria-pressed', 'true');
       this._cleanWake();
