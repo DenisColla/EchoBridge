@@ -23,9 +23,13 @@ import { PoseGizmo } from './gizmo.js';
 import { registerPoseTool } from './panel.js';
 import { registerPresetsTool } from './presetsPanel.js';
 import { registerHandsTool } from './handsPanel.js';
-import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, applyPosePreset, lowestGroundY, measureSeat, seatMark, setSeatMark, presetMark, setPresetMark, feetOnFloor, fitArms, NATURAL_POSE } from './library.js';
+import { PRESERVED_BONES, HIP_REF, mirrorPose, applyPoseObject, applyPosePreset, applyHandPreset, lowestGroundY, measureSeat, seatMark, setSeatMark, presetMark, setPresetMark, feetOnFloor, fitArms, NATURAL_POSE } from './library.js';
 import { SpineFollow, applyNaturalness, exaggerate, poseSnapshot, bendLine, lineSnapshot } from './soft.js';
 import { ActionLine } from './actionLine.js';
+import { ContactPins, EFFECTORS } from './contacts.js';
+import { DirectTouch, HAND_SHAPES } from './direct.js';
+import { CharacterCarry } from './carry.js';
+import { approachSpot } from './approach.js';
 
 const PREFS_KEY = 'posaviva.pose.prefs';
 const POSE_TOOLS = new Set(['pose', 'hands']);
@@ -34,7 +38,7 @@ export const POSE_MODES = ['rotate', 'ik', 'move', 'line'];
 export const DEFAULT_NATURALNESS = 0.6;
 
 function loadPrefs() {
-  const def = { mode: 'rotate', limits: true, pinFeet: true, showJoints: false, softSpine: true, counterTilt: true };
+  const def = { mode: 'rotate', limits: true, pinFeet: true, showJoints: false, softSpine: true, counterTilt: true, direct: true, keepContacts: true };
   try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
 }
 
@@ -108,6 +112,8 @@ export function create(app, shell) {
       state[key] = value;
       if (key === 'limits') rig.limits = value;
       if (key === 'softSpine') controls.setSoft(value);
+      if (key === 'keepContacts' && value) for (const c of app.characters) ctx.contacts?.changed(c);
+      if (key === 'direct' && !value) { ctx.direct?.closeMenu(); ctx.direct?.disarm(); }
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(state)); } catch { /* private mode */ }
       syncHighlight();
       notify('prefs');
@@ -147,6 +153,12 @@ export function create(app, shell) {
   };
   const gizmo = new PoseGizmo(ctx);
   ctx.gizmo = gizmo;
+  // direct touch on the body, contacts (hand / foot pinned on a surface), long press = carry
+  const contacts = new ContactPins(ctx);
+  ctx.contacts = contacts;
+  const direct = new DirectTouch(ctx);
+  ctx.direct = direct;
+  ctx.carry = new CharacterCarry(ctx);
 
   // ---------------------------------------------------------------- operations
   const ops = {
@@ -160,6 +172,7 @@ export function create(app, shell) {
       ctx.edited(ch, true, ctrl.side ? 'copia sull\'altro lato' : 'specchia parte');
     },
     mirrorPose(ch) {
+      contacts.clear(ch); // the contacts were on the other side
       const keep = PRESERVED_BONES.map((n) => [n, ch.getBoneRotation(n)?.clone()]);
       const mode = groundMode(ch);
       const p = mirrorPose(ch.getPose());
@@ -174,6 +187,7 @@ export function create(app, shell) {
       ctx.edited(ch, true, 'specchia posa', { keepPreset: !!pid });
     },
     resetPose(ch) {
+      contacts.clear(ch); // the rest pose touches nothing
       const keep = PRESERVED_BONES.map((n) => [n, ch.getBoneRotation(n)?.clone()]);
       for (const q of ch.poseQuat) q.identity();
       ch.rootOffset.set(0, 0, 0);
@@ -273,6 +287,7 @@ export function create(app, shell) {
 
   // ---------------------------------------------------------------- picking (tap)
   function onTap({ ndc, x, y, event }) {
+    if (direct.eatsTap(event)) return true; // the release of a direct drag that came back to its start
     const tool = shell.activeToolId;
     const posing = ctx.isActive();
     const mode = ctx.mode();
@@ -290,6 +305,8 @@ export function create(app, shell) {
       }
       if (hit.character !== app.selection.character || part !== app.selection.part) app.select(hit.character, part);
       haptic(10);
+      // "Tocco diretto": a hand or a foot opens its small menu at the finger
+      if (posing) direct.maybeMenu(hit, x, y);
       return true;
     }
     if (posing && app.selection.part) { app.select(app.selection.character, null); return true; }
@@ -363,6 +380,123 @@ export function create(app, shell) {
   registerPresetsTool(ctx);
   registerHandsTool(ctx);
 
+  // ---------------------------------------------------------------- contacts & direct touch API
+  const effOk = (ch, eff) => !!ch && app.characters.includes(ch) && EFFECTORS.includes(eff);
+  const v3 = (p) => (p?.isVector3 ? p.clone() : Array.isArray(p) ? new THREE.Vector3().fromArray(p) : p ? new THREE.Vector3(p.x, p.y, p.z) : null);
+  const touchApi = {
+    /**
+     * Contact: IK reach of a hand / foot ('hand.L'|'hand.R'|'foot.L'|'foot.R') to worldPoint
+     * with the palm / sole on the surface of normal worldNormal (resting on it) and, with
+     * keep, pinned there: kept while the body, the pelvis or the character move (contacts
+     * on a prop / another character follow it). opts: {keep=true, target (owner hint:
+     * {character, bone} | {prop} | Object3D; found from the point when omitted), commit=true,
+     * label}. One undo step. Returns true when the contact point was reached (within 3 cm).
+     */
+    pinTo(ch, effector, worldPoint, worldNormal, { keep = true, target, commit = true, label = 'contatto' } = {}) {
+      if (!effOk(ch, effector) || !worldPoint) return false;
+      const r = contacts.pinTo(ch, effector, v3(worldPoint), v3(worldNormal) || new THREE.Vector3(0, 1, 0), { keep, target });
+      ctx.edited(ch, commit, label);
+      return r.ok;
+    },
+    /** releases a contact (one undo step); false when there was none */
+    unpin(ch, effector, { commit = true } = {}) {
+      if (!ch || !contacts.remove(ch, effector)) return false;
+      ctx.edited(ch, commit, 'libera contatto', { keepPreset: true });
+      return true;
+    },
+    /** contacts of a character: [{effector, point, normal, target?: {character, bone} | {prop}}] (world) */
+    pins: (ch) => (ch ? contacts.describe(ch) : []),
+    /**
+     * IK reach without contact: the palm center / sole of `effector` goes to worldPoint, its
+     * orientation kept, the body helping for far points (a contact on it is released).
+     * One undo step (opts.commit). Returns true when reached within 3 cm.
+     */
+    reach(ch, effector, worldPoint, { commit = true } = {}) {
+      if (!effOk(ch, effector) || !worldPoint) return false;
+      const P = v3(worldPoint);
+      contacts.remove(ch, effector);
+      rig.refreshAll(ch);
+      const chain = ik.chains[effector];
+      const E = rig.worldPos(ch, chain.end, new THREE.Vector3());
+      const C0 = ik.effectorPoint(ch, effector, new THREE.Vector3());
+      const off = E.sub(C0);
+      const endQuat = rig.worldQuat(ch, chain.end, new THREE.Quaternion());
+      const other = chain.side === 'L' ? 'R' : 'L';
+      const pins = chain.kind === 'leg' && state.pinFeet && ctx.feetOnFloor(ch)[other] ? [ik.pin(ch, other)] : [];
+      const snap = ik.reachSnapshot(ch, chain);
+      // in small steps, like a drag (one big jump can get stuck on the limits)
+      const n = Math.min(10, Math.max(1, Math.ceil(C0.distanceTo(P) / (0.07 * (ch.root.scale.y || 1)))));
+      const target = new THREE.Vector3();
+      for (let k = 1; k <= n; k++) {
+        target.lerpVectors(C0, P, k / n).add(off);
+        ik.reach(ch, chain, target, snap);
+        ik.solveLimb(ch, chain, target, endQuat, 3);
+        for (const p of pins) ik.solvePinned(ch, p);
+      }
+      const cur = new THREE.Vector3();
+      for (let it = 0; it < 4; it++) {
+        // the hand keeps its turn while it can; out of the wrist's range it follows the forearm
+        ik.solveLimb(ch, chain, target, it < 2 ? endQuat : null, 3);
+        for (const p of pins) ik.solvePinned(ch, p);
+        // the wrist / ankle limits may turn the end a little: aim again with the residual
+        const e = P.clone().sub(ik.effectorPoint(ch, effector, cur));
+        if (e.length() < 0.004) break;
+        target.add(e);
+      }
+      const err = ik.effectorPoint(ch, effector, cur).distanceTo(P);
+      ctx.edited(ch, commit, 'raggiungi');
+      return err < 0.03 * (ch.root.scale.y || 1);
+    },
+    /** hand shape: 'pugno'|'aperta'|'afferra'|'indica'|'rilassata' (or a hand preset id); side 'L'|'R'|'both' */
+    handShape(ch, side, shape, { commit = true } = {}) {
+      if (!ch || !app.characters.includes(ch)) return false;
+      const s = HAND_SHAPES.find((x) => x.id === shape || x.preset === shape);
+      const id = s ? s.preset : shape;
+      const sides = side === 'both' ? ['L', 'R'] : [side];
+      let ok = false;
+      for (const sd of sides) if (sd === 'L' || sd === 'R') ok = applyHandPreset(ch, id, sd) || ok;
+      if (ok) ctx.edited(ch, commit, 'mano: ' + (s ? s.label.toLowerCase() : id));
+      return ok;
+    },
+    /**
+     * Walk-free placement near worldPoint: the character stands at a free spot (props,
+     * rooms' walls and other characters avoided; landscape / exterior ground followed),
+     * facing faceToward (a point; default worldPoint). Contacts on the floor come along.
+     * opts: {distance (m from the point, default: as close as free), commit=true}.
+     * Returns {position, rotationY} or null.
+     */
+    approach(ch, worldPoint, faceToward = null, { distance = null, commit = true } = {}) {
+      if (!ch || !app.characters.includes(ch) || !worldPoint) return null;
+      const spot = approachSpot(ctx, ch, v3(worldPoint), { distance });
+      if (!spot) return null;
+      const look = v3(faceToward) || v3(worldPoint);
+      const yaw = Math.atan2(look.x - spot.x, look.z - spot.z);
+      contacts.carry(ch, () => {
+        ch.root.position.copy(spot);
+        ch.root.rotation.y = yaw;
+        ch.root.updateMatrixWorld(true);
+      });
+      ctx.placed(ch);
+      contacts.releaseLost(ch);
+      ctx.placed(ch, commit, 'avvicina personaggio');
+      return { position: spot.clone(), rotationY: yaw };
+    },
+    /** arms "Tocca un punto da raggiungere": the next tap on a surface makes a contact */
+    armReach: (ch, effector) => { if (effOk(ch, effector)) direct.arm(ch, effector); },
+    /** opens the hand / foot touch menu at client (x, y) */
+    touchMenu: (ch, effector, x, y) => (effOk(ch, effector) ? direct.openMenu(ch, effector, x, y) : null),
+    /** first surface under a client point: {point, normal, distance, owner} | null */
+    surfaceAt(x, y, opts = {}) {
+      const ndc = app.pointerToNDC({ clientX: x, clientY: y });
+      app.camera.updateMatrixWorld();
+      picker.raycaster.setFromCamera(ndc, app.camera);
+      return contacts.hitSurface(picker.raycaster.ray.clone(), opts);
+    },
+    contacts,
+    direct,
+    carry: ctx.carry,
+  };
+
   // ---------------------------------------------------------------- public API
   app.posing = {
     modes: POSE_MODES,
@@ -408,15 +542,29 @@ export function create(app, shell) {
     /** overlay handles (read-only; screen positions of the last drawn frame, used by tests) */
     gizmo,
     ...ops,
+    ...touchApi,
   };
+  ctx.api = app.posing;
+
+  // direct touch listens after every other module's handles; contacts on props follow them
+  app.addEventListener('ready', () => {
+    direct.install();
+    app.props?.addEventListener?.('change', (e) => { if (e.prop) contacts.propChanged(e.prop); });
+  });
 
   return {
     onCharacterAdded(ch, opts) {
+      contacts.attach(ch);
+      // a copy (duplicate, character inserted from Progetti: json without its id) touches
+      // nothing: its contacts belonged to the original's place
+      if (opts?.json && !opts.id && ch.data?.pose?.pins) { delete ch.data.pose.pins; if (!Object.keys(ch.data.pose).length) delete ch.data.pose; }
       // only a brand new character (not a load, undo or duplicate: those carry json)
       if (!opts || opts.json || opts.pose === false) return;
       try { naturalPose(ch); } catch (e) { console.warn('[pose] natural pose failed', e); }
     },
     onCharacterRemoved(ch) {
+      contacts.detach(ch);
+      if (ctx.carry.d?.ch === ch) ctx.carry.d = null;
       highlight.forget(ch);
       if (watched === ch) { watched.removeEventListener('pose', onPose); watched.removeEventListener('shape', onPose); watched = null; }
     },

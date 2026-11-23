@@ -356,6 +356,10 @@ export function openSettings(ctx) {
     section('Interazione', [
       settingToggle('vibrate', 'Vibrazione', 'Piccolo feedback al tocco', settings.get('haptics') !== false, (v) => { settings.set('haptics', v); if (v) haptic('medium'); }),
       settingToggle('sparkle', 'Suggerimenti', 'Consigli brevi la prima volta che apri uno strumento', settings.get('tips') !== false, (v) => settings.set('tips', v)),
+      // pose module ("Tocco diretto": drag hands, feet and limbs by touching the body); absent with ?only=…
+      typeof app.posing?.setPref === 'function'
+        ? settingToggle('tap', 'Tocco diretto', 'Tocca e trascina mani, piedi, braccia e gambe direttamente sul corpo', app.posing.state.direct !== false, (v) => app.posing.setPref('direct', v))
+        : null,
       // the voice module may be missing (?only=…) or still loading: the row appears only when it can open
       typeof voice?.openSettings === 'function'
         ? row('mic', 'Comandi vocali', 'Lingua, modalità offline / ibrida, chiave API Claude', 'Apri', () => { m.close(null); setTimeout(() => voice.openSettings(), 0); })

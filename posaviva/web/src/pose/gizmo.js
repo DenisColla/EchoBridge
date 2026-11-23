@@ -531,6 +531,8 @@ export class PoseGizmo {
       const ch = this.ctx.sel().character;
       if (!ch) return;
       let hit = this.hitTest(e.clientX, e.clientY, e.pointerType);
+      // "Tocco diretto": a press on the selected hand / foot / head drags it (IK) instead of the trackball
+      if (hit?.kind === 'ball' && this.ctx.direct?.wantsBall(e, ch)) hit = null;
       if (!hit && this.ctx.mode() === 'move') {
         // drag the character itself
         this.app.pointerToNDC(e, _ndc);
@@ -604,6 +606,8 @@ export class PoseGizmo {
     } else if (hit.kind === 'ring' || hit.kind === 'ball') {
       const ctrl = this.ctx.sel().control;
       d.ctrl = ctrl;
+      // a hand / foot in a contact: turned freely during the drag, pinned again where it ends
+      if (ctrl.baseId === 'hand' || ctrl.baseId === 'foot') this.ctx.contacts?.handleBegin(ch, ctrl.baseId + '.' + ctrl.side, 'rotate');
       d.follow = this.ctx.follow.begin(ch, ctrl);
       d.k = hit.k;
       d.center = rig.worldPos(ch, ctrl.pivotIndex, new THREE.Vector3());
@@ -636,6 +640,8 @@ export class PoseGizmo {
       } else this.shell.hint('Rotazione libera');
     } else if (hit.kind === 'effector') {
       d.id = hit.id;
+      // dragging the handle of a hand / foot in a contact lets go of the contact
+      if (hit.id.startsWith('hand') || hit.id.startsWith('foot')) this.ctx.contacts?.handleBegin(ch, hit.id, 'move');
       const handle = ik.effectorPoint(ch, hit.id, new THREE.Vector3());
       d.handle = handle.clone();
       d.start = handle.clone();
@@ -775,8 +781,9 @@ export class PoseGizmo {
         if (!p || !d.grab || p.distanceTo(ray.origin) > 80) return;
       }
       const nx = d.startPos.x + p.x - d.grab.x, nz = d.startPos.z + p.z - d.grab.z;
-      ch.root.position.set(nx, this.ctx.floorAt(nx, nz) + d.rel, nz);
-      ch.root.updateMatrixWorld(true);
+      // contacts on the floor travel with the character, those on props / people stay
+      const place = () => { ch.root.position.set(nx, this.ctx.floorAt(nx, nz) + d.rel, nz); ch.root.updateMatrixWorld(true); };
+      if (this.ctx.contacts) this.ctx.contacts.carry(ch, place); else place();
       this.ctx.placed(ch);
     } else if (d.kind === 'turn') {
       let yaw;
@@ -793,9 +800,12 @@ export class PoseGizmo {
       // turn about the ring center: position = C - R(yaw) * R(startYaw)^-1 * offW
       const dy = yaw - d.startYaw;
       const ox = d.offW.x * Math.cos(dy) + d.offW.z * Math.sin(dy), oz = -d.offW.x * Math.sin(dy) + d.offW.z * Math.cos(dy);
-      ch.root.rotation.y = wrapAngle(yaw);
-      ch.root.position.set(d.C.x - ox, this.ctx.floorAt(d.C.x - ox, d.C.z - oz) + d.rel, d.C.z - oz);
-      ch.root.updateMatrixWorld(true);
+      const place = () => {
+        ch.root.rotation.y = wrapAngle(yaw);
+        ch.root.position.set(d.C.x - ox, this.ctx.floorAt(d.C.x - ox, d.C.z - oz) + d.rel, d.C.z - oz);
+        ch.root.updateMatrixWorld(true);
+      };
+      if (this.ctx.contacts) this.ctx.contacts.carry(ch, place); else place();
       this._hintYaw(yaw);
       this.ctx.placed(ch);
     }
@@ -807,12 +817,13 @@ export class PoseGizmo {
 
   _end(d) {
     if (d.follow) this.ctx.follow.end();
+    this.ctx.contacts?.handleEnd(d.moved && !d.cancelled);
     if (!d.moved) return;
     if (d.kind === 'stroke') { if (!d.cancelled) this.ctx.applyStroke(d.ch, d.pts); return; }
     const labels = { ring: 'ruota parte', ball: 'ruota parte', effector: 'trascina', move: 'sposta personaggio', turn: 'ruota personaggio' };
     if (d.kind === 'move' && d.onGround && this.app.characters.includes(d.ch)) {
       const pos = d.ch.root.position, y = this.ctx.groundAt(pos.x, pos.z);
-      if (Math.abs(y - pos.y) > 1e-4) { pos.y = y; d.ch.root.updateMatrixWorld(true); }
+      if (Math.abs(y - pos.y) > 1e-4) this.ctx.contacts.carry(d.ch, () => { pos.y = y; d.ch.root.updateMatrixWorld(true); });
     }
     if (d.kind === 'move' || d.kind === 'turn') this.ctx.placed(d.ch, true, labels[d.kind]);
     else this.ctx.edited(d.ch, true, labels[d.kind]);

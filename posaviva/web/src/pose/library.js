@@ -834,6 +834,8 @@ export function applyPoseObject(ch, pose, opts = {}) {
   const { ground = true, air = 0 } = opts;
   // which ready pose this is (ch.data.pose.preset): set by applyPosePreset, cleared otherwise
   if (ch.data) setPresetMark(ch, opts.presetId || null, !!opts.mirror);
+  // a whole new pose lets go of the hand / foot contacts (pose/contacts.js): pin after it
+  if (ch.data?.pose?.pins && !opts.keepContacts) { delete ch.data.pose.pins; if (!Object.keys(ch.data.pose).length) delete ch.data.pose; }
   if (opts.mirror) pose = mirrorPose(pose);
   const bi = ch.model.boneIndex;
   const keep = new Set(PRESERVED_BONES);

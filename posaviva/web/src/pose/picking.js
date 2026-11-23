@@ -7,6 +7,8 @@ import * as THREE from 'three';
 const _inv = new THREE.Matrix4();
 const _p = new THREE.Vector3();
 const _ray = new THREE.Ray();
+const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+const _nm = new THREE.Matrix3();
 
 export class Picker {
   /** @param {import('../app.js').App} app @param {import('./controls.js').ControlSet} controls */
@@ -58,6 +60,35 @@ export class Picker {
     best.bone = bone;
     best.control = this.controls.forBone(bone);
     return best;
+  }
+
+  /**
+   * Nearest body triangle of one character along a world ray, within `far` (world units):
+   * {character, point (world), distance, tri, bary, bone} or null. Used by contacts
+   * (surface under a finger tap, owner of a contact point).
+   */
+  rayHit(ch, worldRay, far = Infinity) {
+    if (!ch.root.visible || !ch.body.visible) return null;
+    ch.root.updateMatrixWorld(true);
+    _inv.copy(ch.rig.matrixWorld).invert();
+    _ray.copy(worldRay).applyMatrix4(_inv);
+    const hit = this._intersect(ch, _ray);
+    if (!hit) return null;
+    const point = new THREE.Vector3().copy(_ray.direction).multiplyScalar(hit.t).add(_ray.origin).applyMatrix4(ch.rig.matrixWorld);
+    const distance = point.distanceTo(worldRay.origin);
+    if (distance > far) return null;
+    return { character: ch, point, distance, tri: hit.tri, bary: hit.bary, bone: this._dominantBone(hit.tri, hit.bary) };
+  }
+
+  /** World normal of a body triangle (as returned in hit.tri) of the posed character. */
+  normalAt(ch, triK, out = new THREE.Vector3()) {
+    const P = ch.getSkinnedPositions(), T = this.tris;
+    const a = T[triK] * 3, b = T[triK + 1] * 3, c = T[triK + 2] * 3;
+    _e1.set(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]);
+    _e2.set(P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]);
+    out.crossVectors(_e1, _e2);
+    _nm.getNormalMatrix(ch.rig.matrixWorld);
+    return out.applyMatrix3(_nm).normalize();
   }
 
   /** Möller–Trumbore over all body triangles (double sided). Returns {t, tri, bary} of the nearest hit. */

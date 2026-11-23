@@ -177,14 +177,14 @@ export function registerPoseTool(ctx) {
       const pinToggle = toggle({ label: 'Piedi fissi', value: state.pinFeet, onChange: (v) => ctx.setPref('pinFeet', v) });
 
       const yawSlider = slider({ label: 'Rotazione', min: -180, max: 180, step: 1, value: 0, format: (v) => `${Math.round(v)}°`,
-        onInput: (v) => { const ch = app.selection.character; if (!ch) return; turnAboutPelvis(ch, toRad(v)); ctx.placed(ch); },
+        onInput: (v) => { const ch = app.selection.character; if (!ch) return; ctx.contacts.carry(ch, () => turnAboutPelvis(ch, toRad(v))); ctx.placed(ch); },
         onChange: () => { const ch = app.selection.character; if (ch) ctx.placed(ch, true, 'ruota personaggio'); } });
       // height above the floor (a ready landscape's ground under the character, else y = 0)
       const floorOf = (ch) => ctx.floorAt(ch.root.position.x, ch.root.position.z);
       const heightSlider = slider({ label: 'Altezza da terra', min: -0.5, max: 2.5, step: 0.01, value: 0, center: false, defaultValue: 0, format: (v) => `${v.toFixed(2)} m`,
-        onInput: (v) => { const ch = app.selection.character; if (!ch) return; ch.root.position.y = floorOf(ch) + v; ch.root.updateMatrixWorld(true); ctx.placed(ch); },
+        onInput: (v) => { const ch = app.selection.character; if (!ch) return; ctx.contacts.carry(ch, () => { ch.root.position.y = floorOf(ch) + v; ch.root.updateMatrixWorld(true); }); ctx.placed(ch); },
         onChange: () => { const ch = app.selection.character; if (ch) ctx.placed(ch, true, 'altezza personaggio'); } });
-      const dropBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => { const ch = app.selection.character; if (!ch) return; haptic('tick'); ch.root.position.y = ctx.groundAt(ch.root.position.x, ch.root.position.z); ch.root.updateMatrixWorld(true); ctx.ops.dropToGround(ch); ctx.placed(ch); } });
+      const dropBtn = button({ label: 'Appoggia a terra', icon: 'ground', onClick: () => { const ch = app.selection.character; if (!ch) return; haptic('tick'); ctx.contacts.carry(ch, () => { ch.root.position.y = ctx.groundAt(ch.root.position.x, ch.root.position.z); ch.root.updateMatrixWorld(true); }); ctx.ops.dropToGround(ch); ctx.placed(ch); } });
       const movePane = h('div', {}, h('p', { class: 'pv-pose-note' }, 'Trascina l\'anello a terra (o il personaggio) per spostarlo, il pomello per ruotarlo.'), yawSlider, heightSlider, h('div', { class: 'pv-pose-actions' }, dropBtn));
 
       // ---------------------------------------------------------------- line of action pane
@@ -244,7 +244,32 @@ export function registerPoseTool(ctx) {
       const tiltToggle2 = toggle({ label: 'Il bacino compensa (piedi a terra)', value: state.counterTilt, onChange: (v) => { ctx.setPref('counterTilt', v); tiltToggle.setValue(v); } });
       const pinToggle2 = toggle({ label: 'Piedi fissi (Trascina)', value: state.pinFeet, onChange: (v) => { ctx.setPref('pinFeet', v); pinToggle.setValue(v); } });
       const jointsToggle = toggle({ label: 'Mostra articolazioni', value: state.showJoints, onChange: (v) => ctx.setPref('showJoints', v) });
-      const optSection = section('Opzioni', [limitsToggle, softToggle2, tiltToggle2, pinToggle2, jointsToggle], { collapsible: true });
+      const directToggle = toggle({ label: 'Tocco diretto (trascina il corpo)', value: state.direct !== false, onChange: (v) => ctx.setPref('direct', v) });
+      const keepToggle = toggle({ label: 'Mantieni il contatto (mani e piedi appoggiati)', value: state.keepContacts !== false, onChange: (v) => ctx.setPref('keepContacts', v) });
+      const optSection = section('Opzioni', [directToggle, limitsToggle, softToggle2, tiltToggle2, pinToggle2, keepToggle, jointsToggle], { collapsible: true });
+
+      // ---------------------------------------------------------------- contacts (hands / feet pinned on a surface)
+      const contactList = h('div', { class: 'pv-pose-contacts' });
+      const contactSection = section('Contatti', [contactList]);
+      let contactSig = '';
+      function contactWhere(pin) {
+        const t = pin.t;
+        if (!t) return 'sul pavimento';
+        if (t.k === 'ch') { const c = app.characters.find((x) => x.id === t.id); return c ? 'su ' + c.name : 'appoggiata'; }
+        const p = app.props?.props?.find((x) => x.id === t.id);
+        return p ? 'su ' + (p.type?.label || 'oggetto').toLowerCase() : 'appoggiata';
+      }
+      function refreshContacts(ch) {
+        const pins = ch ? ctx.contacts.list(ch) : [];
+        const sig = (ch?.id || '') + JSON.stringify(pins.map((p) => [p.e, p.t?.id || '']));
+        contactSection.style.display = pins.length ? '' : 'none';
+        if (sig === contactSig) return;
+        contactSig = sig;
+        contactList.replaceChildren(...pins.map((pin) => h('div', { class: 'pv-pose-contact' },
+          icon(pin.e.startsWith('hand') ? 'hand' : 'foot', 20),
+          h('span', {}, ctx.contacts.label(pin.e), h('small', {}, contactWhere(pin))),
+          button({ label: 'Libera', icon: 'unlock', small: true, onClick: () => { haptic('tick'); app.posing.unpin(ch, pin.e); } }))));
+      }
 
       // same empty state as the other character tools (Corpo, Viso, Mani, Vestiti)
       const noChar = h('div', { class: 'pv-body-empty' },
@@ -253,7 +278,7 @@ export function registerPoseTool(ctx) {
         h('span', {}, 'Tocca un personaggio nella scena o sceglilo dall\'elenco.'),
         button({ label: 'Personaggi', icon: 'people', small: true, onClick: () => app.modules.ui?.openPeople?.() || shell.openTool('people') }));
       const modePanes = h('div', { class: 'pv-pose-pane' });
-      const content = h('div', {}, modeSeg, modePanes, mapSection, fingerSection, poseSection, optSection);
+      const content = h('div', {}, modeSeg, modePanes, contactSection, mapSection, fingerSection, poseSection, optSection);
       el.append(noChar, content);
 
       function legend(color, label) { return h('span', { class: 'pv-pose-legend-item' }, h('i', { style: { background: color } }), label); }
@@ -285,6 +310,8 @@ export function registerPoseTool(ctx) {
         tiltToggle.setValue(state.counterTilt); tiltToggle2.setValue(state.counterTilt);
         if (ch && state.mode === 'line') adjust.refresh();
         limitsToggle.setValue(state.limits); jointsToggle.setValue(state.showJoints);
+        directToggle.setValue(state.direct !== false); keepToggle.setValue(state.keepContacts !== false);
+        refreshContacts(ch);
         if (ch && control && state.mode === 'rotate') {
           partName.textContent = control.label;
           partSub.textContent = ch.name + (control.free ? ' · rotazione libera' : state.limits ? '' : ' · senza limiti');
