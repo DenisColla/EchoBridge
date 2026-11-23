@@ -22,6 +22,13 @@
 //                        drape of the limbs: the "cut" (skinny .. straight .. loose)
 //   bridge, smooth, finalSmooth, wSmooth, wSmoothMin, loopSmooth   smoothing passes
 //   offset(c,i,P0,bi)    extra local offset (shoulder pads, toe box), envelope (shoes)
+//   hull, bridgeSlope    may be [at 0, at 1] pairs (a knit clings when fitted, drapes oversize)
+//   membrane             0..1 (or a pair): the front / back 2-D membrane over bust, belly,
+//                        shoulder blades (fit.js membraneEnvelope); tension: its sag
+//   seatBridge           0..1 (or a pair): trousers span the gluteal cleft and the groin V
+//   leg.sexShift         {F: dt}: Vestibilità offset of the leg cut for a sex
+//   bumpSigma            radius (m) of the bump removal on the fabric (molded cups: larger)
+// garment fields: hemLift (m: tops rise with raised arms), replacesBra (sports bra), foldFade
 import { PART, NPART } from './body.js';
 
 export const CATEGORIES = [
@@ -52,7 +59,13 @@ const PAL = {
 
 const HEAD = (k) => k.exclude('head', ['head'], 0.5);
 const ARMS = (k) => k.exclude('arms', ['armL', 'handL', 'armR', 'handR'], 0.45);
-const FEET = (k) => k.exclude('feet', ['footL', 'footR'], 0.5);
+const FEET = (k, thr = 0.5) => k.exclude('feet', ['footL', 'footR'], thr);
+/**
+ * Leg length of full-length trousers down to the shoe: `len` at the sides, lower
+ * at the back over the heel, shorter over the instep (the hem rests on the shoe
+ * with a little break instead of hovering above it as a horizontal ring).
+ */
+const shoeHem = (len) => (front) => len + 0.06 * Math.max(0, -front) + 0.01 * Math.max(0, front);
 const sleeves = (k, len) => [k.sleeve('sleeveL', 'L', len), k.sleeve('sleeveR', 'R', len)];
 const legs = (k, len) => [k.legMax('legL', 'L', len), k.legMax('legR', 'R', len)];
 /**
@@ -70,6 +83,20 @@ const lowerLegs = (k, min, heel = 0) => {
   });
 };
 const crew = (k, front = 0.065, back = 0.02, extra = 0.018) => k.neckline('neck', { front, back, width: k.bi.neckRadius + extra });
+/**
+ * Hem heights (torso coordinate T, see body.js) of untucked tops: a tee, tank or
+ * long sleeve ends a little above the hip joint (over the jeans waistband, not
+ * across the hip flexion crease where the thighs would tear it), a rib band
+ * (sweatshirt, track jacket) grips the hip bone.
+ */
+const TOP_HEM = 1.1, BAND_HEM = 1.05;
+/**
+ * Straps of sleeveless tops: the neckline stops this far inside the shoulder
+ * joint and the armhole STRAP_INSET inside it, so a strap is ~5 cm wide: two
+ * body faces at least (a one-face strap is dropped by the selection cleanup).
+ */
+const STRAP_INSET = 0.04;
+const strapNeck = (k, inner = 0.095) => Math.min(k.bi.neckRadius + 0.03, k.land.shoulderX - inner);
 
 /**
  * Ease map of trousers (multiplier of the garment ease): jeans and trousers
@@ -96,6 +123,30 @@ const topEase = (shoulder = 0.45, hip = 0.55) => (c, i, P0, bi) => {
   return Math.min(up, lo);
 };
 
+/**
+ * Ease map of a tailored jacket: snug over the shoulders, the full ease at the
+ * chest, suppressed at the waist (darts: the jacket draws in), opening again
+ * over the hips and the seat.
+ */
+const jacketEase = (shoulder = 0.5, waist = 0.45, hip = 0.9) => (c, i, P0, bi) => {
+  if (c.limb[i] && c.wT[i] < 0.5) return 1;
+  const y = P0[i * 3 + 1], T = bi.T(y);
+  const up = shoulder + (1 - shoulder) * Math.min(1, Math.max(0, (bi.land.armpit + 0.02 - y) / 0.08));
+  const d = T - 2;
+  const mid = d >= 0 ? waist + (1 - waist) * Math.min(1, d / 0.8) : waist + (hip - waist) * Math.min(1, -d / 0.8);
+  return Math.min(up, mid);
+};
+
+/** Ease map of a tucked top: the ease of `map`, reduced to 30% below the waist (the waistband holds the fabric flat). */
+const tuckedEase = (map) => (c, i, P0, bi, t) => map(c, i, P0, bi, t) * (0.3 + 0.7 * Math.min(1, Math.max(0, (bi.T(P0[i * 3 + 1]) - 1.7) / 0.5)));
+/** looseFade: no drape within `a` m of the cut `id`, full drape from `b` m. */
+const fadeAbove = (id, a, b) => (c, i, cv, cons) => {
+  const k = cons.findIndex((q) => q.id === id);
+  if (k < 0) return 1;
+  const x = Math.min(1, Math.max(0, (cv[k][i] - a) / (b - a)));
+  return x * x * (3 - 2 * x);
+};
+
 /** Static fold presets */
 const cuffBunch = (near, amp = 0.0025, width = 0.09, wl = 0.028) => ({ type: 'rings', region: 'arm', near, width, amp, wl });
 const ankleStack = (near, amp = 0.004, width = 0.12, wl = 0.04) => ({ type: 'rings', region: 'leg', near, width, amp, wl });
@@ -105,13 +156,16 @@ export const GARMENTS = [
   // ------------------------------------------------------------------ tops
   {
     id: 'tshirt', label: 'T-shirt', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'tshirt',
+    hemLift: 0.045,
     fabric: 'jersey', color: '#f1efe9', palette: PAL.basic,
-    mask: (k) => [k.above('hem', k.y(0.85)), crew(k), ...sleeves(k, 0.42), HEAD(k)],
+    mask: (k) => [k.above('hem', k.y(TOP_HEM)), crew(k), ...sleeves(k, 0.42), HEAD(k)],
     bands: { neck: { h: 0.017 } },
     edges: { neck: { type: 'hem', r: 0.0022 }, default: { type: 'hem' } },
     // Vestibilità: aderente (stretch, ~3 cm of chest ease) .. normale (~9 cm) .. largo (oversize, ~22 cm)
     fit: {
-      thickness: 0.0022, ease: [0.0006, 0.028], easeMid: 0.0095, easeMap: topEase(0.55), loose: [0.05, 0.75], slope: [0.9, 0.12], bridgeSlope: 0.4, bridge: 6, smooth: 16,
+      thickness: 0.0022, ease: [0.0006, 0.028], easeMid: 0.0095, easeMap: topEase(0.55), loose: [0.0, 0.75], slope: [0.9, 0.12], bridge: 6, smooth: 16,
+      // jersey: clings back under the bust when fitted, drapes from it when oversize
+      bridgeSlope: [1.3, 0.35], hull: [0.45, 0.85], membrane: [0.9, 0.6],
       sleeve: { loose: [0.05, 0.6], slope: [1.2, 0.15], bridgeSlope: 1.2 },
     },
     wrinkle: { k: 0.75, wl: 0.055, wlArm: 0.034 },
@@ -121,16 +175,19 @@ export const GARMENTS = [
   },
   {
     id: 'tank', label: 'Canotta', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'tank',
+    hemLift: 0.04,
     fabric: 'jersey', color: '#e9e6df', palette: PAL.basic,
     mask: (k) => [
-      k.above('hem', k.y(0.45)),
-      k.neckline('neck', { front: 0.11, back: 0.06, width: k.bi.neckRadius + 0.03, shape: 'scoop' }),
-      k.armhole('armholeL', 'L', { inset: 0.045, drop: 0.03, rx: 0.05, ry: 0.08 }),
-      k.armhole('armholeR', 'R', { inset: 0.045, drop: 0.03, rx: 0.05, ry: 0.08 }),
+      k.above('hem', k.y(TOP_HEM)),
+      k.neckline('neck', { front: 0.11, back: 0.06, width: strapNeck(k), shape: 'scoop' }),
+      k.armhole('armholeL', 'L', { inset: STRAP_INSET, drop: 0.03, rx: 0.05, ry: 0.08 }),
+      k.armhole('armholeR', 'R', { inset: STRAP_INSET, drop: 0.03, rx: 0.05, ry: 0.08 }),
       ARMS(k), HEAD(k),
     ],
     edges: { default: { type: 'hem', r: 0.0018 } },
-    fit: { thickness: 0.002, ease: [0.0005, 0.022], easeMid: 0.0075, easeMap: topEase(0.55), loose: [0.05, 0.7], slope: [0.9, 0.15], bridgeSlope: 0.45, bridge: 6, smooth: 12 },
+    // rib knit: back in under the bust and at the waist (no tent from the bust apex)
+    // unless worn oversize
+    fit: { thickness: 0.002, ease: [0.0, 0.022], easeMid: 0.0055, easeMap: topEase(0.55, 0.5), loose: [0.0, 0.7], slope: [1.2, 0.15], bridgeSlope: [1.7, 0.45], hull: [0.3, 0.85], membrane: [1, 0.6], bridge: 6, smooth: 12 },
     wrinkle: { k: 0.6, wl: 0.052 },
     folds: [backSlack(0.0015)],
     weightBlend: hemToPelvis(0.95),
@@ -138,12 +195,14 @@ export const GARMENTS = [
   },
   {
     id: 'longsleeve', label: 'Maglia a maniche lunghe', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'longsleeve',
+    hemLift: 0.045,
     fabric: 'jersey', color: '#2b3a55', palette: PAL.basic,
-    mask: (k) => [k.above('hem', k.y(0.85)), crew(k, 0.06, 0.018, 0.016), ...sleeves(k, 1.97), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    mask: (k) => [k.above('hem', k.y(TOP_HEM)), crew(k, 0.06, 0.018, 0.016), ...sleeves(k, 1.97), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { neck: { h: 0.016 }, sleeveL: { h: 0.035 }, sleeveR: { h: 0.035 } },
     edges: { default: { type: 'hem' } },
     fit: {
-      thickness: 0.0024, ease: [0.0006, 0.026], easeMid: 0.009, easeMap: topEase(0.55), loose: [0.05, 0.75], slope: [0.9, 0.12], bridgeSlope: 0.4, bridge: 6, smooth: 14,
+      thickness: 0.0024, ease: [0.0006, 0.026], easeMid: 0.009, easeMap: topEase(0.55), loose: [0.0, 0.75], slope: [0.9, 0.12], bridge: 6, smooth: 14,
+      bridgeSlope: [1.3, 0.35], hull: [0.45, 0.85], membrane: [0.9, 0.6],
       sleeve: { loose: [0.05, 0.5], slope: [1.2, 0.2], bridgeSlope: 1.2 },
     },
     wrinkle: { k: 0.85, wl: 0.055, wlArm: 0.032 },
@@ -153,12 +212,13 @@ export const GARMENTS = [
   },
   {
     id: 'sweatshirt', label: 'Felpa', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'sweatshirt',
+    hemLift: 0.04,
     fabric: 'fleece', color: '#8a8d93', palette: PAL.basic,
-    mask: (k) => [k.above('hem', k.y(0.28)), crew(k, 0.055, 0.015, 0.014), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    mask: (k) => [k.above('hem', k.y(BAND_HEM)), crew(k, 0.055, 0.015, 0.014), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.06 }, sleeveL: { h: 0.06 }, sleeveR: { h: 0.06 }, neck: { h: 0.022 } },
     edges: { default: { type: 'hem', r: 0.003 } },
     fit: {
-      thickness: 0.0048, ease: [0.003, 0.032], easeMid: 0.012, easeMap: topEase(0.6), loose: [0.3, 1.0], slope: [0.5, 0.06], bridgeSlope: 0.45, bridge: 8, wSmooth: 3, smooth: 16,
+      thickness: 0.0048, ease: [0.003, 0.032], easeMid: 0.012, easeMap: topEase(0.6), loose: [0.3, 1.0], slope: [0.5, 0.06], bridgeSlope: 0.45, membrane: 0.6, bridge: 8, wSmooth: 3, smooth: 16,
       sleeve: { loose: [0.2, 0.8], slope: [0.8, 0.1], bridgeSlope: 1.0 },
     },
     wrinkle: { k: 1.0, wl: 0.07, wlArm: 0.042, kt: 0.25 },
@@ -168,12 +228,13 @@ export const GARMENTS = [
   },
   {
     id: 'trackjacket', label: 'Felpa con zip', cat: 'top', slot: 'outer', layer: 4, styles: ['sport', 'casual'], icon: 'trackjacket',
+    hemLift: 0.04,
     fabric: 'tricot', color: '#2c5aa0', palette: PAL.sport, trim: '#f2f2f2',
-    mask: (k) => [k.above('hem', k.y(0.3)), crew(k, 0.04, 0.0, 0.03), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    mask: (k) => [k.above('hem', k.y(BAND_HEM)), crew(k, 0.04, 0.0, 0.03), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.045 }, sleeveL: { h: 0.05 }, sleeveR: { h: 0.05 } },
     edges: { neck: { type: 'collar', at: () => ({ stand: 0.04, flap: 0.0, lift: 0 }) }, default: { type: 'hem', r: 0.0028 } },
     fit: {
-      thickness: 0.0035, ease: [0.003, 0.028], easeMid: 0.01, easeMap: topEase(0.6), loose: [0.25, 0.9], slope: [0.6, 0.1], bridgeSlope: 0.45, bridge: 8, wSmooth: 3, smooth: 16,
+      thickness: 0.0035, ease: [0.003, 0.028], easeMid: 0.01, easeMap: topEase(0.6), loose: [0.25, 0.9], slope: [0.6, 0.1], bridgeSlope: 0.45, membrane: 0.6, bridge: 8, wSmooth: 3, smooth: 16,
       sleeve: { loose: [0.15, 0.7], slope: [0.9, 0.12], bridgeSlope: 1.0 },
     },
     wrinkle: { k: 0.9, wl: 0.065, wlArm: 0.04 },
@@ -184,15 +245,23 @@ export const GARMENTS = [
   },
   {
     id: 'shirt', label: 'Camicia', cat: 'top', slot: 'top', layer: 1, styles: ['formal', 'casual'], icon: 'shirt',
+    hemLift: 0.03,
     fabric: 'poplin', color: '#f4f4f2', palette: ['#f4f4f2', '#a9c4e0', '#e9dccb', '#ffffff', '#2b3a55', '#d9a6a6', '#8a9a78', '#1d1f24'],
-    mask: (k) => [k.above('hem', k.y(0.08)), crew(k, 0.07, 0.008, 0.012), ...sleeves(k, 1.97), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    // always tucked in (layer 1, under the bottoms): the hem ends a hand below the
+    // waistband, flat and with no rolled edge (no ridge, no lump at the crotch)
+    mask: (k) => [k.above('hem', k.y(1.25)), crew(k, 0.07, 0.008, 0.012), ...sleeves(k, 1.97), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { sleeveL: { h: 0.06 }, sleeveR: { h: 0.06 } },
     edges: {
       neck: { type: 'collar', at: (q) => ({ stand: 0.032, flap: 0.045 + 0.03 * Math.max(0, Math.cos(q.theta)) ** 6, lift: 0.006, skip: Math.abs(q.theta) < 0.12 }) },
+      hem: { type: 'none' },
       default: { type: 'hem', r: 0.0016 },
     },
+    // tucked: no folds (and no room reserved for them) under the waistband
+    foldFade: [1.45, 1.95, 0.1],
     fit: {
-      thickness: 0.0018, ease: [0.0015, 0.026], easeMid: 0.01, easeMap: topEase(0.5), loose: [0.15, 0.8], slope: [0.8, 0.15], bridgeSlope: 0.45, bridge: 6, smooth: 12,
+      thickness: 0.0018, ease: [0.0015, 0.026], easeMid: 0.01, easeMap: tuckedEase(topEase(0.5)), loose: [0.15, 0.8], slope: [0.8, 0.15], bridgeSlope: 0.45, bridge: 6, smooth: 12,
+      // tucked in: the drape from the chest dies out towards the hem (the trousers hold it flat)
+      looseFade: fadeAbove('hem', 0.035, 0.11),
       sleeve: { loose: [0.1, 0.6], slope: [1.0, 0.15], bridgeSlope: 1.0 },
     },
     wrinkle: { k: 0.85, wl: 0.052, wlArm: 0.034, kt: 0.45 },
@@ -203,9 +272,12 @@ export const GARMENTS = [
   },
   {
     id: 'blazer', label: 'Giacca / blazer', cat: 'top', slot: 'outer', layer: 4, styles: ['formal'], icon: 'blazer',
+    hemLift: 0.035,
     fabric: 'wool', color: '#2f3a4f', palette: PAL.formal,
     mask: (k) => [
-      k.above('hem', k.y(-0.05)),
+      // the hem covers the seat but stays above the crotch: one loop around the hips
+      // (below the crotch the body faces of the inner thighs close the jacket into shorts)
+      k.above('hem', k.y(0.3)),
       k.neckline('neck', { front: Math.max(0.12, k.land.neck - k.y(2.25)), back: 0.012, width: k.bi.neckRadius + 0.022, shape: 'v' }),
       ...sleeves(k, 1.92), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5),
     ],
@@ -221,11 +293,13 @@ export const GARMENTS = [
       default: { type: 'hem', r: 0.0035, depth: 0.03 },
     },
     fit: {
-      thickness: 0.005, ease: [0.005, 0.018], loose: [0.25, 0.6], slope: [0.35, 0.12], bridgeSlope: 0.45, bridge: 20, wSmooth: 3, smooth: 20,
+      thickness: 0.005, ease: [0.004, 0.018], easeMid: 0.008, easeMap: jacketEase(), loose: [0.25, 0.6], slope: [0.35, 0.12], bridgeSlope: 0.45, membrane: 1, bridge: 20, wSmooth: 3, smooth: 20,
+      // tailored sleeves: straight from the deltoid, a little taper to the cuff (no balloon)
+      sleeve: { loose: [0.1, 0.45], slope: [0.9, 0.2], bridgeSlope: 1.0 },
       // structured shoulders: a little padding on top of the shoulders
       offset: (c, i, P0, bi) => { const y = P0[i * 3 + 1], x = Math.abs(P0[i * 3]); return 0.004 * Math.max(0, 1 - Math.abs(y - bi.land.shoulder - 0.02) / 0.06) * Math.max(0, 1 - Math.abs(x - bi.land.shoulderX + 0.02) / 0.07); },
     },
-    weightBlend: hemToPelvis(0.6),
+    weightBlend: hemToPelvis(0.9),
     wrinkle: { k: 0.7, wl: 0.07, wlArm: 0.042, kt: 0.3 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.004, 0.12, 0.04)],
     hardware: { blazerButtons: true },
@@ -233,7 +307,10 @@ export const GARMENTS = [
   },
   {
     id: 'sporttop', label: 'Top sportivo', cat: 'top', slot: 'top', layer: 3, styles: ['sport'], sex: 'F', icon: 'sporttop',
+    hemLift: 0.015,
     fabric: 'lycra', color: '#1d1f24', palette: PAL.sport,
+    // a sports bra: worn instead of the bra (no cups or straps under it)
+    replacesBra: true,
     mask: (k) => [
       k.above('hem', k.land.underBust - 0.045),
       // straps at least ~3 cm wide (armhole inset 6 cm): on narrow shoulders or a full neck a
@@ -245,7 +322,8 @@ export const GARMENTS = [
     ],
     bands: { hem: { h: 0.035 } },
     edges: { default: { type: 'hem', r: 0.002 } },
-    fit: { thickness: 0.002, ease: [0.0, 0.006], loose: [0, 0.1], bridge: 26, smooth: 20, bridgeSlope: 0.9 },
+    // compression: one rounded volume over both breasts (membrane), snug under them
+    fit: { thickness: 0.002, ease: [0.0, 0.006], loose: [0, 0.1], bridge: 26, smooth: 20, bridgeSlope: 0.9, hull: 1, membrane: 1, contact: 0.3 },
     wrinkle: { k: 0.2, wl: 0.035 },
     details: 'sporttop',
   },
@@ -254,7 +332,7 @@ export const GARMENTS = [
   {
     id: 'jeans', label: 'Jeans', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual'], icon: 'jeans',
     fabric: 'denim', color: '#3b5577', palette: PAL.denim,
-    mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, 1.97), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.55)), ...legs(k, shoeHem(2.03)), ARMS(k), FEET(k, 0.75)],
     bands: { waist: { h: 0.038 } },
     edges: { default: { type: 'hem', r: 0.0028, depth: 0.02 } },
     // Vestibilità: skinny (hugs to the ankle) .. slim .. regular (straight from
@@ -262,7 +340,10 @@ export const GARMENTS = [
     fit: {
       thickness: 0.0026, ease: [0.0004, 0.02], easeMid: 0.0055, easeMap: trouserEase(0.5, 0.8), contact: 0.6,
       loose: [0.0, 0.3], slope: [1.6, 0.35], bridgeSlope: 1.1, bridge: 4,
-      leg: { loose: [0.2, 0.95], slope: [0.4, 0.01], slopeUpper: [1.2, 0.03], bridgeSlope: 0.9 },
+      // at Normale a straight leg tapering a little to the hem (~39 cm round on a man);
+      // women's jeans are cut a step slimmer at the same Vestibilità
+      leg: { loose: [0.1, 0.95], slope: [0.6, 0.012], slopeUpper: [1.4, 0.04], bridgeSlope: 0.9, sexShift: { F: -0.1 } },
+      seatBridge: [0.7, 1],
     },
     wrinkle: { k: 0.8, wl: 0.058, wlLeg: 0.046, kt: 0.3 },
     folds: [ankleStack(['legL', 'legR'], 0.0045, 0.12, 0.045)],
@@ -272,12 +353,14 @@ export const GARMENTS = [
   {
     id: 'trousers', label: 'Pantaloni eleganti', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['formal'], icon: 'trousers',
     fabric: 'wool', color: '#2a2d33', palette: PAL.formal,
-    mask: (k) => [k.below('waist', k.y(1.75)), ...legs(k, 2.02), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.75)), ...legs(k, shoeHem(2.08)), ARMS(k), FEET(k, 0.8)],
     bands: { waist: { h: 0.036 } },
     edges: { default: { type: 'hem', r: 0.0025, depth: 0.03 } },
     fit: {
       thickness: 0.0028, ease: [0.0015, 0.024], easeMid: 0.0085, easeMap: trouserEase(0.55, 0.9), contact: 0.6, loose: [0.05, 0.4], slope: [1.4, 0.3], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 5,
-      leg: { loose: [0.6, 1.0], slope: [0.12, 0.004], slopeUpper: [0.8, 0.02], bridgeSlope: 0.8 },
+      // pressed straight leg: hangs from the seat and the knee, hem about 42 cm round
+      leg: { loose: [0.45, 1.0], slope: [0.3, 0.02], slopeUpper: [0.8, 0.05], bridgeSlope: 0.8, sexShift: { F: -0.1 } },
+      seatBridge: [0.8, 1],
     },
     wrinkle: { k: 0.8, wl: 0.065, wlLeg: 0.055 },
     folds: [
@@ -295,7 +378,8 @@ export const GARMENTS = [
     edges: { default: { type: 'hem', r: 0.003 } },
     fit: {
       thickness: 0.0045, ease: [0.003, 0.03], easeMid: 0.012, easeMap: trouserEase(0.6, 0.95), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.25], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 6, wSmooth: 3,
-      leg: { loose: [0.6, 1.0], slope: [0.1, 0.008], slopeUpper: [0.5, 0.04], bridgeSlope: 0.8 },
+      leg: { loose: [0.5, 1.0], slope: [0.15, 0.008], slopeUpper: [0.5, 0.04], bridgeSlope: 0.8 },
+      seatBridge: [0.8, 1],
       looseFade: (c, i, cv, cons) => { const a = cons.findIndex((q) => q.id === 'legL'), b = cons.findIndex((q) => q.id === 'legR'); const d = Math.min(cv[a][i], cv[b][i]); return Math.min(1, Math.max(0.1, (d - 0.03) / 0.16)); },
     },
     wrinkle: { k: 1.0, wl: 0.07, wlLeg: 0.052, kt: 0.25 },
@@ -305,12 +389,13 @@ export const GARMENTS = [
   {
     id: 'cargo', label: 'Pantaloni cargo', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'sport'], icon: 'cargo',
     fabric: 'canvas', color: '#5b5e45', palette: ['#5b5e45', '#2a2d2a', '#8a7a5a', '#3f4a3c', '#6b6e72', '#c2b28f', '#2b3a55', '#4a3a2a'],
-    mask: (k) => [k.below('waist', k.y(1.5)), ...legs(k, 1.98), ARMS(k), FEET(k)],
+    mask: (k) => [k.below('waist', k.y(1.5)), ...legs(k, shoeHem(2.02)), ARMS(k), FEET(k, 0.7)],
     bands: { waist: { h: 0.04 } },
     edges: { default: { type: 'hem', r: 0.003, depth: 0.025 } },
     fit: {
       thickness: 0.0035, ease: [0.003, 0.03], easeMid: 0.012, easeMap: trouserEase(0.6, 0.95), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.25], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 6, wSmooth: 3,
-      leg: { loose: [0.7, 1.0], slope: [0.06, 0.004], slopeUpper: [0.4, 0.02], bridgeSlope: 0.8 },
+      leg: { loose: [0.55, 1.0], slope: [0.12, 0.006], slopeUpper: [0.4, 0.02], bridgeSlope: 0.8 },
+      seatBridge: [0.8, 1],
     },
     wrinkle: { k: 1.0, wl: 0.068, wlLeg: 0.055 },
     folds: [
@@ -328,7 +413,8 @@ export const GARMENTS = [
     edges: { default: { type: 'hem', r: 0.0028, depth: 0.02 } },
     fit: {
       thickness: 0.003, ease: [0.002, 0.028], easeMid: 0.01, easeMap: trouserEase(0.55, 1.0), contact: 0.6, loose: [0.1, 0.5], slope: [1.2, 0.3], bridgeSlope: 1.0, innerSlope: 1.6, bridge: 5,
-      leg: { loose: [0.4, 1.0], slope: [0.6, 0.04], bridgeSlope: 0.8 },
+      leg: { loose: [0.15, 0.9], slope: [0.8, 0.05], bridgeSlope: 0.8 },
+      seatBridge: [0.8, 1],
     },
     wrinkle: { k: 0.8, wl: 0.055 },
     details: 'shorts',
@@ -339,7 +425,7 @@ export const GARMENTS = [
     mask: (k) => [k.below('waist', k.y(1.95)), ...legs(k, 1.9), ARMS(k), FEET(k)],
     bands: { waist: { h: 0.04 } },
     edges: { default: { type: 'hem', r: 0.0015 } },
-    fit: { thickness: 0.0014, ease: [0.0, 0.004], loose: [0, 0.05], bridge: 8, bridgeSlope: 2, smooth: 4 },
+    fit: { thickness: 0.0014, ease: [0.0, 0.004], loose: [0, 0.05], bridge: 8, bridgeSlope: 2, smooth: 4, seatBridge: [0.5, 0.7] },
     wrinkle: { k: 0.3, wl: 0.03 },
     details: 'leggings',
   },
@@ -376,13 +462,13 @@ export const GARMENTS = [
       {
         mask: (k) => [
           k.above('hem', k.y(1.6)),
-          k.neckline('neck', { front: 0.12, back: 0.08, width: k.bi.neckRadius + 0.03, shape: 'scoop' }),
-          k.armhole('armholeL', 'L', { inset: 0.05, drop: 0.025, rx: 0.05, ry: 0.08 }),
-          k.armhole('armholeR', 'R', { inset: 0.05, drop: 0.025, rx: 0.05, ry: 0.08 }),
+          k.neckline('neck', { front: 0.12, back: 0.08, width: strapNeck(k), shape: 'scoop' }),
+          k.armhole('armholeL', 'L', { inset: STRAP_INSET, drop: 0.025, rx: 0.05, ry: 0.08 }),
+          k.armhole('armholeR', 'R', { inset: STRAP_INSET, drop: 0.025, rx: 0.05, ry: 0.08 }),
           ARMS(k), HEAD(k),
         ],
         edges: { hem: { type: 'none' }, default: { type: 'hem', r: 0.0018 } },
-        fit: { thickness: 0.002, ease: [0.0006, 0.014], easeMid: 0.005, easeMap: topEase(0.6), loose: [0.0, 0.3], slope: [1.4, 0.6], bridgeSlope: 0.6, bridge: 8, smooth: 12 },
+        fit: { thickness: 0.002, ease: [0.0006, 0.014], easeMid: 0.005, easeMap: topEase(0.6), loose: [0.0, 0.3], slope: [1.4, 0.6], bridgeSlope: 0.6, membrane: 0.9, bridge: 8, smooth: 12 },
         wrinkle: { k: 0.7, wl: 0.055 },
         // under the skirt the bodice stays (almost) flat: the skirt rests on it
         foldFade: [1.75, 2.2, 0.12],
@@ -411,7 +497,7 @@ export const GARMENTS = [
   {
     id: 'dressshoes', label: 'Scarpe eleganti', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['formal'], icon: 'dressshoes',
     fabric: 'leather', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
-    mask: (k) => [lowerLegs(k, 2.03, 0.75), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
+    mask: (k) => [lowerLegs(k, 2.0, 0.6), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
     edges: { default: { type: 'hem', r: 0.0022, depth: 0.01 } },
     fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
@@ -455,14 +541,18 @@ export const GARMENTS = [
           ],
           bands: { waist: { h: 0.012 } },
           edges: { default: { type: 'hem', r: 0.0012 } },
-          fit: { thickness: 0.0012, ease: [0, 0.002], loose: [0, 0], bridge: 22, bridgeSlope: 2, smooth: 6 },
+          // the body's own weights (rides the skin exactly); only a thin rim of skin stays visible
+          fit: { thickness: 0.0012, ease: [0, 0.002], loose: [0, 0], bridge: 22, bridgeSlope: 2, smooth: 6, wSmoothMin: 0 },
+          hideMargin: 0.01,
           wrinkle: { k: 0.12, wl: 0.03 },
         },
         {
           mask: (k) => [braShape(k), ARMS(k)],
           bands: { band: { h: 0.025 } },
           edges: { default: { type: 'hem', r: 0.0014 } },
-          fit: { thickness: 0.0018, ease: [0.002, 0.004], loose: [0, 0], bridge: 30, bridgeSlope: 0.9, smooth: 30, contact: 0 },
+          // molded cups: round domes (no apex point for the tops over them to copy)
+          // (a support garment: it follows the lower pole of the bust, no straight fall from the apex)
+          fit: { thickness: 0.0018, ease: [0.002, 0.004], loose: [0, 0], bridge: 30, bridgeSlope: 2, smooth: 30, contact: 0 },
           // a molded cup: only its very rim must clear the skin (a wide edge zone
           // would wrap it over the nipples)
           hideMargin: 0.008,
@@ -534,7 +624,7 @@ function instepOpening(k) {
       // height above the sole and distance along the foot from the ankle
       const along = (a - 2) * bi.limbs[r].L[2];
       const h = y - 0.035;
-      const e = (along / 0.075) ** 2 + Math.max(0, -h / 0.035) ** 2;
+      const e = (along / 0.06) ** 2 + Math.max(0, -h / 0.035) ** 2;
       best = Math.min(best, e - 1 + (h < 0 ? 1 : 0));
     }
     return best * 0.05;
