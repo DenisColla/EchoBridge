@@ -192,7 +192,9 @@ export function buildSkirtDraft(ctx, def, spec) {
     coords: { wT, limb, aL, sT, thT, sL, thL, tT }, cons: [], cvals: [], skin, loops, fitT: spec.fitT ?? 0.5,
     staticDisp: stat,
     coarse: { n: nf, G: Pf, quads, adj, skin, parents: { idx, w: pw }, coords: { wT, limb, aL } },
-    ring: { rings, segs, ys, R, env },
+    // hang: share of the seated drape that falls off the knees / the seat edge (loose
+    // skirts); a pencil skirt (no flare) stays a tube stretched around the thighs
+    ring: { rings, segs, ys, R, env, hang: smoothstep(0.02, 0.08, spec.flare ?? 0) },
   };
 }
 

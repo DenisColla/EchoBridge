@@ -22,7 +22,7 @@ import { softSkin } from '../render/softskin.js';
 // ------------------------------------------------------------------ fold cavity (fabric shading)
 /** Fold curvature (1/m) where the fold cavity shading starts / is full (see GarmentRuntime._cavityPass). */
 const CAV_K0 = 12, CAV_K1 = 80;
-/** While posing continuously the cavity is refreshed at most every CAV_INTERVAL ms, and CAV_SETTLE ms after the last change. */
+/** Fold cavity timing (ms, see GarmentRuntime._cavityLater): it runs CAV_SETTLE after a change, off the pose-change frame. */
 const CAV_INTERVAL = 45, CAV_SETTLE = 60;
 /** Smoothing passes of the fold curvature before it becomes the cavity. */
 const CAV_SMOOTH = 1;
@@ -552,7 +552,7 @@ export function assemble(pieces, bi, opts = {}) {
     // near the hips can carry thigh coordinates (limb 3/4) at the sides: left out,
     // it hung below the lifted hem as a tab when the arms were raised
     for (let i = 0; i < nf; i++) trs[i] = (C.limb[i] === 1 || C.limb[i] === 2) && C.wT[i] < 0.5 ? 0 : 1;
-    parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, hgt, trs, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
+    parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, hgt, trs, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs, room: d.room, hang: d.ring.hang ?? 1 } : null });
     fineOffset += nf;
     nslot = extraSlot;
   }
@@ -609,8 +609,9 @@ export function assemble(pieces, bi, opts = {}) {
   // fold cavity shading (not for garments that barely fold: shoes, socks, underwear)
   const slot = pieces.find((p) => p.draft)?.draft.def?.slot;
   if (!NO_CAVITY.has(slot)) rt.cav = foldCavity(rt.fine);
-  if (parts.some((p) => p.ring)) rt.setLegs(legColliders(bi));
-  if (!opts.noSeat) rt.setSeat(seatFrames(bi), fineH);
+  const sfr = seatFrames(bi);
+  if (parts.some((p) => p.ring)) rt.setLegs(legColliders(bi), sfr);
+  if (!opts.noSeat) rt.setSeat(sfr, fineH);
   if (opts.hemLift) rt.setHemLift(bi, opts.hemLift, fineTorso);
   return rt;
 }
@@ -637,10 +638,48 @@ function seatFrames(bi) {
       if (d > dm) dm = d;
     }
     const bone = (n) => model.boneIndex.get(n);
-    out.push({ sg, a0, k0, u0: u, b0: b, len, dm, ba: bone('upperleg01.' + side), bb: bone('lowerleg01.' + side), bp: bone('pelvis.' + side) ?? bone('root') });
+    // thigh frame of the seated skirt model: forward (-b) and lateral (u x forward)
+    const f0 = [-b[0], -b[1], -b[2]], l0 = [u[1] * f0[2] - u[2] * f0[1], u[2] * f0[0] - u[0] * f0[2], u[0] * f0[1] - u[1] * f0[0]];
+    out.push({ sg, a0, k0, u0: u, b0: b, f0, l0, len, dm, ba: bone('upperleg01.' + side), bb: bone('lowerleg01.' + side), bp: bone('pelvis.' + side) ?? bone('root') });
   }
   return out;
 }
+
+/**
+ * Posed seat frames (see seatFrames): per leg the posed hip joint A, thigh axis u,
+ * posterior direction b (perpendicular to u, turned with the thigh), thigh length
+ * and the seated weight w (hip flexion SEAT_FLEX). Returns true when any w > 0.
+ */
+function seatPose(M, frames, posed) {
+  let any = false;
+  frames.forEach((fr, q) => {
+    const ps = posed[q];
+    xform(M, fr.ba, fr.a0, _pa); ps.A.set(_pa);
+    xform(M, fr.bb, fr.k0, _pb);
+    let ux = _pb[0] - _pa[0], uy = _pb[1] - _pa[1], uz = _pb[2] - _pa[2];
+    const l = Math.hypot(ux, uy, uz) || 1;
+    ux /= l; uy /= l; uz /= l;
+    ps.u[0] = ux; ps.u[1] = uy; ps.u[2] = uz; ps.len = l;
+    // the thigh's posterior direction, turned with the thigh
+    lin(M, fr.ba, fr.b0, _pc);
+    let d = _pc[0] * ux + _pc[1] * uy + _pc[2] * uz;
+    const bx = _pc[0] - d * ux, by = _pc[1] - d * uy, bz = _pc[2] - d * uz;
+    const bl = Math.hypot(bx, by, bz) || 1;
+    ps.b[0] = bx / bl; ps.b[1] = by / bl; ps.b[2] = bz / bl;
+    // hip flexion: the thigh against its rest direction carried by the pelvis
+    lin(M, fr.bp, fr.u0, _pc);
+    const cl = Math.hypot(_pc[0], _pc[1], _pc[2]) || 1;
+    d = (_pc[0] * ux + _pc[1] * uy + _pc[2] * uz) / cl;
+    lin(M, fr.bp, FWD, _pb);
+    const fwd = (ux - _pc[0] / cl) * _pb[0] + (uy - _pc[1] / cl) * _pb[1] + (uz - _pc[2] / cl) * _pb[2];
+    const ang = fwd > 0 ? Math.acos(Math.max(-1, Math.min(1, d))) * 57.29578 : 0;
+    const t = Math.min(1, Math.max(0, (ang - SEAT_FLEX[0]) / (SEAT_FLEX[1] - SEAT_FLEX[0])));
+    ps.w = t * t * (3 - 2 * t);
+    if (ps.w > 0) any = true;
+  });
+  return any;
+}
+const newPosed = (frames) => frames.map(() => ({ A: new Float32Array(3), u: new Float32Array(3), b: new Float32Array(3), w: 0, len: 1 }));
 
 /** Hip flexion (deg) over which the seat correction fades in. */
 const SEAT_FLEX = [35, 80];
@@ -652,6 +691,8 @@ const SEAT_SOFT = 0.005;
 const SEAT_STILL = 2e-4;
 /** Most height over the body (m) a vertex counts as its own layer thickness in the seat pass. */
 const SEAT_HMAX = 0.012;
+/** Half width (m) of the crotch band whose seam is pressed with the seat although it is not behind the hips. */
+const SEAT_CROTCH_X = 0.06;
 
 /**
  * Leg colliders for skirts: per leg two thigh capsules (hip -> mid-thigh -> knee:
@@ -684,6 +725,14 @@ function legColliders(bi) {
 }
 /** Clearance of a skirt over the legs (fabric thickness + a little air), m. */
 const LEG_CLEAR = 0.006;
+/** Share of its room a seated skirt's side panel drops below the thigh (gravity). */
+const SKIRT_SIDE_DROP = 0.8;
+/** Share of the rest flare a seated skirt keeps where it hangs from the knees / the seat edge. */
+const SKIRT_HANG_FLARE = 0.3;
+/** Radius (m) a seated skirt wraps over the kneecap with, at most. */
+const SKIRT_KNEE_R = 0.07;
+/** Seat edge (m before the knee joint along the thigh): a loose skirt's back panel falls from there. */
+const SKIRT_SEAT_EDGE = 0.1;
 /** How much of a leg contact the fabric below it inherits per ring (hangs from the knee). */
 const HANG = 0.965;
 const _pa = new Float32Array(3);
@@ -840,8 +889,8 @@ function dqApply(q, x, y, z, out) {
   return out;
 }
 /** Posed offset (x, y, z) back to rest space through a blended dual quaternion (inverse rotation and scale). */
-function dqUnrotate(q, x, y, z, out) {
-  const rx = -q[0], ry = -q[1], rz = -q[2], rw = q[3], is = 1 / (q[8] || 1);
+function dqUnrotate(q, x, y, z, out, o = 0) {
+  const rx = -q[o], ry = -q[o + 1], rz = -q[o + 2], rw = q[o + 3], is = 1 / (q[o + 8] || 1);
   const cx = ry * z - rz * y + rw * x, cy = rz * x - rx * z + rw * y, cz = rx * y - ry * x + rw * z;
   out[0] = (x + 2 * (ry * cz - rz * cy)) * is; out[1] = (y + 2 * (rz * cx - rx * cz)) * is; out[2] = (z + 2 * (rx * cy - ry * cx)) * is;
   return out;
@@ -861,6 +910,64 @@ function inv3(a, x, y, z, out) {
   out[2] = (c20 * x + c21 * y + c22 * z) * id;
   return out;
 }
+
+/**
+ * Rest skirt point in a leg's thigh frame (seatFrames) for the seated skirt model:
+ * out = [a along the thigh, lateral, forward, side room]. Gravity lays the room of
+ * the lap side (rest front, up when seated) down onto the thigh; the room of the
+ * sides is returned (it hangs down); the back is pressed onto the seat line (back
+ * of the thigh + gluteal pad + clearance, soft saturation).
+ */
+const _sf = new Float32Array(4);
+function skirtFrame(fr, x, y, z, room, LK, out) {
+  const rx = x - fr.a0[0], ry = y - fr.a0[1], rz = z - fr.a0[2];
+  const a = rx * fr.u0[0] + ry * fr.u0[1] + rz * fr.u0[2];
+  const ox = rx * fr.l0[0] + ry * fr.l0[1] + rz * fr.l0[2];
+  let oz = rx * fr.f0[0] + ry * fr.f0[1] + rz * fr.f0[2];
+  const r = Math.hypot(ox, oz) || 1e-6, cz = oz / r;
+  // below the knee only half of the room lies down (the hanging skirt keeps some of its flare)
+  const rm = room * (1 - 0.5 * ss(LK - 0.05, LK + 0.1, a));
+  if (cz > 0) oz -= rm * cz;
+  const t = a / LK;
+  const D = fr.dm + SEAT_PAD * (1 - ss(0.12, 0.55, t)) + LEG_CLEAR;
+  if (-oz > D) {
+    const e = -oz - D, k = (1 - ss(0.88, 1.04, t)) * (1 - ss(0.13, 0.2, Math.abs(ox)));
+    oz = -(D + e + (SEAT_SOFT * (1 - Math.exp(-e / SEAT_SOFT)) - e) * k);
+  }
+  out[0] = a; out[1] = ox; out[2] = oz; out[3] = rm * (1 - Math.abs(cz));
+  return out;
+}
+
+/**
+ * Posed point p pressed onto the seat line of one leg (posed frame ps of seat frame
+ * fr: back of the thigh + gluteal pad + h, soft saturation), weighted by the leg's
+ * flexion, the reach along the thigh and the lateral distance. In place.
+ */
+const _sp = new Float32Array(3);
+function seatPress(fr, ps, p, h) {
+  if (!(ps.w > 0)) return p;
+  const ex = p[0] - ps.A[0], ey = p[1] - ps.A[1], ez = p[2] - ps.A[2];
+  const ta = ex * ps.u[0] + ey * ps.u[1] + ez * ps.u[2], t = ta / ps.len;
+  const g = ss(-0.7, -0.4, t) * (1 - ss(0.88, 1.04, t));
+  if (g <= 0) return p;
+  const qd = ex * ps.b[0] + ey * ps.b[1] + ez * ps.b[2];
+  const D = fr.dm + SEAT_PAD * (1 - ss(0.12, 0.55, t)) + h, e = qd - D;
+  if (e <= 0) return p;
+  const wx = ex - ta * ps.u[0] - qd * ps.b[0], wy = ey - ta * ps.u[1] - qd * ps.b[1], wz = ez - ta * ps.u[2] - qd * ps.b[2];
+  const lat = 1 - ss(0.13, 0.2, Math.hypot(wx, wy, wz));
+  if (lat <= 0) return p;
+  const c = (SEAT_SOFT * (1 - Math.exp(-e / SEAT_SOFT)) - e) * ps.w * g * lat;
+  p[0] += ps.b[0] * c; p[1] += ps.b[1] * c; p[2] += ps.b[2] * c;
+  return p;
+}
+
+/**
+ * Pose frame id: the layer pass keeps the posed positions of the layers below for
+ * one pose frame (ClothingManager calls nextPoseFrame before updating a character,
+ * inner layers first).
+ */
+let _poseFrame = 0;
+export function nextPoseFrame() { _poseFrame++; }
 
 /** Owns the geometry buffers and applies wrinkle displacements + normals. */
 export class GarmentRuntime {
@@ -889,23 +996,31 @@ export class GarmentRuntime {
    * joints, from a little above them down to the knees.
    */
   setSeat(frames, h) {
-    const P = this.fine.P, n = this.fine.n, idx = [], fr = [];
+    const P = this.fine.P, n = this.fine.n, idx = [], fr = [], cw = [];
+    // skirt tubes are seated by their own model (_legPass)
+    const ring = new Uint8Array(n);
+    if (this.legs) for (const p of this.parts) if (p.ring) ring.fill(1, p.offset, p.offset + p.ring.rings * p.ring.segs);
     for (let i = 0; i < n; i++) {
+      if (ring[i]) continue;
       const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
-      let best = -1;
+      let best = -1, bw = 0;
       for (let f = 0; f < frames.length; f++) {
         const F = frames[f];
         if (y > F.a0[1] + 0.1 || y < F.k0[1] + 0.04 || z > F.a0[2] + 0.05 || x * F.sg < -0.03) continue;
-        // the back half of the thigh and the seat only: a front or side vertex is never pressed
-        if ((x - F.a0[0]) * F.b0[0] + (y - F.a0[1]) * F.b0[1] + (z - F.a0[2]) * F.b0[2] < 0.01) continue;
-        if (best < 0 || Math.abs(x - F.a0[0]) < Math.abs(x - frames[best].a0[0])) best = f;
+        // the back half of the thigh and the seat only: a front or side vertex is never
+        // pressed; between the thighs the crotch seam (about as deep as the hip joints)
+        // goes with the seat, fading in (left out, it hung below the pressed seat as a tab)
+        const dep = (x - F.a0[0]) * F.b0[0] + (y - F.a0[1]) * F.b0[1] + (z - F.a0[2]) * F.b0[2];
+        const w = dep >= 0.01 ? 1 : Math.abs(x) < SEAT_CROTCH_X ? ss(-0.04, 0.01, dep) : 0;
+        if (w <= 0) continue;
+        if (best < 0 || Math.abs(x - F.a0[0]) < Math.abs(x - frames[best].a0[0])) { best = f; bw = w; }
       }
-      if (best >= 0) { idx.push(i); fr.push(best); }
+      if (best >= 0) { idx.push(i); fr.push(best); cw.push(bw); }
     }
     if (!idx.length) return;
     const hh = new Float32Array(idx.length);
     for (let k = 0; k < idx.length; k++) hh[k] = Math.min(SEAT_HMAX, Math.max(0, h[idx[k]]));
-    this.seat = { frames, idx: Int32Array.from(idx), fr: Uint8Array.from(fr), h: hh, on: false, posed: frames.map(() => ({ A: new Float32Array(3), u: new Float32Array(3), b: new Float32Array(3), w: 0, len: 1 })) };
+    this.seat = { frames, idx: Int32Array.from(idx), fr: Uint8Array.from(fr), cw: Float32Array.from(cw), h: hh, on: false, posed: newPosed(frames) };
     this.s3 = null;
     /** the seat pass is applied (the manager turns it off for underwear that is the outer layer) */
     this.seatClamp = true;
@@ -922,33 +1037,8 @@ export class GarmentRuntime {
    * Returns true when the offsets changed.
    */
   _seatPass(M) {
-    const S = this.seat, F = this.fine, P = F.P, si = F.si, sw = F.sw, N = this.dirN, disp = this.disp, push = this.push;
-    let any = false;
-    S.frames.forEach((fr, q) => {
-      const ps = S.posed[q];
-      xform(M, fr.ba, fr.a0, _pa); ps.A.set(_pa);
-      xform(M, fr.bb, fr.k0, _pb);
-      let ux = _pb[0] - _pa[0], uy = _pb[1] - _pa[1], uz = _pb[2] - _pa[2];
-      const l = Math.hypot(ux, uy, uz) || 1;
-      ux /= l; uy /= l; uz /= l;
-      ps.u[0] = ux; ps.u[1] = uy; ps.u[2] = uz; ps.len = l;
-      // the thigh's posterior direction, turned with the thigh
-      lin(M, fr.ba, fr.b0, _pc);
-      let d = _pc[0] * ux + _pc[1] * uy + _pc[2] * uz;
-      const bx = _pc[0] - d * ux, by = _pc[1] - d * uy, bz = _pc[2] - d * uz;
-      const bl = Math.hypot(bx, by, bz) || 1;
-      ps.b[0] = bx / bl; ps.b[1] = by / bl; ps.b[2] = bz / bl;
-      // hip flexion: the thigh against its rest direction carried by the pelvis
-      lin(M, fr.bp, fr.u0, _pc);
-      const cl = Math.hypot(_pc[0], _pc[1], _pc[2]) || 1;
-      d = (_pc[0] * ux + _pc[1] * uy + _pc[2] * uz) / cl;
-      lin(M, fr.bp, FWD, _pb);
-      const fwd = (ux - _pc[0] / cl) * _pb[0] + (uy - _pc[1] / cl) * _pb[1] + (uz - _pc[2] / cl) * _pb[2];
-      const ang = fwd > 0 ? Math.acos(Math.max(-1, Math.min(1, d))) * 57.29578 : 0;
-      const t = Math.min(1, Math.max(0, (ang - SEAT_FLEX[0]) / (SEAT_FLEX[1] - SEAT_FLEX[0])));
-      ps.w = t * t * (3 - 2 * t);
-      if (ps.w > 0) any = true;
-    });
+    const S = this.seat, F = this.fine, P = F.P, si = F.si, sw = F.sw, N = this.dirN, disp = this.disp;
+    const any = seatPose(M, S.frames, S.posed);
     if (!any || !this.seatClamp) {
       if (!S.on) return false;
       S.on = false;
@@ -972,7 +1062,9 @@ export class GarmentRuntime {
       const i = S.idx[k], ps = S.posed[S.fr[k]], fr = S.frames[S.fr[k]], o = i * 3;
       let rx = 0, ry = 0, rz = 0;
       if (ps.w > 0) {
-        const dd = disp[i] + push[i];
+        // without the layer push: the layer pass runs after this one and lifts the
+        // pressed garment over the (pressed) layers below it
+        const dd = disp[i];
         let x = P[o] + N[o] * dd, y = P[o + 1] + N[o + 1] * dd, z = P[o + 2] + N[o + 2] * dd;
         if (this.off3) { x += this.off3[o]; y += this.off3[o + 1]; z += this.off3[o + 2]; }
         // posed position (and the frame to map a posed offset back to rest space)
@@ -992,7 +1084,7 @@ export class GarmentRuntime {
           const e = qd - D;
           if (e > 0 && lat > 0) {
             const keep = SEAT_SOFT * (1 - Math.exp(-e / SEAT_SOFT));
-            const c = (keep - e) * ps.w * g * lat;
+            const c = (keep - e) * ps.w * g * lat * S.cw[k];
             const vx = ps.b[0] * c, vy = ps.b[1] * c, vz = ps.b[2] * c;
             if (dq) { dqUnrotate(_dq, vx, vy, vz, _pa); rx = _pa[0]; ry = _pa[1]; rz = _pa[2]; } else {
               inv3(blendMatrix(M, si, sw, i, _ma), vx, vy, vz, _pa); rx = _pa[0]; ry = _pa[1]; rz = _pa[2];
@@ -1060,12 +1152,92 @@ export class GarmentRuntime {
     return true;
   }
 
-  /** Enables the leg collision of the skirt parts (see legColliders). */
-  setLegs(legs) {
+  /** Enables the leg collision of the skirt parts (see legColliders) and the seated skirt model (seat frames). */
+  setLegs(legs, frames) {
     this.legs = legs;
     this.off3 = new Float32Array(this.disp.length * 3);
     this._legV = new Float32Array(this.disp.length * 3);
-    this._legSig = new Float32Array(legs.length * 6).fill(NaN);
+    this._legM = new Float32Array(this.disp.length * 3);
+    this._legSig = new Float32Array(legs.length * 6 + 2).fill(NaN);
+    this.skirtSeat = null;
+    if (!frames) return;
+    this.skirtSeat = { frames, posed: newPosed(frames) };
+    // per leg and meridian: the rest skirt at the knee (thigh frame: lateral, forward,
+    // room), where the seated skirt wraps over the kneecap / falls off the seat edge
+    const P = this.fine.P, tmp = new Float32Array(4);
+    for (const part of this.parts) {
+      if (!part.ring) continue;
+      const { rings, segs, room } = part.ring, ref = new Float32Array(2 * segs * 3);
+      frames.forEach((fr, q) => {
+        let kb = 0, best = Infinity;
+        for (let k = 0; k < rings; k++) {
+          const i = (part.offset + k * segs) * 3;
+          const a = (P[i] - fr.a0[0]) * fr.u0[0] + (P[i + 1] - fr.a0[1]) * fr.u0[1] + (P[i + 2] - fr.a0[2]) * fr.u0[2];
+          if (Math.abs(a - fr.len) < best) { best = Math.abs(a - fr.len); kb = k; }
+        }
+        for (let j = 0; j < segs; j++) {
+          const v = kb * segs + j, i = (part.offset + v) * 3;
+          skirtFrame(fr, P[i], P[i + 1], P[i + 2], room ? room[v] : 0, fr.len, tmp);
+          ref[(q * segs + j) * 3] = tmp[1]; ref[(q * segs + j) * 3 + 1] = tmp[2]; ref[(q * segs + j) * 3 + 2] = tmp[3];
+        }
+      });
+      part.ring.ref = ref;
+    }
+  }
+
+  /**
+   * Seated skirt model (posed space) for one leg: rest point (x, y, z) in the thigh
+   * frame (skirtFrame: along the thigh a, lateral ox, forward oz, lap room laid down,
+   * back pressed onto the seat line). The fabric follows the thigh as a tube. Past
+   * the knee a loose skirt (hang 1) wraps over the kneecap and falls straight down
+   * in front of the shins, the back panel falls off the seat edge behind the calves,
+   * both from the skirt at the knee (ref: lateral, forward of the meridian there),
+   * flaring out by half its rest flare below; a pencil skirt (hang 0) stays a tube
+   * stretched around the thighs. The sides drop by their room. Near the hip joint
+   * the skirt blends to its skinned position sk (the waist stays with the pelvis).
+   * -> out (posed)
+   */
+  _skirtModel(fr, ps, x, y, z, room, hang, ref, r0, sk, out) {
+    const F = skirtFrame(fr, x, y, z, room, fr.len, _sf);
+    const a = F[0], ox = F[1], oz = F[2], drop = F[3] * SKIRT_SIDE_DROP, LK = fr.len;
+    const A = ps.A, u = ps.u, b = ps.b;
+    // posed frame: forward = -b, lateral = u x forward
+    const fx = -b[0], fy = -b[1], fz = -b[2];
+    const lx = u[1] * fz - u[2] * fy, ly = u[2] * fx - u[0] * fz, lz = u[0] * fy - u[1] * fx;
+    // tube: along the thigh, lateral, forward (also the pencil skirt past the knee)
+    let ta = a, tl = ox, tz = oz, hd = 0;
+    if (hang > 0) {
+      const xk = ref[r0], zk = ref[r0 + 1], fl = SKIRT_HANG_FLARE;
+      if (zk >= 0) {
+        // over the kneecap (quarter turn), then straight down in front of the shins
+        const zr = Math.min(zk, SKIRT_KNEE_R), s = a - LK, arc = zr * 1.5708;
+        if (s > 0) {
+          const k = ss(0, 0.06, s);
+          tl = ox + (xk + (ox - xk) * fl - ox) * k;
+          if (s < arc) { const be = s / Math.max(zr, 1e-3); ta = LK + zr * Math.sin(be); tz = (zr + (oz - zr) * (1 - k)) * Math.cos(be); } else { ta = LK + zr + (oz - zk) * fl; tz = 0; hd = s - arc; }
+        }
+      } else {
+        // off the seat edge (in front of the calf), then straight down: the depth of the
+        // pressed seat there, the rest flare below the knee (oz - zk) partly kept
+        const ae = LK - SKIRT_SEAT_EDGE;
+        if (a > ae) {
+          const te = ae / LK, De = fr.dm + SEAT_PAD * (1 - ss(0.12, 0.55, te)) + LEG_CLEAR;
+          let zp = zk;
+          if (-zk > De) { const e = -zk - De; zp = zk + (-(De + SEAT_SOFT * (1 - Math.exp(-e / SEAT_SOFT))) - zk) * (1 - ss(0.13, 0.2, Math.abs(xk))); }
+          const k = ss(ae, ae + 0.06, a);
+          ta = ae + Math.min(0, oz - zk) * fl * k;
+          tz = oz + (zp - oz) * k;
+          tl = ox + (xk + (ox - xk) * fl - ox) * k;
+          hd = a - ae;
+        }
+      }
+    }
+    const pa = a + (ta - a) * hang, pl = ox + (tl - ox) * hang, pz = oz + (tz - oz) * hang, pd = hd * hang + drop;
+    const px = A[0] + u[0] * pa + lx * pl + fx * pz, py = A[1] + u[1] * pa + ly * pl + fy * pz - pd, qz = A[2] + u[2] * pa + lz * pl + fz * pz;
+    // the waist and the top of the hips stay with the pelvis (skinned position)
+    const f = ss(-0.02, 0.1, a);
+    out[0] = sk[0] + (px - sk[0]) * f; out[1] = sk[1] + (py - sk[1]) * f; out[2] = sk[2] + (qz - sk[2]) * f;
+    return out;
   }
 
   /**
@@ -1073,10 +1245,14 @@ export class GarmentRuntime {
    * raised thigh or a bent knee would come through the fabric: the skirt is
    * pushed off the (posed) leg capsules, the push is carried down the skirt
    * (fabric hangs from the knee like a tent) and spread around a little, then
-   * mapped back to rest space. Returns true if the offsets changed.
+   * mapped back to rest space. Seated (hip flexion, see seatPose) the skirt takes
+   * the seated model of each leg (_skirtModel) first, blended by the flexion and by
+   * the side of the vertex; the thigh capsules then only push what the model left
+   * (the shins still do). Positions without the layer push (the layer pass runs
+   * after). Returns true if the offsets changed.
    */
   _legPass(M) {
-    const legs = this.legs, sig = this._legSig;
+    const legs = this.legs, sig = this._legSig, SS = this.skirtSeat;
     // posed capsule ends (skip everything while the legs do not move)
     let moved = false;
     const caps = this._caps || (this._caps = legs.map(() => ({ a: new Float32Array(3), b: new Float32Array(3) })));
@@ -1088,21 +1264,60 @@ export class GarmentRuntime {
         sig[q * 6 + k] = caps[q].a[k]; sig[q * 6 + 3 + k] = caps[q].b[k];
       }
     });
+    // seated weights (the pelvis turns the flexion: part of the signature)
+    let seated = false;
+    if (SS) {
+      seated = seatPose(M, SS.frames, SS.posed);
+      const o = legs.length * 6;
+      for (let q = 0; q < 2; q++) { const w = SS.posed[q]?.w ?? 0; if (!(Math.abs(w - sig[o + q]) < 1e-4)) moved = true; sig[o + q] = w; }
+    }
     if (!moved && !this._legsDirty) return false;
     this._legsDirty = false;
-    const V = this._legV, off3 = this.off3, P = this.fine.P, N = this.dirN, si = this.fine.si, sw = this.fine.sw, disp = this.disp, push = this.push;
+    const V = this._legV, VM = this._legM, off3 = this.off3, P = this.fine.P, N = this.dirN, si = this.fine.si, sw = this.fine.sw, disp = this.disp;
+    // seated, the model moves the skirt far from its skinned place: posed as the GPU
+    // skins it (dual quaternions with 'Deformazione morbida'); standing, the small
+    // capsule pushes map back through the blended matrix (cheaper)
+    const dq = seated && softSkin.active ? boneDQs(M) : null;
+    // blended dual quaternion of each skirt vertex, reused to map the offsets back
+    const LQ = dq ? this._legQ || (this._legQ = new Float32Array(this.disp.length * 9)) : null;
     V.fill(0);
+    if (seated || this._legSeated) VM.fill(0);
+    this._legSeated = seated;
     let any = false;
+    const sk = _pb, tg = _pc;
     for (const part of this.parts) {
       if (!part.ring) continue;
-      const { rings, segs } = part.ring, o0 = part.offset;
+      const { rings, segs, room, hang, ref } = part.ring, o0 = part.offset;
+      let partAny = false;
       for (let i = o0, e = o0 + rings * segs; i < e; i++) {
-        const a = blendMatrix(M, si, sw, i, _ma);
-        const d = disp[i] + push[i], o = i * 3;
+        const d = disp[i], o = i * 3;
         const x = P[o] + N[o] * d, y = P[o + 1] + N[o + 1] * d, z = P[o + 2] + N[o + 2] * d;
-        let px = a[0] * x + a[3] * y + a[6] * z + a[9], py = a[1] * x + a[4] * y + a[7] * z + a[10], pz = a[2] * x + a[5] * y + a[8] * z + a[11];
+        if (dq) { dqBlend(dq, si, sw, i, _dq); dqApply(_dq, x, y, z, sk); LQ.set(_dq, i * 9); } else {
+          const a = blendMatrix(M, si, sw, i, _ma);
+          sk[0] = a[0] * x + a[3] * y + a[6] * z + a[9]; sk[1] = a[1] * x + a[4] * y + a[7] * z + a[10]; sk[2] = a[2] * x + a[5] * y + a[8] * z + a[11];
+        }
+        let px = sk[0], py = sk[1], pz = sk[2], ws = 0;
+        if (seated) {
+          // each leg's model, by the side of the vertex (L at +x) and that leg's flexion;
+          // near the hips it blends to the skinned skirt pressed onto the seat line
+          const wl = ss(-0.05, 0.05, x);
+          let mx = 0, my = 0, mz = 0;
+          _sp[0] = sk[0]; _sp[1] = sk[1]; _sp[2] = sk[2];
+          for (let q = 0; q < 2; q++) seatPress(SS.frames[q], SS.posed[q], _sp, LEG_CLEAR);
+          for (let q = 0; q < 2; q++) {
+            const ps = SS.posed[q], w = (q === 0 ? wl : 1 - wl) * ps.w;
+            if (w <= 0) continue;
+            this._skirtModel(SS.frames[q], ps, x, y, z, room ? room[i - o0] : 0, hang, ref, (q * segs + (i - o0) % segs) * 3, _sp, _pa);
+            mx += (_pa[0] - sk[0]) * w; my += (_pa[1] - sk[1]) * w; mz += (_pa[2] - sk[2]) * w;
+            ws += w;
+          }
+          if (ws > 0) { px += mx; py += my; pz += mz; VM[o] = mx; VM[o + 1] = my; VM[o + 2] = mz; partAny = true; }
+        }
         const sx = px, sy = py, sz = pz;
         for (let q = 0; q < caps.length; q++) {
+          // seated, the model lays the fabric around the thighs: only the shins push
+          const kq = q % 3 === 2 ? 1 : 1 - Math.min(1, ws);
+          if (kq <= 0) continue;
           const A = caps[q].a, B = caps[q].b, c = legs[q];
           const abx = B[0] - A[0], aby = B[1] - A[1], abz = B[2] - A[2];
           const l2 = abx * abx + aby * aby + abz * abz || 1e-9;
@@ -1114,12 +1329,13 @@ export class GarmentRuntime {
           if (dd >= R * R) continue;
           const dl = Math.sqrt(dd);
           if (dl < 1e-6) continue;
-          const k = (R - dl) / dl;
+          const k = ((R - dl) / dl) * kq;
           px += qx * k; py += qy * k; pz += qz * k;
         }
-        if (px !== sx || py !== sy || pz !== sz) { V[o] = px - sx; V[o + 1] = py - sy; V[o + 2] = pz - sz; any = true; }
+        if (px !== sx || py !== sy || pz !== sz) { V[o] = px - sx; V[o + 1] = py - sy; V[o + 2] = pz - sz; partAny = true; }
       }
-      if (!any) continue;
+      if (!partAny) continue;
+      any = true;
       // the fabric below a contact hangs from it (carried down the skirt) ...
       for (let k = 1; k < rings; k++) for (let j = 0; j < segs; j++) {
         const i = (o0 + k * segs + j) * 3, u = (o0 + (k - 1) * segs + j) * 3;
@@ -1138,7 +1354,7 @@ export class GarmentRuntime {
         }
       }
     }
-    // posed offsets -> rest space (inverse of the blended linear part)
+    // posed offsets (model + push) -> rest space (inverse of the vertex's skinning)
     let changed = false;
     for (const part of this.parts) {
       if (!part.ring) continue;
@@ -1146,9 +1362,9 @@ export class GarmentRuntime {
       for (let i = part.offset, e = part.offset + rings * segs; i < e; i++) {
         const o = i * 3;
         let rx = 0, ry = 0, rz = 0;
-        if (V[o] || V[o + 1] || V[o + 2]) {
-          const a = blendMatrix(M, si, sw, i, _ma);
-          inv3(a, V[o], V[o + 1], V[o + 2], _pa);
+        const vx = V[o] + VM[o], vy = V[o + 1] + VM[o + 1], vz = V[o + 2] + VM[o + 2];
+        if (any && (vx || vy || vz)) {
+          if (dq) dqUnrotate(LQ, vx, vy, vz, _pa, i * 9); else inv3(blendMatrix(M, si, sw, i, _ma), vx, vy, vz, _pa);
           rx = _pa[0]; ry = _pa[1]; rz = _pa[2];
         }
         if (Math.abs(rx - off3[o]) > 1e-5 || Math.abs(ry - off3[o + 1]) > 1e-5 || Math.abs(rz - off3[o + 2]) > 1e-5) changed = true;
@@ -1320,6 +1536,10 @@ export class GarmentRuntime {
   /** Recomputes the layer push for the current pose. Returns true if it changed. */
   _layerPass(M) {
     const L = this.layers, push = this.push, P = this.fine.P, si = this.fine.si, sw = this.fine.sw, N = this.dirN, disp = this.disp;
+    // own offsets (leg pass, seat pass, hem lift) are in: the push lifts the garment
+    // where it lies now over the layers below (pressed seats keep their order, a
+    // lifted hem clears the waistband under it)
+    const off3 = this.off3, s3 = this.seat?.on ? this.s3 : null, liftY = this.liftY;
     const need = L.need;
     need.fill(0);
     let last = -1, px = 0, py = 0, pz = 0, nx = 0, ny = 0, nz = 0;
@@ -1331,22 +1551,30 @@ export class GarmentRuntime {
         const a = blendMatrix(M, si, sw, i, _ma);
         const d = disp[i], o = i * 3;
         const nx0 = N[o], ny0 = N[o + 1], nz0 = N[o + 2];
-        const x = P[o] + nx0 * d, y = P[o + 1] + ny0 * d, z = P[o + 2] + nz0 * d;
+        let x = P[o] + nx0 * d, y = P[o + 1] + ny0 * d, z = P[o + 2] + nz0 * d;
+        if (off3) { x += off3[o]; y += off3[o + 1]; z += off3[o + 2]; }
+        if (s3) { x += s3[o]; y += s3[o + 1]; z += s3[o + 2]; }
+        if (liftY) y += liftY[i];
         px = a[0] * x + a[3] * y + a[6] * z + a[9]; py = a[1] * x + a[4] * y + a[7] * z + a[10]; pz = a[2] * x + a[5] * y + a[8] * z + a[11];
         nx = a[0] * nx0 + a[3] * ny0 + a[6] * nz0; ny = a[1] * nx0 + a[4] * ny0 + a[7] * nz0; nz = a[2] * nx0 + a[5] * ny0 + a[8] * nz0;
         const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
         nx /= nl; ny /= nl; nz /= nl;
       }
-      // the layer below, with its folds and its own push
-      const b = blendMatrix(M, r.fine.si, r.fine.sw, j, _mb);
-      const e = r.disp[j] + r.push[j] + r.fine.lift[j], q = j * 3, RN = r.dirN, RP = r.fine.P;
-      const ux = RP[q] + RN[q] * e, uy = RP[q + 1] + RN[q + 1] * e, uz = RP[q + 2] + RN[q + 2] * e;
-      let ox = 0, oy = 0, oz = 0;
-      if (r.off3) { ox = r.off3[q]; oy = r.off3[q + 1]; oz = r.off3[q + 2]; }
-      if (r.floorOn) { ox += r.fl3[q]; oy += r.fl3[q + 1]; oz += r.fl3[q + 2]; }
-      if (r.seat?.on) { ox += r.s3[q]; oy += r.s3[q + 1]; oz += r.s3[q + 2]; }
-      if (r.liftY) oy += r.liftY[j];
-      const qx = b[0] * (ux + ox) + b[3] * (uy + oy) + b[6] * (uz + oz) + b[9], qy = b[1] * (ux + ox) + b[4] * (uy + oy) + b[7] * (uz + oz) + b[10], qz = b[2] * (ux + ox) + b[5] * (uy + oy) + b[8] * (uz + oz) + b[11];
+      // the layer below, with its folds and its own push (posed once per pose frame:
+      // a trouser vertex under both the shirt and the blazer is not skinned twice)
+      const q = j * 3, LC = r._lpc || (r._lpc = new Float32Array(r.fine.n * 3)), LS = r._lps || (r._lps = new Int32Array(r.fine.n).fill(-1));
+      if (LS[j] !== _poseFrame) {
+        LS[j] = _poseFrame;
+        const b = blendMatrix(M, r.fine.si, r.fine.sw, j, _mb);
+        const e = r.disp[j] + r.push[j] + r.fine.lift[j], RN = r.dirN, RP = r.fine.P;
+        let ux = RP[q] + RN[q] * e, uy = RP[q + 1] + RN[q + 1] * e, uz = RP[q + 2] + RN[q + 2] * e;
+        if (r.off3) { ux += r.off3[q]; uy += r.off3[q + 1]; uz += r.off3[q + 2]; }
+        if (r.floorOn) { ux += r.fl3[q]; uy += r.fl3[q + 1]; uz += r.fl3[q + 2]; }
+        if (r.seat?.on) { ux += r.s3[q]; uy += r.s3[q + 1]; uz += r.s3[q + 2]; }
+        if (r.liftY) uy += r.liftY[j];
+        LC[q] = b[0] * ux + b[3] * uy + b[6] * uz + b[9]; LC[q + 1] = b[1] * ux + b[4] * uy + b[7] * uz + b[10]; LC[q + 2] = b[2] * ux + b[5] * uy + b[8] * uz + b[11];
+      }
+      const qx = LC[q], qy = LC[q + 1], qz = LC[q + 2];
       const v = L.gap[p] - ((px - qx) * nx + (py - qy) * ny + (pz - qz) * nz);
       if (v > need[i]) need[i] = v;
     }
@@ -1384,16 +1612,17 @@ export class GarmentRuntime {
     if (this.k !== k) changed = true;
     this.k = k;
     if (this.hemLift && posed) changed = this._liftPass(M) || changed;
-    if (this.layers && (changed || innerMoved || this._layersDirty)) {
-      this._layersDirty = false;
-      changed = this._layerPass(M) || changed;
-    }
     if (this.legs) {
       if (changed) this._legsDirty = true;
       changed = this._legPass(M) || changed;
     }
-    // after the leg pass: a skirt pushed off the thighs is then pressed onto the seat
     if (this.seat && (posed || this.seat.on)) changed = this._seatPass(M) || changed;
+    // last of the pose passes: the garment is lifted over the layers below where the
+    // leg, seat and lift passes put it (and where those put the layers below)
+    if (this.layers && (changed || innerMoved || this._layersDirty)) {
+      this._layersDirty = false;
+      changed = this._layerPass(M) || changed;
+    }
     if (this.floor && (changed || innerMoved || this._floorDirty !== false)) {
       this._floorDirty = false;
       changed = this._floorPass(M) || changed;
@@ -1498,18 +1727,19 @@ export class GarmentRuntime {
     nacc.fill(0, 0, this.nslot * 3);
     // a triangle facing against the rest normal of a main-surface vertex (a fold
     // turned inside out: shoe toe gaps, extreme poses) does not darken its shading
+    // (accumulation inlined: this loop runs over every triangle on each pose change)
     const main = this.main;
-    const add = (r, nx, ny, nz) => {
-      if (main && main[r]) { const q = rv2v[r] * 3; if (nx * dirN[q] + ny * dirN[q + 1] + nz * dirN[q + 2] < 0) return; }
-      const s = nid[r] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
-    };
     for (let t = 0, m = index.length; t < m; t += 3) {
       const a = index[t], b = index[t + 1], c = index[t + 2];
       const ao = a * 3, bo = b * 3, co = c * 3;
       const ux = P[bo] - P[ao], uy = P[bo + 1] - P[ao + 1], uz = P[bo + 2] - P[ao + 2];
       const vx = P[co] - P[ao], vy = P[co + 1] - P[ao + 1], vz = P[co + 2] - P[ao + 2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      add(a, nx, ny, nz); add(b, nx, ny, nz); add(c, nx, ny, nz);
+      let r = a;
+      for (let k = 0; k < 3; k++, r = k === 1 ? b : c) {
+        if (main && main[r]) { const q = rv2v[r] * 3; if (nx * dirN[q] + ny * dirN[q + 1] + nz * dirN[q + 2] < 0) continue; }
+        const s = nid[r] * 3; nacc[s] += nx; nacc[s + 1] += ny; nacc[s + 2] += nz;
+      }
     }
     for (let r = 0; r < n; r++) {
       const s = nid[r] * 3;
@@ -1523,15 +1753,16 @@ export class GarmentRuntime {
   }
 
   /**
-   * Fold cavity after a geometry change: at once when the last pass is older than
-   * CAV_INTERVAL (a single pose change), else (continuous posing) once the pose
-   * settles, CAV_SETTLE ms after the last change; onCavity() then asks for a redraw.
+   * Fold cavity after a geometry change, never on the frame of the pose change
+   * (that frame already carries the folds, the leg, seat and layer passes): a timer
+   * CAV_SETTLE ms later; while the pose keeps changing a pending timer is kept when
+   * the last pass is younger than CAV_INTERVAL + CAV_SETTLE (a refresh every ~0.1 s
+   * while dragging), else postponed. onCavity() then asks for a redraw.
    */
   _cavityLater() {
     const now = performance.now();
+    if (this._cavTimer && now - (this._cavT || -1e9) < CAV_INTERVAL + CAV_SETTLE) return;
     clearTimeout(this._cavTimer);
-    this._cavTimer = 0;
-    if (now - (this._cavT || -1e9) >= CAV_INTERVAL) { this._cavT = now; this._cavityPass(); return; }
     this._cavTimer = setTimeout(() => {
       this._cavTimer = 0;
       if (!this.cav) return;

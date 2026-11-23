@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { BodyTopo, BodyInfo } from './body.js';
 import { GARMENT_BY_ID, SLOTS, newItem, defaultOutfit } from './catalog.js';
 import { buildGarmentSteps } from './garment.js';
+import { nextPoseFrame } from './assemble.js';
 import { FABRICS, weaveNormal, fabricChar, fabricScale, detailMap, threadColor, HARDWARE, whenFabricsReady, onFabricUpdate } from './fabrics.js';
 
 const SLOT_ORDER = new Map(SLOTS.map((s, i) => [s, i]));
@@ -234,6 +235,7 @@ export class ClothingManager extends THREE.EventDispatcher {
       let changed = false, any = false;
       for (const g of st.garments) if (g.runtime) { any = true; break; }
       const M = any ? st.ch.updateSkinMatrices() : null;
+      nextPoseFrame();
       const covered = st.covered;
       // inner layers first: a garment is pushed out by the layers below it
       let innerMoved = false;
@@ -324,6 +326,7 @@ export class ClothingManager extends THREE.EventDispatcher {
     if (!g.runtime.layers && g.runtime.fine) g.runtime.fine.adj = null;
     // loose fabric lies on the floor (shoes define the contact themselves)
     g.runtime.floor = !g.def.sole;
+    nextPoseFrame();
     g.runtime.update(ch, this.intensity * (g.item.wrinkles ?? 1), ch.updateSkinMatrices());
     if (g.def.sole) { g.sole = soleDepth(ch, mesh); this._updateClearance(st); }
     // outer layers must be rebuilt over this one
