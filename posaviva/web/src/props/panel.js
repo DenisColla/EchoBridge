@@ -56,7 +56,7 @@ export function registerPropsTool(app, shell, manager, gizmo, thumbs) {
         haptic(12);
         app.commit('aggiungi oggetto');
         if (p.hold) toast(`${p.label} nella mano ${SIDE_LABEL[p.hold.side]} di ${p.hold.ch.name}`);
-        else if (p.isHand && ch) toast(`${ch.name} ha già le mani occupate: ${p.label.toLowerCase()} appoggiato a terra`);
+        else if (p.isHand && !p.type.hand.carry && ch) toast(`${ch.name} ha già le mani occupate: ${p.label.toLowerCase()} appoggiato a terra`);
       }
 
       async function addPreset(preset) {

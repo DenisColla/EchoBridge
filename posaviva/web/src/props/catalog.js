@@ -538,6 +538,73 @@ for (const [baseId, id, label, defaults, extra = {}] of VARIANTS) {
   PROP_TYPES.splice(j, 0, v);
 }
 
+// ---------------------------------------------------------------------------- carry
+// Small realistic objects a character can pick up ("Prendi" in the long-press menu of
+// the 3D view, "Attacca alla mano" in Oggetti). Their grip comes from the model size
+// (model space: origin on the floor at the footprint centre, +Y up). hand.carry tells
+// how the object is held:
+//   'up'   the fist closes around the body at a height (vases, bottles, fruit, statuettes)
+//   'long' a handle along +Y gripped low (tools, weapons, bats, brooms)
+//   'top'  hanging from a top handle (baskets, buckets, lanterns, jerry cans, toolboxes)
+//   'x'/'z' an object lying along x / z, held around its middle
+// hand.grip(params, out) -> Matrix4 from model space to grip space (the fist at the
+// grip point; see Prop.updatePivot). A carried object is never put straight into a
+// hand when added from the library (add() leaves it on the floor).
+const CARRY = {
+  ph_ceramic_vase_01: ['up', 0.45], ph_ceramic_vase_02: ['up', 0.45], ph_ceramic_vase_03: ['up', 0.4], ph_ceramic_vase_04: ['up', 0.45],
+  ph_antique_ceramic_vase_01: ['up', 0.45], ph_brass_vase_01: ['up', 0.4], ph_brass_vase_02: ['up', 0.45], ph_planter_pot_clay: ['up', 0.5],
+  ph_potted_plant_04: ['up', 0.3], ph_marble_bust_01: ['up', 0.35], ph_horse_statue_01: ['up', 0.4], ph_carved_wooden_elephant: ['up', 0.5],
+  ph_concrete_cat_statue: ['up', 0.4], ph_garden_gnome: ['up', 0.45], ph_mantel_clock_01: ['up', 0.5], ph_seadogs_compass: ['up', 0.5],
+  ph_standing_picture_frame_01: ['up', 0.5], ph_standing_picture_frame_02: ['up', 0.5], ph_alarm_clock_01: ['up', 0.4],
+  ph_wooden_candlestick: ['up', 0.3], ph_vintage_oil_lamp: ['up', 0.25], ph_lightbulb_01: ['up', 0.5], ph_vintage_electric_kettle: ['up', 0.5],
+  ph_rubber_duck_toy: ['up', 0.4], ph_bleach_bottle: ['up', 0.5], ph_multi_cleaner_bottle: ['up', 0.45], ph_portable_cassette_player: ['up', 0.5],
+  ph_cassette_player: ['up', 0.5], ph_vintage_video_camera: ['up', 0.4], ph_vintage_microscope: ['up', 0.3], ph_bunsen_burner: ['up', 0.3],
+  ph_food_apple_01: ['up', 0.5], ph_lemon: ['up', 0.5], ph_food_lime_01: ['up', 0.5], ph_food_avocado_01: ['up', 0.5], ph_food_kiwi_01: ['up', 0.5],
+  ph_food_pomegranate_01: ['up', 0.5], ph_food_pears_asian_01: ['up', 0.4], ph_yellow_onion: ['up', 0.5], ph_sweet_potato: ['up', 0.5],
+  ph_jug_01: ['up', 0.5], ph_metal_jug: ['up', 0.5], ph_wooden_bowl_02: ['up', 0.5], ph_plastic_thermos: ['up', 0.5], ph_russian_food_cans_01: ['up', 0.5],
+  ph_baseball_01: ['up', 0.5], ph_pocket_watch: ['up', 0.5], ph_vintage_lighter: ['up', 0.5], ph_cigarette_pack: ['up', 0.5], ph_kite_shield: ['up', 0.5],
+  ph_croissant: ['x', 0.5], ph_lambis_shell: ['x', 0.5], ph_CheeseBox_01: ['x', 0.5], ph_american_football: ['x', 0.5],
+  ph_vintage_flashlight: ['z', 0.5], ph_binoculars: ['z', 0.5],
+  ph_Lantern_01: ['top'], ph_wooden_lantern_01: ['top'], ph_brass_diya_lantern: ['top'], ph_wicker_basket_01: ['top'], ph_wicker_basket_02: ['top'],
+  ph_wooden_bucket_01: ['top'], ph_metal_jerrycan: ['top'], ph_plastic_jerrycan: ['top'], ph_metal_toolbox: ['top'], ph_boombox: ['top'],
+  ph_korean_fire_extinguisher_01: ['top'], ph_watering_can_metal_01: ['top'], ph_trashbag: ['top'], ph_propane_tank: ['top'], ph_ammo_box: ['top'],
+  ph_cross_pein_hammer: ['long', 0.2], ph_sledgehammer_01: ['long', 0.2], ph_hatchet: ['long', 0.2], ph_wooden_axe: ['long', 0.2],
+  ph_adjustable_wrench: ['long', 0.25], ph_pipe_wrench: ['long', 0.25], ph_pliers: ['long', 0.3], ph_crowbar_01: ['long', 0.25],
+  ph_bolt_cutters_01: ['long', 0.2], ph_magnifying_glass_01: ['long', 0.2], ph_rusted_spade_01: ['long', 0.85], ph_wooden_broom: ['long', 0.65],
+  ph_plastic_broom: ['long', 0.65], ph_plunger: ['long', 0.8], ph_antique_katana_01: ['long', 0.12], ph_wooden_handle_saber: ['long', 0.12],
+  ph_antique_estoc: ['long', 0.1], ph_ornate_medieval_dagger: ['long', 0.15], ph_machete: ['long', 0.15], ph_ornate_medieval_mace: ['long', 0.12],
+  ph_ornate_war_hammer: ['long', 0.12], ph_baseball_bat: ['long', 0.12], ph_Ukulele_01: ['long', 0.7], ph_service_pistol: ['long', 0.3], ph_Drill_01: ['long', 0.3],
+};
+const clampR = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+/** Hand descriptor (see the PROP_TYPES header) of a carried model of size [w, h, d]. */
+export function carryHand(mode, k, [w, h, d]) {
+  const g = new THREE.Matrix4();
+  const R = new THREE.Matrix4();
+  let radius, slide, hang = false;
+  if (mode === 'top') {
+    // handle across the longer horizontal side; the body hangs below it (grip +Z)
+    if (w >= d) R.makeBasis(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0));
+    else R.makeBasis(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0));
+    g.multiplyMatrices(R, new THREE.Matrix4().makeTranslation(0, -(h - 0.015), 0));
+    radius = 0.008; slide = [-0.05, 0.05]; hang = true;
+  } else if (mode === 'x' || mode === 'z') {
+    if (mode === 'x') R.makeBasis(new THREE.Vector3(0, 1, 0), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1));
+    else R.makeBasis(new THREE.Vector3(0, 0, 1), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0));
+    g.multiplyMatrices(R, new THREE.Matrix4().makeTranslation(0, -h / 2, 0));
+    const L = mode === 'x' ? w : d;
+    radius = clampR(Math.min(h, mode === 'x' ? d : w) * 0.45, 0.012, 0.06); slide = [-L / 2, L / 2];
+  } else {
+    g.makeTranslation(0, -k * h, 0);
+    radius = mode === 'long' ? 0.016 : clampR(Math.min(w, d) * 0.45, 0.015, 0.09);
+    slide = [-k * h, (1 - k) * h];
+  }
+  return {
+    carry: mode, radius, wrap: mode === 'top' ? 0.008 : radius, hang,
+    presets: mode === 'top' || mode === 'long' || radius < 0.035 ? ['grip'] : ['cup', 'grip'],
+    rest: () => [0, 0, 0], slide: () => slide, grip: (params, out = new THREE.Matrix4()) => out.copy(g),
+  };
+}
+
 // realistic CC0 models (Poly Haven), loaded on first use (see models.js)
 const MODEL_BASE = './assets/props/';
 const CEIL_Y = 2.7, WALL_Y = 1.5;
@@ -548,8 +615,47 @@ for (const m of PH_MODELS) {
   else if (m.mount === 'wall') { t.mount = 'wall'; t.spawnY = Math.max(0.3, WALL_Y - m.size[1] / 2); }
   // long tools / weapons start lying on the floor (flat side down)
   if (m.lie) t.lieRot = m.size[0] < m.size[2] ? [0, 0, 90] : [-90, 0, 0];
+  const c = CARRY[m.id];
+  if (c) t.hand = carryHand(c[0], c[1], m.size);
   PROP_TYPES.push(t);
 }
+
+/**
+ * Explicit affordances (what a character can do with a type from the long-press menu,
+ * see props/actions.js), for types whose id / category does not tell. Any type may
+ * also carry its own `afford: [...]` (other modules' registered types).
+ *   seat     one can sit on it          sofa     several seats, one can lie along it
+ *   bed      one can lie on it          table    sit at it (a chair is brought) / lean on it
+ *   surface  things can be put on it    wall     one can lean against it
+ *   window   look out of it             floor    sit / lie down on it
+ *   vehicle  lean on it                 nokneel  no "Inginocchiati" (tall or awkward)
+ * 'openable' comes from an 'open' parameter, 'carry' from `hand`.
+ */
+export const AFFORD = {
+  cubo: ['seat', 'surface'], pedana: ['floor', 'surface'], pavimento: ['floor'], colonna: ['wall'], scala: [],
+  wc: ['seat'], panca_pesi: ['seat', 'bed'], biliardo: ['surface', 'table'], pingpong: ['surface', 'table'], lavabo: ['surface'], lavabo_colonna: ['surface'],
+  isola_cucina: ['surface', 'table'], bancone: ['surface', 'table'], cucina: ['surface'], cucina_angolo: ['surface'], cattedra: ['surface', 'table'],
+  postazione: ['surface', 'table'], banchi_aula: ['surface', 'table'], mobile_tv: ['surface'], cassettiera: ['surface'], comodino: ['surface'],
+  scrivania: ['surface', 'table'], scrivania_legno: ['surface', 'table'], schedario: ['surface'], lavatrice: ['surface'],
+  ph_vintage_day_bed: ['sofa', 'bed'], ph_Ottoman_01: ['seat'], ph_wooden_stool_02: [], ph_wooden_crate_01: ['seat', 'surface'], ph_wooden_crate_02: ['seat', 'surface'],
+  ph_wooden_military_crate: ['seat', 'surface'], ph_old_military_crate: ['seat', 'surface'], ph_treasure_chest: ['seat'], ph_wine_barrel_01: ['seat', 'surface'],
+  ph_Barrel_01: ['surface'], ph_barrel_03: ['surface'], ph_Barrel_02: ['surface'], ph_CoffeeCart_01: ['surface'], ph_metal_tool_chest: ['surface'],
+  ph_GothicCommode_01: ['surface'], ph_drawer_cabinet: ['wall'], ph_vintage_wooden_drawer_01: ['surface'], ph_painted_wooden_cabinet: ['surface'],
+  ph_GothicCabinet_01: ['surface'], ph_modern_wooden_cabinet: ['surface'], ph_WoodenTable_03: ['surface'], ph_vintage_grandfather_clock_01: ['wall'],
+  ph_projector_screen: ['wall'], ph_chinese_screen_panels: ['wall'], ph_standing_chalkboard_01: ['wall'],
+  // exteriors and landscapes (registered by their modules)
+  es_panchina: ['seat'], es_muretto: ['seat', 'wall'], es_fermata: ['seat', 'wall'], es_recinzione: ['wall'], es_lampione: ['wall', 'nokneel'],
+  es_palo: ['wall', 'nokneel'], es_semaforo: ['wall', 'nokneel'], es_cartello: ['wall', 'nokneel'], es_cabina: ['wall'], es_edicola: ['wall'],
+  es_cassetta: ['wall'], es_tronco: ['seat'], es_roccia: ['seat'], es_prato: ['floor'], es_piazza: ['floor'], es_vialetto: ['floor'],
+  es_cassonetto: ['wall'], es_transenna: ['wall'], es_fontanella: [], phc_tree_stump_01: ['seat'], phc_tree_stump_02: ['seat'],
+  phc_dead_tree_trunk: ['seat'], phc_dead_tree_trunk_02: ['seat'], phc_boulder_01: ['seat', 'wall'], phc_namaqualand_boulder_03: ['seat', 'wall'],
+  phc_namaqualand_boulder_04: ['seat', 'wall'], phc_namaqualand_boulder_05: ['seat'], phc_rock_07: ['seat'], phc_rock_face_01: ['wall'],
+  phc_rock_face_02: ['wall'], phc_namaqualand_cliff_01: ['wall'], phc_concrete_road_barrier: ['seat', 'wall'], phc_concrete_road_barrier_02: ['seat', 'wall'],
+  phc_utility_box_01: ['wall'], phc_utility_box_02: ['wall'], phc_wooden_picnic_table: ['surface', 'table'], phc_old_tyre: ['seat'],
+  phc_street_lamp_01: ['wall', 'nokneel'], phc_covered_car: ['vehicle', 'wall'],
+  ls_lettino: ['bed', 'seat'], ls_fieno: ['seat', 'wall'], ls_molo: ['floor'], ls_rovina: ['wall', 'seat'], ls_pozzo: ['wall'], ls_fontana: ['seat'],
+  ls_carretto: ['wall'], ls_container: ['wall'], ls_bancarella: ['surface', 'table'], ls_barca: ['seat'], ls_tetto: ['floor'],
+};
 
 /** Swatches of the tint picker of realistic models (white = original colors). */
 export const TINT_COLORS = ['#ffffff', '#f0d9b5', '#d9a07a', '#c0504d', '#7a1f24', '#e3c76a', '#8fb37a', '#6d8fb0', '#5d4e7a', '#8c8c8c'];

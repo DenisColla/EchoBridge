@@ -1,6 +1,6 @@
 // Kitchens: modular kitchen (straight or L) with sink, hob, oven, hood, wall
 // cabinets, fridge column; fridge; kitchen island with stools; microwave.
-import { add, box, boxOn, cylinder, rod, torus, tube, planeXY, range, int, seg, flag, seed, rng, handle, merge, centerParts } from './util.js';
+import { add, box, boxOn, cylinder, rod, torus, tube, planeXY, range, int, seg, flag, seed, rng, handle, merge, centerParts, colorize, hollowBox } from './util.js';
 import { tiles } from '../textures.js';
 
 const TOPS = [['pietra', 'Pietra'], ['legno', 'Legno'], ['bianco', 'Bianco'], ['nero', 'Nero']];
@@ -117,23 +117,61 @@ function cucina(p) {
   return centerParts(parts);
 }
 
+/** Inside of an open fridge compartment (x0..x1, y0..y1, depth d behind the front zf): glass shelves and food. */
+function fridgeInside(parts, x0, x1, y0, y1, zf, d, seedValue) {
+  const r = rng(seedValue), n = Math.max(2, Math.round((y1 - y0) / 0.32));
+  const FOOD = ['#c0504d', '#e8c46a', '#f1f1ee', '#4f6b3a', '#d9822b', '#2f4a6b', '#e3c76a'];
+  for (let k = 0; k <= n; k++) {
+    const y = y0 + ((y1 - y0) * k) / (n + 0.4);
+    if (k) add(parts, 'glass', boxOn(x1 - x0 - 0.01, 0.008, d - 0.06, { x: (x0 + x1) / 2, y, z: zf - d / 2 }));
+    for (let x = x0 + 0.05; x < x1 - 0.06; x += r.range(0.07, 0.13)) {
+      if (r() < 0.25) continue;
+      const tall = r() < 0.4, hh = tall ? r.range(0.14, 0.24) : r.range(0.05, 0.11), z = zf - d * r.range(0.35, 0.7);
+      if (y + hh > y1 - 0.02) continue;
+      add(parts, 'vcGloss', colorize(tall ? cylinder(0.032, 0.026, hh, { x, y: y + 0.008, z, seg: 10 }) : box(0.08, hh, 0.07, { x, y: y + 0.008 + hh / 2, z, r: 0.006, seg: 1 }), r.pick(FOOD)));
+    }
+  }
+}
+
 function frigo(p) {
   const parts = {};
   if (p.style === 'americano') {
-    const W = 0.91, H = 1.78, D = 0.72;
-    add(parts, 'steel', boxOn(W, H, D - 0.04, { z: -0.02, r: 0.012 }));
-    add(parts, 'steel', boxOn(W / 2 - 0.006, H - 0.02, 0.04, { x: -W / 4, y: 0.01, z: D / 2 - 0.02, r: 0.01 }), boxOn(W / 2 - 0.006, H - 0.02, 0.04, { x: W / 4, y: 0.01, z: D / 2 - 0.02, r: 0.01 }));
-    add(parts, 'black', boxOn(0.2, 0.3, 0.01, { x: -W / 4, y: 1.0, z: D / 2 + 0.002, r: 0.01 }));
-    for (const s of [-1, 1]) add(parts, 'chrome', rod([s * 0.03, 0.75, D / 2 + 0.05], [s * 0.03, 1.45, D / 2 + 0.05], 0.011), rod([s * 0.03, 0.8, D / 2], [s * 0.03, 0.8, D / 2 + 0.05], 0.008), rod([s * 0.03, 1.4, D / 2], [s * 0.03, 1.4, D / 2 + 0.05], 0.008));
+    const W = 0.91, H = 1.78, D = 0.72, zf = D / 2 - 0.04;
+    if (p.open) {
+      hollowBox(parts, 'steel', W, H, D - 0.04, { z: -0.02, t: 0.03, inner: 'appliance' });
+      add(parts, 'appliance', boxOn(0.03, H - 0.06, D - 0.1, { y: 0.03, z: -0.05 }));
+      fridgeInside(parts, -W / 2 + 0.03, -0.015, 0.05, H - 0.05, zf, D - 0.1, 3);
+      fridgeInside(parts, 0.015, W / 2 - 0.03, 0.05, H - 0.05, zf, D - 0.1, 4);
+    } else add(parts, 'steel', boxOn(W, H, D - 0.04, { z: -0.02, r: 0.012 }));
+    // two doors hinged on the outer sides, handles in the middle; open: swung out by 100°
+    for (const s of [-1, 1]) {
+      const hingeX = s * W / 2, dp = {};
+      add(dp, 'steel', boxOn(W / 2 - 0.006, H - 0.02, 0.04, { x: -s * W / 4, y: 0.01, z: 0, r: 0.01 }));
+      if (s < 0) add(dp, 'black', boxOn(0.2, 0.3, 0.01, { x: W / 4, y: 1.0, z: 0.022, r: 0.01 }));
+      const hx = s * 0.03 - hingeX;
+      add(dp, 'chrome', rod([hx, 0.75, 0.07], [hx, 1.45, 0.07], 0.011), rod([hx, 0.8, 0.02], [hx, 0.8, 0.07], 0.008), rod([hx, 1.4, 0.02], [hx, 1.4, 0.07], 0.008));
+      merge(parts, dp, { x: hingeX, z: D / 2 - 0.02, ry: p.open ? s * 100 : 0 });
+    }
     return parts;
   }
   const W = 0.6, H = p.style === 'retro' ? 1.55 : 1.85, D = 0.65;
   const role = p.style === 'retro' ? 'main' : 'appliance';
-  add(parts, role, boxOn(W, H, D - 0.04, { z: -0.02, r: p.style === 'retro' ? 0.07 : 0.012 }));
-  add(parts, role, boxOn(W - 0.008, H * 0.66, 0.045, { y: H * 0.33, z: D / 2 - 0.02, r: p.style === 'retro' ? 0.05 : 0.01 }), boxOn(W - 0.008, H * 0.33 - 0.01, 0.045, { y: 0.005, z: D / 2 - 0.02, r: p.style === 'retro' ? 0.05 : 0.01 }));
+  const rr = p.style === 'retro' ? 0.05 : 0.01;
+  if (p.open) {
+    // upper (fridge) compartment hollow, freezer below closed
+    add(parts, role, boxOn(W, H * 0.33, D - 0.04, { z: -0.02, r: p.style === 'retro' ? 0.07 : 0.012 }));
+    hollowBox(parts, role, W, H * 0.67, D - 0.04, { y: H * 0.33, z: -0.02, t: 0.035, inner: 'appliance' });
+    fridgeInside(parts, -W / 2 + 0.035, W / 2 - 0.035, H * 0.33 + 0.035, H - 0.04, D / 2 - 0.04, D - 0.1, 2);
+  } else add(parts, role, boxOn(W, H, D - 0.04, { z: -0.02, r: p.style === 'retro' ? 0.07 : 0.012 }));
+  add(parts, role, boxOn(W - 0.008, H * 0.33 - 0.01, 0.045, { y: 0.005, z: D / 2 - 0.02, r: rr }));
   const hx = W / 2 - 0.05;
-  add(parts, 'chrome', rod([hx, H * 0.4, D / 2 + 0.06], [hx, H * 0.62, D / 2 + 0.06], 0.01), rod([hx, H * 0.4, D / 2], [hx, H * 0.4, D / 2 + 0.06], 0.008), rod([hx, H * 0.62, D / 2], [hx, H * 0.62, D / 2 + 0.06], 0.008),
-    rod([hx, H * 0.2, D / 2 + 0.06], [hx, H * 0.3, D / 2 + 0.06], 0.01), rod([hx, H * 0.2, D / 2], [hx, H * 0.2, D / 2 + 0.06], 0.008), rod([hx, H * 0.3, D / 2], [hx, H * 0.3, D / 2 + 0.06], 0.008));
+  add(parts, 'chrome', rod([hx, H * 0.2, D / 2 + 0.06], [hx, H * 0.3, D / 2 + 0.06], 0.01), rod([hx, H * 0.2, D / 2], [hx, H * 0.2, D / 2 + 0.06], 0.008), rod([hx, H * 0.3, D / 2], [hx, H * 0.3, D / 2 + 0.06], 0.008));
+  // upper door hinged on the left (handle on the right); open: swung out by 100°
+  const dp = {}, hingeX = -W / 2, lx = hx - hingeX;
+  add(dp, role, boxOn(W - 0.008, H * 0.66, 0.045, { x: W / 2, y: H * 0.33, z: 0, r: rr }));
+  add(dp, 'chrome', rod([lx, H * 0.4, 0.06], [lx, H * 0.62, 0.06], 0.01), rod([lx, H * 0.4, 0], [lx, H * 0.4, 0.06], 0.008), rod([lx, H * 0.62, 0], [lx, H * 0.62, 0.06], 0.008));
+  if (p.open) for (let k = 0; k < 3; k++) add(dp, 'plasticW', boxOn(W - 0.12, 0.012, 0.09, { x: W / 2, y: H * (0.42 + k * 0.17), z: -0.06 }), boxOn(W - 0.12, 0.05, 0.008, { x: W / 2, y: H * (0.42 + k * 0.17), z: -0.105 }));
+  merge(parts, dp, { x: hingeX, z: D / 2 - 0.02, ry: p.open ? -100 : 0 });
   return parts;
 }
 
@@ -174,7 +212,7 @@ export const KITCHEN_TYPES = [
     seg('handles', 'Maniglie', [['barra', 'Barra'], ['gola', 'Gola']], 'barra'), seg('top', 'Piano', TOPS, 'pietra'),
     seg('tile', 'Piastrelle', [['chiaro', 'Chiare'], ['verde', 'Verdi'], ['scuro', 'Scure']], 'chiaro'), seed(4),
   ], build: cucina },
-  { id: 'frigo', label: 'Frigorifero', cat: 'cucina', sub: 'elettrodomestici', color: '#a5d4c8', tags: 'frigo freezer', params: [seg('style', 'Modello', [['moderno', 'Moderno'], ['americano', 'Americano'], ['retro', 'Rétro']], 'moderno')], build: frigo },
+  { id: 'frigo', label: 'Frigorifero', cat: 'cucina', sub: 'elettrodomestici', color: '#a5d4c8', tags: 'frigo freezer', params: [seg('style', 'Modello', [['moderno', 'Moderno'], ['americano', 'Americano'], ['retro', 'Rétro']], 'moderno'), flag('open', 'Aperto', false)], build: frigo },
   { id: 'isola_cucina', label: 'Isola da cucina', cat: 'cucina', sub: 'mobili', color: '#3b3b40', tags: 'penisola bancone colazione sgabelli', params: [range('length', 'Lunghezza', 1.2, 3.6, 0.1, 2.0), seg('top', 'Piano', TOPS, 'pietra'), flag('stools', 'Sgabelli', true)], build: isola },
   { id: 'microonde', label: 'Forno a microonde', cat: 'cucina', sub: 'elettrodomestici', color: '#e8e4dc', tags: 'microonde forno', params: [], build: microonde },
 ];

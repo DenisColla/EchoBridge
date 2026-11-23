@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { box, boxOn, cylinder, lathe, rod, sphere, colorize } from '../geo.js';
 import { BOOK_COLORS } from '../textures.js';
+import { rng } from '../params.js';
 
 export * from '../geo.js';
 export * from '../params.js';
@@ -95,6 +96,58 @@ export function handle(parts, x, y, z, len = 0.12, vertical = false, role = 'met
 /** Knob handle. */
 export function knob(parts, x, y, z, role = 'metal') {
   add(parts, role, cylinder(0.008, 0.014, 0.025, { x, y, z, rx: 90, seg: 12, bevel: 0.004 }));
+}
+
+// ---------------------------------------------------------------- open doors and drawers
+// ("Apri" in the long-press menu: wardrobes, chests of drawers, fridges, filing cabinets)
+export const CLOTH_COLORS = ['#2f4a6b', '#7a1f24', '#e8e4dc', '#3b3b40', '#c9a227', '#4f6b3a', '#9b9a97', '#c0504d', '#5d4e7a', '#d9cbb3'];
+
+/**
+ * Hollow carcass open at the front (+Z): back, sides, bottom and top panels of
+ * thickness t, outer size w × h × d, bottom at y, centred on (x, z).
+ */
+export function hollowBox(parts, role, w, h, d, { x = 0, y = 0, z = 0, t = 0.02, inner = role } = {}) {
+  add(parts, inner, boxOn(w - 2 * t, h - 2 * t, t, { x, y: y + t, z: z - d / 2 + t / 2, r: 0.002 }));
+  add(parts, role,
+    boxOn(t, h, d, { x: x - w / 2 + t / 2, y, z, r: 0.002 }), boxOn(t, h, d, { x: x + w / 2 - t / 2, y, z, r: 0.002 }),
+    boxOn(w - 2 * t, t, d, { x, y, z, r: 0.002 }), boxOn(w - 2 * t, t, d, { x, y: y + h - t, z, r: 0.002 }));
+}
+
+/** Clothes hanging from a rod at height y across x0..x1 (depth d, centred on z), with the rod. */
+export function hangingClothes(parts, x0, x1, y, z, d, seedValue = 7) {
+  const r = rng(seedValue);
+  add(parts, 'metal', rod([x0, y, z], [x1, y, z], 0.01, { seg: 8 }));
+  for (let x = x0 + 0.06; x < x1 - 0.03; x += r.range(0.055, 0.09)) {
+    const len = r.range(0.55, 1.05), th = r.range(0.025, 0.05), dd = d * r.range(0.62, 0.86);
+    add(parts, 'cushions', colorize(box(th, len, dd, { x, y: y - 0.04 - len / 2, z, rz: r.range(-3, 3), r: 0.012, seg: 1 }), r.pick(CLOTH_COLORS)));
+    add(parts, 'metal', rod([x, y - 0.045, z - dd * 0.4], [x, y - 0.045, z + dd * 0.4], 0.004, { seg: 5 }));
+  }
+}
+
+/**
+ * The visible part of a pulled-out drawer: sides and bottom from the cabinet front zf
+ * to zf + pull (the front itself is drawn by the caller, moved by pull), plus a few
+ * things inside (folded clothes, papers…). Drawer opening x ± w/2, y .. y + h.
+ */
+export function pulledDrawer(parts, role, x, y, w, h, zf, pull, fill = 'clothes', seedValue = 5) {
+  const t = 0.012, sh = Math.max(0.04, h - 0.04), zc = zf + pull / 2 - 0.01;
+  add(parts, role,
+    boxOn(t, sh, pull + 0.02, { x: x - w / 2 + 0.025, y: y + 0.012, z: zc }), boxOn(t, sh, pull + 0.02, { x: x + w / 2 - 0.025, y: y + 0.012, z: zc }),
+    boxOn(w - 0.05, t, pull + 0.02, { x, y: y + 0.012, z: zc }));
+  const r = rng(seedValue), y0 = y + 0.024, inner = w - 0.08;
+  if (fill === 'papers') {
+    for (let i = 0; i < 6; i++) add(parts, i % 2 ? 'paper' : 'cardboard', box(inner * 0.9, Math.min(sh - 0.02, 0.22), 0.006, { x, y: y0 + Math.min(sh - 0.02, 0.22) / 2, z: zf + 0.03 + i * (pull - 0.06) / 6, rx: r.range(-6, 6) }));
+    return;
+  }
+  for (let k = 0, n = Math.max(1, Math.floor(inner / 0.16)); k < n; k++) {
+    const cx = x - inner / 2 + (k + 0.5) * (inner / n);
+    let yy = y0;
+    for (let j = 0, m = r.int(1, 3); j < m && yy < y + sh - 0.03; j++) {
+      const th = r.range(0.025, 0.045);
+      add(parts, 'cushions', colorize(box(inner / n - 0.02, th, Math.max(0.06, pull - 0.06), { x: cx, y: yy + th / 2, z: zf + pull / 2, ry: r.range(-3, 3), r: 0.008, seg: 1 }), r.pick(CLOTH_COLORS)));
+      yy += th;
+    }
+  }
 }
 
 export { boxOn, box };

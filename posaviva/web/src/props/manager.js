@@ -108,7 +108,8 @@ export class PropManager extends THREE.EventDispatcher {
     if (!type) return null;
     const p = this.create({ type: typeId, params: defaultParams(type), color: type.color });
     let held = false;
-    if (type.hand && near) {
+    // (carried objects such as vases or tools stay on the floor: "Prendi" picks them up)
+    if (type.hand && !type.hand.carry && near) {
       const side = this.freeHand(near);
       if (side) held = this.attach(p, near, side, { pose: true, emit: false });
     }

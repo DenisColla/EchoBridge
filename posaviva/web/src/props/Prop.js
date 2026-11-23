@@ -13,7 +13,7 @@ import { loadModel, partSpec } from './models.js';
 
 const DEG = Math.PI / 180;
 let _uid = 0;
-const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _m3 = new THREE.Matrix4(), _mFreeInv = new THREE.Matrix4();
+const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _m3 = new THREE.Matrix4(), _mFreeInv = new THREE.Matrix4(), _mGrip = new THREE.Matrix4();
 const _qd = new THREE.Quaternion();
 const _q = new THREE.Quaternion(), _e = new THREE.Euler(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
 const _corners = Array.from({ length: 8 }, () => new THREE.Vector3());
@@ -203,6 +203,8 @@ export class Prop {
       if (g.twist || this.hangTwist) m.multiply(_m.makeRotationY(g.twist + this.hangTwist));
       m.multiply(_m.makeScale(s, s, s));
       if (g.slide) m.multiply(_m.makeTranslation(0, -g.slide, 0));
+      // carried models (catalog carryHand): model space -> grip space
+      if (hand.grip) m.multiply(hand.grip(this.params, _mGrip));
     } else if (hand) {
       // rest orientation, then center the footprint on the origin and sit on y = 0
       const [rx, ry, rz] = hand.rest(this.params);

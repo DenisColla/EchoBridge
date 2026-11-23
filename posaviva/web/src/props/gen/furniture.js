@@ -3,7 +3,7 @@
 // iron / bunk, made or unmade), desks with clutter, round tables, coffee
 // tables, nightstands, classroom desk sets, teacher's desk.
 import * as THREE from 'three';
-import { add, box, boxOn, cylinder, lathe, rod, sphere, torus, tube, range, int, seg, flag, seed, rng, handle, knob, colorize, centerParts, merge } from './util.js';
+import { add, box, boxOn, cylinder, lathe, rod, sphere, torus, tube, range, int, seg, flag, seed, rng, handle, knob, colorize, centerParts, merge, pulledDrawer } from './util.js';
 import { BOOK_COLORS, screen } from '../textures.js';
 
 // ------------------------------------------------------------------------------------------ sofas
@@ -347,8 +347,11 @@ function comodino(p) {
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(parts, 'main', rod([sx * (W / 2 - 0.05), 0, sz * (D / 2 - 0.05)], [sx * (W / 2 - 0.06), 0.12, sz * (D / 2 - 0.06)], 0.014, { r2: 0.018, seg: 10 }));
   for (let i = 0; i < p.drawers; i++) {
     const h = (H - 0.14) / p.drawers;
-    add(parts, 'mainShade', boxOn(W - 0.03, h - 0.012, 0.015, { y: 0.13 + i * h, z: D / 2, r: 0.003 }));
-    knob(parts, 0, 0.13 + i * h + h / 2, D / 2 + 0.012, 'gold');
+    // open: the top drawer pulled out (a book and folded clothes inside)
+    const pull = p.open && i === p.drawers - 1 ? 0.22 : 0, z = D / 2 + pull;
+    if (pull) pulledDrawer(parts, 'mainShade', 0, 0.13 + i * h, W - 0.03, h - 0.012, D / 2, pull, 'clothes', 9);
+    add(parts, 'mainShade', boxOn(W - 0.03, h - 0.012, 0.015, { y: 0.13 + i * h, z, r: 0.003 }));
+    knob(parts, 0, 0.13 + i * h + h / 2, z + 0.012, 'gold');
   }
   if (p.lamp) {
     add(parts, 'ceramic', lathe([[0, 0], [0.06, 0], [0.075, 0.06], [0.06, 0.16], [0.02, 0.2], [0.015, 0.25], [0, 0.25]], { x: -0.08, y: H, z: -0.03, seg: 20 }));
@@ -398,7 +401,7 @@ export const FURNITURE_TYPES = [
   { id: 'tavolino', label: 'Tavolino da salotto', cat: 'tavoli', sub: 'salotto', color: '#8a5a3b', tags: 'caffè soggiorno', params: [
     seg('style', 'Stile', [['legno', 'Legno'], ['vetro', 'Vetro'], ['tondo', 'Tondo']], 'legno'), range('width', 'Larghezza', 0.5, 1.6, 0.05, 1.1), flag('decor', 'Oggetti sopra', true), seed(2),
   ], build: tavolino },
-  { id: 'comodino', label: 'Comodino', cat: 'tavoli', sub: 'comodini', color: '#8a5a3b', tags: 'camera letto notte', params: [int('drawers', 'Cassetti', 1, 3, 2), flag('lamp', 'Abat-jour', true)], build: comodino },
+  { id: 'comodino', label: 'Comodino', cat: 'tavoli', sub: 'comodini', color: '#8a5a3b', tags: 'camera letto notte', params: [int('drawers', 'Cassetti', 1, 3, 2), flag('lamp', 'Abat-jour', true), flag('open', 'Cassetto aperto', false)], build: comodino },
   { id: 'culla', label: 'Culla', cat: 'letti', sub: 'letti', color: '#e8e4dc', tags: 'neonato bambino lettino', params: [flag('toy', 'Peluche', true)], build: culla },
   { id: 'banchi_aula', label: 'Banchi di scuola', cat: 'ufficio', sub: 'scuola', color: '#4f6b3a', tags: 'aula classe scuola studenti', params: [int('rows', 'File', 1, 5, 3), int('cols', 'Colonne', 1, 4, 2)], build: banchiAula },
   { id: 'cattedra', label: 'Cattedra', cat: 'ufficio', sub: 'scuola', color: '#8a5a3b', tags: 'insegnante professore aula', params: [flag('platform', 'Pedana', true), seed(3)], build: cattedra },
