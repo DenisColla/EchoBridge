@@ -29,6 +29,16 @@
 //   leg.sexShift         {F: dt}: Vestibilità offset of the leg cut for a sex
 //   bumpSigma            radius (m) of the bump removal on the fabric (molded cups: larger)
 // garment fields: hemLift (m: tops rise with raised arms), replacesBra (sports bra), foldFade
+//
+// fabric and tailoring (fabrics.js, assemble.js atlasLayout, render/materials.js cloth):
+//   fabric, trimFabric   FABRICS key of the garment and of its bands (default: rib on
+//                        knits, else the garment's own cloth)
+//   details              detail drawing (fabrics.js DRAW: seams, pockets, plackets...)
+//   atlas                {t, arm, leg: body coordinate ranges of the atlas panels, c:
+//                        torso circumference (skirts), legCut, armCut} ; detailSize (px)
+//   thread               thread colour (contrast stitching); default: a tone of the colour
+//   stitch               {hem, top}: [d1, d2, width, stitch length] (m) stitch lines along
+//                        the bottom / top (waist, neck) edges, drawn by the cloth shader
 import { PART, NPART } from './body.js';
 
 export const CATEGORIES = [
@@ -185,6 +195,7 @@ export const GARMENTS = [
     folds: [backSlack(0.002), { type: 'rings', region: 'arm', near: ['sleeveL', 'sleeveR'], width: 0.05, amp: 0.0012, wl: 0.03 }],
     weightBlend: hemToPelvis(0.95),
     details: 'tshirt',
+    atlas: { t: [0.2, 5.7], arm: [-0.3, 0.75] }, stitch: { hem: [0.014, 0.02, 0.0011, 0.0042], top: [0.021, 0, 0.0011, 0.0042] },
   },
   {
     id: 'tank', label: 'Canotta', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'tank',
@@ -205,6 +216,7 @@ export const GARMENTS = [
     folds: [backSlack(0.0015)],
     weightBlend: hemToPelvis(0.95),
     details: 'tank',
+    atlas: { t: [0.0, 5.7] }, stitch: { hem: [0.009, 0, 0.0011, 0.0042], top: [0.009, 0, 0.0011, 0.0042] },
   },
   {
     id: 'longsleeve', label: 'Maglia a maniche lunghe', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'longsleeve',
@@ -222,6 +234,7 @@ export const GARMENTS = [
     folds: [backSlack(0.002), cuffBunch(['sleeveL', 'sleeveR'], 0.0032, 0.12, 0.03)],
     weightBlend: hemToPelvis(0.95),
     details: 'plainKnit',
+    atlas: { t: [0.0, 5.7], arm: [-0.3, 2.1] }, stitch: { hem: [0.02, 0, 0.0011, 0.0042], top: [0.02, 0, 0.0011, 0.0042] },
   },
   {
     id: 'sweatshirt', label: 'Felpa', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'sweatshirt',
@@ -238,6 +251,7 @@ export const GARMENTS = [
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.006, 0.16, 0.042), { type: 'rings', region: 'torso', near: 'hem', width: 0.13, amp: 0.004, wl: 0.05 }],
     weightBlend: hemToPelvis(0.95),
     details: 'sweatshirt',
+    atlas: { t: [-0.3, 5.7], arm: [-0.3, 2.1] }, stitch: { hem: [0.064, 0, 0.0013, 0.0045], top: [0.026, 0, 0.0013, 0.0045] },
   },
   {
     id: 'trackjacket', label: 'Felpa con zip', cat: 'top', slot: 'outer', layer: 4, styles: ['sport', 'casual'], icon: 'trackjacket',
@@ -255,6 +269,7 @@ export const GARMENTS = [
     hardware: { zipper: true },
     weightBlend: hemToPelvis(0.95),
     details: 'trackjacket',
+    atlas: { t: [-0.3, 5.7], arm: [-0.3, 2.1] }, thread: '#e9e9ea', stitch: { hem: [0.054, 0, 0.0011, 0.0042], top: [0.006, 0, 0.0011, 0.0042] },
   },
   {
     id: 'shirt', label: 'Camicia', cat: 'top', slot: 'top', layer: 1, styles: ['formal', 'casual'], icon: 'shirt',
@@ -282,6 +297,7 @@ export const GARMENTS = [
     hardware: { shirtButtons: true, placket: 0.026 },
     weightBlend: hemToPelvis(0.8),
     details: 'shirt',
+    atlas: { t: [-0.8, 5.7], arm: [-0.3, 2.1] }, stitch: { hem: [0.006, 0, 0.0009, 0.0032], top: [0.006, 0, 0.0009, 0.0032] },
   },
   {
     id: 'blazer', label: 'Giacca / blazer', cat: 'top', slot: 'outer', layer: 4, styles: ['formal'], icon: 'blazer',
@@ -312,6 +328,7 @@ export const GARMENTS = [
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.004, 0.12, 0.04)],
     hardware: { blazerButtons: BLAZER_FRONT, sleeveButtons: 3 },
     details: 'blazer',
+    atlas: { t: [-0.8, 5.7], arm: [-0.3, 2.05] }, stitch: { hem: [0.006, 0, 0.0008, 0.0045] },
   },
   {
     id: 'sporttop', label: 'Top sportivo', cat: 'top', slot: 'top', layer: 3, styles: ['sport'], sex: 'F', icon: 'sporttop',
@@ -334,6 +351,7 @@ export const GARMENTS = [
     fit: { thickness: 0.002, ease: [0.0, 0.006], loose: [0, 0.1], bridge: 26, smooth: 20, bridgeSlope: 0.9, hull: 1, membrane: 1, contact: 0.3 },
     wrinkle: { k: 0.2, wl: 0.035 },
     details: 'sporttop',
+    atlas: { t: [2.0, 5.5] }, stitch: { hem: [0.006, 0.03, 0.0011, 0.0042] },
   },
 
   // ------------------------------------------------------------------ bottoms
@@ -357,6 +375,7 @@ export const GARMENTS = [
     folds: [ankleStack(['legL', 'legR'], 0.0045, 0.12, 0.045)],
     hardware: { jeansButton: true },
     details: 'jeans',
+    atlas: { t: [-0.8, 2.0], leg: [-0.3, 2.1] }, thread: '#c98a3c', stitch: { hem: [0.015, 0, 0.0014, 0.0045], top: [0.004, 0.034, 0.0014, 0.0045] },
   },
   {
     id: 'trousers', label: 'Pantaloni eleganti', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['formal'], icon: 'trousers',
@@ -377,6 +396,7 @@ export const GARMENTS = [
       ankleStack(['legL', 'legR'], 0.004, 0.1, 0.05),
     ],
     details: 'trousers',
+    atlas: { t: [-0.8, 2.2], leg: [-0.3, 2.15] }, stitch: { hem: [0, 0, 0.001, 0.004], top: [0.004, 0.032, 0.0009, 0.0042] },
   },
   {
     id: 'sweatpants', label: 'Pantaloni della tuta', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['sport', 'casual'], icon: 'sweatpants',
@@ -393,6 +413,7 @@ export const GARMENTS = [
     wrinkle: { k: 1.0, wl: 0.07, wlLeg: 0.052, kt: 0.25 },
     folds: [ankleStack(['legL', 'legR'], 0.007, 0.17, 0.045)],
     details: 'sweatpants',
+    atlas: { t: [-0.8, 2.1], leg: [-0.3, 2.1] }, stitch: { hem: [0.064, 0, 0.0013, 0.0045], top: [0.049, 0, 0.0013, 0.0045] },
   },
   {
     id: 'cargo', label: 'Pantaloni cargo', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'sport'], icon: 'cargo',
@@ -412,6 +433,7 @@ export const GARMENTS = [
       { type: 'bump', region: 'leg', amp: 0.006, sector: [0, 0.5], sRange: [0.21, 0.37] },
     ],
     details: 'cargo',
+    atlas: { t: [-0.8, 2.0], leg: [-0.3, 2.1] }, stitch: { hem: [0.012, 0.018, 0.0013, 0.0045], top: [0.004, 0.036, 0.0013, 0.0045] },
   },
   {
     id: 'shorts', label: 'Shorts', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'sport'], icon: 'shorts',
@@ -426,6 +448,7 @@ export const GARMENTS = [
     },
     wrinkle: { k: 0.8, wl: 0.055 },
     details: 'shorts',
+    atlas: { t: [-0.8, 2.0], leg: [-0.3, 0.8] }, stitch: { hem: [0.02, 0, 0.0011, 0.0042], top: [0.004, 0.032, 0.0011, 0.0042] },
   },
   {
     id: 'leggings', label: 'Leggings', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['sport', 'casual'], icon: 'leggings',
@@ -436,6 +459,7 @@ export const GARMENTS = [
     fit: { thickness: 0.0014, ease: [0.0, 0.004], loose: [0, 0.05], bridge: 8, bridgeSlope: 2, smooth: 4, seatBridge: [0.5, 0.7] },
     wrinkle: { k: 0.3, wl: 0.03 },
     details: 'leggings',
+    atlas: { t: [-0.8, 2.4], leg: [-0.3, 2.1] }, stitch: { hem: [0.012, 0, 0.0011, 0.0042], top: [0.006, 0.038, 0.0011, 0.0042] },
   },
   {
     id: 'miniskirt', label: 'Gonna corta', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual'], icon: 'miniskirt', kind: 'skirt',
@@ -443,7 +467,8 @@ export const GARMENTS = [
     skirt: (bi, fit) => ({ top: bi.yOfT(1.75), hem: bi.land.hipJoint - 0.33 * (bi.land.hipJoint - bi.joint('lowerleg01.L')[1]) - 0.06, ease: 0.003 + fit * 0.012, flare: 0.25 + fit * 0.35, taper: 0.05, drape: { count: 9, amp: 0.004 + fit * 0.004 }, loose: 0.3, band: 0.035 }),
     edges: { default: { type: 'hem', r: 0.0028 } },
     wrinkle: { k: 0.7, wl: 0.06 },
-    details: 'skirt',
+    details: 'mini',
+    atlas: { t: [-3.0, 2.2], c: 1.05 }, thread: '#c98a3c', stitch: { hem: [0.012, 0, 0.0014, 0.0045], top: [0.004, 0.032, 0.0014, 0.0045] },
   },
   {
     id: 'pencilskirt', label: 'Gonna a tubino', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['formal'], icon: 'pencilskirt', kind: 'skirt',
@@ -452,6 +477,7 @@ export const GARMENTS = [
     edges: { default: { type: 'hem', r: 0.003, depth: 0.03 } },
     wrinkle: { k: 0.6, wl: 0.06 },
     details: 'pencil',
+    atlas: { t: [-5.0, 2.4], c: 1.0 }, stitch: { hem: [0, 0, 0.001, 0.004], top: [0.004, 0.026, 0.0009, 0.0042] },
   },
   {
     id: 'flaredskirt', label: 'Gonna svasata midi', cat: 'bottom', slot: 'bottom', layer: 2, styles: ['casual', 'formal'], icon: 'flaredskirt', kind: 'skirt',
@@ -460,6 +486,7 @@ export const GARMENTS = [
     edges: { default: { type: 'hem', r: 0.0022 } },
     wrinkle: { k: 0.8, wl: 0.08 },
     details: 'skirt',
+    atlas: { t: [-7.0, 2.4], c: 1.5 }, stitch: { hem: [0.008, 0, 0.0009, 0.0042], top: [0.004, 0.026, 0.0009, 0.0042] },
   },
 
   // ------------------------------------------------------------------ full
@@ -489,6 +516,7 @@ export const GARMENTS = [
       },
     ],
     details: 'dress',
+    atlas: { t: [-5.5, 5.6], c: 1.25 }, stitch: { hem: [0.012, 0, 0.0009, 0.0042], top: [0.008, 0, 0.0009, 0.0042] },
   },
 
   // ------------------------------------------------------------------ shoes
@@ -501,16 +529,18 @@ export const GARMENTS = [
     subdiv: 0,
     wrinkle: { k: 0.15, wl: 0.03 },
     details: 'sneakers',
+    atlas: { leg: [1.3, 3.05] }, detailSize: 512, stitch: { hem: [0.005, 0, 0.0011, 0.0042] },
   },
   {
     id: 'dressshoes', label: 'Scarpe eleganti', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['formal'], icon: 'dressshoes',
-    fabric: 'leather', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
+    fabric: 'calf', color: '#1b1b1c', palette: PAL.shoes, sole: { color: '#3a2a20', top: 0.014, below: 0.005, welt: 0.004 },
     mask: (k) => [lowerLegs(k, 2.0, 0.6), k.only('feetonly', ['legL', 'footL', 'legR', 'footR'], 0.5), instepOpening(k)],
     edges: { default: { type: 'hem', r: 0.0022, depth: 0.01 } },
     fit: { thickness: 0.0025, ease: [0.002, 0.006], loose: [0, 0], bridge: 34, wSmooth: 4, wSmoothMin: 1, smooth: 24, offset: toeBox(0.006, 0.002, 0.012), finalSmooth: 10, envelope: 1 },
     subdiv: 0,
     wrinkle: { k: 0.1, wl: 0.03 },
     details: 'dressshoes',
+    atlas: { leg: [1.3, 3.05] }, detailSize: 512, stitch: { hem: [0.004, 0, 0.0008, 0.0042] },
   },
   {
     id: 'boots', label: 'Stivali / anfibi', cat: 'shoes', slot: 'shoes', layer: 1, styles: ['casual', 'sport'], icon: 'boots',
@@ -522,6 +552,7 @@ export const GARMENTS = [
     subdiv: 0,
     wrinkle: { k: 0.25, wl: 0.045 },
     details: 'boots',
+    atlas: { leg: [1.2, 3.05] }, detailSize: 512, thread: '#d6c08c', stitch: { hem: [0.006, 0.012, 0.0014, 0.0045] },
   },
 
   // ------------------------------------------------------------------ socks & underwear
@@ -535,6 +566,7 @@ export const GARMENTS = [
     subdiv: 0,
     wrinkle: { k: 0.35, wl: 0.03 },
     details: 'socks',
+    atlas: { leg: [1.0, 3.05] }, detailSize: 512, stitch: { hem: [0, 0, 0.001, 0.004] },
   },
   {
     id: 'underwear', label: 'Intimo', cat: 'under', slot: 'underwear', layer: 0, styles: ['casual', 'sport', 'formal'], icon: 'underwear',
@@ -579,6 +611,7 @@ export const GARMENTS = [
       ],
     },
     details: 'underwear',
+    atlas: { t: [-0.8, 3.8] }, detailSize: 512, stitch: { hem: [0.006, 0, 0.0011, 0.0042], top: [0.004, 0, 0.0011, 0.0042] },
   },
 ];
 
