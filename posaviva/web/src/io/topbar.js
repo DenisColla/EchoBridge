@@ -99,6 +99,8 @@ export class TopBar {
       { separator: true },
       { id: 'png', label: 'Esporta immagine PNG', icon: 'image', onClick: () => a.exportImage(false) },
       { id: 'share', label: 'Condividi immagine', icon: 'share', onClick: () => a.exportImage(true) },
+      // the top-bar button hides when the bar is narrow (portrait tablet with the panel open)
+      this.ctx.shell?.setCleanView ? { id: 'clean', label: 'Vista pulita', icon: 'cleanView', hint: 'Solo la scena, senza comandi', onClick: () => this.ctx.shell.setCleanView(true) } : null,
       { separator: true },
       { id: 'export', label: 'Esporta file scena (.json)', icon: 'download', onClick: a.exportSceneFile },
       { id: 'import', label: 'Importa file scena', icon: 'upload', onClick: a.importSceneFile },

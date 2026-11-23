@@ -11,7 +11,8 @@
   opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; z-index: 4; white-space: nowrap; }
 .pv-focus-back.show { opacity: 1; pointer-events: auto; transform: translateX(-50%); }
 
-.pv-focus-wrap { position: absolute; right: calc(var(--cover-right, 0px) + 14px); bottom: calc(var(--cover-bottom, 0px) + 14px);
+/* placed by the shell's --fab-r / --fab-b (cover + safe area + 14 px); the on-stage shortcuts stack above it */
+.pv-focus-wrap { position: absolute; right: var(--fab-r, calc(var(--cover-right, 0px) + 14px)); bottom: var(--fab-b, calc(var(--cover-bottom, 0px) + 14px));
   width: 48px; height: 48px; z-index: 4; transition: bottom .22s ease, right .22s ease; pointer-events: none !important; }
 .pv-focus-wrap > .pv-focus-fab { pointer-events: auto; }
 .pv-focus-fab { width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(255,255,255,.16); background: rgba(20, 22, 28, .82); color: #fff;

@@ -39,6 +39,8 @@
 .pv-panel-grip span { width: 5px; height: 46px; border-radius: 3px; background: rgba(255, 255, 255, .2); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
   transition: background .2s, height .2s; }
 .pv-panel-grip:hover span, .pv-panel.resizing .pv-panel-grip span { background: var(--accent-hi); height: 64px; }
+/* 280-520 px: the edge ticks and brightens at a preset width or a limit (it snaps to the presets on release) */
+.pv-panel.resizing[data-near]:not([data-near=""]) .pv-panel-grip span { background: #fff; height: 84px; box-shadow: 0 0 0 3px var(--accent-soft); }
 .pv-root.pv-tablet.pv-side .pv-panel-width { display: inline-flex; color: var(--muted); }
 .pv-root.pv-tablet.pv-side .pv-panel-width.off { display: none; }
 .pv-root.pv-tablet .pv-panel-head { min-height: 60px; gap: 4px; padding: calc(var(--safe-top) + 8px) 8px 6px 22px; }
@@ -98,3 +100,12 @@ html.pv-tablet .pv-modal-actions { gap: 10px; margin-top: 20px; }
 html.pv-tablet .pv-modal-actions .pv-btn { min-width: 112px; }
 html.pv-tablet .pv-menu-item { min-height: 52px; font-size: 15.5px; }
 html.pv-tablet .pv-menu-label small { font-size: 13px; }
+
+/* ------------------------------------------------------------------ Vista pulita, on-stage shortcuts */
+/* a narrow top bar (portrait tablet with the panel open) keeps the character chip readable: the
+   Vista pulita button comes back as soon as the bar has room (panel closed, landscape) */
+@container pvtop (max-width: 420px) { html.pv-tablet .pv-clean-btn { display: none; } }
+.pv-root.pv-tablet .pv-clean-exit { width: 50px; height: 50px; top: calc(var(--safe-top) + 14px); right: calc(var(--safe-right) + 14px); }
+html.pv-tablet .pv-env-tile { min-height: 50px; font-size: 14.5px; }
+html.pv-tablet .pv-env-group { min-height: 70px; font-size: 14px; }
+html.pv-tablet .pv-env-item { min-height: 50px; }

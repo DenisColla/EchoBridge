@@ -103,6 +103,10 @@ const P = {
   // (the side panel is on the right: widening moves its edge to the left)
   panelWide: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16M11.5 12h-5m0 0 2-2m-2 2 2 2"/>',
   panelNarrow: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M11.5 12h5m0 0-2-2m2 2-2 2"/>',
+  // Vista pulita (only the 3D view) and the way back; Centra personaggi (figures in a frame)
+  cleanView: '<path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/><path d="M8.5 12s1.4-2.6 3.5-2.6 3.5 2.6 3.5 2.6-1.4 2.6-3.5 2.6-3.5-2.6-3.5-2.6z"/>',
+  cleanExit: '<path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/>',
+  frameAll: '<path d="M3 8V4.5A1.5 1.5 0 0 1 4.5 3H8M16 3h3.5A1.5 1.5 0 0 1 21 4.5V8M21 16v3.5a1.5 1.5 0 0 1-1.5 1.5H16M8 21H4.5A1.5 1.5 0 0 1 3 19.5V16"/><circle cx="9" cy="7.6" r="1.5"/><circle cx="15" cy="7.6" r="1.5"/><path d="M9 9.6v3.8l-1.4 3.6M9 13.4l1.4 3.6M7 11.2l2-.8 2 .8M15 9.6v3.8l-1.4 3.6M15 13.4l1.4 3.6M13 11.2l2-.8 2 .8"/>',
 };
 
 export function icon(name, size = 22) {
