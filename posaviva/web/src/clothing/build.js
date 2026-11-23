@@ -26,6 +26,10 @@ import { hangFit, bridgeSmooth, metricSmooth, enforceOffset, smoothWeights, top4
 import { collideBody } from './collide.js';
 
 const smoothstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+/** Smooth maximum (polynomial, blend width k). */
+const smax = (a, b, k) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.max(a, b) + h * h * k * 0.25; };
+/** Blend width (m) where a neckline meets its rise over the shoulders. */
+const NECK_ROUND = 0.02;
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const PI = Math.PI;
 
@@ -100,7 +104,11 @@ export function maskKit(bi) {
           const ax = Math.abs(x), u = ax / W;
           const fr = smoothstep(-0.03, 0.04, z - zN);
           const d = prof(u, spec.back, spec.backShape || 'round') * (1 - fr) + prof(u, spec.front, spec.shape || 'round') * fr;
-          return yN - d + Math.max(0, ax - W) * 2.5 - y;
+          // over the shoulder the cut rises at 2.5 m/m beyond the half width. The
+          // two parts meet in a smooth curve: the round profile ends vertical at
+          // x = W, and added to the rise it left a hook on each side of the neck
+          // (a tooth of the snapped boundary over the trapezius)
+          return smax(yN - d, yN + (ax - W) * 2.5, NECK_ROUND) - y;
         },
       };
     },

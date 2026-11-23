@@ -212,6 +212,13 @@ export function assemble(pieces, bi, opts = {}) {
       let g = 0;
       if (pc.faceGroup) g = pc.faceGroup(f, vs);
       else if (d.zone && d.zone[vs[0]] + d.zone[vs[1]] + d.zone[vs[2]] + d.zone[vs[3]] > 2) g = 1;
+      // material border through the quad (garment.js isoSplit): per-triangle groups, split on the border
+      const tg = d.triGroups ? d.triGroups(vs) : -1;
+      if (tg >= 0 && tg >> 4 < 2) {
+        if (tg >> 4 === 0) { groupsTris[tg & 3].push(r0, r1, r2); groupsTris[(tg >> 2) & 3].push(r0, r2, r3); } else { groupsTris[tg & 3].push(r0, r1, r3); groupsTris[(tg >> 2) & 3].push(r1, r2, r3); }
+        continue;
+      }
+      if (tg >= 0) g = tg & 3;
       // split along the shorter diagonal
       const a = vs[0] * 3, b = vs[1] * 3, c = vs[2] * 3, e = vs[3] * 3;
       const d02 = (P[a] - P[c]) ** 2 + (P[a + 1] - P[c + 1]) ** 2 + (P[a + 2] - P[c + 2]) ** 2;
@@ -444,6 +451,47 @@ const WEIGHT_INHERIT = 0.85;
 const LAYER_GAP_MIN = 0.0035, LAYER_GAP_MAX = 0.006;
 /** Rings (even) and per-ring falloff of the layer push around each contact. */
 const LAYER_SPREAD = 4, LAYER_FALLOFF = 0.86;
+/** Smoothing passes of the inherited skin weights (no shear between neighbours, see _inheritWeights). */
+const INHERIT_SMOOTH = 3;
+
+/**
+ * Jacobi smoothing of sparse top-4 skin weights over the vertices in `region`
+ * (half own weights, half the neighbours' mean; 4 largest kept, renormalised).
+ */
+const SKIN_MAXB = 32, _bIdx = new Int32Array(SKIN_MAXB), _bW = new Float32Array(SKIN_MAXB);
+/** Adds weight x of bone b to the sparse accumulator (m entries); returns the new count. */
+function addBone(m, b, x) {
+  if (x <= 0) return m;
+  for (let q = 0; q < m; q++) if (_bIdx[q] === b) { _bW[q] += x; return m; }
+  if (m < SKIN_MAXB) { _bIdx[m] = b; _bW[m] = x; m++; }
+  return m;
+}
+function smoothSkinWeights(n, adj, si, sw, region, passes) {
+  const bIdx = _bIdx, bW = _bW;
+  const nsi = new Uint16Array(si.length), nsw = new Float32Array(sw.length);
+  for (let pass = 0; pass < passes; pass++) {
+    nsi.set(si); nsw.set(sw);
+    for (let i = 0; i < n; i++) {
+      if (!region[i]) continue;
+      const d = adj.off[i + 1] - adj.off[i];
+      if (!d) continue;
+      let m = 0;
+      for (let k = 0; k < 4; k++) m = addBone(m, si[i * 4 + k], sw[i * 4 + k] * 0.5);
+      const kn = 0.5 / d;
+      for (let e = adj.off[i]; e < adj.off[i + 1]; e++) { const u = adj.adj[e]; for (let k = 0; k < 4; k++) m = addBone(m, si[u * 4 + k], sw[u * 4 + k] * kn); }
+      let s = 0;
+      for (let k = 0; k < 4; k++) {
+        let bq = -1, bw = 0;
+        for (let q = 0; q < m; q++) if (bW[q] > bw) { bw = bW[q]; bq = q; }
+        nsi[i * 4 + k] = bq >= 0 ? bIdx[bq] : 0; nsw[i * 4 + k] = bw; s += bw;
+        if (bq >= 0) bW[bq] = -1;
+      }
+      s = s || 1;
+      for (let k = 0; k < 4; k++) nsw[i * 4 + k] /= s;
+    }
+    si.set(nsi); sw.set(nsw);
+  }
+}
 
 /** Blended skin matrix (12 floats, column major 3x4) of fine vertex i into out. */
 function blendMatrix(M, si, sw, i, out) {
@@ -995,6 +1043,15 @@ export class GarmentRuntime {
       for (let k = 0; k < 4; k++) sw[i * 4 + k] /= s;
     }
     if (!any) return;
+    // (edges workstream) neighbours may have taken their weights from different
+    // partners below (left thigh / right thigh / pelvis): a hem lying across them
+    // sheared into light and dark teeth as the legs moved. Low-pass the blended
+    // weights over the inheriting region (and one ring around it).
+    {
+      const region = new Uint8Array(n);
+      for (let i = 0; i < n; i++) if (t[i] * WEIGHT_INHERIT >= 0.02) { region[i] = 1; for (let k = adj.off[i]; k < adj.off[i + 1]; k++) region[adj.adj[k]] = 1; }
+      smoothSkinWeights(n, adj, si, sw, region, INHERIT_SMOOTH);
+    }
     // render vertices follow their fine vertex
     const SI = this.geometry.attributes.skinIndex, SW = this.geometry.attributes.skinWeight, rv2v = this.rv2v;
     for (let r = 0; r < rv2v.length; r++) {

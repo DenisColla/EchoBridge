@@ -3,7 +3,7 @@
 // outfit manager needs for layering (occupancy) and skin hiding (coverage).
 import { buildBodyDraftSteps } from './build.js';
 import { buildSkirtDraft, skirtOccupancy, skirtCoverage, ribbon } from './skirt.js';
-import { hemExtras, collarExtras, discExtras, newExtras } from './edges.js';
+import { hemExtras, collarExtras, discExtras, newExtras, ridgeExtras, frontLine } from './edges.js';
 import { assemble, FOLD_GAIN } from './assemble.js';
 import { quadNormals, len2, len3 } from './mesh.js';
 import { referenceSkin } from './wrinkles.js';
@@ -54,6 +54,8 @@ export function* buildGarmentSteps(ctx, def, item) {
     else draft = yield* buildBodyDraftSteps(pctx, pdef, { fit });
     if (!draft) continue;
     yield 'draft';
+    // rib bands / waistbands / cuffs: their border is a smooth line, not the mesh grid
+    if (draft.kind === 'body' && pdef.bands) bandSplit(draft, pdef.bands);
     draft.N = quadNormals(draft.nf, draft.quads, draft.P);
     // enveloped parts (shoes, socks) keep body-derived folds in their toe gaps:
     // a smoothed normal field gives them one coherent outward direction
@@ -71,7 +73,8 @@ export function* buildGarmentSteps(ctx, def, item) {
     hardware(draft, pdef, bi, extras);
     if (pdef.straps && !ctx.noStraps) extras.push(...straps(bi, topo));
     let faceGroup = null;
-    if (pdef.sole) { levelSoleLine(draft, pdef.sole); faceGroup = soleGroups(draft, pdef.sole); }
+    // sole / upper border: a clean horizontal line (iso-line split), not the faces' staircase
+    if (pdef.sole) soleSplit(draft, pdef.sole);
     pieces.push({ draft, extras, wrinkle: pdef.wrinkle, folds: pdef.folds, faceGroup, ampScale: foldFade(draft, pdef.foldFade) });
     // layering for the next part / garment
     if (draft.kind === 'skirt') {
@@ -226,16 +229,25 @@ function hardware(draft, pdef, bi, extras) {
     }
     return best;
   };
+  // raised bands lying on the garment (main fabric): shirt placket, jacket front edge
+  const band = newExtras(0);
   if (hw.shirtButtons) {
     const top = bi.land.neck - 0.085, bottom = bi.yOfT(0.3);
-    for (let y = top; y > bottom; y -= 0.085) { const v = frontVertex(y); if (v >= 0) discExtras(ex, draft, v, draft.N, 0.0052, 0.0018); }
+    // the button placket: a band 2.6 cm wide down the centre front, buttons on it
+    if (hw.placket) ridgeExtras(band, draft, draft.N, frontLine(draft, 0, bi.land.neckPoint[1] - 0.06, bottomOf(draft, 0.12) + 0.012), hw.placket, 0.0011);
+    for (let y = top; y > bottom; y -= 0.085) { const v = frontVertex(y); if (v >= 0) discExtras(ex, draft, v, draft.N, 0.0052, hw.placket ? 0.0028 : 0.0018); }
     ex.kind = 'shirt';
   }
   if (hw.blazerButtons) {
-    const v = frontVertex(bi.yOfT(2.25) - 0.035, 0.12);
-    if (v >= 0) discExtras(ex, draft, v, draft.N, 0.009, 0.0028, 16);
+    // two buttons on the front below the lapels' break, then the fronts curve
+    // apart (catalog.js blazerFront); the overlapping front edge between them
+    const yb = bi.yOfT(2.25), fr = typeof hw.blazerButtons === 'object' ? hw.blazerButtons : null;
+    for (const y of fr ? [yb - 0.025, yb - 0.025 - fr.buttonGap] : [yb - 0.035]) { const v = frontVertex(y, 0.12); if (v >= 0) discExtras(ex, draft, v, draft.N, 0.0085, 0.0028, 16); }
+    if (fr) ridgeExtras(band, draft, draft.N, frontLine(draft, fr.edgeX, yb + 0.004, yb - fr.open), 0.007, 0.0022);
     ex.kind = 'blazer';
   }
+  if (hw.sleeveButtons) sleeveButtons(draft, bi, ex, hw.sleeveButtons);
+  if (band.tris.length) extras.push(band);
   if (hw.jeansButton) {
     const v = frontVertex(bi.yOfT(1.55) - 0.019, 0.1);
     if (v >= 0) discExtras(ex, draft, v, draft.N, 0.0075, 0.0025, 14);
@@ -247,6 +259,40 @@ function hardware(draft, pdef, bi, extras) {
     ex.kind = 'zipper';
   }
   if (ex.tris.length) extras.push(ex);
+}
+
+/** Lowest point (y) of the garment's front within |x| < w (rest pose). */
+function bottomOf(draft, w) {
+  const P = draft.P, N = draft.N;
+  let y = Infinity;
+  for (let i = 0; i < draft.nf; i++) if (Math.abs(P[i * 3]) < w && N[i * 3 + 2] > 0.3 && P[i * 3 + 1] < y) y = P[i * 3 + 1];
+  return y;
+}
+
+/**
+ * Jacket sleeve buttons: `count` small buttons in a row on the back of each
+ * sleeve, 3 cm above the cuff edge.
+ */
+function sleeveButtons(draft, bi, ex, count) {
+  const C = draft.coords, P = draft.P, N = draft.N, nf = draft.nf;
+  for (const [r, sgn] of [[1, 1], [2, -1]]) {
+    // end of this sleeve (largest arm parameter on it)
+    let aEnd = -Infinity;
+    for (let i = 0; i < nf; i++) if (C.limb[i] === r && C.wT[i] < 0.5 && C.aL[i] > aEnd) aEnd = C.aL[i];
+    if (!(aEnd > 1.2)) continue;
+    const perM = 1 / (bi.limbs[r].L[1] || 0.25);
+    for (let b = 0; b < count; b++) {
+      const a = aEnd - (0.03 + b * 0.017) * perM;
+      let best = -1, bs = -Infinity;
+      for (let i = 0; i < nf; i++) {
+        if (C.limb[i] !== r || C.wT[i] > 0.5 || Math.abs(C.aL[i] - a) > 0.02 * perM) continue;
+        // back and outer side of the forearm (rest pose)
+        const s = -N[i * 3 + 2] * 0.8 + N[i * 3] * sgn * 0.6 - (Math.abs(C.aL[i] - a) / perM) * 60;
+        if (s > bs) { bs = s; best = i; }
+      }
+      if (best >= 0) discExtras(ex, draft, best, N, 0.0055, 0.002, 10);
+    }
+  }
 }
 
 /** Bra straps over the shoulders (front cup top -> shoulder -> back band). */
@@ -298,27 +344,106 @@ function applySole(draft, sole, bi) {
 }
 
 /**
- * The sole / upper border follows the mesh faces: on a coarse foot mesh it is a
- * staircase. Vertices shared by sole and upper faces are moved to one height
- * (the top of the midsole), so the border reads as a clean horizontal line.
+ * The sole / upper border at the top of the midsole: a clean horizontal line
+ * (iso-line split of the height field), sole group 2 below it.
  */
-function levelSoleLine(draft, sole) {
-  const P = draft.P, Q = draft.quads, nq = Q.length >> 2, line = sole.top * 0.8;
-  const inSole = new Uint8Array(draft.nf), inUpper = new Uint8Array(draft.nf);
-  for (let f = 0; f < nq; f++) {
-    let y = 0;
-    for (let k = 0; k < 4; k++) y += P[Q[f * 4 + k] * 3 + 1];
-    const mark = y / 4 < line ? inSole : inUpper;
-    for (let k = 0; k < 4; k++) mark[Q[f * 4 + k]] = 1;
-  }
-  for (let i = 0; i < draft.nf; i++) if (inSole[i] && inUpper[i] && P[i * 3 + 1] > 0) P[i * 3 + 1] = line;
+function soleSplit(draft, sole) {
+  const P = draft.P, line = sole.top * 0.8, f = new Float32Array(draft.nf);
+  for (let i = 0; i < draft.nf; i++) f[i] = P[i * 3 + 1] - line;
+  isoSplit(draft, f, 2, 0);
 }
 
-function soleGroups(draft, sole) {
-  const P = draft.P, top = sole.top;
-  return (f, vs) => {
-    let y = 0;
-    for (const v of vs) y += P[v * 3 + 1];
-    return y / 4 < top * 0.8 ? 2 : 0;
+/**
+ * Rib bands (hems, cuffs, neck bands, waistbands): band group 1 where the
+ * distance from the band's cut is under 0.95 h (the 0.5 level of the zone
+ * field of build.js, which also tightens the band).
+ */
+function bandSplit(draft, bands) {
+  const nf = draft.nf, f = new Float32Array(nf).fill(Infinity);
+  let any = false;
+  draft.cons.forEach((c, ci) => {
+    const b = bands[c.id];
+    if (!b || !draft.cvals[ci]) return;
+    const cv = draft.cvals[ci], H = b.h * 0.95;
+    any = true;
+    for (let i = 0; i < nf; i++) { const x = cv[i] - H; if (x < f[i]) f[i] = x; }
+  });
+  if (any) isoSplit(draft, f, 1, 0);
+}
+
+/**
+ * Two materials on one surface (main fabric | rib band, upper | sole) assigned
+ * per quad follow the body mesh grid, whose rows are oblique to the border: a
+ * staircase of teeth. Here the border becomes a smooth line: every fine edge
+ * crossing the zero level of `field` has its nearer end moved onto the crossing
+ * point, with all its per-vertex data interpolated along the edge (the fold,
+ * UV and weave coordinates stay continuous), and the quads on the line are
+ * split along the diagonal that lies on it, each triangle in its own group
+ * (draft.triGroups, read by assemble.js). Boundary-loop vertices never move.
+ * field < 0 -> group gIn, else gOut.
+ */
+function isoSplit(draft, field, gIn, gOut) {
+  const nf = draft.nf, Q = draft.quads, nq = Q.length >> 2;
+  const onLoop = new Uint8Array(nf);
+  for (const l of draft.loops || []) for (const v of l.verts) onLoop[v] = 1;
+  const best = new Float32Array(nf).fill(2), to = new Int32Array(nf).fill(-1);
+  for (let q = 0; q < nq; q++) for (let k = 0; k < 4; k++) {
+    let a = Q[q * 4 + k], b = Q[q * 4 + ((k + 1) & 3)];
+    const fa = field[a], fb = field[b];
+    if ((fa < 0) === (fb < 0)) continue;
+    let t = fa / (fa - fb); // crossing at a + (b - a) t
+    // the nearer end moves (a loop vertex stays: the other end moves instead)
+    if ((t > 0.5 && !onLoop[b]) || onLoop[a]) { const x = a; a = b; b = x; t = 1 - t; }
+    if (onLoop[a] || t >= best[a]) continue;
+    best[a] = t; to[a] = b;
+  }
+  const side = new Int8Array(nf);
+  for (let i = 0; i < nf; i++) side[i] = field[i] < 0 ? -1 : 1;
+  const moves = [];
+  for (let a = 0; a < nf; a++) if (to[a] >= 0) { moves.push(a); side[a] = 0; }
+  if (!moves.length) return;
+  // every per-vertex quantity follows the vertex along its edge; new values are
+  // computed from the unmoved ones first (a target may move too, by its own crossing)
+  const nm = moves.length, buf = new Float32Array(nm * 3);
+  const move = (A, dim, isAngle = null) => {
+    if (!A) return;
+    for (let q = 0; q < nm; q++) {
+      const a = moves[q], b = to[a], t = best[a];
+      for (let c = 0; c < dim; c++) {
+        let d = A[b * dim + c] - A[a * dim + c];
+        if (isAngle) { if (isAngle(a, b)) { if (d > Math.PI) d -= 2 * Math.PI; else if (d < -Math.PI) d += 2 * Math.PI; } else d = 0; }
+        buf[q * dim + c] = A[a * dim + c] + d * t;
+      }
+    }
+    for (let q = 0; q < nm; q++) for (let c = 0; c < dim; c++) A[moves[q] * dim + c] = buf[q * dim + c];
+  };
+  const C = draft.coords;
+  move(draft.P, 3); move(draft.B, 3); move(draft.BN, 3);
+  if (draft.BN) for (const a of moves) { const o = a * 3, l = len3(draft.BN[o], draft.BN[o + 1], draft.BN[o + 2]) || 1; draft.BN[o] /= l; draft.BN[o + 1] /= l; draft.BN[o + 2] /= l; }
+  for (const A of [draft.off, draft.room, draft.zone, draft.span]) move(A, 1);
+  if (C) {
+    for (const A of [C.wT, C.aL, C.sT, C.sL, C.tT]) move(A, 1);
+    move(C.thT, 1, () => true);
+    move(C.thL, 1, (a, b) => C.limb[a] === C.limb[b]);
+  }
+  for (const A of draft.cvals || []) move(A, 1);
+  const TRI = [[0, 1, 2, 0, 2, 3], [0, 1, 3, 1, 2, 3]];
+  const sgn = (vs, i0, i1, i2) => {
+    const s0 = side[vs[i0]], s1 = side[vs[i1]], s2 = side[vs[i2]];
+    const neg = s0 < 0 || s1 < 0 || s2 < 0, pos = s0 > 0 || s1 > 0 || s2 > 0;
+    return neg && pos ? -2 : neg ? gIn : gOut;
+  };
+  // per quad: g0 | g1 << 2 | diagonal << 4 (0: v0-v2, 1: v1-v3, 2: the shorter one)
+  draft.triGroups = (vs) => {
+    let neg = 0, pos = 0;
+    for (let k = 0; k < 4; k++) { const s = side[vs[k]]; if (s < 0) neg++; else if (s > 0) pos++; }
+    if (!neg) return gOut | (gOut << 2) | (2 << 4);
+    if (!pos) return gIn | (gIn << 2) | (2 << 4);
+    for (let d = 0; d < 2; d++) {
+      const T = TRI[d], g0 = sgn(vs, T[0], T[1], T[2]), g1 = sgn(vs, T[3], T[4], T[5]);
+      if (g0 >= 0 && g1 >= 0) return g0 | (g1 << 2) | (d << 4);
+    }
+    const g = neg >= pos ? gIn : gOut;
+    return g | (g << 2) | (2 << 4);
   };
 }

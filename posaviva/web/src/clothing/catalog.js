@@ -97,6 +97,12 @@ const TOP_HEM = 1.1, BAND_HEM = 1.05;
  */
 const STRAP_INSET = 0.04;
 const strapNeck = (k, inner = 0.095) => Math.min(k.bi.neckRadius + 0.03, k.land.shoulderX - inner);
+/**
+ * Torso height T of a rib-band hem: on women at least 0.62, above the pubic
+ * curve (a tight band lower down clings into the lower belly and folds into a
+ * V-shaped tab at the centre front).
+ */
+const ribHemT = (sex, t) => (sex === 'F' ? Math.max(t, 0.62) : t);
 
 /**
  * Ease map of trousers (multiplier of the garment ease): jeans and trousers
@@ -146,6 +152,13 @@ const fadeAbove = (id, a, b) => (c, i, cv, cons) => {
   const x = Math.min(1, Math.max(0, (cv[k][i] - a) / (b - a)));
   return x * x * (3 - 2 * x);
 };
+/**
+ * Blazer front (single breasted, two buttons): the lapels break at T 2.25, the
+ * buttons sit below the break `buttonGap` apart, and `open` m below the break
+ * the fronts curve apart down to the hem (blazerFront). edgeX: the overlapping
+ * front edge between the break and the opening (wearer's left over right).
+ */
+const BLAZER_FRONT = { open: 0.135, buttonGap: 0.1, edgeX: -0.004 };
 
 /** Static fold presets */
 const cuffBunch = (near, amp = 0.0025, width = 0.09, wl = 0.028) => ({ type: 'rings', region: 'arm', near, width, amp, wl });
@@ -214,7 +227,7 @@ export const GARMENTS = [
     id: 'sweatshirt', label: 'Felpa', cat: 'top', slot: 'top', layer: 3, styles: ['casual', 'sport'], icon: 'sweatshirt',
     hemLift: 0.04,
     fabric: 'fleece', color: '#8a8d93', palette: PAL.basic,
-    mask: (k) => [k.above('hem', k.y(BAND_HEM)), crew(k, 0.055, 0.015, 0.014), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    mask: (k, sex) => [k.above('hem', k.y(ribHemT(sex, BAND_HEM))), crew(k, 0.055, 0.015, 0.014), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.06 }, sleeveL: { h: 0.06 }, sleeveR: { h: 0.06 }, neck: { h: 0.022 } },
     edges: { default: { type: 'hem', r: 0.003 } },
     fit: {
@@ -230,7 +243,7 @@ export const GARMENTS = [
     id: 'trackjacket', label: 'Felpa con zip', cat: 'top', slot: 'outer', layer: 4, styles: ['sport', 'casual'], icon: 'trackjacket',
     hemLift: 0.04,
     fabric: 'tricot', color: '#2c5aa0', palette: PAL.sport, trim: '#f2f2f2',
-    mask: (k) => [k.above('hem', k.y(BAND_HEM)), crew(k, 0.04, 0.0, 0.03), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
+    mask: (k, sex) => [k.above('hem', k.y(ribHemT(sex, BAND_HEM))), crew(k, 0.04, 0.0, 0.03), ...sleeves(k, 1.96), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5)],
     bands: { hem: { h: 0.045 }, sleeveL: { h: 0.05 }, sleeveR: { h: 0.05 } },
     edges: { neck: { type: 'collar', at: () => ({ stand: 0.04, flap: 0.0, lift: 0 }) }, default: { type: 'hem', r: 0.0028 } },
     fit: {
@@ -266,7 +279,7 @@ export const GARMENTS = [
     },
     wrinkle: { k: 0.85, wl: 0.052, wlArm: 0.034, kt: 0.45 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.0035, 0.13, 0.03), { type: 'crease', region: 'torso', theta: 0, amp: 0.0014, halfWidth: 0.006 }, backSlack(0.003)],
-    hardware: { shirtButtons: true },
+    hardware: { shirtButtons: true, placket: 0.026 },
     weightBlend: hemToPelvis(0.8),
     details: 'shirt',
   },
@@ -279,17 +292,12 @@ export const GARMENTS = [
       // (below the crotch the body faces of the inner thighs close the jacket into shorts)
       k.above('hem', k.y(0.3)),
       k.neckline('neck', { front: Math.max(0.12, k.land.neck - k.y(2.25)), back: 0.012, width: k.bi.neckRadius + 0.022, shape: 'v' }),
+      blazerFront(k),
       ...sleeves(k, 1.92), HEAD(k), k.exclude('hands', ['handL', 'handR'], 0.5),
     ],
     edges: {
-      neck: {
-        type: 'collar', at: (q) => {
-          const front = Math.max(0, Math.cos(q.theta));
-          const yb = q.bi.yOfT(2.25);
-          const lapel = 0.075 * Math.min(1, Math.max(0, (q.y - yb) / 0.16)) ** 0.8;
-          return { stand: 0.03 * (1 - front) ** 2, flap: Math.max(0.04 * (1 - front), lapel * front * 1.15), lift: 0.004 };
-        },
-      },
+      // notched lapels below the gorge, collar (stand + fall) around the neck
+      neck: { type: 'collar', at: blazerCollar, roll: 0.004, smooth: 1 },
       default: { type: 'hem', r: 0.0035, depth: 0.03 },
     },
     fit: {
@@ -302,7 +310,7 @@ export const GARMENTS = [
     weightBlend: hemToPelvis(0.9),
     wrinkle: { k: 0.7, wl: 0.07, wlArm: 0.042, kt: 0.3 },
     folds: [cuffBunch(['sleeveL', 'sleeveR'], 0.004, 0.12, 0.04)],
-    hardware: { blazerButtons: true },
+    hardware: { blazerButtons: BLAZER_FRONT, sleeveButtons: 3 },
     details: 'blazer',
   },
   {
@@ -629,6 +637,34 @@ function instepOpening(k) {
     }
     return best * 0.05;
   });
+}
+
+/** Blazer: the front opening below the buttons (inverted V widening towards the hem). */
+function blazerFront(k) {
+  const bi = k.bi, yTop = bi.yOfT(2.25) - BLAZER_FRONT.open;
+  return k.custom('front', (v, x, y, z) => {
+    if (y > yTop + 0.03 || z < bi.cz(y)) return 1;
+    const d = yTop - y;
+    // half width of the opening: 1.7 cm 2 cm below its top, 3.4 cm at 5 cm, 5.7 cm at 10 cm, 7.7 cm at 15 cm
+    const w = d > 0 ? 0.32 * Math.pow(d, 0.75) : 0;
+    return Math.max(Math.abs(x) - w, -d);
+  });
+}
+
+/**
+ * Blazer collar and lapels (collarExtras params along the V neckline): the
+ * lapel widens from the break (V bottom) to the lapel point, the notch cuts
+ * back to the gorge, then the collar (stand + fall) runs around the neck.
+ */
+function blazerCollar(q) {
+  const bi = q.bi, yN = bi.land.neckPoint[1], yb = bi.yOfT(2.25);
+  const D = Math.max(0.12, yN - yb), yg = yb + 0.6 * D, yl = yg - 0.013;
+  const wL = 0.072, wC = 0.04, notch = 0.012;
+  const y = q.y;
+  if (y < yl) return { stand: 0, flap: wL * Math.max(0, (y - yb) / (yl - yb)), lift: 0.003 };
+  if (y < yg) return { stand: 0, flap: wL + ((notch - wL) * (y - yl)) / (yg - yl), lift: 0.003 };
+  const front = Math.max(0, Math.cos(q.theta)), c = Math.min(1, (y - yg) / 0.014);
+  return { stand: 0.028 * (1 - front) ** 1.5 * c, flap: notch + (wC - notch) * c, lift: 0.004 };
 }
 
 /** Skin weights of a long jacket hem blended towards the pelvis (no tearing when legs lift). */
