@@ -78,5 +78,18 @@
 .pv-pose-actions.pv-pose-view { margin: 10px 0 12px; }
 .pv-pose-hand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
 
+/* "Tocco diretto": hand / foot touch menu (never blocks the view: no dimming, the scene
+   keeps its touches) and the Contatti list of the Posa panel */
+.pv-modal.pv-pose-touchmenu { pointer-events: none; }
+.pv-modal.pv-pose-touchmenu .pv-modal-backdrop { display: none; }
+.pv-modal.pv-pose-touchmenu .pv-modal-card { pointer-events: auto; box-shadow: 0 10px 34px rgba(0,0,0,.45); }
+.pv-pose-tm-shapes { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 6px; }
+.pv-pose-tm-shapes .pv-chip { min-height: 40px; padding: 7px 12px; font-size: 13.5px; }
+.pv-pose-contacts { display: flex; flex-direction: column; gap: 6px; }
+.pv-pose-contact { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; background: var(--elev); border: 1px solid var(--line); border-radius: var(--radius); }
+.pv-pose-contact > span { flex: 1; min-width: 0; font-size: 13.5px; }
+.pv-pose-contact small { display: block; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* tablets: >= 44 px touch targets (ui/tablet.css) */
 html.pv-tablet .pv-pose-map-btn { min-height: 44px; font-size: 14px; }
+html.pv-tablet .pv-pose-tm-shapes .pv-chip { min-height: 44px; }

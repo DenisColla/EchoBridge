@@ -10,7 +10,7 @@ import { focusHand } from './focus.js';
 
 const D = Math.PI / 180;
 // full curl (c = 1) per phalanx, degrees: [base, media, punta]; thumb: [CMC, MCP, IP]
-const CURL = { 1: [12, 50, 70], 2: [82, 100, 68], 3: [84, 102, 70], 4: [86, 104, 70], 5: [88, 104, 68] };
+export const CURL = { 1: [12, 50, 70], 2: [82, 100, 68], 3: [84, 102, 70], 4: [86, 104, 70], 5: [88, 104, 68] };
 // spread (s = 1) abduction toward the little finger, degrees, on phalanx 1 (+ metacarpal)
 const SPREAD = { 2: [-14, -3], 3: [-2, 0], 4: [8, 2], 5: [17, 5] };
 // thumb opposition at o = 1 on the CMC (finger1-1): flexion, palmar abduction, rotation (degrees)

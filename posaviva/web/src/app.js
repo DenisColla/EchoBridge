@@ -345,7 +345,8 @@ export class App extends THREE.EventDispatcher {
     // the toolbar) must not leave the router believing it is still down
     const forget = (e) => {
       pointers.delete(e.pointerId);
-      if (endSession(e, true)) { if (down?.id === e.pointerId) down = null; return; }
+      // (this window listener runs before the canvas' own: a release ON the canvas ends the session there, not cancelled)
+      if (e.target !== c && endSession(e, true)) { if (down?.id === e.pointerId) down = null; return; }
       if (down && e.pointerId === down.id && e.target !== c) { cancelHold(); down = null; }
     };
     window.addEventListener('pointerup', forget, true);
