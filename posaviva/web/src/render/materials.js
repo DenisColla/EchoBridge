@@ -805,6 +805,15 @@ function emissiveOf(s) {
   return { emissive: new THREE.Color(s.emissive || '#ffffff'), emissiveIntensity: s.emissiveIntensity ?? 1, emissiveMap: s.emissiveMap || null };
 }
 
+/** Clay: lit lamps / screens / flames still read as lit (a pale, desaturated glow on the mannequin palette). */
+function clayGlow(s) {
+  const e = emissiveOf(s);
+  if (!e.emissive) return e;
+  e.emissive.lerp(new THREE.Color('#fff4e2'), 0.55);
+  e.emissiveIntensity = Math.min(1.6, e.emissiveIntensity * 0.8);
+  return e;
+}
+
 const defaultFactories = {
   /** Flattering PBR: wrapped-diffuse skin with warm sheen, fabric sheen, glossy eyes. */
   realistic(s) {
@@ -887,6 +896,7 @@ const defaultFactories = {
     const m = new THREE.MeshStandardMaterial({
       ...c, color, ...normals(s), map: cut ? s.map : null,
       roughness: 0.88, metalness: 0, side: sideOf(s.side, s.kind === 'lashes' ? THREE.DoubleSide : THREE.FrontSide),
+      ...(s.kind === 'prop' ? clayGlow(s) : {}),
     });
     return cut ? mapAlphaOnlyHook(m) : m;
   },

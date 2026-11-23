@@ -14,6 +14,9 @@ import { registerLightsTool } from './lightsPanel.js';
 import { registerCameraTool } from './cameraPanel.js';
 import { registerGuidesTool } from './guidesPanel.js';
 import { patchShadowKernel } from './shadowPatch.js';
+import { Practicals } from './practicals.js';
+import { PRACTICAL_TYPES, PRACTICAL_ROLES } from './practicalSources.js';
+import { registerPropTypes, registerPropRoles } from '../props/catalog.js';
 
 export function create(app, shell) {
   // ---------------------------------------------------------------- lights
@@ -30,6 +33,27 @@ export function create(app, shell) {
   app.lightRig = lights;
   lights.applyPreset('studio');
 
+  // ---------------------------------------------------------------- practical lights & windows
+  // candles, string lights and a fireplace join the props catalog (category Luci)
+  registerPropRoles(PRACTICAL_ROLES);
+  registerPropTypes(PRACTICAL_TYPES, []);
+  const practicals = new Practicals(app, lights);
+  app.practicals = practicals;
+  // long press on an empty spot (floor, sky, the floor and walls of a room, anything nobody
+  // else handles): "Luce ambientale"; on a light source no other module took (a lamp, a
+  // window or the window of a room): its own menu. Characters and animals are never "space".
+  app.addHoldHandler?.(({ ndc, x, y }) => {
+    const hit = app.props?.pick?.(ndc);
+    const far = hit ? hit.distance : Infinity;
+    const ch = app.posing?.pick?.(ndc);
+    if (ch?.character && ch.distance < far) return false;
+    const an = app.animals?.pick?.(ndc);
+    if (an && an.distance < far) return false;
+    if (hit?.prop && practicals.hitsSource(hit.prop, hit.point)) { practicals.openMenu(hit.prop, x, y); return true; }
+    practicals.ambientMenu(x, y);
+    return true;
+  }, 0);
+
   // ---------------------------------------------------------------- camera & guides
   const camera = new CameraRig(app, shell);
   const guides = new PerspectiveGuides(app, shell);
@@ -40,11 +64,12 @@ export function create(app, shell) {
     const now = performance.now();
     const animating = camera.onFrame(now, dt);
     lights.onFrame(now);
+    practicals.onFrame(now);
     return animating;
   });
   app.addAfterRenderHook(() => guides.afterRender());
 
-  registerLightsTool(app, shell, lights);
+  registerLightsTool(app, shell, lights, practicals);
   registerCameraTool(app, shell, camera);
   registerGuidesTool(app, shell, guides);
 
@@ -74,7 +99,7 @@ export function create(app, shell) {
       dirty();
     },
     serializeScene() {
-      return { v: 1, lights: lights.getState(), camera: camera.getState(), guides: guides.getState() };
+      return { v: 1, lights: lights.getState(), camera: camera.getState(), guides: guides.getState(), practicals: practicals.getState() };
     },
     deserializeScene(obj) {
       if (!obj || typeof obj !== 'object') return;
@@ -82,6 +107,7 @@ export function create(app, shell) {
       // undo history) and the camera only follows committed camera actions
       const fromHistory = !!app.history?._restoring;
       if (obj.lights) lights.setState(obj.lights);
+      practicals.setState(obj.practicals || null);
       if (obj.camera) { camera.setState(obj.camera, { fromHistory }); cameraRestored = true; }
       if (obj.guides && !fromHistory) guides.setState(obj.guides);
       dirty();

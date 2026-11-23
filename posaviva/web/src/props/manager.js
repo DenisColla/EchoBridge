@@ -608,6 +608,7 @@ export class PropManager extends THREE.EventDispatcher {
         const g = it.grip || {};
         Object.assign(p.grip, { slide: +g.slide || 0, twist: +g.twist || 0, flip: !!g.flip });
         p.group = typeof it.group === 'string' ? it.group : null;
+        p.light = it.light && typeof it.light === 'object' ? { ...it.light } : null;
       }
       keep.add(p);
       const want = it.hold && it.hold.characterId ? { characterId: it.hold.characterId, side: it.hold.side === 'L' ? 'L' : 'R' } : null;

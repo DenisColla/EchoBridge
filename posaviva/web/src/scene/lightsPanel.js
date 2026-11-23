@@ -7,13 +7,14 @@ import { LightGlobe, presetThumb } from './lightGlobe.js';
 import { MAX_EXTRAS, TYPE_LABELS, lightLabel, dirFromAzEl, azElFromDir } from './lights.js';
 import { kelvinGradientCSS, kelvinToHex } from './color.js';
 import { svgIcon, LIGHT_ICONS } from './svg.js';
+import { buildSourcesSection } from './practicalsUI.js';
 
 const DEG = Math.PI / 180;
 const GELS = ['#ffffff', '#ffd6a5', '#ff7a4d', '#ff4f6d', '#c77dff', '#5d8cff', '#4fd1e8', '#8dff9a'];
 
 const _q = new THREE.Quaternion(), _v = new THREE.Vector3();
 
-export function registerLightsTool(app, shell, rig) {
+export function registerLightsTool(app, shell, rig, practicals = null) {
   shell.registerTool({
     id: 'lights', group: 'scene', label: 'Luci', icon: 'sun', order: 60, title: 'Luci',
     build(el) {
@@ -122,8 +123,12 @@ export function registerLightsTool(app, shell, rig) {
       const handlesT = toggle({ label: 'Maniglie delle luci nella vista', value: true, onChange: (v) => rig.setHandlesPref(v) });
       const ambSec = section('Ambiente (riempimento)', [ambI, ambK, handlesT]);
 
-      el.append(
+      // ---------------------------------------------------------- practical lights (lamps, candles, windows...)
+      const sources = practicals ? buildSourcesSection(app, practicals) : null;
+
+      el.append(...[
         section('Preset', [presetStrip]),
+        sources ? section('Fonti nella scena', [sources.el]) : null,
         section('Luci della scena', [tabs]),
         globeRow,
         h('div', { class: 'pv-sc-block' }, typeSeg),
@@ -131,7 +136,7 @@ export function registerLightsTool(app, shell, rig) {
         shadowSec,
         posSec,
         ambSec,
-      );
+      ].filter(Boolean));
 
       // ---------------------------------------------------------- behaviour
       function flipHemisphere(back) {
@@ -149,6 +154,7 @@ export function registerLightsTool(app, shell, rig) {
       let raf = 0;
       function schedule() { if (!visible || raf) return; raf = requestAnimationFrame(() => { raf = 0; refresh(); }); }
       function refresh() {
+        sources?.refresh();
         renderTabs();
         const d = rig.selected;
         for (const [id, b] of presetCards) b.classList.toggle('active', rig.state.preset === id);
@@ -178,6 +184,7 @@ export function registerLightsTool(app, shell, rig) {
         handlesT.setValue(rig.state.handles !== false);
       }
       rig.addEventListener('change', schedule);
+      practicals?.addEventListener('change', schedule);
       app.controls.addEventListener('change', schedule); // the globe is drawn from the camera's point of view
       app.addEventListener('selection', schedule);
 
