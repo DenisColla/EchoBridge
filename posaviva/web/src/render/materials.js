@@ -236,8 +236,10 @@ const CLOTH_MAP = /* glsl */`
   #endif
   #ifdef PV_FAB
     vec4 pvF = texture2D( pvFab, vNormalMapUv * pvFabK.x );
+    // the weave texel, fetched once: its alpha (weave tone) here, xyz in normal_fragment_maps
+    vec4 pvNm = texture2D( normalMap, vNormalMapUv );
     diffuseColor.rgb *= 1.0 + ( pvF.r - 0.5 ) * 2.0 * pvFabK.y * pvClothUse.x;
-    diffuseColor.rgb *= 1.0 + ( texture2D( normalMap, vNormalMapUv ).a - 0.5 ) * 2.0 * pvClothK.x * pvClothUse.x;
+    diffuseColor.rgb *= 1.0 + ( pvNm.a - 0.5 ) * 2.0 * pvClothK.x * pvClothUse.x;
   #endif
   {
     float pvFw = max( fwidth( vPvEdge.x ), 1e-5 ), pvFu = fwidth( vPvUv0.x );
@@ -257,7 +259,7 @@ const CLOTH_RELIEF = /* glsl */`
   #ifdef USE_MAP
   if ( pvClothUse.y > 0.0 ) {
     vec2 pvDx = dFdx( vMapUv ), pvDy = dFdy( vMapUv );
-    float pvH0 = texture2D( map, vMapUv ).b;
+    float pvH0 = pvD.b; // the detail texel of map_fragment (CLOTH_MAP)
     vec2 pvDH = vec2( texture2D( map, vMapUv + pvDx ).b - pvH0, texture2D( map, vMapUv + pvDy ).b - pvH0 ) * pvClothK.y * pvClothUse.y;
     normal = pvPerturb( - vViewPosition, normal, pvDH, faceDirection );
   }
@@ -311,7 +313,11 @@ function clothHook(material, s, style) {
     fs = patch(fs, '#include <map_fragment>', CLOTH_MAP, 'cloth-map');
     if (fab) fs = patch(fs, '#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n roughnessFactor = clamp( roughnessFactor + ( pvF.g - 0.5 ) * 2.0 * pvFabK.z, 0.04, 1.0 );', 'cloth-rough');
     if (use[1]) fs = patch(fs, '#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + CLOTH_RELIEF, 'cloth-relief');
-    if (fab) fs = patch(fs, '#include <normal_fragment_maps>', patch(THREE.ShaderChunk.normal_fragment_maps, 'normal = normalize( tbn * mapN );', CLOTH_NORMAL, 'cloth-normal-chunk'), 'cloth-normal');
+    if (fab) {
+      let nm = patch(THREE.ShaderChunk.normal_fragment_maps, 'normal = normalize( tbn * mapN );', CLOTH_NORMAL, 'cloth-normal-chunk');
+      nm = patch(nm, 'vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;', 'vec3 mapN = pvNm.xyz * 2.0 - 1.0;', 'cloth-normal-fetch');
+      fs = patch(fs, '#include <normal_fragment_maps>', nm, 'cloth-normal');
+    }
     if (use[2] && style !== 'toon') fs = patch(fs, '#include <aomap_fragment>', CLOTH_CAVITY + '#include <aomap_fragment>', 'cloth-cavity');
     shader.vertexShader = vs;
     shader.fragmentShader = fs;

@@ -671,9 +671,11 @@ const DRAW = {
   },
   blazer(a) {
     for (const s of [1, -1]) {
-      // flap pockets at the hips: flap raised over a dark welt opening
-      const fl = a.rect(s * 0.55, a.dc(0, 1.15, -38), s * 1.28, 1.15);
-      a.stroke(0, a.around(0, 1.15, s * 0.55, s * 1.28), 3.5, 'dark', 0.55);
+      // flap pockets at the hips: flap raised over a dark welt opening (a hand above
+      // the hem at T 0.3, clear of the front cutaway below the lower button)
+      const PK = 1.4;
+      const fl = a.rect(s * 0.6, a.dc(0, PK, -38), s * 1.3, PK);
+      a.stroke(0, a.around(0, PK, s * 0.6, s * 1.3), 3.5, 'dark', 0.55);
       a.raised(0, fl, 0.45, 0.35);
       a.stitch(0, fl, s * 3, { k: 0.5 });
       // princess seams (front and back), side panel seams

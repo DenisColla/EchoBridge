@@ -548,7 +548,10 @@ export function assemble(pieces, bi, opts = {}) {
     else if (d.room) for (let i = 0; i < nf; i++) hgt[i] = d.room[i] + (d.thick || 0.0025) + 0.002;
     // torso (not sleeve / trouser leg) vertices: the hem lift moves them
     const trs = new Uint8Array(nf);
-    for (let i = 0; i < nf; i++) trs[i] = C.limb[i] && C.wT[i] < 0.5 ? 0 : 1;
+    // torso flags of the hem lift: only the sleeves stay put. The lower hem of a top
+    // near the hips can carry thigh coordinates (limb 3/4) at the sides: left out,
+    // it hung below the lifted hem as a tab when the arms were raised
+    for (let i = 0; i < nf; i++) trs[i] = (C.limb[i] === 1 || C.limb[i] === 2) && C.wT[i] < 0.5 ? 0 : 1;
     parts.push({ wp, offset: fineOffset, N, nf, P, skin: d.skin, adj: buildAdjacency(nf, buildEdges(nf, d.quads)), lift, hgt, trs, ring: d.kind === 'skirt' ? { rings: d.ring.rings, segs: d.ring.segs } : null });
     fineOffset += nf;
     nslot = extraSlot;
