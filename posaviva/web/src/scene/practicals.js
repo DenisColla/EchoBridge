@@ -388,8 +388,46 @@ export class Practicals extends THREE.EventDispatcher {
     if (!this._dirty) return;
     this._dirty = false;
     this._lastRank = now;
+    const v0 = this._viewSig, s0 = this._castSig;
+    this._glowChanged = false;
     this._assign();
-    this.app.invalidate();
+    const v1 = this._viewSig = this._lightSig(), s1 = this._castSig = this._casterSig();
+    // only what changed is redrawn: a moved or newly casting shadow light redraws the shadow
+    // maps; a light that only changed intensity / colour (or a glow) just the frame. (Before,
+    // every re-rank, every 400 ms while over the budget, redrew every shadow map of the scene.)
+    const app = this.app;
+    if (s1 !== s0) { if (app.refreshShadows) app.refreshShadows(); else app.invalidate(); }
+    else if (v1 !== v0 || this._glowChanged) { if (app.invalidateView) app.invalidateView(); else app.invalidate(); }
+  }
+
+  /** Cheap signature of what the pooled and window lights look like (redraw when it changes). */
+  _lightSig() {
+    let s = 0, k = 1;
+    const add = (L) => {
+      const p = L.position, c = L.color;
+      s += k++ * (p.x * 1.31 + p.y * 2.17 + p.z * 3.73 + L.intensity * 5.3 + c.r * 7.1 + c.g * 11.3 + c.b * 13.7 + (L.angle || 0) * 17.9 + (L.distance || 0) * 0.19 + (L.penumbra || 0) * 3.3);
+      if (L.target) { const t = L.target.position; s += k * (t.x * 0.71 + t.y * 0.37 + t.z * 0.53); }
+    };
+    for (const L of this.pool.point) add(L);
+    for (const L of this.pool.spot) add(L);
+    for (const w of this.winLights) { add(w.sun); if (w.bounce) add(w.bounce); }
+    for (const m of this.plates) s += k++ * (m.visible ? 1 : 0) + m.position.x * 0.13 + m.material.color.r * 0.29;
+    return s;
+  }
+
+  /** Signature of the lights that render a shadow map now (which ones, where they are, their cones). */
+  _casterSig() {
+    let s = 0, k = 1;
+    const add = (L) => {
+      if (!L.castShadow || !L.shadow.autoUpdate) return;
+      const p = L.position;
+      s += k++ * (p.x * 1.31 + p.y * 2.17 + p.z * 3.73 + (L.angle || 0) * 5.9 + L.shadow.mapSize.x * 0.001 + L.shadow.radius * 0.07);
+      if (L.target) { const t = L.target.position; s += k * (t.x * 0.71 + t.y * 0.37 + t.z * 0.53); }
+    };
+    for (const L of this.pool.point) add(L);
+    for (const L of this.pool.spot) add(L);
+    for (const w of this.winLights) add(w.sun);
+    return s;
   }
 
   // ================================================================== scanning
@@ -712,8 +750,9 @@ export class Practicals extends THREE.EventDispatcher {
       }
       mats.apply(m, spec);
       m.userData.pvGlowMat = m.material;
+      this._glowChanged = true;
     }
-    for (const m of e.hide) m.visible = on;
+    for (const m of e.hide) if (m.visible !== on) { m.visible = on; this._glowChanged = true; }
   }
 
   // ================================================================== windows
