@@ -205,7 +205,17 @@ export class PenInput {
     if (key === this._hlKey) return;
     this._hlKey = key;
     const hl = this._highlight();
-    hl.set(ch, control, control.own.map((n) => app.model.boneIndex.get(n)));
+    hl.set(ch, control, this._glowBones(control));
+  }
+
+  /** bones that glow for a control: a hand is grabbed whole, palm and fingers light up with the wrist */
+  _glowBones(control) {
+    const model = this.app.model;
+    const bones = control.own.map((n) => model.boneIndex.get(n));
+    if (control.baseId !== 'hand') return bones;
+    const c = this._handBones || (this._handBones = {});
+    c[control.side] ||= model.bones.filter((b) => /^(finger|metacarpal)/.test(b.name) && b.name.endsWith('.' + control.side)).map((b) => model.boneIndex.get(b.name));
+    return bones.concat(c[control.side]);
   }
 
   _highlight() {

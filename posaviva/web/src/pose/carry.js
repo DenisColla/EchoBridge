@@ -1,4 +1,10 @@
 // Long press on a character (app.addHoldHandler, priority 60):
+//  - where: with Tocco diretto posing the press (no panel, Posa, Mani) the trunk, shoulders,
+//    upper arms and thighs carry. A long press on a hand, a finger, a forearm, a foot, a shin,
+//    the neck or the head is a careful pose drag (a finger / S Pen resting to aim before
+//    pulling): moving afterwards poses that part (direct.dragFrom), releasing still opens the
+//    character menu. Where touch does not pose (another panel, Sposta, Tocco diretto off) any
+//    part of the body carries.
 //  - the character lifts a little (and a shadow ring marks its spot on the floor); sliding
 //    the finger carries it over the ground (landscape terrain followed, props and other
 //    characters it was not already touching are not walked into), a second finger turns
@@ -14,8 +20,8 @@ import { EFFECTOR_LABEL } from './contacts.js';
 
 const LIFT = 0.05; // m (scaled)
 const FOOT_R = 0.17; // footprint radius (m, scaled)
-/** parts a slow drag usually starts on (see _hold) */
-const LIMB_ENDS = new Set(['hand', 'foot', 'toes', 'head']);
+/** px a limb long press must then travel before it becomes a pose drag (as a carry starts moving) */
+const LIMB_SLOP = 8;
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _n = new THREE.Vector3();
 const _box = new THREE.Box3();
 const _ndc = new THREE.Vector2();
@@ -42,23 +48,49 @@ export class CharacterCarry {
 
   get active() { return !!this.d; }
 
-  _hold({ ndc, x, y, event, drift = 0 }) {
+  _hold({ ndc, x, y, t0, event }) {
     if (this.d) return false;
     const { app, ctx } = this;
     if (event && event.pointerType === 'mouse' && event.button > 0) return false;
     const hit = ctx.picker.pick(ndc);
     if (!hit) return false;
-    // a finger (pen) resting on a hand, a foot or the head to aim before pulling it trembles a
-    // little: that press is a careful pose drag about to start, not a request to carry
-    const c = hit.control;
-    const end = c && (c.region === 'finger' || LIMB_ENDS.has(c.baseId));
-    if (end && drift > (event?.pointerType === 'pen' ? 1.5 : 3.5)) return false;
     // an object in front of the body: its own long press (objects, priority 50)
     const pp = app.props?.pick?.(ndc, { occlusion: false });
     if (pp && pp.distance < hit.distance - 0.01) return false;
+    // Tocco diretto: a hand, forearm, foot, shin or the head held still is a pose drag about to start
+    const limb = event && ctx.direct?.holdPoses?.(event);
+    // (the drag is measured from where the finger rests now: the body point under it was picked there)
+    if (limb) return this._limbHold(limb, x, y, t0 ?? event.timeStamp);
     ctx.direct?.cancelPress();
     ctx.direct?.closeMenu();
     return this._begin(hit.character, hit, x, y, event?.pointerId);
+  }
+
+  /**
+   * Long press on a limb (Tocco diretto): nothing lifts. Moving on poses the part as if the
+   * press had moved at once; released still, the character menu opens (as for a carry
+   * released without moving).
+   */
+  _limbHold(hit, x, y, t0) {
+    const { ctx, shell } = this;
+    const ch = hit.character;
+    ctx.direct.closeMenu();
+    shell.hint('Trascina per posare · il busto sposta il personaggio');
+    let done = false;
+    return {
+      move: (e) => {
+        if (done || Math.hypot(e.clientX - x, e.clientY - y) < LIMB_SLOP) return;
+        done = true;
+        shell.hint('');
+        ctx.direct.dragFrom({ id: e.pointerId, x0: x, y0: y, t0, hit, type: e.pointerType }, e);
+      },
+      end: (e, cancelled) => {
+        if (done) return;
+        done = true;
+        shell.hint('');
+        if (!cancelled && this.app.characters.includes(ch)) this.openMenu(ch, x, y);
+      },
+    };
   }
 
   // ------------------------------------------------------------ session
@@ -343,6 +375,8 @@ export class CharacterCarry {
       { id: 'del', label: 'Elimina', icon: 'trash', danger: true, onClick: () => { if (people?.remove) people.remove(ch); else { app.removeCharacter(ch); app.commit('elimina personaggio'); } } },
     ];
     // opened by the release of the finger: kit.stageMenu ignores the click of that release
-    return stageMenu(items, { x, y, title: ch.name, subtitle: 'Tieni premuto e trascina per spostarlo', width: 264 });
+    // (with Tocco diretto only the trunk carries: say where to hold)
+    const sub = ctx.direct?.posesTouch?.() ? 'Tieni premuto il busto e trascina per spostarlo' : 'Tieni premuto e trascina per spostarlo';
+    return stageMenu(items, { x, y, title: ch.name, subtitle: sub, width: 264 });
   }
 }

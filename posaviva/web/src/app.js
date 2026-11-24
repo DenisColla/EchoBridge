@@ -252,7 +252,8 @@ export class App extends THREE.EventDispatcher {
   }
 
   /**
-   * Register a long-press handler: fn({ndc, event, x, y}) -> false (not mine) | true (consumed) |
+   * Register a long-press handler: fn({ndc, event, x, y, x0, y0, t0 (where / when the press
+   * started), drift (px it wandered), pointerType}) -> false (not mine) | true (consumed) |
    * a press-and-drag session {move(e), end(e, cancelled)}: while the finger stays down the
    * camera does not orbit and every move goes to the session. A press held HOLD_MS without
    * moving more than 10 px (one finger, nothing else down) fires the handlers, highest
@@ -290,13 +291,15 @@ export class App extends THREE.EventDispatcher {
      * Runs the hold handlers for a press (event e, still down). Returns true when one took
      * it (a returned session then owns the pointer until it lifts).
      */
-    const runHold = (e, drift = 0) => {
+    const runHold = (e, drift = 0, origin = null) => {
       ring.hide();
       if (!this._holdHandlers.length) return false;
       const ndc = this.pointerToNDC(e);
+      // x0 / y0 / t0: where and when the press started (x / y: where the finger rests now)
+      const x0 = origin?.x ?? e.clientX, y0 = origin?.y ?? e.clientY, t0 = origin?.t ?? e.timeStamp;
       for (const h of this._holdHandlers) {
         let r = false;
-        try { r = h.fn({ ndc, event: e, x: e.clientX, y: e.clientY, drift, pointerType: e.pointerType }); } catch (err) { console.error(err); }
+        try { r = h.fn({ ndc, event: e, x: e.clientX, y: e.clientY, x0, y0, t0, drift, pointerType: e.pointerType }); } catch (err) { console.error(err); }
         if (!r) continue;
         haptic('medium');
         if (typeof r === 'object') {
@@ -312,13 +315,13 @@ export class App extends THREE.EventDispatcher {
      * A capture-phase handle (pose rings) that took a press which then stayed still for the
      * long-press time hands it over: the hold handlers run as if the router had timed it.
      */
-    this.holdFrom = (e, drift = 0) => (!this._holdSession && pointers.size <= 1 ? runHold(e, drift) : false);
+    this.holdFrom = (e, drift = 0, origin = null) => (!this._holdSession && pointers.size <= 1 ? runHold(e, drift, origin) : false);
     const fireHold = () => {
       const d = down;
       if (!d || d.multi) return;
       d.timer = 0;
       d.held = true;
-      runHold(d.last, d.drift);
+      runHold(d.last, d.drift, { x: d.x, y: d.y, t: d.t });
     };
     const endSession = (e, cancelled) => {
       const hs = this._holdSession;

@@ -125,22 +125,29 @@ export class IKSolver {
       // 2) back: abdomen ~45%, chest the rest (a few passes: the bend is spread over
       // the curved spine, so the shoulder travels less than a rigid turn would move it)
       const ab = this.controls.get('abdomen'), chs = this.controls.get('chest');
-      // the budget counts the bend the back already has (a second hand on the same table)
-      let budget = snap.spineMax ?? Infinity;
-      if (Number.isFinite(budget)) {
-        for (const c of [ab, chs]) {
-          const f = c.axes.findIndex((a) => a.key === 'flex'), l = c.axes.findIndex((a) => a.key === 'lat');
-          budget -= Math.hypot(f >= 0 ? rig.read(ch, c, f) : 0, l >= 0 ? rig.read(ch, c, l) : 0);
-        }
-        budget = Math.max(0, budget);
-      }
+      // spineMax caps the total bend of the back (abdomen + chest, flexion and side bend): a swing
+      // that would go past it is shortened; one that straightens a bent back is always allowed
+      // (a second hand on the same table shares the bend; a back leaning the other way can come
+      // back up)
+      const cap = snap.spineMax ?? Infinity;
+      const keys = [ab, chs].map((c) => [c.axes.findIndex((a) => a.key === 'flex'), c.axes.findIndex((a) => a.key === 'lat')]);
+      const bend = () => {
+        let b = 0;
+        [ab, chs].forEach((c, j) => { const [f, l] = keys[j]; b += Math.hypot(f >= 0 ? rig.read(ch, c, f) : 0, l >= 0 ? rig.read(ch, c, l) : 0); });
+        return b;
+      };
       const swing = (ctrl, dist) => {
-        if (budget <= 1e-3) return false;
-        const r = rig.worldPos(ch, ctrl.pivotIndex, _W).distanceTo(_S);
-        if (r < 1e-4) return false;
-        const dd = Math.min(dist, budget * r); // arc length within the remaining bend
-        budget -= dd / r;
-        return this._swingToward(ch, ctrl, ctrl.pivotIndex, _S, target, dd, null);
+        if (!Number.isFinite(cap)) return this._swingToward(ch, ctrl, ctrl.pivotIndex, _S, target, dist, null);
+        const b0 = bend(), max = Math.max(cap, b0);
+        const vals = ctrl.axes.map((_, k) => rig.read(ch, ctrl, k));
+        const undo = () => { vals.forEach((v, k) => rig.write(ch, ctrl, k, v, false)); rig.refreshControl(ch, ctrl); };
+        let hit = this._swingToward(ch, ctrl, ctrl.pivotIndex, _S, target, dist, null);
+        for (let i = 0, f = 0.5; i < 4 && bend() > max + 1e-4; i++, f *= 0.5) {
+          undo();
+          hit = this._swingToward(ch, ctrl, ctrl.pivotIndex, _S, target, dist * f, null) || true;
+        }
+        if (bend() > max + 1e-4) { undo(); return true; }
+        return hit;
       };
       for (let it = 0; it < 3; it++) {
         rig.worldPos(ch, chain.upper, _S);

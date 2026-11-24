@@ -115,8 +115,9 @@ export class PoseGizmo {
   // ------------------------------------------------------------ drawing
   draw() {
     const ctx = this.ctx;
-    // Vista pulita: no handles (direct touch still poses); hidden handles are not hit either
-    const active = ctx.isActive() && !this.shell.cleanView;
+    // Vista pulita: no handles (direct touch still poses); hidden handles are not hit either.
+    // "Ruota la vista" (close-ups): no handles, every drag orbits
+    const active = ctx.isActive() && !this.shell.cleanView && !ctx.direct?.suspended;
     const ch = ctx.sel().character;
     if (!active || !ch || !ch.root.visible) {
       for (const r of this.rings) r.ok = false;
@@ -753,7 +754,7 @@ export class PoseGizmo {
     if (!this.ctx.picker.pick(_ndc) && !app.props?.pick?.(_ndc)) return;
     app.controls.enabled = d.controlsWasEnabled;
     this.shell.hint('');
-    if (!app.holdFrom(e, drift)) { app.controls.enabled = false; return; }
+    if (!app.holdFrom(e, drift, { x: d.x0, y: d.y0, t: d.t0 })) { app.controls.enabled = false; return; }
     // the long press took it: the handle lets go, nothing changed
     this.drag = null;
     if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }

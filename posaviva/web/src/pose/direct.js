@@ -9,6 +9,10 @@
 //    least-squares on the two anatomical axes); a finger = curl of that finger. With the
 //    hand (foot) in a contact, dragging the arm (leg) swings the elbow (knee) around the
 //    shoulder-wrist line. One undo step per drag.
+//  - A press that rests first (a finger or the S Pen aiming before it pulls) still poses: a
+//    long press on a hand, a finger, a forearm, a foot, a shin, the neck or the head becomes
+//    the same drag once it moves (dragFrom, called by pose/carry.js); the trunk, the
+//    shoulders, the upper arms and the thighs carry the character when held.
 //  - The press is shared with the core router (tap, long press) and the camera: nothing
 //    is taken until the finger moves past the tap tolerance; the camera never gets the
 //    moves of a press that started on the body. Two fingers still zoom / pan; a press on
@@ -34,8 +38,19 @@ const REACH_OK = 0.05;
 /** anatomical axes a drag drives (twist needs the rings) */
 const DRAG_KEYS = new Set(['flex', 'abd', 'lat', 'elev', 'prot']);
 const FK_PARTS = new Set(['arm', 'forearm', 'shoulder', 'thigh', 'shin', 'abdomen', 'chest', 'neck']);
-/** parts dragged by their far end (the touched skin of the back barely moves when it bends) */
-const SPINE_LEVER = new Set(['abdomen', 'chest', 'neck']);
+/**
+ * parts dragged by a far lever (the touched skin of the back barely moves when it bends): the
+ * top of the chest for the abdomen and the chest (bending the abdomen carries the whole upper
+ * body), the middle of the head for the neck. [bone, t along it]
+ */
+const SPINE_LEVER = { abdomen: ['spine01', 1], chest: ['spine01', 1], neck: ['head', 0.5] };
+/**
+ * a long press here carries the character (pose/carry.js): the trunk, the shoulders, the upper
+ * arms and the thighs (the big middle of the body, also seen from the side). On the far half
+ * of a limb and on the head (hand, fingers, forearm, foot, toes, shin, neck, head: where a
+ * finger or the S Pen rests to aim before pulling) it is a pose drag.
+ */
+const CARRY_PARTS = new Set(['pelvis', 'abdomen', 'chest', 'shoulder', 'arm', 'thigh']);
 const D = Math.PI / 180;
 export const HAND_SHAPES = [
   { id: 'pugno', preset: 'fist', label: 'Pugno' },
@@ -112,7 +127,8 @@ export class DirectTouch {
     on = !!on;
     if (on === this.suspended) return;
     this._suspended = on;
-    if (on) { this.press = null; this.closeMenu(); }
+    // (the selected part lets go: its rings would only sit there, inert)
+    if (on) { this.press = null; this.closeMenu(); if (this.app.selection.part) this.app.select(this.app.selection.character, null); }
     this.app.dispatchEvent({ type: 'directtouch', suspended: on });
     this.app.invalidate();
   }
@@ -125,6 +141,37 @@ export class DirectTouch {
 
   /** a long press took the pending press (A4): forget it */
   cancelPress() { this.press = null; }
+
+  /** a press would pose the body here (no panel, Posa, Mani; not Sposta, not the stroke tool, not paused) */
+  posesTouch() {
+    const ctx = this.ctx, mode = ctx.mode();
+    return this.enabled && !this._suspended && ctx.isActive() && mode !== 'move' && !(mode === 'line' && this.shell.activeToolId === 'pose');
+  }
+
+  /**
+   * Long press (pose/carry.js): the body hit when this press would pose the far half of a
+   * limb, the neck or the head (a finger / S Pen resting to aim before pulling), else null
+   * (the trunk, upper arms and thighs carry, as does any part where touch does not pose).
+   */
+  holdPoses(e) {
+    if (!this._allowed(e)) return null;
+    const hit = this.pickBody(e);
+    if (!hit) return null;
+    if (hit.character.bones[hit.bone]?.name === 'spine05' || CARRY_PARTS.has(hit.control.baseId)) return null;
+    return hit;
+  }
+
+  /**
+   * A long press on a limb that starts moving (pose/carry.js): the same pose drag as a press
+   * that moved at once, measured from (x0, y0), where `hit` was picked. p: {id, x0, y0, t0, hit, type}.
+   */
+  dragFrom(p, e) {
+    if (this.drag || !p?.hit || !this.app.characters.includes(p.hit.character)) return false;
+    this.press = null;
+    try { this._begin(p, e); } catch (err) { console.error('[pose] direct drag', err); this._abort(); }
+    if (this.drag) this.drag.fromHold = true; // (a second finger now never undoes it as a pinch)
+    return !!this.drag;
+  }
 
   /**
    * The palm is mostly metacarpal bones (finger controls 'f{n}0'): outside the Mani tool a
@@ -208,7 +255,7 @@ export class DirectTouch {
       if (e.pointerId === d.id) return;
       // a pinch whose first finger slid past the tap tolerance before the second one landed
       // (they land 30-80 ms apart): the drag is undone and the camera takes the gesture
-      if (e.timeStamp - d.t0 < PINCH_MS || Math.hypot(d.x - d.x0, d.y - d.y0) < PINCH_PX) { this._yield(d); return; }
+      if (!d.fromHold && (e.timeStamp - d.t0 < PINCH_MS || Math.hypot(d.x - d.x0, d.y - d.y0) < PINCH_PX)) { this._yield(d); return; }
       e.stopImmediatePropagation();
       return;
     }
@@ -361,12 +408,12 @@ export class DirectTouch {
    * grabbed point as the handle; too close to the pivot (no lever) or `lever` (back and neck:
    * the touched skin barely moves when they bend): the end of the part
    */
-  _handleFor(d, ch, ctrl, lever = false) {
+  _handleFor(d, ch, ctrl, lever = null) {
     const { rig } = this.ctx;
     const piv = rig.worldPos(ch, ctrl.pivotIndex, new THREE.Vector3());
-    const lastName = ctrl.own[ctrl.own.length - 1];
+    const lastName = lever ? lever[0] : ctrl.own[ctrl.own.length - 1];
     const li = rig.model.boneIndex.get(lastName);
-    const end = rig.pointOnBone(ch, li, 1, new THREE.Vector3());
+    const end = rig.pointOnBone(ch, li, lever ? lever[1] : 1, new THREE.Vector3());
     const len = piv.distanceTo(end);
     if (!lever && d.hit.point.distanceTo(piv) >= 0.35 * len) {
       d.hb = d.hit.bone;
@@ -385,12 +432,16 @@ export class DirectTouch {
     const { rig, state, controls } = this.ctx;
     d.kind = 'fk';
     d.dofs = [];
+    // "Il bacino compensa" (abdomen / chest): the pelvis counter-tilts with every change, so
+    // the solver sees it too (else the hips take back most of a side bend and the top of the
+    // back lags far behind the finger)
+    const follow = () => { if (d.follow) this.ctx.follow.update(); };
     const add = (c, damp) => c.axes.forEach((a, k) => {
       if (!DRAG_KEYS.has(a.key) || (a.extra && state.limits)) return;
       d.dofs.push({
         damp,
         get: () => rig.read(ch, c, k),
-        set: (v, clamp) => { const r = rig.write(ch, c, k, v, clamp); rig.refreshControl(ch, c); return clamp && r.clamped; },
+        set: (v, clamp) => { const r = rig.write(ch, c, k, v, clamp); rig.refreshControl(ch, c); follow(); return clamp && r.clamped; },
       });
     });
     add(ctrl, 1);
@@ -398,9 +449,11 @@ export class DirectTouch {
     // helps (damped more: the elbow / knee bends first), so the touched point stays under the finger
     const upper = ctrl.baseId === 'forearm' ? 'arm.' : ctrl.baseId === 'shin' ? 'thigh.' : null;
     if (upper) add(controls.get(upper + ctrl.side), 3);
+    // the chest alone turns a short way (and the hips compensate): the abdomen helps it lean
+    if (ctrl.baseId === 'chest') add(controls.get('abdomen'), 2);
     d.follow = this.ctx.follow.begin(ch, ctrl);
-    this._handleFor(d, ch, ctrl, SPINE_LEVER.has(ctrl.baseId));
-    this.shell.hint(ctrl.label);
+    this._handleFor(d, ch, ctrl, SPINE_LEVER[ctrl.baseId] || null);
+    this.shell.hint(d.hint0 = ctrl.label);
   }
 
   /** finger curl: the three phalanges together (same profile as the Mani panel) */
@@ -429,7 +482,7 @@ export class DirectTouch {
     d.hl = rig.pointOnBone(ch, tip, 1, new THREE.Vector3()).applyMatrix4(_m.copy(ch.bones[tip].matrixWorld).invert());
     d.h0 = { ...this._project(this._handleWorld(d, _v), { x: 0, y: 0 }) };
     if (d.h0.x == null) d.h0 = { x: d.x0, y: d.y0 };
-    this.shell.hint(`${ctrl.label.split(' · ')[0]}: piega il dito`);
+    this.shell.hint(d.hint0 = `${ctrl.label.split(' · ')[0]}: piega il dito`);
   }
 
   /** a limb whose hand / foot is in a contact: the drag swings the elbow / knee */
@@ -453,7 +506,7 @@ export class DirectTouch {
       },
     }];
     this._handleFor(d, ch, ctrl);
-    this.shell.hint(chain.kind === 'arm' ? 'Gomito (la mano resta appoggiata)' : 'Ginocchio (il piede resta appoggiato)');
+    this.shell.hint(d.hint0 = chain.kind === 'arm' ? 'Gomito (la mano resta appoggiata)' : 'Ginocchio (il piede resta appoggiato)');
   }
 
   _safeUpdate(d) {
@@ -493,7 +546,7 @@ export class DirectTouch {
       if (d.follow) ctx.follow.update();
     }
     if (limited && !d.atLimit) haptic('tick');
-    if (limited !== d.atLimit && d.dofs) this.shell.hint(limited ? `${d.ctrl.label} · al limite` : d.kind === 'fk' ? d.ctrl.label : '');
+    if (limited !== d.atLimit && d.dofs) this.shell.hint(limited ? `${d.ctrl.label} · al limite` : d.hint0 || '');
     d.atLimit = limited;
     ctx.edited(ch, false);
     app.invalidate();
@@ -630,8 +683,11 @@ export class DirectTouch {
       items.push({ id: 'reach', label: 'Tocca un punto', icon: 'tap', hint: hint('Un gradino, una sedia, un oggetto'), onClick: () => this.arm(ch, eff) });
       if (pinned) items.push({ id: 'free', label: 'Libera', icon: 'unlock', onClick: () => { api.unpin(ch, eff); toast(`${EFFECTOR_LABEL[eff]} libero`, { ms: 1400 }); } });
     }
+    // beside the finger (a short screen): on the side away from the body, which stays in view
+    const body0 = this._project(this.ctx.rig.worldPos(ch, 0, _v), _s);
+    const prefer = body0 ? (body0.x > x ? 'left' : 'right') : undefined;
     const m = stageMenu(items, {
-      x, y, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: short ? 300 : 276,
+      x, y, prefer, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: short ? 300 : 276,
       onClose: () => { if (this.menu === m) this.menu = null; },
     });
     // never in the way: no dimming, touches outside go to the scene (and close it)
@@ -736,15 +792,31 @@ export class DirectTouch {
     return false;
   }
 
-  /** walks the character next to a point and makes the contact there (one undo step) */
+  /**
+   * Walks the character next to a point and makes the contact there (one undo step). A hand
+   * gets the point at its side, a little ahead (where a squat reaches the floor); a foot
+   * faces it. Out of reach even from there: everything stays as it was (no step).
+   */
   async approachAndReach(ch, eff, hit) {
     const { app, ctx } = this;
     if (!app.characters.includes(ch)) return false;
     let ok = false;
     await app.history.batch('raggiungi', () => {
-      // close to the point, its hand side toward it (the squat and the arm do the rest)
-      if (!ctx.api.approach(ch, hit.point, hit.point, { near: 0.3, commit: false })) return;
+      const p0 = ch.root.position.clone(), y0 = ch.root.rotation.y, u = this.snapPose(ch);
+      const hand = eff.startsWith('hand');
+      const r = ctx.api.approach(ch, hit.point, hit.point, { near: hand ? 0.45 : 0.3, commit: false });
+      if (!r) return;
+      if (hand) {
+        const turn = eff.endsWith('.R') ? Math.PI / 4 : -Math.PI / 4;
+        ctx.contacts.carry(ch, () => { ch.root.rotation.y = r.rotationY + turn; ch.root.updateMatrixWorld(true); });
+        ctx.placed(ch);
+      }
       ok = this._reachPoint(ch, eff, hit, { approached: true });
+      if (!ok) {
+        ctx.contacts.carry(ch, () => { ch.root.position.copy(p0); ch.root.rotation.y = y0; ch.root.updateMatrixWorld(true); });
+        this.restorePose(ch, u);
+        ctx.placed(ch);
+      }
     });
     return ok;
   }
