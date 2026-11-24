@@ -335,7 +335,7 @@ export function seatOf(p, { bed = false } = {}) {
  * (center and half sizes of the flat central region, world). Beds: the mattress
  * (pillows at the head are skipped).
  */
-export function topOf(p, { bed = false } = {}) {
+export function topOf(p, { bed = false, below = Infinity } = {}) {
   p.root.updateWorldMatrix(true, true);
   const b = p.localBox, s = p.scale;
   if (b.isEmpty()) return null;
@@ -347,7 +347,7 @@ export function topOf(p, { bed = false } = {}) {
   const zA = bed ? 0.35 : 0.2, zB = bed ? 0.92 : 0.8;
   for (let i = 1; i < 6; i++) for (let k = 1; k < 6; k++) {
     const lx = x0 + W * (0.2 + 0.6 * (i / 6)), lz = z0 + D * (zA + (zB - zA) * (k / 6));
-    const y = hitY(p, ox + lx * c + lz * sn, oz - lx * sn + lz * c, top);
+    const y = hitY(p, ox + lx * c + lz * sn, oz - lx * sn + lz * c, top, below);
     if (y !== null) ys.push({ y, lx, lz });
   }
   if (!ys.length) return null;

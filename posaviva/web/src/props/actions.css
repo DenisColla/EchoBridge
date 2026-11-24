@@ -3,8 +3,17 @@
 .pv-oa .pv-modal-subtitle { color: var(--accent-hi, var(--muted)); }
 .pv-oa-who { display: flex; align-items: center; gap: 8px; padding: 2px 6px 6px; border-bottom: 1px solid var(--line); margin-bottom: 2px; }
 .pv-oa-who-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--muted); flex: none; }
-.pv-oa-who-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0; min-width: 0; }
-.pv-oa-who-chips .pv-chip { flex: none; min-height: 36px; }
+/* one row that scrolls sideways; .more-r / .more-l fade the cut side, › says how many more */
+.pv-oa-who-scroll { flex: 1; min-width: 0; display: flex; }
+.pv-oa-who-chips { display: flex; gap: 6px; padding: 2px 0; min-width: 0; flex: 1; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; scroll-snap-type: x proximity; }
+.pv-oa-who-chips::-webkit-scrollbar { display: none; }
+.pv-oa-who-chips .pv-chip { flex: none; min-height: 36px; scroll-snap-align: start; }
+.pv-oa-who.more-r .pv-oa-who-chips { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 34px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 34px), transparent); }
+.pv-oa-who.more-l .pv-oa-who-chips { -webkit-mask-image: linear-gradient(to right, transparent, #000 24px); mask-image: linear-gradient(to right, transparent, #000 24px); }
+.pv-oa-who.more-l.more-r .pv-oa-who-chips { -webkit-mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 34px), transparent); mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 34px), transparent); }
+.pv-oa-who-next { flex: none; display: inline-flex; align-items: center; gap: 1px; min-width: 40px; min-height: 36px; padding: 0 6px 0 8px; margin-left: -4px; border-radius: 99px;
+  border: 1px solid var(--accent, #7c6cff); background: var(--accent-soft, rgba(124,108,255,.2)); color: var(--text); font: inherit; font-size: 12px; font-weight: 600; }
+.pv-oa-who-next[hidden] { display: none; }
 .pv-oa-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 2px; border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
 .pv-oa-tool { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 52px; padding: 4px 2px; border: 0; border-radius: 12px; background: none; color: var(--text); font: inherit; font-size: 11px; line-height: 1.1; text-align: center; }
 .pv-oa-tool .pv-icon { color: var(--muted); }

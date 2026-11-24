@@ -63,10 +63,11 @@ function poltrona(p) {
     return parts;
   }
   if (p.style === 'club') {
+    // club proportions: seat cushion top 0.44 m, arms 0.62 m, back 0.84 m (one sits in it, not on it)
     const W = 0.9, D = 0.88;
-    add(parts, 'soft', boxOn(W, 0.36, D, { y: 0.06, r: 0.06 }));
-    for (const s of [-1, 1]) add(parts, 'soft', boxOn(0.18, 0.5, D - 0.05, { x: s * (W / 2 - 0.1), y: 0.06, r: 0.08 }));
-    add(parts, 'soft', boxOn(W - 0.08, 0.76, 0.2, { y: 0.06, z: -D / 2 + 0.11, r: 0.09 }), boxOn(W - 0.36, 0.12, D - 0.3, { y: 0.42, z: 0.08, r: 0.05 }));
+    add(parts, 'soft', boxOn(W, 0.25, D, { y: 0.06, r: 0.06 }));
+    for (const s of [-1, 1]) add(parts, 'soft', boxOn(0.18, 0.56, D - 0.05, { x: s * (W / 2 - 0.1), y: 0.06, r: 0.08 }));
+    add(parts, 'soft', boxOn(W - 0.08, 0.78, 0.2, { y: 0.06, z: -D / 2 + 0.11, r: 0.09 }), boxOn(W - 0.36, 0.13, D - 0.3, { y: 0.31, z: 0.08, r: 0.05 }));
     for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(parts, 'dark', cylinder(0.025, 0.02, 0.06, { x: sx * (W / 2 - 0.08), z: sz * (D / 2 - 0.08), seg: 12 }));
     return parts;
   }
