@@ -9,6 +9,10 @@
 //    least-squares on the two anatomical axes); a finger = curl of that finger. With the
 //    hand (foot) in a contact, dragging the arm (leg) swings the elbow (knee) around the
 //    shoulder-wrist line. One undo step per drag.
+//  - A press that rests first (a finger or the S Pen aiming before it pulls) still poses: a
+//    long press on a limb, the neck or the head becomes the same drag once it moves
+//    (dragFrom, called by pose/carry.js); only the trunk (Busto, Addome, Bacino) carries
+//    the character when held.
 //  - The press is shared with the core router (tap, long press) and the camera: nothing
 //    is taken until the finger moves past the tap tolerance; the camera never gets the
 //    moves of a press that started on the body. Two fingers still zoom / pan; a press on
@@ -36,6 +40,8 @@ const DRAG_KEYS = new Set(['flex', 'abd', 'lat', 'elev', 'prot']);
 const FK_PARTS = new Set(['arm', 'forearm', 'shoulder', 'thigh', 'shin', 'abdomen', 'chest', 'neck']);
 /** parts dragged by their far end (the touched skin of the back barely moves when it bends) */
 const SPINE_LEVER = new Set(['abdomen', 'chest', 'neck']);
+/** the trunk: a long press there carries the character; on any other part it is a pose drag (pose/carry.js) */
+const TRUNK = new Set(['pelvis', 'abdomen', 'chest']);
 const D = Math.PI / 180;
 export const HAND_SHAPES = [
   { id: 'pugno', preset: 'fist', label: 'Pugno' },
@@ -126,6 +132,37 @@ export class DirectTouch {
   /** a long press took the pending press (A4): forget it */
   cancelPress() { this.press = null; }
 
+  /** a press would pose the body here (no panel, Posa, Mani; not Sposta, not the stroke tool, not paused) */
+  posesTouch() {
+    const ctx = this.ctx, mode = ctx.mode();
+    return this.enabled && !this._suspended && ctx.isActive() && mode !== 'move' && !(mode === 'line' && this.shell.activeToolId === 'pose');
+  }
+
+  /**
+   * Long press (pose/carry.js): the body hit when this press would pose a limb, the neck or
+   * the head (a finger / S Pen resting to aim before pulling), else null (the trunk carries,
+   * as does any part where touch does not pose).
+   */
+  holdPoses(e) {
+    if (!this._allowed(e)) return null;
+    const hit = this.pickBody(e);
+    if (!hit) return null;
+    if (hit.character.bones[hit.bone]?.name === 'spine05' || TRUNK.has(hit.control.baseId)) return null;
+    return hit;
+  }
+
+  /**
+   * A long press on a limb that starts moving (pose/carry.js): the same pose drag as a press
+   * that moved at once, measured from where the press started. p: {id, x0, y0, t0, hit, type}.
+   */
+  dragFrom(p, e) {
+    if (this.drag || !p?.hit || !this.app.characters.includes(p.hit.character)) return false;
+    this.press = null;
+    try { this._begin(p, e); } catch (err) { console.error('[pose] direct drag', err); this._abort(); }
+    if (this.drag) this.drag.fromHold = true; // (a second finger now never undoes it as a pinch)
+    return !!this.drag;
+  }
+
   /**
    * The palm is mostly metacarpal bones (finger controls 'f{n}0'): outside the Mani tool a
    * touch there means the hand (drag = IK, tap = hand menu), not the finger. The fingers too
@@ -208,7 +245,7 @@ export class DirectTouch {
       if (e.pointerId === d.id) return;
       // a pinch whose first finger slid past the tap tolerance before the second one landed
       // (they land 30-80 ms apart): the drag is undone and the camera takes the gesture
-      if (e.timeStamp - d.t0 < PINCH_MS || Math.hypot(d.x - d.x0, d.y - d.y0) < PINCH_PX) { this._yield(d); return; }
+      if (!d.fromHold && (e.timeStamp - d.t0 < PINCH_MS || Math.hypot(d.x - d.x0, d.y - d.y0) < PINCH_PX)) { this._yield(d); return; }
       e.stopImmediatePropagation();
       return;
     }

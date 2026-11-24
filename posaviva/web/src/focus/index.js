@@ -233,7 +233,10 @@ export function create(app, shell) {
     const { character: ch, part } = app.selection;
     const c = part && ch && ch.root.visible ? controlsOf()?.get(part) : null;
     const dragging = app.controls.enabled === false; // a gizmo/handle drag is in progress
-    if (!c || dragging) { lens.classList.remove('show'); return; }
+    // a part selected by a direct drag (quiet rings): no button over the body either, the next
+    // press there belongs to the body (a tap on the part brings the rings and the lens back)
+    const quiet = !!app.posing?.gizmo?.isQuiet?.();
+    if (!c || dragging || quiet) { lens.classList.remove('show'); return; }
     const bone = ch.boneByName.get(c.pivot);
     if (!bone) { lens.classList.remove('show'); return; }
     bone.getWorldPosition(_ndc).project(app.camera);

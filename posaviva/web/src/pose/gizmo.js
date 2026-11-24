@@ -753,7 +753,7 @@ export class PoseGizmo {
     if (!this.ctx.picker.pick(_ndc) && !app.props?.pick?.(_ndc)) return;
     app.controls.enabled = d.controlsWasEnabled;
     this.shell.hint('');
-    if (!app.holdFrom(e, drift)) { app.controls.enabled = false; return; }
+    if (!app.holdFrom(e, drift, { x: d.x0, y: d.y0, t: d.t0 })) { app.controls.enabled = false; return; }
     // the long press took it: the handle lets go, nothing changed
     this.drag = null;
     if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
