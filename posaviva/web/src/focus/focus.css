@@ -28,3 +28,13 @@
 .pv-focus-item.sel { border-color: var(--accent, #7c6cff); }
 .pv-focus-item:disabled { opacity: .45; }
 .pv-focus-empty { font-size: 12px; color: var(--muted, #9aa0ae); padding: 4px 8px; text-align: right; }
+
+/* "Ruota la vista" (close-ups): under "Torna alla vista"; on = a drag on the body orbits */
+.pv-focus-orbit { position: absolute; top: calc(var(--safe-top, 0px) + 112px); left: var(--pv-free-cx, 50%); transform: translateX(-50%) translateY(-8px);
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; min-height: 40px; border-radius: 99px; border: 1px solid rgba(255,255,255,.18);
+  background: rgba(20, 22, 28, .82); color: #fff; font-weight: 600; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.3);
+  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s, background .15s; z-index: 4; white-space: nowrap; }
+.pv-focus-orbit.show { opacity: 1; pointer-events: auto; transform: translateX(-50%); }
+.pv-focus-orbit.on { background: #4fd1c5; color: #0d1a1a; border-color: transparent; }
+.pv-focus-orbit.on .pv-icon { color: #0d1a1a; }
+html.pv-clean .pv-focus-orbit { display: none; }

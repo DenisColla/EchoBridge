@@ -300,11 +300,12 @@ export function create(app, shell) {
       let part = null;
       if (posing && mode === 'rotate') {
         // (a tap on the palm selects the hand outside the Mani tool: direct.palmAsHand)
-        part = direct.palmAsHand(hit.control)?.id || null;
+        part = direct.palmAsHand(hit.control, hit.character)?.id || null;
         // the hands tool only poses hands: other parts just select the character
         if (tool === 'hands' && hit.control && !['hand', 'finger'].includes(hit.control.region)) part = null;
       }
       if (hit.character !== app.selection.character || part !== app.selection.part) app.select(hit.character, part);
+      gizmo.setQuiet(null); // a tap makes the rings real handles
       haptic(10);
       // "Tocco diretto": a hand or a foot opens its small menu at the finger
       if (posing) direct.maybeMenu(hit, x, y);
@@ -465,12 +466,13 @@ export function create(app, shell) {
      * Walk-free placement near worldPoint: the character stands at a free spot (props,
      * rooms' walls and other characters avoided; landscape / exterior ground followed),
      * facing faceToward (a point; default worldPoint). Contacts on the floor come along.
-     * opts: {distance (m from the point, default: as close as free), commit=true}.
-     * Returns {position, rotationY} or null.
+     * opts: {distance (m from the point, default: as close as free), exact (worldPoint is the
+     * standing spot itself: used as is when free, else the nearest free one), near (first
+     * ring, m), commit=true}. Returns {position, rotationY} or null.
      */
-    approach(ch, worldPoint, faceToward = null, { distance = null, commit = true } = {}) {
+    approach(ch, worldPoint, faceToward = null, { distance = null, exact = false, near = null, commit = true } = {}) {
       if (!ch || !app.characters.includes(ch) || !worldPoint) return null;
-      const spot = approachSpot(ctx, ch, v3(worldPoint), { distance });
+      const spot = approachSpot(ctx, ch, v3(worldPoint), { distance, exact, near });
       if (!spot) return null;
       const look = v3(faceToward) || v3(worldPoint);
       const yaw = Math.atan2(look.x - spot.x, look.z - spot.z);

@@ -31,10 +31,11 @@
 .pv-panel-grip, .pv-panel-width { display: none; }
 .pv-root.pv-tablet.pv-side .pv-panel { transition: transform .32s var(--ease-out), width .22s var(--ease-out), visibility 0s linear .32s; }
 .pv-root.pv-tablet.pv-side.panel-open .pv-panel { transition: transform .32s var(--ease-out), width .22s var(--ease-out), visibility 0s; }
-.pv-root.pv-tablet .pv-panel.resizing { transition: none !important; }
-.pv-root.pv-tablet .pv-panel.resizing .pv-panel-body { pointer-events: none; }
+.pv-root .pv-panel.resizing { transition: none !important; }
+.pv-root .pv-panel.resizing .pv-panel-body { pointer-events: none; }
 /* drag the left edge to resize (double tap: normal / wide) */
-.pv-root.pv-tablet.pv-side .pv-panel-grip { display: flex; position: absolute; left: -13px; top: 0; bottom: 0; width: 26px; z-index: 3;
+/* (also phones in landscape: 260-440 px) */
+.pv-root.pv-side .pv-panel-grip { display: flex; position: absolute; left: -13px; top: 0; bottom: 0; width: 26px; z-index: 3;
   align-items: center; justify-content: center; cursor: ew-resize; touch-action: none; }
 .pv-panel-grip span { width: 5px; height: 46px; border-radius: 3px; background: rgba(255, 255, 255, .2); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
   transition: background .2s, height .2s; }

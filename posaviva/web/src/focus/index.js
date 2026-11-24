@@ -8,13 +8,17 @@
 //    keep editing.
 //  - "Torna alla vista" (and the Android back gesture) restores the camera that
 //    was active before the first close-up.
+//  - A close-up selects no part (no pose rings over the middle of the view): the body still
+//    poses by touch, the background orbits; "Ruota la vista" (under "Torna alla vista")
+//    pauses direct touch so a drag anywhere orbits (app.posing.direct.setSuspended).
 // Camera moves are view changes: nothing is committed to the undo history.
 import * as THREE from 'three';
 import './focus.css';
-import { h, icon, haptic } from '../ui/kit.js';
+import { h, icon, haptic, toast } from '../ui/kit.js';
 import { focusControl, focusHead, focusHand, focusFoot } from '../pose/focus.js';
 
 const _v = new THREE.Vector3(), _m = new THREE.Matrix4(), _d = new THREE.Vector3();
+const TIP_KEY = 'posaviva.focus.orbitTip';
 
 export function create(app, shell) {
   const rig = () => app.sceneTools?.camera || null;
@@ -27,10 +31,22 @@ export function create(app, shell) {
   // ---------------------------------------------------------------- UI
   const lens = h('button', { type: 'button', class: 'pv-focus-lens', title: 'Primo piano sulla parte', 'aria-label': 'Primo piano sulla parte' }, icon('zoom', 20));
   const back = h('button', { type: 'button', class: 'pv-focus-back' }, icon('focusBack', 18), h('span', {}, 'Torna alla vista'));
+  const orbit = h('button', { type: 'button', class: 'pv-focus-orbit', 'aria-pressed': 'false', title: 'Il tocco sul corpo ruota la vista invece di posare' }, icon('orbit', 18), h('span', {}, 'Ruota la vista'));
+  const direct = () => app.posing?.direct || null;
+  const syncOrbit = () => { const on = !!direct()?.suspended; orbit.classList.toggle('on', on); orbit.setAttribute('aria-pressed', on ? 'true' : 'false'); };
+  orbit.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const d = direct();
+    if (!d?.setSuspended) return;
+    haptic('tick');
+    d.setSuspended(!d.suspended);
+    shell.hint(d.suspended ? 'Trascina ovunque per ruotare la vista' : 'Trascina il corpo per posarlo', 1600);
+  });
+  app.addEventListener('directtouch', syncOrbit);
   const menu = h('div', { class: 'pv-focus-menu', role: 'menu' });
   const fab = h('button', { type: 'button', class: 'pv-focus-fab', title: 'Zoom rapido', 'aria-label': 'Zoom rapido' }, icon('zoom', 22));
   const wrap = h('div', { class: 'pv-focus-wrap' }, menu, fab);
-  shell.overlay.append(lens, back, wrap);
+  shell.overlay.append(lens, back, orbit, wrap);
 
   lens.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -119,8 +135,9 @@ export function create(app, shell) {
       return;
     }
     const c = controlsOf()?.get(id);
-    if (c && app.selection.part !== id) app.select(ch, id); // ready to edit that part
-    else if (app.selection.character !== ch) app.select(ch, null);
+    // no part gets selected: its rings would sit in the middle of the close-up and take the
+    // drags meant for the camera (the lens on an already selected part keeps it)
+    if (app.selection.character !== ch || (app.selection.part && app.selection.part !== id)) app.select(ch, null);
     if (id === 'head') start(ch, () => focusHead(app, shell, ch), 'head');
     else if (id.startsWith('hand.')) start(ch, () => focusHand(app, shell, ch, id.slice(-1)), `wrist.${id.slice(-1)}`);
     else if (id.startsWith('foot.')) start(ch, () => focusFoot(app, shell, ch, id.slice(-1)), `foot.${id.slice(-1)}`);
@@ -143,13 +160,25 @@ export function create(app, shell) {
     if (!doFocus()) return;
     focus = { ch, bone, local: new THREE.Vector3(), last: null, saved, settle: 2 };
     back.classList.add('show');
+    if (direct()?.setSuspended) { orbit.classList.add('show'); syncOrbit(); }
+    tipOnce();
     popBack ||= app.pushBackHandler(() => { exit(true); return true; });
     app.invalidate();
+  }
+
+  /** first close-up on this device: how one finger is shared between posing and the camera */
+  function tipOnce() {
+    let seen = false;
+    try { seen = localStorage.getItem(TIP_KEY) === '1'; localStorage.setItem(TIP_KEY, '1'); } catch { /* private mode */ }
+    if (seen || !direct()?.setSuspended) return;
+    toast('Trascina il corpo per posare, lo sfondo per ruotare la vista', { kind: 'info', icon: 'orbit', ms: 5000, action: { label: 'Ruota ovunque', onClick: () => { direct()?.setSuspended(true); } } });
   }
 
   function clear() {
     focus = null;
     back.classList.remove('show');
+    orbit.classList.remove('show');
+    direct()?.setSuspended?.(false);
     if (popBack) { popBack(); popBack = null; }
   }
 

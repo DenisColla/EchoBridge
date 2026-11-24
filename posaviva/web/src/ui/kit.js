@@ -418,9 +418,11 @@ export function promptDialog(label, value = '', opts = {}) {
 /**
  * Context menu at a point of the 3D view (long press on a character, an object,
  * an empty spot...). items like sheetMenu (+ keepOpen: the menu stays open after
- * the click). opts: {x, y (screen px of the finger), title, subtitle, body: Node|Node[]
- * shown above the items (e.g. a slider), width, onClose}. Returns the modal api
- * ({el, card, body, close, result}).
+ * the click; checkable: the check mark follows the item's .checked class, data-id = id).
+ * opts: {x, y (screen px of the finger), title, subtitle, body: Node|Node[] shown above
+ * the items (e.g. a slider), width, side (beside the finger when it fits), onClose}.
+ * Placement: below the finger, else above it, else beside it (never over the point
+ * touched). Returns the modal api ({el, card, body, close, result}).
  *
  * Ghost clicks: a stage menu is usually opened by a finger that is still down (long press)
  * or that has just lifted (tap). The browser then sends the click of that release to
@@ -436,10 +438,14 @@ export function stageMenu(items, opts = {}) {
     if (!it) continue;
     if (it.separator) { list.appendChild(h('div', { class: 'pv-menu-sep' })); continue; }
     if (it.header) { list.appendChild(h('div', { class: 'pv-menu-header' }, it.header)); continue; }
+    // (checkable items keep their check mark, shown while .checked: menus can update it live)
+    const check = it.checked || it.checkable ? icon('check', 18) : null;
+    if (check) check.classList.add('pv-menu-check');
     const b = h('button', { type: 'button', role: 'menuitem', class: `pv-menu-item ${it.danger ? 'danger' : ''} ${it.checked ? 'checked' : ''}`.trim(), disabled: it.disabled },
       it.icon ? icon(it.icon, 20) : h('span', { class: 'pv-menu-noicon' }),
       h('span', { class: 'pv-menu-label' }, it.label, it.hint ? h('small', {}, it.hint) : null),
-      it.checked ? icon('check', 18) : null);
+      check);
+    if (it.id != null) b.dataset.id = it.id;
     b.addEventListener('click', () => { haptic('tick'); if (!it.keepOpen) m.close(it.id ?? it.label); setTimeout(() => it.onClick?.(), 0); });
     list.appendChild(b);
   }
@@ -470,21 +476,50 @@ export function stageMenu(items, opts = {}) {
   // below the finger when there is room, otherwise above it (measured after layout)
   card.style.top = Math.round(Math.min(y + 18, H - 120)) + 'px';
   card.style.maxHeight = `calc(100vh - 16px - var(--safe-bottom, 0px))`;
-  requestAnimationFrame(() => {
+  // placed after layout, and again whenever the card changes size (a note shown, a section
+  // expanded): it never runs off the screen
+  let lastH = -1, lastW = -1;
+  const place = () => {
     if (!stageMenus.has(m)) return;
-    const ch = card.offsetHeight; // layout height: the card is still scaled by its opening transition
-    let top = y + 18;
-    if (top + ch > H - 8) top = Math.max(8, y - 18 - ch);
-    if (top + ch > H - 8) top = Math.max(8, H - 8 - ch);
+    const ch = card.offsetHeight, cw = card.offsetWidth; // layout size: the card is still scaled by its opening transition
+    if (ch === lastH && cw === lastW) return;
+    lastH = ch; lastW = cw;
+    let top = y + 18, left = parseFloat(card.style.left);
+    // opts.side: beside the finger first (a light being adjusted stays in view), when it fits
+    const sideFirst = opts.side && (x + 24 + cw <= W - 8 || x - 24 - cw >= 8);
+    if (sideFirst || top + ch > H - 8) {
+      if (!sideFirst && y - 18 - ch >= 8) top = y - 18 - ch; // above the finger
+      else {
+        // neither below nor above (a short landscape screen): beside the finger, never over
+        // what it touched (the hand being shaped, the lamp being dimmed)
+        const right = x + 24, leftSide = x - 24 - cw;
+        const okR = right + cw <= W - 8, okL = leftSide >= 8;
+        if (okR || okL) {
+          left = okR && (!okL || x < W / 2) ? right : leftSide;
+          top = Math.min(Math.max(8, y - ch / 2), Math.max(8, H - 8 - ch));
+          card.style.left = Math.round(left) + 'px';
+          card.style.transformOrigin = left > x ? 'center left' : 'center right';
+        } else top = Math.max(8, H - 8 - ch);
+      }
+    }
     card.style.top = Math.round(top) + 'px';
     // the on-stage shortcut buttons (and the quick zoom button under them) step aside when covered
-    const l = parseFloat(card.style.left), t = top, r = l + card.offsetWidth, b = top + ch;
+    const l = left, t = top, r = l + cw, b = top + ch;
+    let cover = false;
     for (const f of document.querySelectorAll('.pv-stage-fabs, .pv-focus-wrap')) {
+      if (aside) { cover = true; break; }
       const q = f.getBoundingClientRect();
-      if (q.width && q.left < r + 6 && q.right > l - 6 && q.top < b + 6 && q.bottom > t - 6) { aside = true; fabsAside(1); break; }
+      if (q.width && q.left < r + 6 && q.right > l - 6 && q.top < b + 6 && q.bottom > t - 6) { cover = true; break; }
     }
-  });
-  card.style.transformOrigin = 'top center';
+    if (cover && !aside) { aside = true; fabsAside(1); }
+  };
+  requestAnimationFrame(place);
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(() => place());
+    ro.observe(card);
+    m.result.finally?.(() => ro.disconnect());
+  }
+  if (!card.style.transformOrigin) card.style.transformOrigin = 'top center';
   return m;
 }
 

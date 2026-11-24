@@ -20,6 +20,10 @@ const SIDES = ['L', 'R'];
 const DASH = [3, 4], DASH2 = [4, 4], NODASH = [];
 const RING_PX = { l: 70, m: 58, s: 44 };
 const HIT_RING = 20, HIT_BALL = 22, BALL_R = 13, HIT_EFF = 27, EFF_R = 13, HIT_DOT = 20;
+/** over the body (Tocco diretto on) a ring takes only a press right on its stroke: the part under the finger is dragged directly */
+const HIT_RING_BODY = 7;
+/** a press on a ring that stays this still for the long-press time goes to the long press (app.holdFrom) */
+const HOLD_MS = 480, HOLD_SLOP = 4;
 /** Hit radius scale per pointer type: a pen tip (S Pen) or a mouse is far more precise than a finger. */
 const HIT_SCALE = { pen: 0.55, mouse: 0.75 };
 const reach = (px, pointerType) => px * (HIT_SCALE[pointerType] || 1);
@@ -250,17 +254,18 @@ export class PoseGizmo {
       if (ring.band) this._drawBand(C, r, ring);
       order.push(slot);
     }
+    const fade = this.isQuiet() && dragK < 0 ? 0.5 : 1; // quiet rings (selected by a drag): fainter
     for (let pass = 0; pass < 2; pass++) {
       for (const slot of order) {
         const ring = this.rings[slot];
         const hot = ring.k === dragK;
         g.strokeStyle = ring.color;
         g.lineCap = 'round';
-        g.globalAlpha = pass ? 1 : 0.32;
+        g.globalAlpha = (pass ? 1 : 0.32) * fade;
         g.lineWidth = pass ? (hot ? 5 : 3.2) : 2;
         // halo for contrast on any background
         if (pass) {
-          g.save(); g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = g.lineWidth + 3; this._strokeRing(ring, 1); g.restore();
+          g.save(); g.strokeStyle = 'rgba(0,0,0,.45)'; g.globalAlpha = fade; g.lineWidth = g.lineWidth + 3; this._strokeRing(ring, 1); g.restore();
         }
         this._strokeRing(ring, pass);
       }
@@ -487,6 +492,35 @@ export class PoseGizmo {
     return null;
   }
 
+  /**
+   * hitTest as a press over the body sees it (Tocco diretto): a ring only on its stroke.
+   * Used by the S Pen hover glow.
+   */
+  hitTestBody(x, y, pointerType) {
+    const hit = this.hitTest(x, y, pointerType);
+    if (hit && (hit.kind === 'ring' || hit.kind === 'ball') && this._yieldsToBody({ clientX: x, clientY: y, pointerType, button: 0, buttons: 0 }, hit)) return null;
+    return hit;
+  }
+
+  /** a press on a ring / the ball that belongs to the body part under it (Tocco diretto) */
+  _yieldsToBody(e, hit) {
+    const under = this.ctx.direct?.bodyControl?.(e);
+    if (!under) return false;
+    const sel = this.ctx.sel().control;
+    const other = under !== sel, x = e.clientX, y = e.clientY, pt = e.pointerType;
+    if (other && this.isQuiet()) return true;
+    if (hit.kind === 'ring') return this._distRing(hit.ring, x, y) > reach(HIT_RING_BODY, pt);
+    return other && Math.hypot(x - this.center.x, y - this.center.y) > reach(BALL_R + 3, pt);
+  }
+
+  /**
+   * Quiet rings: the part was selected by a direct drag, not by a tap. They are drawn fainter
+   * and leave every press on another body part to direct touch; a tap on the part (or any
+   * other selection) makes them normal handles again.
+   */
+  setQuiet(ch, part) { this._quiet = ch && part ? { ch, part } : null; this.app.invalidate(); }
+  isQuiet() { const q = this._quiet, s = this.app.selection; return !!q && q.ch === s.character && q.part === s.part; }
+
   _distRing(ring, x, y) {
     const P = ring.pts, F = ring.front;
     let best = Infinity;
@@ -529,11 +563,16 @@ export class PoseGizmo {
       if (this.drag) { if (e.pointerId !== this.drag.pointerId) e.stopImmediatePropagation(); return; }
       // pen barrel (side) button held: the press orbits the camera (io/pen.js), no handle
       if (busy || e.button > 0 || (e.pointerType === 'pen' && ((e.buttons & 2) || this.app.penBarrel)) || !this.ctx.isActive()) return;
+      if (this.ctx.direct?.suspended) return; // "Ruota la vista": every drag orbits
       const ch = this.ctx.sel().character;
       if (!ch) return;
       let hit = this.hitTest(e.clientX, e.clientY, e.pointerType);
       // "Tocco diretto": a press on the selected hand / foot / head drags it (IK) instead of the trackball
       if (hit?.kind === 'ball' && this.ctx.direct?.wantsBall(e, ch)) hit = null;
+      // the rings and ball of the selected part cross the rest of the body: there they take only
+      // a press right on a stroke / on the ball, and none at all while the part was selected by a
+      // drag (quiet rings): any other press drags the part under the finger (or long-presses it)
+      if (hit && (hit.kind === 'ring' || hit.kind === 'ball') && this._yieldsToBody(e, hit)) hit = null;
       if (!hit && this.ctx.mode() === 'move') {
         // drag the character itself
         this.app.pointerToNDC(e, _ndc);
@@ -550,7 +589,8 @@ export class PoseGizmo {
       const d = this.drag;
       if (!d || e.pointerId !== d.pointerId) return;
       e.stopImmediatePropagation();
-      d.lastX = e.clientX; d.lastY = e.clientY;
+      d.lastX = e.clientX; d.lastY = e.clientY; d.lastEv = e;
+      if (d.holdT && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) > HOLD_SLOP) { clearTimeout(d.holdT); d.holdT = 0; }
       if (d.kind === 'stroke') {
         // every point counts (coalesced ones too): the stroke is a curve, not a handle
         const evs = e.getCoalescedEvents?.() || [];
@@ -565,6 +605,7 @@ export class PoseGizmo {
       const d = this.drag;
       if (!d || e.pointerId !== d.pointerId) return;
       e.stopImmediatePropagation();
+      if (d.holdT) { clearTimeout(d.holdT); d.holdT = 0; }
       // flush the throttled update (pending frame and/or a last move in the up event)
       const pending = !!d.raf;
       if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
@@ -695,7 +736,29 @@ export class PoseGizmo {
       } else this.shell.hint('Sposta il personaggio');
     }
     this.drag = d;
+    // a finger / pen resting on a ring (it never started turning): after the long-press time
+    // the press goes to the long press of what is under it (carry a character, object menu)
+    if ((hit.kind === 'ring' || hit.kind === 'ball') && e.pointerType !== 'mouse') { d.lastEv = e; d.holdT = setTimeout(() => this._holdThrough(d), HOLD_MS); }
     haptic(8);
+    app.invalidate();
+  }
+
+  _holdThrough(d) {
+    d.holdT = 0;
+    const app = this.app, e = d.lastEv;
+    const drift = Math.hypot(d.lastX - d.x0, d.lastY - d.y0);
+    if (this.drag !== d || d.moved || drift > HOLD_SLOP || !e || !app.holdFrom) return;
+    // only where a long press means something: a body or an object under the finger
+    app.pointerToNDC(e, _ndc);
+    if (!this.ctx.picker.pick(_ndc) && !app.props?.pick?.(_ndc)) return;
+    app.controls.enabled = d.controlsWasEnabled;
+    this.shell.hint('');
+    if (!app.holdFrom(e, drift)) { app.controls.enabled = false; return; }
+    // the long press took it: the handle lets go, nothing changed
+    this.drag = null;
+    if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+    if (d.follow) this.ctx.follow.end();
+    this.ctx.contacts?.handleEnd(false);
     app.invalidate();
   }
 

@@ -35,6 +35,12 @@ const _box = new THREE.Box3();
 const UP = new THREE.Vector3(0, 1, 0), DOWN = new THREE.Vector3(0, -1, 0);
 const HALF_PI = Math.PI / 2;
 const ROOM_PARTS = new Set(['stanza', 'pavimento', 'muro']);
+/** seats higher than this (m) are perched on (feet dangling); the pose is fitted to a PERCH_SEAT stool */
+const PERCH_H = 0.72, PERCH_SEAT = 0.6;
+/** where palms go on a table top: [m in from the edge, m to the side of the middle], first free one */
+const PALM_SPOTS = [[0.1, 0.2], [0.1, 0.28], [0.06, 0.2], [0.1, 0.13], [0.06, 0.3], [0.05, 0.36]];
+/** feet (root) to the table edge when leaning on it with both hands, m (scaled) */
+const LEAN_GAP = 0.27;
 
 class ActionError extends Error {}
 const fail = (msg) => { throw new ActionError(msg); };
@@ -123,7 +129,13 @@ export function affordancesOf(target) {
   if (/^frigo/.test(id)) a.add('wall');
   a.add('look');
   if (!p.hold) a.add('approach');
-  const low = !p.localBox.isEmpty() && (p.localBox.max.y - p.localBox.min.y) * p.scale < 1.05;
+  // kneel: by a bed, a sofa, a rug, or something low standing on the floor (a chest, a crate, a
+  // plant); not for small things on furniture (a cup on a table, a TV)
+  let low = false;
+  if (!p.localBox.isEmpty() && !p.hold) {
+    const b = p.worldBox(_box);
+    low = b.max.y - b.min.y < 0.6 && b.min.y < 0.1; // (the set's floor is y = 0 around the characters)
+  }
   if (!a.has('nokneel') && !p.hold && !a.has('building') && (a.has('bed') || a.has('sofa') || a.has('floor') || (low && !a.has('wall')))) a.add('kneel');
   return [...a];
 }
@@ -184,6 +196,56 @@ export function createObjectActions(app, shell) {
     for (const c of cands) if (isFreeAt(obs, fp, c.x, c.z)) return c;
     return null;
   }
+  /**
+   * A free floor spot for a body footprint (half sizes hx across, hz along the yaw) near (x, z),
+   * trying each yaw in turn: other characters, props and animals avoided; on a rug / floor piece
+   * (`on`) the spot stays on it. null when there is no room.
+   */
+  function floorSpot(ch, x, z, hx, hz, yaws, on = null) {
+    const obs = obstacles(app, new Set([ch, ...holding(ch), ...(on ? [on] : [])]));
+    const rug = on ? footOf({ kind: 'prop', obj: on }) : null;
+    const room = roomOf(x, z);
+    for (const yaw of yaws) {
+      const f = findFree(app, x, z, { cx: 0, cz: 0, hx, hz, yaw }, { obstacles: obs, step: 0.12, room });
+      if (!f.free) continue;
+      if (rug) {
+        const c = Math.cos(rug.yaw), sn = Math.sin(rug.yaw), dx = f.x - rug.cx, dz = f.z - rug.cz;
+        if (Math.abs(dx * c - dz * sn) > rug.hx + 0.1 || Math.abs(dx * sn + dz * c) > rug.hz + 0.1) continue; // off the rug
+      }
+      return { x: f.x, z: f.z, yaw };
+    }
+    return null;
+  }
+
+  /**
+   * Leaning at a table whose edges are all taken by chairs: the chair at the first edge spot
+   * whose only obstacles are free chairs is slid out along the edge's outward direction
+   * (same undo step). Returns that spot, or null (nothing moved).
+   */
+  function pullChair(ch, cands, table) {
+    const ignore = new Set([ch, table, ...holding(ch)]);
+    const fp = charFootprint(ch);
+    const hips = visibleChars().filter((c) => c !== ch).map((c) => hipsW(c, new THREE.Vector3()));
+    const M = props();
+    for (const cand of cands) {
+      const obs = obstacles(app, ignore);
+      const hit = obs.filter((o) => !isFreeAt([o], fp, cand.x, cand.z));
+      const chairs = hit.map((o) => o.obj).filter((q, i, a) => a.indexOf(q) === i);
+      if (!chairs.length || !chairs.every((q) => q.type && q.type.cat === 'sedute' && q.type.sub !== 'divani' && !q.hold)) continue;
+      // nobody sitting on them
+      if (chairs.some((q) => { const f = footOf({ kind: 'prop', obj: q }); return hips.some((hp) => Math.hypot(hp.x - f.cx, hp.z - f.cz) < 0.4); })) continue;
+      const saved = chairs.map((q) => [q, q.root.position.x, q.root.position.z]);
+      for (const d of [0.4, 0.55, 0.7]) {
+        for (const [q, x, z] of saved) M.moveTo(q, x + cand.out.x * d, z + cand.out.z * d);
+        const obs2 = obstacles(app, ignore);
+        const ok = isFreeAt(obs2, fp, cand.x, cand.z) && chairs.every((q) => { const f = footOf({ kind: 'prop', obj: q }); return isFreeAt(obstacles(app, new Set([q])), f, f.cx, f.cz); });
+        if (ok) return cand;
+      }
+      for (const [q, x, z] of saved) M.moveTo(q, x, z);
+    }
+    return null;
+  }
+
   /** Seated / lying / kneeling characters get up first (natural standing pose, held props kept). */
   function standUp(ch, force = false) {
     if (!force && !seatedLike(ch)) return false;
@@ -342,12 +404,16 @@ export function createObjectActions(app, shell) {
     const fc = face || centerOf(t, new THREE.Vector3());
     return { x: f.x, z: f.z, yaw: Math.atan2(fc.x - f.x, fc.z - f.z), free: f.free };
   }
-  /** Walk-free placement: the character stands at a spot (no walk animation), facing a point. */
+  /**
+   * Walk-free placement: the character stands at a spot (no walk animation), facing a point.
+   * The spot already is where to stand (spotNear): approach uses it as is when it is free
+   * (exact), and searches around it only when it is taken.
+   */
   function standAt(ch, spot, face) {
     const P = app.posing;
     if (P?.approach && face) {
       // app.posing.approach: {position, rotationY} | null (floor contacts travel, unreachable ones are let go)
-      try { if (P.approach(ch, new THREE.Vector3(spot.x, floorY(spot.x, spot.z), spot.z), face.clone ? face.clone() : face)) return; } catch (e) { console.warn('[actions] posing.approach', e); }
+      try { if (P.approach(ch, new THREE.Vector3(spot.x, floorY(spot.x, spot.z), spot.z), face.clone ? face.clone() : face, { exact: true })) return; } catch (e) { console.warn('[actions] posing.approach', e); }
     }
     place(ch, spot.x, spot.z, spot.yaw);
   }
@@ -370,21 +436,35 @@ export function createObjectActions(app, shell) {
       .sort((a, b) => Math.hypot(a.x - ref.x, a.z - ref.z) - Math.hypot(b.x - ref.x, b.z - ref.z))[0];
     if (!slot) fail(`Nessun posto libero ${withArticle(p.type.label, 'su')}`);
     const sofa = aff.has('sofa');
-    const id = seat.h > 0.58 ? 'sit_stool' : sofa ? 'sit_relaxed' : 'sit_chair';
-    const floor = p.root.position.y;
-    place(ch, slot.x, slot.z, seat.yaw, floor);
-    applyPosePreset(ch, id, { seat: seat.h, keepHands: holding(ch).length > 0 });
+    // a high top (a low wall, a counter): perched with the feet dangling in front of it (not
+    // tucked under it like on a stool). The pose is fitted to a seat on a floor raised under
+    // the feet (the legs could not reach the real floor)
+    const perch = seat.h > PERCH_H;
+    const hv = perch ? PERCH_SEAT : seat.h;
+    const id = perch ? 'sit_chair' : seat.h > 0.58 ? 'sit_stool' : sofa ? 'sit_relaxed' : 'sit_chair';
+    const floor = p.root.position.y + (seat.h - hv);
+    const yaw = slot.yaw ?? seat.yaw;
+    place(ch, slot.x, slot.z, yaw, floor);
+    applyPosePreset(ch, id, { seat: hv, keepHands: holding(ch).length > 0 });
     // hips over the seat: knees just past the front edge, the buttocks not behind the back
-    const s = scaleOf(ch), sc = p.scale, yaw = seat.yaw;
+    const s = scaleOf(ch), sc = p.scale;
     const f = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
     const H = hipsW(ch, new THREE.Vector3());
     const K = boneW(ch, 'lowerleg01.L', new THREE.Vector3()).add(boneW(ch, 'lowerleg01.R', _v)).multiplyScalar(0.5);
     const thigh = Math.max(0.2 * s, _v.subVectors(K, H).dot(f));
-    const front = p.localBox.max.z * sc, back = front - seat.depth;
-    let lz = Math.max(back + 0.11 * s, front + 0.03 * s - thigh);
-    lz = Math.min(lz, front - 0.12 * s);
-    const c = Math.cos(yaw), sn = Math.sin(yaw), o = p.root.position;
-    const tx = o.x + slot.lx * c + lz * sn, tz = o.z - slot.lx * sn + lz * c;
+    let tx, tz;
+    if (slot.side) {
+      // the long side of a bed: the hips behind its edge, the knees just past it
+      const back = Math.max(0.12 * s, thigh - 0.03 * s);
+      tx = slot.edge.x - f.x * back; tz = slot.edge.z - f.z * back;
+    } else {
+      const front = p.localBox.max.z * sc, back = front - seat.depth;
+      let lz = Math.max(back + 0.11 * s, front + 0.03 * s - thigh);
+      lz = Math.min(lz, front - 0.12 * s);
+      if (perch && seat.depth < 0.35) lz = front - 0.07 * s; // a thin high top (a low wall): the hips over its front edge
+      const c = Math.cos(seat.yaw), sn = Math.sin(seat.yaw), o = p.root.position;
+      tx = o.x + slot.lx * c + lz * sn; tz = o.z - slot.lx * sn + lz * c;
+    }
     moveBy(ch, tx - H.x, tz - H.z, floor);
     for (const q of holding(ch)) carryPose(ch, q);
     return `${ch.name} ${agreeF(ch, 'seduto', 'seduta')} ${withArticle(p.type.label, 'su')}`;
@@ -443,6 +523,12 @@ export function createObjectActions(app, shell) {
       // the camera sees the body from the side: the axis across the view when possible
       const toCam = new THREE.Vector3(app.camera.position.x - cx, 0, app.camera.position.z - cz).normalize();
       if (!p && Math.abs(axis.dot(toCam)) > 0.7) axis.set(-toCam.z, 0, toCam.x);
+      // room for a lying body (about 1.9 x 0.55 m along the axis), never on somebody
+      const ya = Math.atan2(axis.x, axis.z);
+      const spot = floorSpot(ch, cx, cz, 0.28 * s, 0.95 * s, [ya, ya + HALF_PI], p);
+      if (!spot) fail(p ? `Non c'è spazio libero ${withArticle(p.type.label, 'su')}` : 'Non c\'è spazio per sdraiarsi qui');
+      if (spot.yaw !== ya) axis.set(Math.sin(spot.yaw), 0, Math.cos(spot.yaw));
+      cx = spot.x; cz = spot.z;
       headT = new THREE.Vector3(cx, 0, cz).addScaledVector(axis, 0.8 * s);
       faceT = app.camera.position.clone();
     }
@@ -483,10 +569,31 @@ export function createObjectActions(app, shell) {
       x = fp.cx; z = fp.cz;
       y = prop.worldBox(_box).max.y;
     }
+    // room for a cross-legged body (about 0.75 m around), never on somebody
+    const s = scaleOf(ch);
+    const spot = floorSpot(ch, x, z, 0.36 * s, 0.36 * s, [0], prop);
+    if (!spot) fail(prop ? `Non c'è spazio libero ${withArticle(prop.type.label, 'su')}` : 'Non c\'è spazio per sedersi qui');
+    x = spot.x; z = spot.z;
+    if (!prop) y = floorY(x, z);
     const yaw = Math.atan2(app.camera.position.x - x, app.camera.position.z - z);
     place(ch, x, z, yaw, y);
     applyPosePreset(ch, 'sit_floor_cross', { keepHands: holding(ch).length > 0 });
+    // the floor pose lets tucked shoes dip a little into the floor: on a rug they would go
+    // through it, so the body rests on the rug top instead
+    restOn(ch, y);
     return `${ch.name} ${agreeF(ch, 'seduto', 'seduta')} a terra`;
+  }
+
+  /** lifts a floor pose so that no part of the body (shoes included) is below y (world) */
+  function restOn(ch, y) {
+    ch.root.updateMatrixWorld(true);
+    const pos = ch.getSkinnedPositions?.();
+    if (!pos) return;
+    const M = ch.rig.matrixWorld, body = ch.model.groupVertices[0];
+    let min = Infinity;
+    for (let k = 0; k < body.length; k += 3) { const i = body[k] * 3; const wy = _v.set(pos[i], pos[i + 1], pos[i + 2]).applyMatrix4(M).y; if (wy < min) min = wy; }
+    const d = y + 0.002 - min;
+    if (Number.isFinite(d) && d > 0.004 && d < 0.1) moveBy(ch, 0, 0, ch.root.position.y + d);
   }
 
   /** At a table: a free chair around it facing it, else a new chair (a stool at a counter). */
@@ -693,36 +800,77 @@ export function createObjectActions(app, shell) {
     const aff = new Set(affordancesOf(t));
     const s = scaleOf(ch);
     if (isProp(t) && (aff.has('table') || (aff.has('surface') && !aff.has('wall')))) {
-      const T = t.obj, top = topOf(T);
+      const T = t.obj;
+      // the pressed point on the top (a counter under wall cabinets: the ray from above sees them)
+      const pressed = point && normal && normal.y > 0.8;
+      const top = topOf(T) || (pressed ? { x: point.x, z: point.z, y: point.y, yaw: T.root.rotation.y } : null);
       if (!top) fail(`Non riesco ad appoggiarmi ${withArticle(T.type.label, 'a')}`);
-      // the edge of the top nearest to the pressed point (or to the character)
+      if (pressed) top.y = point.y;
       const ref = point || ch.root.position;
       const c = Math.cos(top.yaw), sn = Math.sin(top.yaw);
-      const dx = ref.x - top.x, dz = ref.z - top.z;
-      let lx = dx * c - dz * sn, lz = dx * sn + dz * c;
-      const ex = top.hx, ez = top.hz;
-      const clampIn = (v, e) => { const m = Math.max(0, e - 0.25); return Math.max(-m, Math.min(m, v)); };
-      // candidate edges: the one toward the pressed point first; along each edge a few spots
-      const sides = [[Math.sign(lx) || 1, 0], [0, Math.sign(lz) || 1], [-(Math.sign(lx) || 1), 0], [0, -(Math.sign(lz) || 1)]];
-      if (Math.abs(lz) / ez > Math.abs(lx) / ex) sides.unshift(sides.splice(1, 1)[0]);
-      const cands = [];
-      for (const [nx, nz] of sides) {
-        const e = nx ? ez : ex, base = nx ? clampIn(lz, ez) : clampIn(lx, ex);
-        for (const k of [0, 1, -1, 2, -2]) {
-          const along = clampIn(base + k * 0.3, e);
-          const elx = nx ? nx * ex : along, elz = nx ? along : nz * ez;
-          const edge = new THREE.Vector3(top.x + elx * c + elz * sn, top.y, top.z - elx * sn + elz * c);
-          const out = new THREE.Vector3(nx * c + nz * sn, 0, -nx * sn + nz * c).normalize();
-          cands.push({ x: edge.x + out.x * 0.36 * s, z: edge.z + out.z * 0.36 * s, edge, out });
+      // the real edges of the top (round tables, L-shaped counters): walked with short rays
+      // from the pressed point (else the middle of the top) along the top's four directions
+      const rc = new THREE.Raycaster();
+      const onTopAt = (x, z) => { rc.set(_v.set(x, top.y + 0.25, z), DOWN); rc.far = 0.4; const hit = rc.intersectObjects(T.meshes, false)[0]; return !!hit && Math.abs(hit.point.y - top.y) < 0.05; };
+      const edgeFrom = (x, z, o) => {
+        if (!onTopAt(x, z)) return null;
+        let lo = 0, hi = null;
+        for (let d = 0.08; d <= 4; d += 0.08) { if (!onTopAt(x + o.x * d, z + o.z * d)) { hi = d; break; } lo = d; }
+        if (hi === null) return null;
+        for (let i = 0; i < 4; i++) { const m = (lo + hi) / 2; if (onTopAt(x + o.x * m, z + o.z * m)) lo = m; else hi = m; }
+        return new THREE.Vector3(x + o.x * lo, top.y, z + o.z * lo);
+      };
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([nx, nz]) => new THREE.Vector3(nx * c + nz * sn, 0, -nx * sn + nz * c));
+      // start on the top: the pressed point (or a step inside it when it is right on an edge), else the middle
+      let sx = top.x, sz = top.z;
+      const starts = [[ref.x, ref.z], ...dirs.flatMap((o) => [0.06, 0.15].map((k) => [ref.x + o.x * k, ref.z + o.z * k]))];
+      for (const [x, z] of starts) if (onTopAt(x, z)) { sx = x; sz = z; break; }
+      const edges = [];
+      for (const out of dirs) {
+        const lat = new THREE.Vector3(-out.z, 0, out.x);
+        const e0 = edgeFrom(sx, sz, out);
+        if (!e0) continue;
+        const list = [];
+        for (const k of [0, 0.3, -0.3, 0.6, -0.6]) {
+          const e = k ? edgeFrom(sx + lat.x * k, sz + lat.z * k, out) : e0;
+          if (e) list.push(e);
         }
+        edges.push({ out, d: Math.hypot(e0.x - ref.x, e0.z - ref.z), list });
       }
-      const pick = freeSpot(ch, cands, [T]) || cands[0];
+      if (!edges.length) fail(`Non riesco ad appoggiarmi ${withArticle(T.type.label, 'a')}`);
+      edges.sort((p1, p2) => p1.d - p2.d); // the edge nearest to the pressed point (or the character) first
+      const cands = [];
+      // standing close to the edge (the hips a hand's width from it), the arms nearly straight;
+      // inside the room the table stands in (a counter against a wall: never behind it)
+      const R = roomOf(sx, sz);
+      const inRoom = (x, z) => { if (!R) return true; const l = toRoom(R, x, z); return Math.abs(l.x) <= R.W / 2 - 0.22 * s && Math.abs(l.z) <= R.D / 2 - 0.22 * s; };
+      for (const { out, list } of edges) for (const edge of list) {
+        const x = edge.x + out.x * LEAN_GAP * s, z = edge.z + out.z * LEAN_GAP * s;
+        if (inRoom(x, z)) cands.push({ x, z, edge, out });
+      }
+      if (!cands.length) fail(`Non c'è spazio libero ${withArticle(T.type.label, 'a')}`);
+      // a free spot at an edge; at a dining table the chair there is pulled out (as a person
+      // does); never inside a chair or another character
+      const pick = freeSpot(ch, cands, [T]) || pullChair(ch, cands, T);
+      if (!pick) fail(`Non c'è spazio libero ${withArticle(T.type.label, 'a')}`);
       const { edge, out } = pick;
       if (seatedLike(ch)) standUp(ch, true);
       place(ch, pick.x, pick.z, Math.atan2(-out.x, -out.z));
       const inward = out.clone().negate(), lat = new THREE.Vector3(-inward.z, 0, inward.x);
+      // the palms go on a free part of the top near its edge (not on the plates, the bowl…)
+      const onTop = (props()?.props || []).filter((q) => q !== T && !q.hold && q.root.visible && Math.abs(q.worldBox(_box).min.y - top.y) < 0.06)
+        .map((q) => footOf({ kind: 'prop', obj: q }));
+      const busy = (pt) => onTop.some((f) => {
+        const c2 = Math.cos(f.yaw), s2 = Math.sin(f.yaw), dx = pt.x - f.cx, dz = pt.z - f.cz;
+        return Math.abs(dx * c2 - dz * s2) < f.hx + 0.06 && Math.abs(dx * s2 + dz * c2) < f.hz + 0.06;
+      });
       const pin = (side, k) => {
-        const pt = edge.clone().addScaledVector(inward, 0.12 * s).addScaledVector(lat, k * 0.2 * s);
+        let pt = null;
+        for (const [inw, lt] of PALM_SPOTS) {
+          const q = edge.clone().addScaledVector(inward, inw * s).addScaledVector(lat, k * lt * s);
+          if (!busy(q)) { pt = q; break; }
+        }
+        if (!pt) pt = edge.clone().addScaledVector(inward, 0.03 * s).addScaledVector(lat, k * 0.2 * s); // right on the edge
         pt.y = top.y + 0.012;
         if (app.posing?.pinTo) {
           // a contact on the top (it follows the table; kept while the body moves), palm flat and open
@@ -941,7 +1089,7 @@ export function createObjectActions(app, shell) {
           act(open ? 'close' : 'open', open ? 'Chiudi' : 'Apri', open ? 'lock' : 'unlock', () => setOpen(p, !open, { ch }));
         }
         if (A.has('window')) act('look-out', 'Guarda fuori', 'eye', () => lookOut(ch, p, hit.point));
-        if (A.has('table') || A.has('wall')) act('lean', A.has('table') ? 'Appoggiati al piano' : 'Appoggiati', 'body', () => lean(ch, t, hit));
+        if (A.has('table') || A.has('wall') || leanTop(p, A, hit)) act('lean', A.has('table') || !A.has('wall') ? 'Appoggiati al piano' : 'Appoggiati', 'body', () => lean(ch, t, hit));
         if (A.has('kneel')) act('kneel', 'Inginocchiati', 'pose', () => kneel(ch, t));
         act('look', 'Guarda', 'eye', () => look(ch, t, hit.point));
         if (A.has('approach')) act('approach', 'Avvicinati', 'footprint', () => approach(ch, t));
@@ -959,6 +1107,14 @@ export function createObjectActions(app, shell) {
     // the walls of a room are part of the set: its ambient light is one step away
     if (isProp(t) && roomPart(t.obj) && app.practicals?.ambientMenu) items.push({ id: 'ambient', label: 'Luce ambientale…', icon: 'sun', hint: 'Giorno, tramonto, notte', onClick: () => app.practicals.ambientMenu(hit.x, hit.y) });
     return items;
+  }
+  /** a counter, a chest of drawers, a dresser: a top between 0.7 and 1.15 m one can lean on with both hands */
+  function leanTop(p, A, hit) {
+    if (!A.has('surface') || A.has('wall')) return false;
+    // the pressed top itself when it faces up (a counter under wall cabinets), else the top seen from above
+    const y = hit?.point && hit.normal?.y > 0.8 ? hit.point.y : topOf(p)?.y;
+    const h = y == null ? -1 : y - p.root.position.y;
+    return h >= 0.7 && h <= 1.15;
   }
   const isOpen = (p) => { const v = p.params.open; return typeof v === 'boolean' ? v : v > (p.type.params.find((q) => q.id === 'open')?.min ?? 0) + 1e-3; };
 
@@ -997,11 +1153,13 @@ export function createObjectActions(app, shell) {
       if (!it) continue;
       if (it.separator) { out.push(h('div', { class: 'pv-menu-sep' })); continue; }
       if (it.header) { out.push(h('div', { class: 'pv-menu-header' }, it.header)); continue; }
+      const check = it.checked || it.checkable ? icon('check', 18) : null;
+      if (check) check.classList.add('pv-menu-check');
       const b = h('button', { type: 'button', role: 'menuitem', class: `pv-menu-item ${it.danger ? 'danger' : ''} ${it.checked ? 'checked' : ''}`.trim(), disabled: it.disabled },
         it.icon ? icon(it.icon, 20) : h('span', { class: 'pv-menu-noicon' }),
         h('span', { class: 'pv-menu-label' }, it.label, it.hint ? h('small', {}, it.hint) : null),
-        it.checked ? icon('check', 18) : null);
-      if (it.id) b.dataset.action = it.id;
+        check);
+      if (it.id) { b.dataset.action = it.id; b.dataset.id = it.id; }
       b.addEventListener('click', () => { haptic('tick'); if (!it.keepOpen) closeMenu(); setTimeout(() => it.onClick?.(), 0); });
       out.push(b);
     }
@@ -1048,17 +1206,28 @@ export function createObjectActions(app, shell) {
       }
       who.appendChild(row);
     }
+    // a light's menu stays short (the light being adjusted stays in view): the object's own
+    // actions and tools wait behind "Azioni…"
+    let expanded = !section?.body;
+    const tools = toolsRow(t);
     const render = () => {
       const own = itemsFor(t, ch, hit);
-      const its = section?.items?.length ? [...section.items, own.length ? { separator: true } : null, ...own] : own;
+      const more = { id: 'more', label: 'Azioni…', icon: 'more', hint: own.slice(0, 3).map((o) => o.label).join(', '), keepOpen: true, onClick: () => { expanded = true; render(); } };
+      const rest = expanded ? own : own.length ? [more] : [];
+      const its = section?.items?.length ? [...section.items, rest.length ? { separator: true } : null, ...rest] : rest;
       list.replaceChildren(...renderItems(its));
+      tools.hidden = !expanded;
+      if (who) who.hidden = !expanded && !!section?.body;
       const sub = current?.card?.querySelector('.pv-modal-subtitle');
       if (sub) sub.textContent = subtitle();
     };
     render();
+    // a window of a room or a wall: the menu is the window's (not "Stanza")
+    const title = section && PR.isWindow?.(t.obj) ? PR.state(t.obj)?.label || 'Finestra' : nameOf(t);
+    const tablet = document.documentElement.classList.contains('pv-tablet');
     const m = stageMenu([], {
-      x, y, title: nameOf(t), subtitle: subtitle(), width: 288,
-      body: [section?.body || null, who, list, toolsRow(t)].filter(Boolean),
+      x, y, title, subtitle: subtitle(), width: section?.body && tablet ? 380 : 288, side: !!section?.body,
+      body: [section?.body || null, who, list, tools].filter(Boolean),
       onClose: () => { if (current === m) current = null; },
     });
     m.el.classList.add('pv-oa');

@@ -14,6 +14,8 @@ import { EFFECTOR_LABEL } from './contacts.js';
 
 const LIFT = 0.05; // m (scaled)
 const FOOT_R = 0.17; // footprint radius (m, scaled)
+/** parts a slow drag usually starts on (see _hold) */
+const LIMB_ENDS = new Set(['hand', 'foot', 'toes', 'head']);
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _n = new THREE.Vector3();
 const _box = new THREE.Box3();
 const _ndc = new THREE.Vector2();
@@ -40,12 +42,17 @@ export class CharacterCarry {
 
   get active() { return !!this.d; }
 
-  _hold({ ndc, x, y, event }) {
+  _hold({ ndc, x, y, event, drift = 0 }) {
     if (this.d) return false;
     const { app, ctx } = this;
     if (event && event.pointerType === 'mouse' && event.button > 0) return false;
     const hit = ctx.picker.pick(ndc);
     if (!hit) return false;
+    // a finger (pen) resting on a hand, a foot or the head to aim before pulling it trembles a
+    // little: that press is a careful pose drag about to start, not a request to carry
+    const c = hit.control;
+    const end = c && (c.region === 'finger' || LIMB_ENDS.has(c.baseId));
+    if (end && drift > (event?.pointerType === 'pen' ? 1.5 : 3.5)) return false;
     // an object in front of the body: its own long press (objects, priority 50)
     const pp = app.props?.pick?.(ndc, { occlusion: false });
     if (pp && pp.distance < hit.distance - 0.01) return false;
@@ -142,13 +149,20 @@ export class CharacterCarry {
     const dy = d.yaw - d.startYaw, c = Math.cos(dy), s = Math.sin(dy);
     const ox = d.cOff.x * c + d.cOff.z * s, oz = -d.cOff.x * s + d.cOff.z * c;
     const tx = nx + d.cOff.x - ox, tz = nz + d.cOff.z - oz;
-    // slide along what blocks the way
+    // walk from where it is toward the finger in short steps (never through a table, a wall or
+    // somebody: a far target past an obstacle stops at it), sliding along what blocks the way
     const cur = ch.root.position;
-    let fx = tx, fz = tz;
-    if (this._blocked(d, tx, tz, ox, oz)) {
-      if (!this._blocked(d, tx, cur.z, ox, oz)) fz = cur.z;
-      else if (!this._blocked(d, cur.x, tz, ox, oz)) fx = cur.x;
-      else { fx = cur.x; fz = cur.z; }
+    let fx = cur.x, fz = cur.z;
+    const step = 0.5 * d.r;
+    const maxN = Math.min(200, 2 * Math.ceil(Math.hypot(tx - cur.x, tz - cur.z) / step) + 4);
+    for (let i = 0; i < maxN; i++) {
+      const dx = tx - fx, dz = tz - fz, L = Math.hypot(dx, dz);
+      if (L < 1e-4) break;
+      const k = Math.min(L, step) / L, sx = fx + dx * k, sz = fz + dz * k;
+      if (!this._blocked(d, sx, sz, ox, oz)) { fx = sx; fz = sz; continue; }
+      if (Math.abs(dx * k) > 1e-4 && !this._blocked(d, sx, fz, ox, oz)) { fx = sx; continue; }
+      if (Math.abs(dz * k) > 1e-4 && !this._blocked(d, fx, sz, ox, oz)) { fz = sz; continue; }
+      break;
     }
     ctx.contacts.carry(ch, () => {
       ch.root.rotation.y = d.yaw;

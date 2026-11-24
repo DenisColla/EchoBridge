@@ -284,27 +284,41 @@ export class App extends THREE.EventDispatcher {
     let down = null;
     const pointers = new Set(); // pointers currently down anywhere (multi-touch never taps)
     const HOLD_MS = 480;
-    const cancelHold = () => { if (down?.timer) { clearTimeout(down.timer); down.timer = 0; } };
+    const ring = new HoldRing();
+    const cancelHold = () => { if (down?.timer) { clearTimeout(down.timer); down.timer = 0; } if (down?.ringT) { clearTimeout(down.ringT); down.ringT = 0; } ring.hide(); };
+    /**
+     * Runs the hold handlers for a press (event e, still down). Returns true when one took
+     * it (a returned session then owns the pointer until it lifts).
+     */
+    const runHold = (e, drift = 0) => {
+      ring.hide();
+      if (!this._holdHandlers.length) return false;
+      const ndc = this.pointerToNDC(e);
+      for (const h of this._holdHandlers) {
+        let r = false;
+        try { r = h.fn({ ndc, event: e, x: e.clientX, y: e.clientY, drift, pointerType: e.pointerType }); } catch (err) { console.error(err); }
+        if (!r) continue;
+        haptic('medium');
+        if (typeof r === 'object') {
+          this._holdSession = { s: r, id: e.pointerId, controls: this.controls.enabled };
+          this.controls.enabled = false;
+        }
+        this.invalidate();
+        return true;
+      }
+      return false;
+    };
+    /**
+     * A capture-phase handle (pose rings) that took a press which then stayed still for the
+     * long-press time hands it over: the hold handlers run as if the router had timed it.
+     */
+    this.holdFrom = (e, drift = 0) => (!this._holdSession && pointers.size <= 1 ? runHold(e, drift) : false);
     const fireHold = () => {
       const d = down;
       if (!d || d.multi) return;
       d.timer = 0;
       d.held = true;
-      if (!this._holdHandlers.length) return;
-      const e = d.last;
-      const ndc = this.pointerToNDC(e);
-      for (const h of this._holdHandlers) {
-        let r = false;
-        try { r = h.fn({ ndc, event: e, x: e.clientX, y: e.clientY }); } catch (err) { console.error(err); }
-        if (!r) continue;
-        haptic('medium');
-        if (typeof r === 'object') {
-          this._holdSession = { s: r, id: d.id, controls: this.controls.enabled };
-          this.controls.enabled = false;
-        }
-        this.invalidate();
-        return;
-      }
+      runHold(d.last, d.drift);
     };
     const endSession = (e, cancelled) => {
       const hs = this._holdSession;
@@ -318,24 +332,37 @@ export class App extends THREE.EventDispatcher {
     c.addEventListener('pointerdown', (e) => {
       pointers.add(e.pointerId);
       if (down && pointers.size > 1) { down.multi = true; cancelHold(); return; }
-      down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false, held: false, timer: 0, last: e };
+      down = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, multi: false, held: false, timer: 0, ringT: 0, last: e, drift: 0, type: e.pointerType };
       // a press already taken by a gizmo / mode (capture listeners) never becomes a long press,
       // nor does a camera gesture: mouse middle / right button, S Pen with its barrel button held
       const camera = e.button > 0 || (e.pointerType === 'pen' && ((e.buttons & 2) || this.penBarrel));
-      if (!e.defaultPrevented && !camera) down.timer = setTimeout(fireHold, HOLD_MS);
+      if (!e.defaultPrevented && !camera) {
+        down.timer = setTimeout(fireHold, HOLD_MS);
+        // a finger / pen resting still: a small ring fills up to the long press (it tells a
+        // careful start of a drag from a long press before it happens)
+        if (e.pointerType !== 'mouse' && this._holdHandlers.length) {
+          const d = down;
+          d.ringT = setTimeout(() => { d.ringT = 0; if (down === d && d.timer && !d.multi) ring.show(d.x, d.y, HOLD_MS - 200); }, 200);
+        }
+      }
     });
     c.addEventListener('pointermove', (e) => {
       const hs = this._holdSession;
       if (hs && e.pointerId === hs.id) { try { hs.s.move?.(e); } catch (err) { console.error(err); } this.invalidate(); return; }
       if (!down || e.pointerId !== down.id) return;
       down.last = e;
-      if (down.timer && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 10) cancelHold();
+      const dist = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+      if (dist > down.drift) down.drift = dist;
+      // the S Pen tip does not tremble like a finger: any real movement is a stroke
+      if (down.timer && dist > (down.type === 'pen' ? 3 : 10)) cancelHold();
     });
     const up = (e) => {
       if (endSession(e, e.type === 'pointercancel')) { if (down?.id === e.pointerId) down = null; return; }
       if (!down || e.pointerId !== down.id) return;
       const d = down; down = null;
       if (d.timer) clearTimeout(d.timer);
+      if (d.ringT) clearTimeout(d.ringT);
+      ring.hide();
       if (d.multi || d.held || e.type === 'pointercancel') return;
       // event timestamps: a long frame between down and up must not swallow the tap
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10 || e.timeStamp - d.t > 450) return;
@@ -676,4 +703,28 @@ class History {
     this._emit();
   }
   _emit() { this.app.dispatchEvent({ type: 'history', canUndo: this.canUndo, canRedo: this.canRedo, held: this._holds > 0 }); }
+}
+
+/**
+ * Long-press feedback: a small ring at the finger that fills while a press stays still
+ * (pure DOM + CSS animation: no frame needed, never in captures).
+ */
+class HoldRing {
+  constructor() { this.el = null; }
+  show(x, y, ms) {
+    if (typeof document === 'undefined') return;
+    let el = this.el;
+    if (!el) {
+      el = this.el = document.createElement('div');
+      el.className = 'pv-hold-ring';
+      el.innerHTML = '<svg viewBox="0 0 48 48" aria-hidden="true"><circle class="bg" cx="24" cy="24" r="19"/><circle class="fg" cx="24" cy="24" r="19"/></svg>';
+    }
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    el.style.setProperty('--pv-hold-ms', Math.max(60, ms) + 'ms');
+    el.classList.remove('on');
+    if (!el.isConnected) document.body.appendChild(el);
+    void el.offsetWidth; // restart the fill animation
+    el.classList.add('on');
+  }
+  hide() { if (this.el?.isConnected) { this.el.classList.remove('on'); this.el.remove(); } }
 }

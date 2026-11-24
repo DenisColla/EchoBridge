@@ -223,18 +223,24 @@ export function roomOpening(r, which = 'window') {
 }
 
 // ------------------------------------------------------------------ surfaces
-/** Downward ray hits on a prop's meshes at world (x, z): highest hit y or null. */
-function hitY(p, x, z, fromY) {
+/**
+ * Downward ray hits on a prop's meshes at world (x, z): highest hit y or null. below: the
+ * highest hit under that height (a lower bunk under the upper one).
+ */
+function hitY(p, x, z, fromY, below = Infinity) {
   _ray.set(_v.set(x, fromY, z), _down);
   _ray.far = fromY + 5;
   const hits = _ray.intersectObjects(p.meshes, false);
-  return hits.length ? hits[0].point.y : null;
+  for (const h of hits) if (h.point.y < below) return h.point.y;
+  return null;
 }
 
 /**
  * Seat of a sofa / chair / bench / stool / bed: {y (world seat height), yaw (facing),
- * slots: [{x, z}] world points where hips go, width}. null if the prop has no seat-like
- * surface (0.2 .. 0.95 m).
+ * slots: [{x, z, yaw, edge}] world points where hips go (each with its facing and the point
+ * of the front edge before it), width}. A bed also has slots on both long sides (facing
+ * out) and none at its foot when a footboard rises above the mattress. null if the prop has
+ * no seat-like surface (0.2 .. 0.95 m).
  */
 export function seatOf(p, { bed = false } = {}) {
   p.root.updateWorldMatrix(true, true);
@@ -252,7 +258,7 @@ export function seatOf(p, { bed = false } = {}) {
   for (let i = 0; i < nx; i++) {
     const lx = x0 + ((i + 0.5) / nx) * W;
     const col = [];
-    for (let k = 0; k < nz; k++) { const lz = z0 + ((k + 0.5) / nz) * D; const w = world(lx, lz); const y = hitY(p, w.x, w.z, top); col.push(y === null ? null : y - oy); }
+    for (let k = 0; k < nz; k++) { const lz = z0 + ((k + 0.5) / nz) * D; const w = world(lx, lz); const y = hitY(p, w.x, w.z, top, bed ? oy + 0.98 : Infinity); col.push(y === null ? null : y - oy); }
     H.push({ lx, col });
   }
   // seat height: median of the plausible heights in the front 60% of the depth
@@ -291,7 +297,35 @@ export function seatOf(p, { bed = false } = {}) {
     const front = z0 + D;
     const depth = front - near.lzBack;
     const lz = bed ? front - 0.2 : depth > 0.32 ? near.lzBack + 0.15 : near.lzBack + depth * 0.45;
-    slots.push({ ...world(lx, lz), lx, lz });
+    slots.push({ ...world(lx, lz), lx, lz, yaw, edge: world(lx, front) });
+  }
+  if (bed) {
+    const front = z0 + D, cx = x0 + W / 2;
+    const flat = (lx, lz) => { const w = world(lx, lz), y = hitY(p, w.x, w.z, top, oy + 0.98); return y !== null && Math.abs(y - oy - seatH) < 0.1; };
+    // a board or rails above the mattress at that edge (horizontal rays going out over it, at
+    // thigh to hip height): the legs would go through it
+    // (a fan every 5 cm: iron bars and rails are thin)
+    const railed = (lx, lz, dx, dz) => {
+      const o = world(lx - dx * 0.15, lz - dz * 0.15), d = _v2.set(dx * c + dz * sn, 0, -dx * sn + dz * c);
+      for (let h = 0.04; h <= 0.45; h += 0.05) {
+        _ray.set(_v.set(o.x, oy + seatH + h, o.z), d); _ray.far = 0.3;
+        if (_ray.intersectObjects(p.meshes, false).length) return true;
+      }
+      return false;
+    };
+    // a footboard (iron rails, a wooden board): nobody sits at the foot end
+    if (!flat(cx, front - 0.03) || [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85].some((f) => railed(x0 + W * f, front, 0, 1))) slots.length = 0;
+    // the long sides (the usual way to sit on a bed), every ~0.6 m between the pillows and
+    // the foot, facing out; a side rail above the mattress drops that side
+    for (const sx of [-1, 1]) {
+      const edgeX = sx > 0 ? x0 + W : x0;
+      for (let lz = z0 + 0.42 * D; lz <= z0 + 0.88 * D + 1e-6; lz += Math.max(0.3, Math.min(0.6, 0.46 * D))) {
+        if (!flat(edgeX - sx * 0.04, lz) || !flat(edgeX - sx * 0.25, lz) || [-0.15, -0.05, 0.05, 0.15].some((k) => railed(edgeX, lz + k, sx, 0))) continue;
+        const lx = edgeX - sx * 0.2;
+        slots.push({ ...world(lx, lz), lx, lz, yaw: yaw + sx * Math.PI / 2, edge: world(edgeX, lz), side: sx });
+      }
+    }
+    if (!slots.length) return null;
   }
   return { y: oy + seatH, h: seatH, yaw, slots, width: span, depth: (z0 + D) - (backZ ?? z0) };
 }

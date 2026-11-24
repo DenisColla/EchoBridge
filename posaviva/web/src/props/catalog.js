@@ -605,6 +605,14 @@ export function carryHand(mode, k, [w, h, d]) {
   };
 }
 
+// small procedural decor that can be picked up too ("Prendi il vaso"): mode, grip height
+// fraction, the size of the part held [w, h, d] (the vase body, the globe's stand)
+const GEN_CARRY = { vaso_fiori: ['up', 0.6, [0.16, 0.25, 0.16]], mappamondo: ['up', 0.2, [0.06, 0.47, 0.06]] };
+for (const t of PROP_TYPES) {
+  const c = GEN_CARRY[t.variantOf || t.id];
+  if (c && !t.hand) t.hand = carryHand(c[0], c[1], c[2]);
+}
+
 // realistic CC0 models (Poly Haven), loaded on first use (see models.js)
 const MODEL_BASE = './assets/props/';
 const CEIL_Y = 2.7, WALL_Y = 1.5;

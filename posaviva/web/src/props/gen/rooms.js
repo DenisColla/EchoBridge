@@ -31,7 +31,9 @@ export const ROOM_PRESETS = [
     id: 'cucina', label: 'Cucina', size: [4.2, 3.8], tags: 'cucina pranzo tavolo',
     items: () => [
       W(4.2, 3.8, { door: 'destra', window: 'fondo', floor: 'piastrelle' }),
-      { type: 'cucina', params: { shape: 'L', length: 3.6, side: 2.4, wall: true, fridge: true }, color: '#e8e4dc', pos: [-2.1, 0, -1.9], ax: -1, az: -1 },
+      { type: 'cucina', params: { shape: 'L', length: 3.0, side: 2.4, wall: true, fridge: false }, color: '#e8e4dc', pos: [-2.1, 0, -1.9], ax: -1, az: -1 },
+      // the fridge is its own prop (it opens: Apri / Chiudi)
+      { type: 'frigo', params: { style: 'moderno' }, pos: [0.92, 0, -1.9], ax: -1, az: -1 },
       { type: 'tavolo_rotondo', params: { diameter: 1.1, base: 'centrale' }, color: '#c49a6c', pos: [0.7, 0, 0.6] },
       { type: 'sedia_design', color: '#e8e4dc', pos: [0.7, 0, 1.35], yaw: 180 },
       { type: 'sedia_design', color: '#e8e4dc', pos: [0.7, 0, -0.15], yaw: 0 },

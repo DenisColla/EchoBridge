@@ -557,7 +557,8 @@ export class Executor {
     if (sofa && id === 'sit_chair') id = 'sit_relaxed';
     if (seat.h > 0.58 && id !== 'sit_stool') id = 'sit_stool';
     const floorY = p.root.position.y;
-    ch.setPlacement({ position: [slot.x, floorY, slot.z], rotationY: seat.yaw });
+    const yawS = slot.yaw ?? seat.yaw;
+    ch.setPlacement({ position: [slot.x, floorY, slot.z], rotationY: yawS });
     this.lib?.applyPosePreset(ch, id, { seat: seat.h });
     // hips onto the seat point (the pose moves the pelvis relative to the root)
     ch.root.updateWorldMatrix(true, true);
@@ -566,7 +567,7 @@ export class Executor {
       hl.updateWorldMatrix(true, false); hr.updateWorldMatrix(true, false);
       const a = _v.setFromMatrixPosition(hl.matrixWorld), b = _v2.setFromMatrixPosition(hr.matrixWorld);
       const hx = (a.x + b.x) / 2, hz = (a.z + b.z) / 2;
-      ch.setPlacement({ position: [ch.root.position.x + slot.x - hx, floorY, ch.root.position.z + slot.z - hz], rotationY: seat.yaw });
+      ch.setPlacement({ position: [ch.root.position.x + slot.x - hx, floorY, ch.root.position.z + slot.z - hz], rotationY: yawS });
     }
     return (ch.sex === 'F' ? 'seduta ' : 'seduto ') + articleName(p.type.label, 'su');
   }

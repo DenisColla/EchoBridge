@@ -436,3 +436,15 @@ input.pv-swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; op
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* long press building up (app.js HoldRing): a ring around the finger fills to the hold */
+.pv-hold-ring { position: fixed; width: 76px; height: 76px; margin: -38px 0 0 -38px; pointer-events: none; z-index: 60; opacity: 0; transition: opacity .12s; }
+.pv-hold-ring.on { opacity: 1; }
+.pv-hold-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+.pv-hold-ring circle { fill: none; stroke-width: 4; }
+.pv-hold-ring .bg { stroke: rgba(10, 12, 18, .35); stroke-width: 6; }
+.pv-hold-ring .fg { stroke: #4fd1c5; stroke-linecap: round; stroke-dasharray: 119.4; stroke-dashoffset: 119.4; }
+.pv-hold-ring.on .fg { animation: pv-hold-fill var(--pv-hold-ms, 280ms) linear forwards; }
+@keyframes pv-hold-fill { to { stroke-dashoffset: 0; } }
+/* checkable stage-menu items: the check mark shows while the item is checked (updated live) */
+.pv-menu-item:not(.checked) > .pv-menu-check { visibility: hidden; }

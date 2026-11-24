@@ -8,8 +8,9 @@
 //    the character or a pose handle (the pose gizmo skips such presses).
 //  - "La penna non muove la vista": a pen drag that does not start on a handle leaves the
 //    camera alone (fingers still orbit / zoom); the barrel button still orbits.
-//  - hover highlight: with the Posa / Mani tool open (Ruota), the body part under the hovering
-//    pen glows (teal) before it is touched.
+//  - hover highlight: with the Posa / Mani tool open (Ruota), or with no panel while Tocco
+//    diretto is on, the part a press would grab (direct.palmAsHand) glows (teal) under the
+//    hovering pen before it is touched.
 //  - finer pick tolerance for pen taps / handles lives in the pose gizmo (hitTest / hitDot
 //    take the pointer type).
 //
@@ -175,10 +176,14 @@ export class PenInput {
 
   _updateHover() {
     const p = this._hover, app = this.app, posing = app.posing;
-    if (!p || this.state.down || !posing || !POSE_TOOLS.has(this.shell.activeToolId) || posing.state.mode !== 'rotate') { this._clearGlow(); return; }
+    // where a press poses a part: Posa / Mani (Ruota), or no panel with Tocco diretto on
+    const tool = this.shell.activeToolId, mode = posing?.state.mode, dt = posing?.direct;
+    const live = posing && ((POSE_TOOLS.has(tool) && mode === 'rotate') || (tool === null && dt?.enabled && !dt.suspended && mode !== 'move'));
+    if (!p || this.state.down || !live) { this._clearGlow(); return; }
     const g = posing.gizmo;
-    // over a pose handle: the handle itself is the target, no body glow
-    if (g?.hitTest?.(p.x, p.y, 'pen')) { this._clearGlow(); return; }
+    // over a pose handle: the handle itself is the target, no body glow (over the body only a
+    // ring's stroke takes the press, gizmo.hitTestBody)
+    if ((g?.hitTestBody || g?.hitTest)?.call(g, p.x, p.y, 'pen')) { this._clearGlow(); return; }
     const sel = app.selection;
     let ch = null, control = null;
     const dot = posing.state.showJoints ? g?.hitDot?.(p.x, p.y, 'pen') : null;
@@ -186,7 +191,12 @@ export class PenInput {
     else {
       app.pointerToNDC({ clientX: p.x, clientY: p.y }, _ndc);
       const hit = posing.pick(_ndc);
-      if (hit) { ch = hit.character; control = hit.control; }
+      if (hit) {
+        ch = hit.character; control = hit.control;
+        // what a press there would actually drag: the hips move the pelvis, a small hand is grabbed whole
+        if (app.model.bones[hit.bone]?.name === 'spine05') control = posing.controls.get('pelvis') || control;
+        else if (dt?.palmAsHand) control = dt.palmAsHand(control, ch);
+      }
     }
     // the Mani tool only poses hands
     if (control && this.shell.activeToolId === 'hands' && !['hand', 'finger'].includes(control.region)) control = null;

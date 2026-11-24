@@ -21,9 +21,10 @@
 // mode (mix / solo / scene) is serialized by the scene module (serializeScene().practicals).
 //
 // Budget (render quality preset, render/device.js): alta 8 lights + the strongest casts a
-// shadow, media 4 without shadows, bassa 2. Farther / weaker sources are culled (their
-// bulbs still glow). Lights are pooled so switching lamps on and off never changes the
-// number of lights in the shaders (no recompile), only intensities and positions.
+// shadow, media 3 without shadows, bassa 2. Farther / weaker sources are culled (their
+// bulbs still glow). Lights are pooled, one per source of the scene up to the budget (lit or
+// not), so switching lamps on and off never changes the number of lights in the shaders (no
+// recompile), only intensities and positions.
 import * as THREE from 'three';
 import { setColorFromKelvin, kelvinToHex } from './color.js';
 import { ROLES, TYPE_BY_ID } from '../props/catalog.js';
@@ -35,9 +36,11 @@ import { buildMenuSection, openAmbientMenu, openPracticalMenu } from './practica
 const DEG = Math.PI / 180;
 const BUDGET = {
   alta: { max: 8, shadows: 1, pointMap: 512, spotMap: 1024, windows: 2, windowMap: 1024, bounce: true },
-  media: { max: 4, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 1024, bounce: false },
+  media: { max: 3, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 1024, bounce: false },
   bassa: { max: 2, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 512, bounce: false },
 };
+/** light-map size of a window's sun (the opening's shape: nothing lit outside the window) */
+const COOKIE_PX = 128;
 /** a pool larger than needed shrinks after this long (each size change recompiles the shaders) */
 const SHRINK_MS = 2500;
 /** studio rig scale while only the scene's own lights should be on (faint fill) */
@@ -513,34 +516,36 @@ export class Practicals extends THREE.EventDispatcher {
     ranked.sort((a, b) => b.score - a.score);
     this._overBudget = ranked.length > budget.max;
     const chosen = ranked.slice(0, budget.max);
-    // pool sizes grow in steps (1, 2, 4, 8) and shrink only when the scene has no source at all
+    // pool sizes follow the SOURCES of the scene, lit or not (up to the budget): switching
+    // lamps on and off never changes the number of lights in the shaders (each size change
+    // recompiles ~20 programs: a visible hitch). Only adding / removing a source (or the
+    // quality preset) resizes it; a smaller need is kept for SHRINK_MS first.
     const need = { point: 0, spot: 0 };
     for (const e of chosen) need[e.kind === 'point' ? 'point' : 'spot']++;
-    const hasSources = [...this.entries.values()].some((e) => e.src);
+    const avail = { point: 0, spot: 0 };
+    for (const e of this.entries.values()) if (e.src && e.prop.root.visible) avail[e.kind === 'point' ? 'point' : 'spot']++;
+    const want = { point: Math.min(avail.point, budget.max), spot: Math.min(avail.spot, budget.max) };
+    // over the budget in total: each kind keeps what is lit now, the rest is shared by count
+    while (want.point + want.spot > budget.max) {
+      const k = want.point - need.point >= want.spot - need.spot ? 'point' : 'spot';
+      if (want[k] <= need[k]) { want[k === 'point' ? 'spot' : 'point']--; continue; }
+      want[k]--;
+    }
     const shadowsOn = app.renderer.shadowMap.enabled && budget.shadows > 0;
     const shadowKind = shadowsOn && chosen.length ? (chosen[0].kind === 'point' ? 'point' : 'spot') : null;
-    // exact sizes: an idle light costs as much as a lit one. Growing is immediate, shrinking
-    // waits SHRINK_MS (switching lamps on and off quickly does not recompile every time)
     const now = performance.now();
     const size = { point: 0, spot: 0 };
     this._shrink ||= { point: 0, spot: 0 };
     for (const kind of ['point', 'spot']) {
       const cur = this.pool[kind].length;
-      if (!hasSources) size[kind] = 0;
-      else if (need[kind] >= cur) { size[kind] = need[kind]; this._shrink[kind] = 0; }
+      if (want[kind] >= cur) { size[kind] = want[kind]; this._shrink[kind] = 0; }
       else {
         if (!this._shrink[kind]) this._shrink[kind] = now;
-        size[kind] = now - this._shrink[kind] >= SHRINK_MS ? need[kind] : cur;
+        size[kind] = now - this._shrink[kind] >= SHRINK_MS ? want[kind] : cur;
       }
-      size[kind] = Math.min(budget.max, size[kind]);
     }
-    this._pendingShrink = size.point > need.point || size.spot > need.spot;
-    // never more lights than the budget in total: the kind with spare slots gives them back
-    while (size.point + size.spot > budget.max) {
-      const k = size.point - need.point >= size.spot - need.spot ? 'point' : 'spot';
-      if (size[k] <= need[k]) break;
-      size[k] = need[k];
-    }
+    this._pendingShrink = size.point > want.point || size.spot > want.spot;
+    while (size.point + size.spot > budget.max) { const k = size.point - want.point >= size.spot - want.spot ? 'point' : 'spot'; size[k] = Math.max(want[k], size[k] - 1); if (size.point + size.spot > budget.max && size[k] === want[k]) break; }
     for (const kind of ['point', 'spot']) this._resizePool(kind, size[kind]);
     // assign: within a kind, the strongest first (slot 0 is the shadow caster)
     const slots = { point: 0, spot: 0 };
@@ -719,7 +724,7 @@ export class Practicals extends THREE.EventDispatcher {
     wins.sort((a, b) => a.d2 - b.d2);
     const want = wins.length ? Math.min(budget.windows, wins.length) : 0;
     // light objects: one sun (+ one bounce on 'alta') per lit window, kept while windows exist (no recompiles)
-    const dropWin = (w) => { for (const L of [w.sun, w.bounce]) if (L) { this.group.remove(L, L.target); L.dispose(); } };
+    const dropWin = (w) => { for (const L of [w.sun, w.bounce]) if (L) { this.group.remove(L, L.target); L.map?.dispose(); L.dispose(); } };
     if (this.winLights.length && !!this.winLights[0].bounce !== !!budget.bounce) while (this.winLights.length) dropWin(this.winLights.pop());
     while (this.winLights.length > want) dropWin(this.winLights.pop());
     while (this.winLights.length < want) {
@@ -728,6 +733,12 @@ export class Practicals extends THREE.EventDispatcher {
       sun.castShadow = false;
       sun.shadow.bias = -0.0005;
       sun.shadow.normalBias = 0.012;
+      // a cookie (light map) shaped like the opening: the sun only passes through the window,
+      // the outside of the wall around it stays in shade (the wall cannot shadow its own face)
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = COOKIE_PX;
+      sun.map = new THREE.CanvasTexture(cv);
+      sun.userData.cookie = { cv, key: '' };
       const bounce = budget.bounce ? new THREE.SpotLight(0xffffff, 0, 7, Math.PI * 0.42, 1, 2) : null;
       if (bounce) bounce.name = 'pv-window-bounce';
       for (const L of [sun, bounce]) if (L) { L.userData.pvPractical = true; this.group.add(L, L.target); }
@@ -781,8 +792,35 @@ export class Practicals extends THREE.EventDispatcher {
         bounce.penumbra = 1;
       }
       for (const L of [sun, bounce]) if (L) { L.updateMatrixWorld(); L.target.updateMatrixWorld(); }
+      this._drawCookie(sun, w);
     }
     return lit;
+  }
+
+  /** the opening seen from the sun light, white on black, in its light-map space */
+  _drawCookie(sun, w) {
+    const ck = sun.userData.cookie;
+    if (!ck || !sun.map) return;
+    sun.shadow.updateMatrices(sun);
+    const up = _v3.set(0, 1, 0);
+    const right = _n.crossVectors(w.nIn, up);
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0); else right.normalize();
+    up.crossVectors(right, w.nIn).normalize();
+    const S = COOKIE_PX, pts = [];
+    for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      _v.copy(w.c).addScaledVector(right, a * w.w * 0.52).addScaledVector(up, b * w.h * 0.52).applyMatrix4(sun.shadow.matrix);
+      pts.push(_v.x * S, (1 - _v.y) * S);
+    }
+    const key = pts.map((v) => Math.round(v * 4)).join();
+    if (key === ck.key) return;
+    ck.key = key;
+    const g = ck.cv.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, S, S);
+    g.fillStyle = '#fff';
+    g.beginPath();
+    for (let i = 0; i < 8; i += 2) { if (i) g.lineTo(pts[i], pts[i + 1]); else g.moveTo(pts[i], pts[i + 1]); }
+    g.closePath(); g.fill();
+    sun.map.needsUpdate = true;
   }
 
   /** Sun direction for a window: the landscape's sun when it shines on that side, else a mode default. */

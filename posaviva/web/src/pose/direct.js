@@ -25,9 +25,17 @@ import { CURL } from './handsPanel.js';
 
 /** px a press must travel before it poses (= the core tap / long-press tolerance) */
 const SLOP = 10;
+/** a hand smaller than this on screen (wrist -> middle fingertip, px) is grabbed whole: its fingers are too small to curl one */
+const HAND_PX = 110;
+/** a second finger this soon (ms from the first touch) or this close (px of travel) to a drag's start: it was a pinch */
+const PINCH_MS = 300, PINCH_PX = 40;
+/** "Tocca un punto": a contact this close (m, scaled) counts as reached */
+const REACH_OK = 0.05;
 /** anatomical axes a drag drives (twist needs the rings) */
 const DRAG_KEYS = new Set(['flex', 'abd', 'lat', 'elev', 'prot']);
 const FK_PARTS = new Set(['arm', 'forearm', 'shoulder', 'thigh', 'shin', 'abdomen', 'chest', 'neck']);
+/** parts dragged by their far end (the touched skin of the back barely moves when it bends) */
+const SPINE_LEVER = new Set(['abdomen', 'chest', 'neck']);
 const D = Math.PI / 180;
 export const HAND_SHAPES = [
   { id: 'pugno', preset: 'fist', label: 'Pugno' },
@@ -43,6 +51,7 @@ const _q = new THREE.Quaternion();
 const _m = new THREE.Matrix4();
 const _ndc = new THREE.Vector2();
 const _s = { x: 0, y: 0 }, _s2 = { x: 0, y: 0 };
+const _h1 = new THREE.Vector3(), _h2 = new THREE.Vector3(), _hp = { x: 0, y: 0 }, _hq = { x: 0, y: 0 };
 
 export class DirectTouch {
   /** ctx: pose module context (+ contacts, api) */
@@ -94,6 +103,20 @@ export class DirectTouch {
 
   get enabled() { return this.ctx.state.direct !== false; }
 
+  /**
+   * "Ruota la vista" (close-ups): direct touch and the pose rings pause, a drag on the body
+   * orbits the camera. Not saved; the close-up ends it.
+   */
+  get suspended() { return !!this._suspended; }
+  setSuspended(on) {
+    on = !!on;
+    if (on === this.suspended) return;
+    this._suspended = on;
+    if (on) { this.press = null; this.closeMenu(); }
+    this.app.dispatchEvent({ type: 'directtouch', suspended: on });
+    this.app.invalidate();
+  }
+
   /** true while a direct drag owns the pointer */
   get active() { return !!this.drag; }
 
@@ -105,16 +128,44 @@ export class DirectTouch {
 
   /**
    * The palm is mostly metacarpal bones (finger controls 'f{n}0'): outside the Mani tool a
-   * touch there means the hand (drag = IK, tap = hand menu), not the finger.
+   * touch there means the hand (drag = IK, tap = hand menu), not the finger. The fingers too
+   * while the hand is small on screen (full-body framing: one finger is a few px wide and its
+   * curl would not even show): only the Mani tool or a close-up curls a single finger.
+   * `ch` (the touched character) enables the size test.
    */
-  palmAsHand(ctrl) {
-    if (!ctrl || ctrl.region !== 'finger' || ctrl.phalanx !== 0 || !this.enabled || this.shell.activeToolId === 'hands') return ctrl;
+  palmAsHand(ctrl, ch = null) {
+    if (!ctrl || ctrl.region !== 'finger' || !this.enabled || this.shell.activeToolId === 'hands') return ctrl;
+    if (ctrl.phalanx !== 0 && (!ch || this.handSpan(ch, ctrl.side) >= HAND_PX)) return ctrl;
     return this.ctx.controls.get('hand.' + ctrl.side) || ctrl;
+  }
+
+  /** on-screen length of a hand (wrist -> tip of the middle finger), CSS px */
+  handSpan(ch, side) {
+    const { rig } = this.ctx;
+    const bi = rig.model.boneIndex;
+    const a = this._project(rig.worldPos(ch, bi.get('wrist.' + side), _h1), _hp);
+    if (!a) return 0;
+    const ax = a.x, ay = a.y;
+    const b = this._project(rig.pointOnBone(ch, bi.get('finger3-3.' + side), 1, _h2), _hq);
+    return b ? Math.hypot(b.x - ax, b.y - ay) : 0;
+  }
+
+  /** the press would pose the body (Tocco diretto on, a body part under it): the pose rings let it through */
+  bodyUnder(e) { return !!this.bodyControl(e); }
+
+  /** the control a press would drag (hips = pelvis, a small hand whole), or null */
+  bodyControl(e) {
+    if (!this._allowed(e)) return null;
+    const hit = this.pickBody(e);
+    if (!hit) return null;
+    if (hit.character !== this.app.selection.character) return hit.control; // another character: never the selected part
+    if (hit.character.bones[hit.bone]?.name === 'spine05' || hit.control.baseId === 'pelvis') return this.ctx.controls.get('pelvis');
+    return this.palmAsHand(hit.control, hit.character);
   }
 
   _allowed(e) {
     const ctx = this.ctx;
-    if (!this.enabled || !ctx.isActive() || this.armed || this.app.holdActive) return false;
+    if (!this.enabled || this._suspended || !ctx.isActive() || this.armed || this.app.holdActive) return false;
     if (e.button > 0 || (e.pointerType === 'pen' && ((e.buttons & 2) || this.app.penBarrel))) return false;
     const mode = ctx.mode();
     if (mode === 'move') return false; // Sposta: the gizmo drags the character
@@ -145,14 +196,22 @@ export class DirectTouch {
     const ctrl = this.ctx.sel().control;
     if (!ctrl || !['hand', 'foot', 'head'].includes(ctrl.baseId)) return false;
     const hit = this.pickBody(e, { occlusion: false });
-    return !!hit && hit.character === ch && this.palmAsHand(hit.control) === ctrl;
+    return !!hit && hit.character === ch && this.palmAsHand(hit.control, ch) === ctrl;
   }
 
   // ------------------------------------------------------------ input
   _onDown(e) {
     const busy = this._downIds.size > 0;
     this._downIds.add(e.pointerId);
-    if (this.drag) { if (e.pointerId !== this.drag.id) e.stopImmediatePropagation(); return; }
+    const d = this.drag;
+    if (d) {
+      if (e.pointerId === d.id) return;
+      // a pinch whose first finger slid past the tap tolerance before the second one landed
+      // (they land 30-80 ms apart): the drag is undone and the camera takes the gesture
+      if (e.timeStamp - d.t0 < PINCH_MS || Math.hypot(d.x - d.x0, d.y - d.y0) < PINCH_PX) { this._yield(d); return; }
+      e.stopImmediatePropagation();
+      return;
+    }
     // a second finger before the drag started: pinch / pan, the camera takes the gesture
     if (this.press) { this.press = null; return; }
     if (busy || !this._allowed(e)) return;
@@ -160,7 +219,7 @@ export class DirectTouch {
     if (!hit) return;
     // nothing is stopped here: the core router (tap, long press) and the camera see the
     // press; only its moves are kept from the camera (see _onMove)
-    this.press = { id: e.pointerId, x0: e.clientX, y0: e.clientY, hit, type: e.pointerType };
+    this.press = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: e.timeStamp, hit, type: e.pointerType };
   }
 
   _onMove(e) {
@@ -200,6 +259,27 @@ export class DirectTouch {
     if (d) this._end(d, true);
   }
 
+  /** gives a just-started drag back (pinch): pose, contacts and selection as before, no undo step */
+  _yield(d) {
+    if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+    this.drag = null;
+    this._end(d, true);
+    const s0 = d.sel0;
+    if (s0 && this.app.characters.includes(s0.character) && (this.app.selection.character !== s0.character || this.app.selection.part !== s0.part)) this.app.select(s0.character, s0.part);
+  }
+
+  /** pose, root offset and contacts of a character (restorePose puts them back, no event besides 'pose') */
+  snapPose(ch) { return { q: ch.poseQuat.map((q) => q.clone()), root: ch.rootOffset.clone(), pins: JSON.stringify(ch.data?.pose?.pins || null) }; }
+
+  restorePose(ch, u) {
+    u.q.forEach((q, i) => ch.poseQuat[i].copy(q));
+    ch.rootOffset.copy(u.root);
+    const pins = JSON.parse(u.pins);
+    const pd = ch.data.pose || (ch.data.pose = {});
+    if (pins) pd.pins = pins; else { delete pd.pins; if (!Object.keys(pd).length) delete ch.data.pose; }
+    ch.applyPose();
+  }
+
   // ------------------------------------------------------------ drag
   _begin(p, e) {
     const { app, ctx } = this;
@@ -208,16 +288,20 @@ export class DirectTouch {
     if (!app.characters.includes(ch)) return;
     // the hips (lowest lumbar bone, pelvis bones) move the whole pelvis: crouch, sit, lean
     const hips = ch.bones[hit.bone]?.name === 'spine05' || hit.control.baseId === 'pelvis';
-    const ctrl = hips ? ctx.controls.get('pelvis') : this.palmAsHand(hit.control);
+    const ctrl = hips ? ctx.controls.get('pelvis') : this.palmAsHand(hit.control, ch);
     // selection exactly as a tap would make it
     const mode = ctx.mode();
     const part = mode === 'rotate' ? ctrl.id : null;
+    const sel0 = { character: app.selection.character, part: app.selection.part };
     if (app.selection.character !== ch || app.selection.part !== part) app.select(ch, part);
+    // selected by a drag: its rings stay quiet (fainter, never in the way of the next drag)
+    if (part) ctx.gizmo?.setQuiet(ch, part);
     this.closeMenu();
     const d = {
       id: p.id, ch, ctrl, hit, x0: p.x0, y0: p.y0, x: e.clientX, y: e.clientY, raf: 0, atLimit: false,
+      t0: p.t0 ?? e.timeStamp, sel0,
       ctl: app.controls.enabled, kind: null, label: 'tocco diretto',
-      undo: { q: ch.poseQuat.map((q) => q.clone()), root: ch.rootOffset.clone(), pins: JSON.stringify(ch.data?.pose?.pins || null) },
+      undo: this.snapPose(ch),
     };
     app.controls.enabled = false;
     this.drag = d; // from here an error ends the drag cleanly (_abort: controls and pose restored)
@@ -273,15 +357,18 @@ export class DirectTouch {
     return out;
   }
 
-  /** grabbed point as the handle; too close to the pivot (no lever): the end of the part */
-  _handleFor(d, ch, ctrl) {
+  /**
+   * grabbed point as the handle; too close to the pivot (no lever) or `lever` (back and neck:
+   * the touched skin barely moves when they bend): the end of the part
+   */
+  _handleFor(d, ch, ctrl, lever = false) {
     const { rig } = this.ctx;
     const piv = rig.worldPos(ch, ctrl.pivotIndex, new THREE.Vector3());
     const lastName = ctrl.own[ctrl.own.length - 1];
     const li = rig.model.boneIndex.get(lastName);
     const end = rig.pointOnBone(ch, li, 1, new THREE.Vector3());
     const len = piv.distanceTo(end);
-    if (d.hit.point.distanceTo(piv) >= 0.35 * len) {
+    if (!lever && d.hit.point.distanceTo(piv) >= 0.35 * len) {
       d.hb = d.hit.bone;
       _m.copy(ch.bones[d.hb].matrixWorld).invert();
       d.hl = d.hit.point.clone().applyMatrix4(_m);
@@ -295,18 +382,24 @@ export class DirectTouch {
   }
 
   _setupFK(d, ch, ctrl) {
-    const { rig, state } = this.ctx;
+    const { rig, state, controls } = this.ctx;
     d.kind = 'fk';
     d.dofs = [];
-    ctrl.axes.forEach((a, k) => {
+    const add = (c, damp) => c.axes.forEach((a, k) => {
       if (!DRAG_KEYS.has(a.key) || (a.extra && state.limits)) return;
       d.dofs.push({
-        get: () => rig.read(ch, ctrl, k),
-        set: (v, clamp) => { const r = rig.write(ch, ctrl, k, v, clamp); rig.refreshControl(ch, ctrl); return clamp && r.clamped; },
+        damp,
+        get: () => rig.read(ch, c, k),
+        set: (v, clamp) => { const r = rig.write(ch, c, k, v, clamp); rig.refreshControl(ch, c); return clamp && r.clamped; },
       });
     });
+    add(ctrl, 1);
+    // forearm / shin: a hinge alone cannot follow a sideways drag; the upper arm / thigh
+    // helps (damped more: the elbow / knee bends first), so the touched point stays under the finger
+    const upper = ctrl.baseId === 'forearm' ? 'arm.' : ctrl.baseId === 'shin' ? 'thigh.' : null;
+    if (upper) add(controls.get(upper + ctrl.side), 3);
     d.follow = this.ctx.follow.begin(ch, ctrl);
-    this._handleFor(d, ch, ctrl);
+    this._handleFor(d, ch, ctrl, SPINE_LEVER.has(ctrl.baseId));
     this.shell.hint(ctrl.label);
   }
 
@@ -347,6 +440,7 @@ export class DirectTouch {
     let cur = 0;
     d.dofs = [{
       get: () => cur,
+      sync: (v) => { cur = v; }, // the pose was put back to the value v
       set: (v, clamp) => {
         const S = rig.worldPos(ch, chain.upper, new THREE.Vector3());
         const W = rig.worldPos(ch, chain.end, new THREE.Vector3());
@@ -399,6 +493,7 @@ export class DirectTouch {
       if (d.follow) ctx.follow.update();
     }
     if (limited && !d.atLimit) haptic('tick');
+    if (limited !== d.atLimit && d.dofs) this.shell.hint(limited ? `${d.ctrl.label} · al limite` : d.kind === 'fk' ? d.ctrl.label : '');
     d.atLimit = limited;
     ctx.edited(ch, false);
     app.invalidate();
@@ -406,47 +501,65 @@ export class DirectTouch {
 
   /**
    * The handle follows the finger: damped least squares on the drag's degrees of freedom
-   * (screen-space Jacobian by finite differences), limits clamp the result.
+   * (screen-space Jacobian by finite differences), limits clamp the result. A step is kept
+   * only when it brings the handle closer to the finger (backtracking): against coupled
+   * limits a plain step can overshoot back and forth, and a resting finger would make the
+   * part flicker between two poses.
    */
   _follow(d) {
     const tx = d.h0.x + (d.x - d.x0), ty = d.h0.y + (d.y - d.y0);
     const n = d.dofs.length;
     if (!n) return false;
+    const ch = d.ch, { rig } = this.ctx;
     const J = d.J || (d.J = new Float64Array(n * 2)), v0 = d.v0 || (d.v0 = new Float64Array(n));
+    const save = d.saveQ || (d.saveQ = ch.poseQuat.map((q) => q.clone()));
     const H = 0.02;
+    const errNow = () => { const c = this._project(this._handleWorld(d, _v), _s2); return c ? (tx - c.x) ** 2 + (ty - c.y) ** 2 : Infinity; };
+    const restore = () => {
+      for (let i = 0; i < save.length; i++) ch.poseQuat[i].copy(save[i]);
+      rig.refreshAll(ch);
+      for (let k = 0; k < n; k++) d.dofs[k].sync?.(v0[k]);
+    };
     let limited = false;
     for (let it = 0; it < 3; it++) {
       const cur = this._project(this._handleWorld(d, _v), _s);
       if (!cur) break;
-      const ex = tx - cur.x, ey = ty - cur.y;
-      if (ex * ex + ey * ey < 0.25) break;
+      const cx = cur.x, cy = cur.y;
+      const ex = tx - cx, ey = ty - cy;
+      const e0 = ex * ex + ey * ey;
+      if (e0 < 0.25) break;
       for (let k = 0; k < n; k++) {
         const dof = d.dofs[k];
         v0[k] = dof.get();
         dof.set(v0[k] + H, false);
-        const p = this._project(this._handleWorld(d, _v), _s2) || cur;
-        J[k * 2] = (p.x - cur.x) / H; J[k * 2 + 1] = (p.y - cur.y) / H;
+        const p = this._project(this._handleWorld(d, _v), _s2);
+        J[k * 2] = p ? (p.x - cx) / H : 0; J[k * 2 + 1] = p ? (p.y - cy) / H : 0;
         dof.set(v0[k], false);
       }
-      // (JtJ + lambda I) dx = Jt e
-      let a = 0, b = 0, c = 0, g0 = 0, g1 = 0;
-      for (let k = 0; k < n; k++) {
-        const jx = J[k * 2], jy = J[k * 2 + 1];
-        if (k === 0) { a = jx * jx + jy * jy; g0 = jx * ex + jy * ey; } else { c = jx * jx + jy * jy; g1 = jx * ex + jy * ey; b = J[0] * jx + J[1] * jy; }
+      for (let i = 0; i < save.length; i++) save[i].copy(ch.poseQuat[i]);
+      // (JtJ + lambda D) dx = Jt e   (D: per-dof damping, the hinge moves before the bone above it)
+      const A = d.A || (d.A = new Float64Array(n * n)), g = d.g || (d.g = new Float64Array(n)), dx = d.dx || (d.dx = new Float64Array(n));
+      let tr = 0;
+      for (let k = 0; k < n; k++) tr += J[k * 2] * J[k * 2] + J[k * 2 + 1] * J[k * 2 + 1];
+      const lam = 0.05 * tr + 40;
+      for (let i = 0; i < n; i++) {
+        g[i] = J[i * 2] * ex + J[i * 2 + 1] * ey;
+        for (let j = 0; j < n; j++) A[i * n + j] = J[i * 2] * J[j * 2] + J[i * 2 + 1] * J[j * 2 + 1];
+        A[i * n + i] += lam * (d.dofs[i].damp || 1);
       }
-      const lam = 0.05 * (a + c) + 40;
-      let d0, d1 = 0;
-      if (n === 1) d0 = g0 / (a + lam);
-      else {
-        const A = a + lam, C = c + lam, det = A * C - b * b;
-        if (Math.abs(det) < 1e-9) break;
-        d0 = (C * g0 - b * g1) / det; d1 = (A * g1 - b * g0) / det;
+      if (!solveSmall(A, g, dx, n)) break;
+      let ok = false, lim = false;
+      for (let bt = 0, f = 1; bt < 4; bt++, f *= 0.5) {
+        lim = false;
+        for (let k = 0; k < n; k++) {
+          const st = Math.max(-0.3, Math.min(0.3, dx[k] * f));
+          lim = d.dofs[k].set(v0[k] + st, true) || lim;
+        }
+        if (errNow() < e0 - 0.01) { ok = true; break; }
+        restore();
       }
-      const step = [d0, d1];
-      for (let k = 0; k < n; k++) {
-        const s = Math.max(-0.3, Math.min(0.3, step[k]));
-        limited = d.dofs[k].set(v0[k] + s, true) || limited;
-      }
+      limited = limited || lim;
+      if (!ok) break; // nothing closer within the limits: the part stays where it is
     }
     return limited;
   }
@@ -460,15 +573,13 @@ export class DirectTouch {
     ctx.contacts.handleEnd(!cancelled);
     if (!app.characters.includes(ch)) return;
     if (cancelled) {
-      // palm rejection / system gesture: the pose before the drag comes back, no undo step
-      d.undo.q.forEach((q, i) => ch.poseQuat[i].copy(q));
-      ch.rootOffset.copy(d.undo.root);
-      const pins = JSON.parse(d.undo.pins);
-      const pd = ch.data.pose || (ch.data.pose = {});
-      if (pins) pd.pins = pins; else { delete pd.pins; if (!Object.keys(pd).length) delete ch.data.pose; }
-      ch.applyPose();
+      // palm rejection / system gesture / pinch: the pose before the drag comes back, no undo step
+      this.restorePose(ch, d.undo);
       return;
     }
+    // a drag that could not move anything (limits, a straight arm turning about its own line)
+    const same = d.undo.q.every((q, i) => Math.abs(q.dot(ch.poseQuat[i])) > 1 - 1e-9) && d.undo.root.distanceToSquared(ch.rootOffset) < 1e-12;
+    if (same && d.dofs) { haptic('warning'); this.shell.hint(`${d.ctrl.label}: al limite, non si muove oltre`, 1500); }
     ctx.edited(ch, true, d.label);
   }
 
@@ -476,7 +587,7 @@ export class DirectTouch {
   /** after a tap selected a part: a hand or a foot opens its menu at the finger */
   maybeMenu(hit, x, y) {
     if (!this.enabled || !hit?.control || this.armed) return false;
-    const c = this.palmAsHand(hit.control);
+    const c = this.palmAsHand(hit.control, hit.character);
     const eff = c.baseId === 'hand' ? 'hand.' + c.side : c.baseId === 'foot' || c.baseId === 'toes' ? 'foot.' + c.side : null;
     if (!eff) return false;
     this.openMenu(hit.character, eff, x, y);
@@ -496,6 +607,9 @@ export class DirectTouch {
     const pinned = ctx.contacts.has(ch, eff);
     const side = eff.slice(-1), isHand = eff.startsWith('hand');
     const items = [];
+    // short screens (a phone in landscape): no second lines, the card fits beside the finger
+    const short = window.innerHeight < 500;
+    const hint = (t) => (short ? undefined : t);
     let body = null;
     if (isHand) {
       const chips = HAND_SHAPES.map((s) => {
@@ -508,16 +622,16 @@ export class DirectTouch {
         return b;
       });
       body = h('div', { class: 'pv-pose-tm-shapes' }, ...chips);
-      items.push({ id: 'reach', label: 'Tocca un punto da raggiungere', icon: 'tap', hint: 'Un oggetto, il pavimento, un personaggio', onClick: () => this.arm(ch, eff) });
+      items.push({ id: 'reach', label: 'Tocca un punto da raggiungere', icon: 'tap', hint: hint('Un oggetto, il pavimento, un personaggio'), onClick: () => this.arm(ch, eff) });
       if (pinned) items.push({ id: 'free', label: 'Libera contatto', icon: 'unlock', onClick: () => { api.unpin(ch, eff); toast(`${EFFECTOR_LABEL[eff]} libera`, { ms: 1400 }); } });
-      else items.push({ id: 'pin', label: 'Fissa a superficie', icon: 'lock', hint: 'Resta qui quando muovi il corpo', onClick: () => this.pinHere(ch, eff) });
+      else items.push({ id: 'pin', label: 'Fissa a superficie', icon: 'lock', hint: hint('Resta qui quando muovi il corpo'), onClick: () => this.pinHere(ch, eff) });
     } else {
       items.push({ id: 'floor', label: 'Appoggia a terra', icon: 'ground', onClick: () => this.footDown(ch, eff) });
-      items.push({ id: 'reach', label: 'Tocca un punto', icon: 'tap', hint: 'Un gradino, una sedia, un oggetto', onClick: () => this.arm(ch, eff) });
+      items.push({ id: 'reach', label: 'Tocca un punto', icon: 'tap', hint: hint('Un gradino, una sedia, un oggetto'), onClick: () => this.arm(ch, eff) });
       if (pinned) items.push({ id: 'free', label: 'Libera', icon: 'unlock', onClick: () => { api.unpin(ch, eff); toast(`${EFFECTOR_LABEL[eff]} libero`, { ms: 1400 }); } });
     }
     const m = stageMenu(items, {
-      x, y, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: 276,
+      x, y, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: short ? 300 : 276,
       onClose: () => { if (this.menu === m) this.menu = null; },
     });
     // never in the way: no dimming, touches outside go to the scene (and close it)
@@ -594,10 +708,45 @@ export class DirectTouch {
       return true;
     }
     this.disarm();
-    const ok = ctx.api.pinTo(a.ch, a.eff, hit.point, hit.normal, { target: hit.owner });
-    haptic(ok ? 'success' : 'warning');
-    if (!ok) toast('Troppo lontano: avvicina il personaggio, il contatto resta', { kind: 'info', ms: 2200 });
+    this._reachPoint(a.ch, a.eff, hit);
     return true;
+  }
+
+  /**
+   * "Tocca un punto": contact at a surface point. Out of reach (beyond the arm, a squat and a
+   * natural bend of the back) the pose comes back untouched and no contact is kept: the toast
+   * offers to walk there first (Avvicina, one undo step with the contact).
+   */
+  _reachPoint(ch, eff, hit, { approached = false } = {}) {
+    const { ctx } = this;
+    const u = this.snapPose(ch);
+    const r = ctx.contacts.pinTo(ch, eff, hit.point, hit.normal, { target: hit.owner });
+    if (r.ok || r.error < REACH_OK * (ch.root.scale.y || 1)) {
+      ctx.edited(ch, !approached, 'contatto');
+      haptic('success');
+      return true;
+    }
+    this.restorePose(ch, u);
+    haptic('warning');
+    if (approached) { toast(`${EFFECTOR_LABEL[eff]}: non ci arriva neanche da vicino`, { kind: 'info', ms: 2200 }); return false; }
+    toast('Troppo lontano da qui', {
+      kind: 'info', ms: 4000, icon: 'footprint',
+      action: { label: 'Avvicina', onClick: () => this.approachAndReach(ch, eff, hit) },
+    });
+    return false;
+  }
+
+  /** walks the character next to a point and makes the contact there (one undo step) */
+  async approachAndReach(ch, eff, hit) {
+    const { app, ctx } = this;
+    if (!app.characters.includes(ch)) return false;
+    let ok = false;
+    await app.history.batch('raggiungi', () => {
+      // close to the point, its hand side toward it (the squat and the arm do the rest)
+      if (!ctx.api.approach(ch, hit.point, hit.point, { near: 0.3, commit: false })) return;
+      ok = this._reachPoint(ch, eff, hit, { approached: true });
+    });
+    return ok;
   }
 
   _drawArmed(g, project) {
@@ -614,4 +763,29 @@ export class DirectTouch {
     g.beginPath(); g.arc(o.x, o.y, 5, 0, Math.PI * 2); g.fillStyle = '#b69bff'; g.fill();
     g.restore();
   }
+}
+
+/** solves the n x n system A x = b in place (Gaussian elimination, partial pivoting); false when singular */
+function solveSmall(A, b, x, n) {
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r * n + c]) > Math.abs(A[p * n + c])) p = r;
+    if (Math.abs(A[p * n + c]) < 1e-12) return false;
+    if (p !== c) {
+      for (let k = 0; k < n; k++) { const t = A[c * n + k]; A[c * n + k] = A[p * n + k]; A[p * n + k] = t; }
+      const t = b[c]; b[c] = b[p]; b[p] = t;
+    }
+    for (let r = c + 1; r < n; r++) {
+      const f = A[r * n + c] / A[c * n + c];
+      if (!f) continue;
+      for (let k = c; k < n; k++) A[r * n + k] -= f * A[c * n + k];
+      b[r] -= f * b[c];
+    }
+  }
+  for (let r = n - 1; r >= 0; r--) {
+    let t = b[r];
+    for (let k = r + 1; k < n; k++) t -= A[r * n + k] * x[k];
+    x[r] = t / A[r * n + r];
+  }
+  return true;
 }

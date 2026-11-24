@@ -23,11 +23,14 @@ const EMPTY = Object.freeze([]);
 const PALM_SKIN = 0.016, REST_GAP = 0.004, REF_HAND = 0.092;
 /** a target contact farther than this from its effector after a move is let go (m) */
 const LOST = 0.06;
+/** back bend (rad) a contact placed by reach may add, and the reach it buys (m, scaled) for the squat */
+const SPINE_MAX = 0.6, CROUCH_BACK = 0.15;
 
 const _P = new THREE.Vector3(), _N = new THREE.Vector3(), _F = new THREE.Vector3();
 const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3();
 const _W = new THREE.Vector3(), _C = new THREE.Vector3(), _u = new THREE.Vector3(), _f = new THREE.Vector3();
 const _T = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _R = new THREE.Quaternion();
 const _m = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _m3 = new THREE.Matrix3();
 const r5 = (v) => Math.round(v * 1e5) / 1e5;
@@ -281,7 +284,10 @@ export class ContactPins {
       const other = chain.side === 'L' ? 'R' : 'L';
       if (this.ctx.feetOnFloor(ch)[other] || this.has(ch, 'foot.' + other)) pins = [ik.pin(ch, other)];
     }
-    const snap = reach ? ik.reachSnapshot(ch, chain) : null;
+    // a hand sent low (the floor, a low table): the knees bend first, and the back only
+    // helps up to a natural bend (it never folds into the limits to chase a far point)
+    if (reach && chain.kind === 'arm') this._crouch(ch, chain, _T);
+    const snap = reach ? ik.reachSnapshot(ch, chain, { spineMax: chain.kind === 'arm' ? SPINE_MAX : Infinity }) : null;
     const E = new THREE.Vector3(), C = new THREE.Vector3(), A = new THREE.Vector3(), B = new THREE.Vector3();
     if (reach) {
       // a far contact is walked there in small steps, like a drag (the limb IK keeps the
@@ -317,6 +323,69 @@ export class ContactPins {
       if (err < 0.004 * scale) break;
     }
     return err;
+  }
+
+  /**
+   * Standing character, hand target below the hips and out of a comfortable reach: a squat
+   * with the feet planted (pelvis down, at most to a deep squat, knees within their limits)
+   * and the hips flexing toward the target (pelvis tilted forward, at most ~40°), until the
+   * shoulder is close enough for the arm and a natural bend of the back. Matrices refreshed.
+   */
+  _crouch(ch, chain, T) {
+    const { rig, ik } = this.ctx;
+    const s = ch.root.scale.y || 1;
+    const feet = this.ctx.feetOnFloor(ch);
+    const pins = ['L', 'R'].filter((sd) => feet[sd] || this.has(ch, 'foot.' + sd)).map((sd) => ik.pin(ch, sd));
+    if (pins.length < 2) return; // seated, kneeling on one leg, in the air: no squat
+    rig.refreshAll(ch);
+    const S = new THREE.Vector3(), E = new THREE.Vector3(), W = new THREE.Vector3(), H = new THREE.Vector3();
+    rig.worldPos(ch, chain.upper, S); rig.worldPos(ch, chain.lower, E); rig.worldPos(ch, chain.end, W);
+    const L = S.distanceTo(E) + E.distanceTo(W);
+    rig.worldPos(ch, 0, H);
+    if (T.y > H.y - 0.08 * s) return; // only below the hips
+    const floorY = Math.min(pins[0].pos.y, pins[1].pos.y);
+    const maxDrop = 0.45 * Math.max(0, H.y - floorY);
+    const help = 0.92 * L + CROUCH_BACK * s; // a nearly straight arm + what the back adds
+    const inv = new THREE.Matrix4().copy(ch.rig.matrixWorld).invert();
+    const dR = new THREE.Vector3(), axis = new THREE.Vector3(), q = new THREE.Quaternion();
+    const y0 = H.y;
+    // the knees bend only for a low target (the floor, a coffee table); at a table or a
+    // counter the hips flex and the legs stay straight
+    const low = T.y < floorY + 0.55 * (y0 - floorY);
+    const maxLean = low ? 0.85 : 0.45; // a squat leans further than a lean on a table
+    // how far the pelvis already leans (a second hand on the same table: the total stays natural)
+    _f.setFromMatrixColumn(ch.bones[0].matrixWorld, 1).normalize();
+    _u.setFromMatrixColumn(ch.restGlobal[0], 1).transformDirection(ch.rig.matrixWorld);
+    let leaned = Math.min(maxLean, Math.acos(Math.max(-1, Math.min(1, _f.dot(_u)))));
+    for (let it = 0; it < 10; it++) {
+      rig.worldPos(ch, chain.upper, S);
+      const need = S.distanceTo(T) - help;
+      if (need < 0.01 * s) break;
+      let moved = false;
+      // 1) the hips flex: the pelvis tilts toward the target (the legs are re-solved on the planted feet)
+      rig.worldPos(ch, 0, H);
+      axis.set(T.x - H.x, 0, T.z - H.z);
+      if (leaned < maxLean && axis.lengthSq() > 1e-6) {
+        const da = Math.min(0.12, maxLean - leaned);
+        axis.normalize().cross(_up); // horizontal, perpendicular to the way to the target
+        q.setFromAxisAngle(axis.negate(), da);
+        rig.rotateWorld(ch, 0, q);
+        rig.refreshBone(ch, 0);
+        ik.movePelvis(ch, ch.rootOffset.clone(), pins);
+        leaned += da;
+        moved = true;
+      }
+      // 2) down (the knees bend), never below a deep squat
+      rig.worldPos(ch, 0, H);
+      const dy = low ? Math.min(need * 0.5, maxDrop - (y0 - H.y)) : 0;
+      if (dy > 1e-3 * s) {
+        const before = ch.rootOffset.clone();
+        dR.set(H.x, H.y - dy, H.z).applyMatrix4(inv).sub(H.clone().applyMatrix4(inv));
+        ik.movePelvis(ch, before.clone().add(dR), pins);
+        moved = ch.rootOffset.distanceToSquared(before) > 1e-8 || moved;
+      }
+      if (!moved) break; // a deep squat, leaning as far as it goes
+    }
   }
 
   /** Re-solves every enforced contact of a character (no event). Returns true if any. */

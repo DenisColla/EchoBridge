@@ -86,12 +86,14 @@ export class IKSolver {
    * State a reach() call restores before recruiting the body: clavicle + back values
    * (hands), pelvis rotation (feet). Taken at drag start.
    */
-  reachSnapshot(ch, chain) {
+  reachSnapshot(ch, chain, { spineMax = Infinity } = {}) {
     const rig = this.rig, C = (id) => this.controls.get(id);
     const parts = chain.kind === 'arm' ? [C('shoulder.' + chain.side), C('abdomen'), C('chest')] : [];
     const vals = [];
     for (const c of parts) for (let k = 0; k < c.axes.length; k++) vals.push([c, k, rig.read(ch, c, k)]);
-    return { chain, vals, root: ch.poseQuat[0].clone() };
+    // spineMax (radians): how much the back may bend / twist to help a hand (a contact placed
+    // by a tap keeps a natural back; a drag follows the finger as far as the limits allow)
+    return { chain, vals, root: ch.poseQuat[0].clone(), spineMax };
   }
 
   /**
@@ -123,15 +125,32 @@ export class IKSolver {
       // 2) back: abdomen ~45%, chest the rest (a few passes: the bend is spread over
       // the curved spine, so the shoulder travels less than a rigid turn would move it)
       const ab = this.controls.get('abdomen'), chs = this.controls.get('chest');
+      // the budget counts the bend the back already has (a second hand on the same table)
+      let budget = snap.spineMax ?? Infinity;
+      if (Number.isFinite(budget)) {
+        for (const c of [ab, chs]) {
+          const f = c.axes.findIndex((a) => a.key === 'flex'), l = c.axes.findIndex((a) => a.key === 'lat');
+          budget -= Math.hypot(f >= 0 ? rig.read(ch, c, f) : 0, l >= 0 ? rig.read(ch, c, l) : 0);
+        }
+        budget = Math.max(0, budget);
+      }
+      const swing = (ctrl, dist) => {
+        if (budget <= 1e-3) return false;
+        const r = rig.worldPos(ch, ctrl.pivotIndex, _W).distanceTo(_S);
+        if (r < 1e-4) return false;
+        const dd = Math.min(dist, budget * r); // arc length within the remaining bend
+        budget -= dd / r;
+        return this._swingToward(ch, ctrl, ctrl.pivotIndex, _S, target, dd, null);
+      };
       for (let it = 0; it < 3; it++) {
         rig.worldPos(ch, chain.upper, _S);
         excess = _S.distanceTo(target) - comfy;
         if (excess < 0.005 * L) break;
-        limited = this._swingToward(ch, ab, ab.pivotIndex, _S, target, excess * 0.75, null) || limited;
+        limited = swing(ab, excess * 0.75) || limited;
         rig.worldPos(ch, chain.upper, _S);
         excess = _S.distanceTo(target) - comfy;
         if (excess < 0.005 * L) break;
-        limited = this._swingToward(ch, chs, chs.pivotIndex, _S, target, excess * 0.9, null) || limited;
+        limited = swing(chs, excess * 0.9) || limited;
       }
     } else {
       // pelvis tilt about the root (max ~25°): the whole leg swings toward the target

@@ -70,6 +70,8 @@ const RAIL_W = { tablet: 88, 'tablet-wide': 96 };
 const SIDE_KEY = 'posaviva.ui.side';
 /** Tablet side panel width range (CSS px); the view keeps at least SIDE_VIEW_MIN next to it. */
 const SIDE_MIN = 280, SIDE_MAX = 520, SIDE_VIEW_MIN = 300;
+/** phones in landscape (side panel): 260-440 px, the view keeps at least 360 px */
+const PHONE_SIDE_MIN = 260, PHONE_SIDE_MAX = 440, PHONE_VIEW_MIN = 360;
 /** Free view (CSS px) below which the floating buttons (mic, quick zoom) are hidden: two 48 px buttons + margins side by side, room above the sheet. */
 const FAB_MIN_FREE_H = 230, FAB_MIN_FREE_W = 150;
 /** Floating buttons: size, gap, margin from the free view's edge (CSS px). */
@@ -204,6 +206,10 @@ export class Shell extends EventTarget {
     const tier = this.tier;
     const safe = this.safeInsets();
     const free = W - (RAIL_W[tier] || 84) - safe.left - safe.right;
+    if (tier === 'phone') {
+      const max = clamp(free - PHONE_VIEW_MIN, PHONE_SIDE_MIN, PHONE_SIDE_MAX);
+      return { normal: Math.min(max, Math.round(Math.min(380, W * 0.43))), wide: max, min: Math.min(PHONE_SIDE_MIN, max), max };
+    }
     // 280-520 px, and the view keeps at least 300 px next to the panel
     const max = Math.max(SIDE_MIN, Math.min(SIDE_MAX, free - SIDE_VIEW_MIN));
     const normal = tier === 'tablet-wide' ? clamp(Math.round(W * 0.3125), 380, 440) : clamp(Math.round(W * 0.44), 320, 360);
@@ -211,9 +217,9 @@ export class Shell extends EventTarget {
     return { normal: Math.min(normal, max), wide: Math.min(wide, max), min: SIDE_MIN, max };
   }
 
-  /** Current side panel width (CSS px) on tablets; null on phones (CSS default). */
+  /** Current side panel width (CSS px) in side mode (tablets, phones in landscape); null with the sheet. */
   get sideWidth() {
-    if (!this.tablet) return null;
+    if (!this.tablet && this.mode !== 'side') return null;
     const ws = this.sideWidths();
     const p = this._liveSideW ?? this._sidePref[this.tier];
     return Math.round(clamp(typeof p === 'number' ? p : ws.normal, ws.min, ws.max));
@@ -230,7 +236,7 @@ export class Shell extends EventTarget {
    * opts.live: while dragging (not remembered); opts.persist (default true).
    */
   setSideWidth(w, { live = false, persist = true } = {}) {
-    if (!this.tablet) return;
+    if (!this.tablet && this.mode !== 'side') return;
     const ws = this.sideWidths();
     if (w === 'toggle') w = this.sideIsWide ? 'normal' : 'wide';
     const px = Math.round(clamp(w === 'wide' ? ws.wide : w === 'normal' ? ws.normal : +w || ws.normal, ws.min, ws.max));
@@ -276,12 +282,12 @@ export class Shell extends EventTarget {
     return changed;
   }
 
-  /** Drag the left edge of the side panel (tablets) to resize it; a double tap toggles the two presets. */
+  /** Drag the left edge of the side panel (tablets, phones in landscape) to resize it; a double tap toggles the two presets. */
   _setupSideResize() {
     let d = null, lastTap = 0;
     const g = this.grip;
     g.addEventListener('pointerdown', (e) => {
-      if (!this.tablet || this.mode !== 'side' || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      if (this.mode !== 'side' || (e.pointerType === 'mouse' && e.button !== 0)) return;
       e.preventDefault();
       e.stopPropagation();
       d = { id: e.pointerId, x0: e.clientX, w0: this.sideWidth, moved: false };
@@ -668,7 +674,7 @@ export class Shell extends EventTarget {
     if (this.mode === 'side') {
       ins.left = this.toolbar.getBoundingClientRect().right - r.left;
       // tablets: the target width (the panel may still be animating to it after a rotation or a resize)
-      const sideW = this.tablet ? this.sideWidth + this.safeInsets().right : 0;
+      const sideW = this.sideWidth != null ? this.sideWidth + this.safeInsets().right : 0;
       if (this.active) {
         ins.right = sideW || this.panel.offsetWidth;
         ins.top = this.topBar.offsetTop + this.topBar.offsetHeight;
@@ -802,7 +808,8 @@ export class Shell extends EventTarget {
       nh = Math.round(nh);
       this._applySheetHeight(nh);
       // the snap points are magnets: a tick when the edge reaches one, and the badge names it
-      const near = this._nearSnap(nh, r);
+      // (over-dragged past the top or the bottom: the rubber band still means that end's snap)
+      const near = this._nearSnap(clamp(nh, r.min, r.max), r);
       if (near !== drag.near) { if (near) haptic('tick'); drag.near = near; }
       this._sheetBadge(nh, near, r);
       samples.push([e.clientY, e.timeStamp]);

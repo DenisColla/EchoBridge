@@ -11,10 +11,12 @@ const DIRS = Array.from({ length: 8 }, (_, i) => new THREE.Vector3(Math.cos((i *
 /**
  * Spot (Vector3 on the ground: landscape terrain, exterior pieces) for `ch` near `P`:
  * rings of growing distance around P, starting from the direction of the character (the
- * shortest "walk"), 15° steps. opts.distance forces the ring. Returns null only when P
- * is not finite.
+ * shortest "walk"), 15° steps. opts.distance forces the ring; opts.exact tries P itself
+ * first (P already is the spot where the character should stand: object actions);
+ * opts.near (m, scaled) is the first ring (default 0.42: standing next to the point).
+ * Returns null only when P is not finite.
  */
-export function approachSpot(ctx, ch, P, { distance = null } = {}) {
+export function approachSpot(ctx, ch, P, { distance = null, exact = false, near = null } = {}) {
   if (!P || !Number.isFinite(P.x) || !Number.isFinite(P.z)) return null;
   const app = ctx.app;
   const s = ch.root.scale.y || 1;
@@ -59,7 +61,10 @@ export function approachSpot(ctx, ch, P, { distance = null } = {}) {
     }
     return true;
   };
-  const rings = distance ? [distance] : [0.42, 0.52, 0.65, 0.8, 1.0, 1.25, 1.6, 2.0, 2.6, 3.4].map((v) => v * s);
+  if (exact) { const y = ctx.groundAt(P.x, P.z); if (free(P.x, P.z, y)) return new THREE.Vector3(P.x, y, P.z); }
+  let rings = distance ? [distance] : [0.42, 0.52, 0.65, 0.8, 1.0, 1.25, 1.6, 2.0, 2.6, 3.4].map((v) => v * s);
+  if (!distance && near != null) rings = [near * s, ...rings.filter((v) => v > near * s + 0.04 * s)];
+  else if (!distance && exact) rings = [0.14 * s, 0.26 * s, ...rings]; // the wanted spot is taken: the nearest free one
   for (const d of rings) {
     for (let k = 0; k < 24; k++) {
       const a = a0 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (Math.PI / 12);
