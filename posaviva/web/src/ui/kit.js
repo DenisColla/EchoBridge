@@ -420,7 +420,8 @@ export function promptDialog(label, value = '', opts = {}) {
  * an empty spot...). items like sheetMenu (+ keepOpen: the menu stays open after
  * the click; checkable: the check mark follows the item's .checked class, data-id = id).
  * opts: {x, y (screen px of the finger), title, subtitle, body: Node|Node[] shown above
- * the items (e.g. a slider), width, side (beside the finger when it fits), onClose}.
+ * the items (e.g. a slider), width, side (beside the finger when it fits), prefer ('left' |
+ * 'right': which side when beside), onClose}.
  * Placement: below the finger, else above it, else beside it (never over the point
  * touched). Returns the modal api ({el, card, body, close, result}).
  *
@@ -495,7 +496,7 @@ export function stageMenu(items, opts = {}) {
         const right = x + 24, leftSide = x - 24 - cw;
         const okR = right + cw <= W - 8, okL = leftSide >= 8;
         if (okR || okL) {
-          left = okR && (!okL || x < W / 2) ? right : leftSide;
+          left = okR && (!okL || (opts.prefer ? opts.prefer === 'right' : x < W / 2)) ? right : leftSide; // prefer: the side away from what is edited
           top = Math.min(Math.max(8, y - ch / 2), Math.max(8, H - 8 - ch));
           card.style.left = Math.round(left) + 'px';
           card.style.transformOrigin = left > x ? 'center left' : 'center right';

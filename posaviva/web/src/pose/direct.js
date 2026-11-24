@@ -678,8 +678,11 @@ export class DirectTouch {
       items.push({ id: 'reach', label: 'Tocca un punto', icon: 'tap', hint: hint('Un gradino, una sedia, un oggetto'), onClick: () => this.arm(ch, eff) });
       if (pinned) items.push({ id: 'free', label: 'Libera', icon: 'unlock', onClick: () => { api.unpin(ch, eff); toast(`${EFFECTOR_LABEL[eff]} libero`, { ms: 1400 }); } });
     }
+    // beside the finger (a short screen): on the side away from the body, which stays in view
+    const body0 = this._project(this.ctx.rig.worldPos(ch, 0, _v), _s);
+    const prefer = body0 ? (body0.x > x ? 'left' : 'right') : undefined;
     const m = stageMenu(items, {
-      x, y, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: short ? 300 : 276,
+      x, y, prefer, title: EFFECTOR_LABEL[eff], subtitle: pinned ? 'Contatto fissato · ' + ch.name : ch.name, body, width: short ? 300 : 276,
       onClose: () => { if (this.menu === m) this.menu = null; },
     });
     // never in the way: no dimming, touches outside go to the scene (and close it)
