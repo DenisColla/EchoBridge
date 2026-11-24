@@ -1,0 +1,19 @@
+PosaViva — human bodies
+
+human.json / human.bin (body topology, skeleton, skin weights, facial expression units,
+eyes, helper geometry, slider and preset differences) are built from the MakeHuman hm08
+base mesh, targets, default skeleton and weights — CC0 1.0 Universal (public domain),
+MakeHuman Community, http://www.makehumancommunity.org
+
+The body SHAPES of the 'Normale' presets (and through them all six presets) and the skin
+relief normal maps skin_normal.png (female) and skin_normal_m.png (male) come from the
+Blender Studio "Human Base Meshes" asset bundle v1.4.1 — CC0 1.0 Universal (public domain):
+  "Body Female - Realistic" and "Body Male - Realistic" by Dan Ulrich
+  (realistic scan data models with multiresolution details), Blender Studio,
+  https://studio.blender.org — download.blender.org/demo/asset-bundles/human-base-meshes/
+They were registered onto the MakeHuman topology (non-rigid fit) and their level-3 sculpt
+detail was baked into tangent-space normal maps by tools/hbm/ (fit.py, bake.py); the
+original meshes are not distributed with the app.
+
+CC0 1.0: https://creativecommons.org/publicdomain/zero/1.0/
+Thanks to the MakeHuman community, Blender Studio and Dan Ulrich.

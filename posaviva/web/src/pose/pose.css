@@ -1,0 +1,95 @@
+/* Pose module: overlay gizmo + panels (Posa, Pose pronte, Mani). */
+.pv-pose-gizmo { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.pv-pose-modes { margin-bottom: 12px; }
+/* four modes: icon above the label so they fit a phone panel */
+.pv-pose-modes .pv-seg-btn { min-height: 50px; flex-direction: column; gap: 2px; padding: 5px 2px; font-size: 12.5px; }
+.pv-pose-modes .pv-seg-btn svg { width: 19px; height: 19px; }
+
+/* Linea d'azione: whole-pose adjustments */
+.pv-pose-adjust { margin: 4px 0 8px; }
+.pv-pose-adjust .pv-slider { margin-bottom: 6px; }
+.pv-pose-slider-hint { margin: -2px 0 4px; color: var(--faint); font-size: 12px; line-height: 1.35; }
+
+/* selected part header */
+.pv-pose-part { display: flex; align-items: center; gap: 4px; padding: 8px 6px 8px 10px; margin-bottom: 10px;
+  background: var(--elev); border: 1px solid var(--line); border-radius: var(--radius); }
+.pv-pose-part-icon { width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent-hi); flex: none; margin-right: 6px; }
+.pv-pose-part-text { flex: 1; min-width: 0; }
+.pv-pose-part-name { font-weight: 650; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-pose-part-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-pose-part .pv-icon-btn { flex: none; }
+
+/* axis sliders: colored dot = gizmo ring color */
+.pv-pose-axis .pv-slider-label::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--axis-color); margin-right: 8px; vertical-align: 0; box-shadow: 0 0 0 2px rgba(0,0,0,.35); }
+.pv-pose-axis input[type=range]::-webkit-slider-thumb { border-color: var(--axis-color) !important; }
+
+.pv-pose-actions { display: flex; gap: 8px; margin: 6px 0 4px; }
+.pv-pose-actions > .pv-btn { flex: 1 1 0; min-width: 0; }
+.pv-pose-actions.wrap { flex-wrap: wrap; }
+.pv-pose-actions.wrap > .pv-btn { flex: 1 1 120px; }
+
+.pv-pose-empty { display: flex; gap: 12px; align-items: flex-start; padding: 12px; margin-bottom: 10px; color: var(--muted);
+  background: var(--elev); border: 1px dashed var(--line-2); border-radius: var(--radius); font-size: 13px; line-height: 1.45; }
+.pv-pose-empty b { color: var(--text); font-size: 14px; display: block; margin-bottom: 2px; }
+.pv-pose-empty .pv-icon { color: var(--accent-hi); flex: none; margin-top: 2px; }
+
+.pv-pose-info { padding: 10px 12px; margin-bottom: 8px; background: var(--elev); border: 1px solid var(--line); border-radius: var(--radius); }
+.pv-pose-info p { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.pv-pose-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.pv-pose-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.pv-pose-legend-item i { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; display: inline-block; }
+.pv-pose-note { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+/* body map */
+.pv-pose-map, .pv-pose-fingers { display: grid; gap: 6px; }
+.pv-pose-map { grid-template-columns: 1fr 1fr 1fr; }
+.pv-pose-fingers { grid-template-columns: 76px repeat(4, 1fr); margin-top: 10px; align-items: center; }
+.pv-pose-map-head { font-size: 11px; color: var(--faint); text-align: center; text-transform: uppercase; letter-spacing: .06em; }
+.pv-pose-map-btn { min-height: 40px; border-radius: 12px; border: 1px solid var(--line); background: var(--elev-2); color: var(--text);
+  font: inherit; font-size: 13px; padding: 4px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-pose-map-btn.center { background: rgba(124,108,255,.08); }
+.pv-pose-map-btn.small { font-weight: 600; }
+.pv-pose-map-btn.active { background: var(--accent); border-color: transparent; color: #fff; }
+.pv-pose-map-btn:active { transform: scale(.97); }
+.pv-pose-finger-name { font-size: 13px; color: var(--muted); }
+
+/* presets */
+.pv-pose-lib-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pv-pose-lib-top .pv-chips { flex: 1; min-width: 0; }
+.pv-pose-lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.pv-pose-card { position: relative; display: flex; flex-direction: column; align-items: stretch; padding: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--elev); color: var(--text); font: inherit; min-height: 40px; }
+.pv-pose-card:active { transform: scale(.97); }
+.pv-pose-card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.pv-pose-thumb { aspect-ratio: 3 / 4; width: 100%; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(120% 90% at 50% 20%, rgba(255,255,255,.07), rgba(255,255,255,0)); color: var(--faint); }
+.pv-pose-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.pv-pose-thumb.loading::after { content: ''; width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--accent-hi);
+  animation: pvPoseSpin .9s linear infinite; }
+@keyframes pvPoseSpin { to { transform: rotate(360deg); } }
+.pv-pose-card-label { font-size: 12px; padding: 5px 6px 7px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-pose-lib-empty { padding: 26px 12px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.pv-pose-lib-empty .pv-icon { color: var(--accent-hi); margin-bottom: 6px; }
+
+/* hands */
+.pv-pose-actions.pv-pose-view { margin: 10px 0 12px; }
+.pv-pose-hand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+
+/* "Tocco diretto": hand / foot touch menu (never blocks the view: no dimming, the scene
+   keeps its touches) and the Contatti list of the Posa panel */
+.pv-modal.pv-pose-touchmenu { pointer-events: none; }
+.pv-modal.pv-pose-touchmenu .pv-modal-backdrop { display: none; }
+.pv-modal.pv-pose-touchmenu .pv-modal-card { pointer-events: auto; box-shadow: 0 10px 34px rgba(0,0,0,.45); }
+.pv-pose-tm-shapes { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 6px; }
+.pv-pose-tm-shapes .pv-chip { min-height: 40px; padding: 7px 12px; font-size: 13.5px; }
+.pv-pose-contacts { display: flex; flex-direction: column; gap: 6px; }
+.pv-pose-contact { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; background: var(--elev); border: 1px solid var(--line); border-radius: var(--radius); }
+.pv-pose-contact > span { flex: 1; min-width: 0; font-size: 13.5px; }
+.pv-pose-contact small { display: block; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* tablets: >= 44 px touch targets (ui/tablet.css) */
+html.pv-tablet .pv-pose-map-btn { min-height: 44px; font-size: 14px; }
+html.pv-tablet .pv-pose-tm-shapes .pv-chip { min-height: 44px; }

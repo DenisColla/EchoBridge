@@ -1,0 +1,32 @@
+/* Animals module ("Animali"). Prefix: pv-an- */
+.pv-overlay > canvas.pv-an-gizmo { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pv-an-strip { margin: 2px 0 6px; }
+.pv-an-strip .pv-chip { min-height: 40px; }
+.pv-an-add { border-style: dashed; }
+.pv-an-add.active { border-style: solid; }
+.pv-an-note { font-size: 12px; color: var(--muted); line-height: 1.35; margin: 2px 0 8px; }
+.pv-an-groups { margin: 4px 0 10px; }
+.pv-an-groups .pv-chip { min-height: 38px; }
+.pv-an-grid .pv-cards { gap: 7px; }
+.pv-an-grid .pv-card { padding: 6px 4px 8px; min-height: 118px; gap: 3px; justify-content: flex-start; }
+.pv-an-grid .pv-card:active { transform: scale(.96); }
+.pv-an-grid .pv-card-label { font-size: 12px; line-height: 1.15; text-align: center; display: flex; flex-direction: column; }
+.pv-an-grid .pv-card-label small { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+.pv-an-grid .pv-card-visual { height: 80px; align-items: center; }
+.pv-card-visual img.pv-an-thumb { width: 80px; height: 80px; object-fit: contain; border-radius: 10px; opacity: 0; transition: opacity .25s;
+  background: radial-gradient(ellipse at 50% 80%, rgba(255,255,255,.10), rgba(255,255,255,0) 70%); }
+.pv-card-visual img.pv-an-thumb.ready { opacity: 1; }
+.pv-an-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.pv-an-head .pv-an-title { flex: 1; font-size: 17px; font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-an-head .pv-an-title small { font-size: 13px; font-weight: 400; color: var(--muted); }
+.pv-an-head .pv-btn.small { min-width: 42px; min-height: 42px; }
+.pv-an-actions { flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.pv-an-actions .pv-btn { min-width: 0; min-height: 40px; }
+.pv-an-poses { flex-wrap: wrap; overflow: visible; }
+.pv-an-poses .pv-chip, .pv-an-partchips .pv-chip { min-height: 40px; }
+.pv-an-partchips { margin-bottom: 6px; }
+.pv-an-partbox { border-radius: 12px; background: rgba(143,128,255,.10); padding: 8px 10px 6px; margin-top: 4px; }
+.pv-an-partname { font-weight: 650; font-size: 14px; margin-bottom: 4px; color: #b9b0ff; }
+.pv-an-dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; margin-right: 6px; border: 1px solid rgba(255,255,255,.35); flex: none; }
+.pv-an-custom { align-items: center; gap: 10px; margin: 8px 0 4px; font-size: 13px; }
+.pv-an-height { margin-top: -2px; }

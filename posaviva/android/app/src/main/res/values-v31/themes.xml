@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ system splash: dark background (icon = adaptive launcher icon). -->
+    <style name="Theme.PosaViva" parent="Base.Theme.PosaViva">
+        <item name="android:windowSplashScreenBackground">@color/posaviva_background</item>
+    </style>
+</resources>

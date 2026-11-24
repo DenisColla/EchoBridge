@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">PosaViva</string>
+    <string name="share_image_title">Condividi immagine</string>
+    <string name="file_chooser_title">Scegli un file</string>
+    <string name="no_app_to_share">Nessuna app disponibile per la condivisione</string>
+    <string name="no_file_picker">Nessuna app disponibile per scegliere i file</string>
+    <string name="share_failed">Impossibile condividere l\'immagine</string>
+    <string name="mic_permission_denied">Per i comandi vocali PosaViva deve usare il microfono. Tocca di nuovo il microfono e scegli «Consenti», oppure scrivi il comando.</string>
+    <string name="mic_permission_blocked">Il microfono è bloccato per PosaViva. Per usare i comandi vocali apri Impostazioni › App › PosaViva › Autorizzazioni › Microfono e scegli «Consenti solo mentre usi l\'app». Puoi anche scrivere il comando.</string>
+    <string name="webview_old_title">Aggiorna Android System WebView</string>
+    <string name="webview_old_text">PosaViva disegna la scena 3D con il componente «Android System WebView», che su questo dispositivo è troppo vecchio (versione %1$s, serve la %2$d o successiva). Aggiornalo dal Play Store e riapri l\'app.</string>
+    <string name="webview_old_update">Aggiorna</string>
+    <string name="webview_old_try">Prova comunque</string>
+</resources>
