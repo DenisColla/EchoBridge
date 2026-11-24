@@ -467,7 +467,8 @@ export const PROP_TYPES = [
   { id: 'libro', label: 'Libro', cat: 'mano', color: '#2f4a6b', params: [], build: libro,
     hand: { ...handDefaults, radius: 0, wrap: 0.1, thumb: [0.041, 0.03, 0.03], presets: ['hold'], rest: () => [0, 0, 90], slide: () => [-0.08, 0.08] } },
   { id: 'tazza', label: 'Tazza', cat: 'mano', color: '#c0504d', params: [], build: tazza,
-    hand: { ...handDefaults, radius: 0.041, presets: ['cup', 'grip'], rest: () => [0, 0, 0], slide: () => [-0.03, 0.03] } },
+    // held a little below its middle: the index finger stays under the rim (never over the coffee)
+    hand: { ...handDefaults, radius: 0.041, presets: ['cup', 'grip'], rest: () => [0, 0, 0], slide: () => [-0.03, 0.03], grip: (params, out = new THREE.Matrix4()) => out.makeTranslation(0, 0.017, 0) } },
   { id: 'telefono', label: 'Telefono', cat: 'mano', color: '#3a3d44', params: [], build: telefono,
     hand: { ...handDefaults, radius: 0, wrap: 0.12, thumb: [0.017, 0.022, 0.045], presets: ['phone', 'hold'], rest: () => [0, 0, 90], slide: () => [-0.03, 0.03] } },
   { id: 'borsa', label: 'Borsa', cat: 'mano', color: '#7b4a2b', params: [], build: borsa,

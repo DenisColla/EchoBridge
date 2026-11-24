@@ -154,22 +154,29 @@ export function wrapHand(ch, side, radius, { base = null, thumb = null } = {}) {
       const target = radius + FINGER_R * hs;
       const [lo, hi] = FINGER_LIMITS[j - 1];
       const dAt = (t) => { setDelta(i, _axl, t); return distToAxis(endOf(i, j, f, _cp)); };
-      let prevT = lo, best = lo, bestD = dAt(lo), hit = bestD <= target ? lo : null;
-      if (hit === null) {
-        for (let t = lo + SCAN_STEP; t <= hi + 1e-6; t += SCAN_STEP) {
-          const d = dAt(t);
-          if (d < bestD) { bestD = d; best = t; }
-          if (d <= target) { hit = t; break; }
-          prevT = t;
+      const solve = () => {
+        let prevT = lo, best = lo, bestD = dAt(lo), hit = bestD <= target ? lo : null;
+        if (hit === null) {
+          for (let t = lo + SCAN_STEP; t <= hi + 1e-6; t += SCAN_STEP) {
+            const d = dAt(t);
+            if (d < bestD) { bestD = d; best = t; }
+            if (d <= target) { hit = t; break; }
+            prevT = t;
+          }
         }
-      }
-      let t = best;
-      if (hit !== null && hit > lo) {
-        let a = prevT, b = hit;
-        for (let k = 0; k < 7; k++) { const m = (a + b) / 2; if (dAt(m) > target) a = m; else b = m; }
-        t = (a + b) / 2;
-      } else if (hit === lo) t = Math.max(lo, 0);
-      setDelta(i, _axl, t);
+        if (hit !== null && hit > lo) {
+          let a = prevT, b = hit;
+          for (let k = 0; k < 7; k++) { const m = (a + b) / 2; if (dAt(m) > target) a = m; else b = m; }
+          return { t: (a + b) / 2, lo: false };
+        }
+        return hit === lo ? { t: Math.max(lo, 0), lo: true } : { t: best, lo: false };
+      };
+      let r = solve();
+      // the starting pose (a hand preset made for a thinner handle) already bends this joint
+      // into a thick body (a cup, a bottle): solve it again from a straight joint instead,
+      // so the finger rests on the surface rather than through it
+      if (r.lo && dAt(0) < target - 0.002 && Math.abs(_base.w) < 0.99999) { _base.identity(); r = solve(); }
+      setDelta(i, _axl, r.t);
     }
   }
 
@@ -179,10 +186,12 @@ export function wrapHand(ch, side, radius, { base = null, thumb = null } = {}) {
     _Wi.copy(_W2).invert();
     if (thumb) _tg.set(thumb[0] / s, thumb[1] / s, thumb[2] / s).applyMatrix4(_W2);
     else {
-      // on the handle surface, wrist side of the axis, level with the index finger
+      // on the handle surface, wrist side of the axis, level with the index finger. A thin
+      // handle: over the far side (a power grip); a thick body (a cup, a bottle, a vase): on
+      // its side, where the thumb reaches (aimed at the far side it would cut through the body)
       const k2 = ch.bones[B('finger2-1')];
       const ky = k2 ? k2.getWorldPosition(_tmp2).applyMatrix4(_Wi).y : 0.02 / s;
-      const Rt = radius + THUMB_R * hs, a = -0.6;
+      const Rt = radius + THUMB_R * hs, a = -0.6 - THREE.MathUtils.clamp((radius / hs - 0.02) / 0.025, 0, 1) * 0.95;
       _tg.copy(_lp).addScaledVector(_nw, Rt * Math.cos(a)).addScaledVector(_zw, Rt * Math.sin(a)).addScaledVector(_ld, ky * 0.55 * s);
     }
     const tipLen = boneLen(th[2]);

@@ -8,7 +8,7 @@
 //   affordances(target) -> string[]       what the object offers (catalog AFFORD + type data)
 //   actorFor(target) -> Character | null   the selected character, else the nearest one
 //   openMenu(target, {x, y, point, normal, actor}) -> modal api (kit.stageMenu)
-//   sit(ch, prop, {point}) · lie(ch, prop | null, 'back' | 'side' | 'front') · sitFloor(ch, prop?) · sitAtTable(ch, table)
+//   sit(ch, prop, {point}) · lie(ch, prop | null, 'back' | 'side' | 'front', {point}) · sitFloor(ch, prop?) · sitAtTable(ch, table)
 //   take(ch, prop, {side}) · putDown(ch, prop, {on, point}) · setOpen(prop, open, {ch})
 //   look(ch, target, point?) · approach(ch, target) · lean(ch, target, {point, normal})
 //   kneel(ch, target) · pet(ch, animal) · lookOut(ch, prop, point?)
@@ -93,6 +93,20 @@ function boxOf(t, box = new THREE.Box3()) {
 function centerOf(t, out = new THREE.Vector3()) { return boxOf(t, _box).getCenter(out); }
 function footOf(t) {
   if (t.kind === 'prop') return footprintOf({ kind: 'prop', obj: t.obj });
+  if (t.kind === 'animal' && t.obj.skinnedPositions && t.obj.rig) {
+    // an animal: its posed body in its own frame (a world box of a dog turned 45° is far
+    // wider than the dog: walk-to spots would stop too far from it)
+    const P = t.obj.skinnedPositions();
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (let i = 0; i < P.length; i += 3) { const x = P[i], z = P[i + 2]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; }
+    if (x1 > x0) {
+      t.obj.root.updateMatrixWorld(true);
+      const M = t.obj.rig.matrixWorld, e = M.elements;
+      const c = _v4.set((x0 + x1) / 2, 0, (z0 + z1) / 2).applyMatrix4(M);
+      const sx = Math.hypot(e[0], e[1], e[2]), sz = Math.hypot(e[8], e[9], e[10]);
+      return { cx: c.x, cz: c.z, hx: ((x1 - x0) / 2) * sx, hz: ((z1 - z0) / 2) * sz, yaw: Math.atan2(-e[2], e[0]) };
+    }
+  }
   boxOf(t, _box);
   return { cx: (_box.min.x + _box.max.x) / 2, cz: (_box.min.z + _box.max.z) / 2, hx: (_box.max.x - _box.min.x) / 2, hz: (_box.max.z - _box.min.z) / 2, yaw: 0 };
 }
@@ -466,25 +480,29 @@ export function createObjectActions(app, shell) {
       tx = o.x + slot.lx * c + lz * sn; tz = o.z - slot.lx * sn + lz * c;
     }
     moveBy(ch, tx - H.x, tz - H.z, floor);
+    // a hard high top (a low wall, a counter): the buttocks and thighs rest ON it, not in it
+    if (perch) settleOn(ch, p, seat.y);
     for (const q of holding(ch)) carryPose(ch, q);
     return `${ch.name} ${agreeF(ch, 'seduto', 'seduta')} ${withArticle(p.type.label, 'su')}`;
   }
 
   /** Lies down on a bed (head on the pillow), along a sofa, or on the floor / a rug. */
-  function lie(ch, prop, variant = 'back') {
+  function lie(ch, prop, variant = 'back', { point = null } = {}) {
     const id = variant === 'side' ? 'lie_side' : variant === 'front' ? 'lie_front' : 'lie_back';
     const p = prop || null, aff = new Set(p ? affordancesOf(p) : ['floor']);
     let y, headT, axis, faceT = null; // world head target, body axis feet -> head (unit), side faces faceT
     const s = scaleOf(ch);
     if (p && aff.has('bed') && !aff.has('sofa')) {
-      const top = topOf(p, { bed: true });
+      // a bunk bed pressed on its lower bunk: that mattress (the highest one under the press)
+      let top = point ? topOf(p, { bed: true, below: point.y + 0.35 }) : null;
+      if (!top || top.y - p.root.position.y < 0.2) top = topOf(p, { bed: true });
       if (!top) fail(`Non riesco a sdraiarmi ${withArticle(p.type.label, 'su')}`);
       const W = (p.localBox.max.x - p.localBox.min.x) * p.scale;
       const lanes = W >= 1.25 ? [-W / 4, W / 4] : [0];
       const yaw = p.root.rotation.y, c = Math.cos(yaw), sn = Math.sin(yaw), o = p.root.position;
       const others = visibleChars().filter((q) => q !== ch).map((q) => hipsW(q, new THREE.Vector3()));
       const toW = (lx, lz) => new THREE.Vector3(o.x + lx * c + lz * sn, 0, o.z - lx * sn + lz * c);
-      const lane = lanes.find((lx) => !others.some((q) => { const w = toW(lx, (p.localBox.min.z + p.localBox.max.z) / 2 * p.scale); return Math.hypot(q.x - w.x, q.z - w.z) < 0.35 && q.y > top.y - 0.1; }));
+      const lane = lanes.find((lx) => !others.some((q) => { const w = toW(lx, (p.localBox.min.z + p.localBox.max.z) / 2 * p.scale); return Math.hypot(q.x - w.x, q.z - w.z) < 0.35 && q.y > top.y - 0.1 && q.y < top.y + 0.45; })); // (the other bunk is not this one)
       if (lane === undefined) fail(`${p.type.label}: è già occupato`);
       y = top.y;
       headT = toW(lane, p.localBox.min.z * p.scale + 0.3 * s);
@@ -569,9 +587,10 @@ export function createObjectActions(app, shell) {
       x = fp.cx; z = fp.cz;
       y = prop.worldBox(_box).max.y;
     }
-    // room for a cross-legged body (about 0.75 m around), never on somebody
+    // room for a cross-legged body (knees about 0.75 m apart) and a hand's width more,
+    // never on somebody
     const s = scaleOf(ch);
-    const spot = floorSpot(ch, x, z, 0.36 * s, 0.36 * s, [0], prop);
+    const spot = floorSpot(ch, x, z, 0.43 * s, 0.43 * s, [0], prop);
     if (!spot) fail(prop ? `Non c'è spazio libero ${withArticle(prop.type.label, 'su')}` : 'Non c\'è spazio per sedersi qui');
     x = spot.x; z = spot.z;
     if (!prop) y = floorY(x, z);
@@ -582,6 +601,35 @@ export function createObjectActions(app, shell) {
     // through it, so the body rests on the rug top instead
     restOn(ch, y);
     return `${ch.name} ${agreeF(ch, 'seduto', 'seduta')} a terra`;
+  }
+
+  /**
+   * Raises a seated body so that its hips and thighs over the seat's footprint are not below
+   * the seat top y (world): the body sits on a hard top instead of sinking into it.
+   */
+  let _seatBones = null;
+  function settleOn(ch, p, y, maxLift = 0.12) {
+    ch.root.updateMatrixWorld(true);
+    const pos = ch.getSkinnedPositions?.();
+    if (!pos) return;
+    if (!_seatBones) {
+      _seatBones = new Set();
+      ch.model.bones.forEach((b, i) => { if (/^(root|pelvis|spine05|upperleg0[12])/.test(b.name)) _seatBones.add(i); });
+    }
+    const f = footOf({ kind: 'prop', obj: p }), c = Math.cos(f.yaw), sn = Math.sin(f.yaw);
+    const M = ch.rig.matrixWorld, body = ch.model.groupVertices[0], SI = ch.model.skinIndex;
+    let need = 0;
+    for (let k = 0; k < body.length; k += 2) {
+      const vi = body[k];
+      if (!_seatBones.has(SI[vi * 4])) continue;
+      const i = vi * 3;
+      _v.set(pos[i], pos[i + 1], pos[i + 2]).applyMatrix4(M);
+      if (_v.y > y || _v.y < y - 0.2) continue;
+      const dx = _v.x - f.cx, dz = _v.z - f.cz;
+      if (Math.abs(dx * c - dz * sn) > f.hx - 0.01 || Math.abs(dx * sn + dz * c) > f.hz - 0.01) continue;
+      need = Math.max(need, y + 0.003 - _v.y);
+    }
+    if (need > 0.004) moveBy(ch, 0, 0, ch.root.position.y + Math.min(need, maxLift));
   }
 
   /** lifts a floor pose so that no part of the body (shoes included) is below y (world) */
@@ -803,7 +851,8 @@ export function createObjectActions(app, shell) {
       const T = t.obj;
       // the pressed point on the top (a counter under wall cabinets: the ray from above sees them)
       const pressed = point && normal && normal.y > 0.8;
-      const top = topOf(T) || (pressed ? { x: point.x, z: point.z, y: point.y, yaw: T.root.rotation.y } : null);
+      // (a counter under wall cabinets: the top at leaning height, not the cabinets above it)
+      const top = topOf(T, { below: T.root.position.y + 1.2 }) || topOf(T) || (pressed ? { x: point.x, z: point.z, y: point.y, yaw: T.root.rotation.y } : null);
       if (!top) fail(`Non riesco ad appoggiarmi ${withArticle(T.type.label, 'a')}`);
       if (pressed) top.y = point.y;
       const ref = point || ch.root.position;
@@ -1018,12 +1067,18 @@ export function createObjectActions(app, shell) {
   async function run(label, fn) {
     if (busy) return false;
     busy = true;
+    const H = app.history, top0 = H.stack?.[H.index];
     try {
       const msg = await app.history.batch(label, fn);
       app.invalidate();
       haptic('success');
       return msg || true;
     } catch (e) {
+      // an action that fails half-way leaves no trace: the step its batch recorded is undone
+      // and dropped (no redo of a failed action)
+      if (Array.isArray(H.stack) && H.stack[H.index] !== top0) {
+        try { H.undo(); if (H.stack[H.index] === top0) { H.stack.length = H.index + 1; H._emit?.(); } } catch (e2) { console.warn('[actions] rollback', e2); }
+      }
       if (e instanceof ActionError) { toast(e.message, { kind: 'warning' }); haptic('warning'); }
       else { console.error('[actions]', label, e); toast('Azione non riuscita', { kind: 'error' }); }
       app.invalidate();
@@ -1121,7 +1176,7 @@ export function createObjectActions(app, shell) {
   function lieMenu(t, ch, hit) {
     closeMenu();
     const p = t.obj;
-    const go = (variant, text) => run(text.toLowerCase(), withActor(ch, () => lie(ch, p, variant)));
+    const go = (variant, text) => run(text.toLowerCase(), withActor(ch, () => lie(ch, p, variant, { point: hit.point })));
     const list = h('div', { class: 'pv-menu pv-stage-menu-list pv-oa-list', role: 'menu' }, renderItems([
       { id: 'lie-back', label: 'Sulla schiena', icon: 'sofa', onClick: () => go('back', 'Sdraiati sulla schiena') },
       { id: 'lie-side', label: 'Su un fianco', icon: 'sofa', onClick: () => go('side', 'Sdraiati su un fianco') },
@@ -1204,7 +1259,31 @@ export function createObjectActions(app, shell) {
         });
         row.appendChild(b);
       }
-      who.appendChild(row);
+      // one row that scrolls sideways; when it overflows, a fade on the cut side and a ›
+      // button (with how many more) say that more characters can act
+      const next = h('button', { type: 'button', class: 'pv-oa-who-next', 'aria-label': 'Altri personaggi', hidden: true }, h('span', {}), icon('chevronRight', 16));
+      next.addEventListener('click', () => { haptic('tick'); row.scrollBy({ left: Math.max(60, row.clientWidth * 0.7), behavior: 'smooth' }); });
+      const hint = () => {
+        const over = row.scrollWidth > row.clientWidth + 2;
+        const end = row.scrollLeft + row.clientWidth >= row.scrollWidth - 2;
+        who.classList.toggle('more-r', over && !end);
+        who.classList.toggle('more-l', over && row.scrollLeft > 2);
+        next.hidden = !over || end;
+        if (!next.hidden) {
+          const r = row.getBoundingClientRect();
+          const n = [...row.children].filter((c) => c.getBoundingClientRect().right > r.right + 4).length;
+          next.firstChild.textContent = n ? `+${n}` : '';
+        }
+      };
+      row.addEventListener('scroll', hint, { passive: true });
+      who.append(h('div', { class: 'pv-oa-who-scroll' }, row), next);
+      requestAnimationFrame(() => {
+        // the acting character's chip in view
+        const a = row.querySelector('.active');
+        if (a) { const ra = a.getBoundingClientRect(), rr = row.getBoundingClientRect(); if (ra.right > rr.right - 30) row.scrollLeft += ra.right - rr.right + 40; }
+        hint();
+      });
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(hint).observe(row);
     }
     // a light's menu stays short (the light being adjusted stays in view): the object's own
     // actions and tools wait behind "Azioni…"
@@ -1390,7 +1469,7 @@ export function createObjectActions(app, shell) {
     closeMenu,
     pick: pickAt,
     sit: (ch, p, opts) => run('siediti', withActor(ch, () => sit(ch, p, opts))),
-    lie: (ch, p, variant = 'back') => run('sdraiati', withActor(ch, () => lie(ch, p, variant))),
+    lie: (ch, p, variant = 'back', opts) => run('sdraiati', withActor(ch, () => lie(ch, p, variant, opts || {}))),
     sitFloor: (ch, p = null) => run('siediti a terra', withActor(ch, () => sitFloor(ch, p))),
     sitAtTable: (ch, table) => run('siediti al tavolo', withActor(ch, () => sitAtTable(ch, table))),
     take: (ch, p, opts) => run('prendi', withActor(ch, () => take(ch, p, opts))),
