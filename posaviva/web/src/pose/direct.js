@@ -773,15 +773,31 @@ export class DirectTouch {
     return false;
   }
 
-  /** walks the character next to a point and makes the contact there (one undo step) */
+  /**
+   * Walks the character next to a point and makes the contact there (one undo step). A hand
+   * gets the point at its side, a little ahead (where a squat reaches the floor); a foot
+   * faces it. Out of reach even from there: everything stays as it was (no step).
+   */
   async approachAndReach(ch, eff, hit) {
     const { app, ctx } = this;
     if (!app.characters.includes(ch)) return false;
     let ok = false;
     await app.history.batch('raggiungi', () => {
-      // close to the point, its hand side toward it (the squat and the arm do the rest)
-      if (!ctx.api.approach(ch, hit.point, hit.point, { near: 0.3, commit: false })) return;
+      const p0 = ch.root.position.clone(), y0 = ch.root.rotation.y, u = this.snapPose(ch);
+      const hand = eff.startsWith('hand');
+      const r = ctx.api.approach(ch, hit.point, hit.point, { near: hand ? 0.45 : 0.3, commit: false });
+      if (!r) return;
+      if (hand) {
+        const turn = eff.endsWith('.R') ? Math.PI / 4 : -Math.PI / 4;
+        ctx.contacts.carry(ch, () => { ch.root.rotation.y = r.rotationY + turn; ch.root.updateMatrixWorld(true); });
+        ctx.placed(ch);
+      }
       ok = this._reachPoint(ch, eff, hit, { approached: true });
+      if (!ok) {
+        ctx.contacts.carry(ch, () => { ch.root.position.copy(p0); ch.root.rotation.y = y0; ch.root.updateMatrixWorld(true); });
+        this.restorePose(ch, u);
+        ctx.placed(ch);
+      }
     });
     return ok;
   }
