@@ -416,6 +416,9 @@ export class ContactPins {
     const list = this.list(ch);
     if (!list.length || !this.keep) return false;
     let any = false;
+    // (a character just loaded or placed may not have its world matrices yet: the pose would be
+    // solved from where it stood before, pulling every contact away)
+    ch.root.updateMatrixWorld(true);
     this.ctx.rig.refreshAll(ch);
     for (const pin of list) {
       if (this._suspended.has(ch.id + '|' + pin.e)) continue;
