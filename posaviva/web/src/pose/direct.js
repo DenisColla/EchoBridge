@@ -10,9 +10,9 @@
 //    hand (foot) in a contact, dragging the arm (leg) swings the elbow (knee) around the
 //    shoulder-wrist line. One undo step per drag.
 //  - A press that rests first (a finger or the S Pen aiming before it pulls) still poses: a
-//    long press on a limb, the neck or the head becomes the same drag once it moves
-//    (dragFrom, called by pose/carry.js); only the trunk (Busto, Addome, Bacino) carries
-//    the character when held.
+//    long press on a hand, a finger, a forearm, a foot, a shin, the neck or the head becomes
+//    the same drag once it moves (dragFrom, called by pose/carry.js); the trunk, the
+//    shoulders, the upper arms and the thighs carry the character when held.
 //  - The press is shared with the core router (tap, long press) and the camera: nothing
 //    is taken until the finger moves past the tap tolerance; the camera never gets the
 //    moves of a press that started on the body. Two fingers still zoom / pan; a press on
@@ -44,8 +44,13 @@ const FK_PARTS = new Set(['arm', 'forearm', 'shoulder', 'thigh', 'shin', 'abdome
  * body), the middle of the head for the neck. [bone, t along it]
  */
 const SPINE_LEVER = { abdomen: ['spine01', 1], chest: ['spine01', 1], neck: ['head', 0.5] };
-/** the trunk: a long press there carries the character; on any other part it is a pose drag (pose/carry.js) */
-const TRUNK = new Set(['pelvis', 'abdomen', 'chest']);
+/**
+ * a long press here carries the character (pose/carry.js): the trunk, the shoulders, the upper
+ * arms and the thighs (the big middle of the body, also seen from the side). On the far half
+ * of a limb and on the head (hand, fingers, forearm, foot, toes, shin, neck, head: where a
+ * finger or the S Pen rests to aim before pulling) it is a pose drag.
+ */
+const CARRY_PARTS = new Set(['pelvis', 'abdomen', 'chest', 'shoulder', 'arm', 'thigh']);
 const D = Math.PI / 180;
 export const HAND_SHAPES = [
   { id: 'pugno', preset: 'fist', label: 'Pugno' },
@@ -144,21 +149,21 @@ export class DirectTouch {
   }
 
   /**
-   * Long press (pose/carry.js): the body hit when this press would pose a limb, the neck or
-   * the head (a finger / S Pen resting to aim before pulling), else null (the trunk carries,
-   * as does any part where touch does not pose).
+   * Long press (pose/carry.js): the body hit when this press would pose the far half of a
+   * limb, the neck or the head (a finger / S Pen resting to aim before pulling), else null
+   * (the trunk, upper arms and thighs carry, as does any part where touch does not pose).
    */
   holdPoses(e) {
     if (!this._allowed(e)) return null;
     const hit = this.pickBody(e);
     if (!hit) return null;
-    if (hit.character.bones[hit.bone]?.name === 'spine05' || TRUNK.has(hit.control.baseId)) return null;
+    if (hit.character.bones[hit.bone]?.name === 'spine05' || CARRY_PARTS.has(hit.control.baseId)) return null;
     return hit;
   }
 
   /**
    * A long press on a limb that starts moving (pose/carry.js): the same pose drag as a press
-   * that moved at once, measured from where the press started. p: {id, x0, y0, t0, hit, type}.
+   * that moved at once, measured from (x0, y0), where `hit` was picked. p: {id, x0, y0, t0, hit, type}.
    */
   dragFrom(p, e) {
     if (this.drag || !p?.hit || !this.app.characters.includes(p.hit.character)) return false;

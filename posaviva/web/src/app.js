@@ -295,8 +295,7 @@ export class App extends THREE.EventDispatcher {
       ring.hide();
       if (!this._holdHandlers.length) return false;
       const ndc = this.pointerToNDC(e);
-      // x0 / y0 / t0: where and when the press started (a handler that turns the hold into a drag
-      // measures the drag from there)
+      // x0 / y0 / t0: where and when the press started (x / y: where the finger rests now)
       const x0 = origin?.x ?? e.clientX, y0 = origin?.y ?? e.clientY, t0 = origin?.t ?? e.timeStamp;
       for (const h of this._holdHandlers) {
         let r = false;

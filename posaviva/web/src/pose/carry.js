@@ -1,9 +1,10 @@
 // Long press on a character (app.addHoldHandler, priority 60):
-//  - where: with Tocco diretto posing the press (no panel, Posa, Mani) only the trunk carries
-//    (Busto, Addome, Bacino). A long press on a limb, the neck or the head is a careful pose
-//    drag (a finger / S Pen resting to aim before pulling): moving afterwards poses that part
-//    (direct.dragFrom), releasing still opens the character menu. Where touch does not pose
-//    (another panel, Sposta, Tocco diretto off) any part of the body carries.
+//  - where: with Tocco diretto posing the press (no panel, Posa, Mani) the trunk, shoulders,
+//    upper arms and thighs carry. A long press on a hand, a finger, a forearm, a foot, a shin,
+//    the neck or the head is a careful pose drag (a finger / S Pen resting to aim before
+//    pulling): moving afterwards poses that part (direct.dragFrom), releasing still opens the
+//    character menu. Where touch does not pose (another panel, Sposta, Tocco diretto off) any
+//    part of the body carries.
 //  - the character lifts a little (and a shadow ring marks its spot on the floor); sliding
 //    the finger carries it over the ground (landscape terrain followed, props and other
 //    characters it was not already touching are not walked into), a second finger turns
@@ -47,7 +48,7 @@ export class CharacterCarry {
 
   get active() { return !!this.d; }
 
-  _hold({ ndc, x, y, x0, y0, t0, event }) {
+  _hold({ ndc, x, y, t0, event }) {
     if (this.d) return false;
     const { app, ctx } = this;
     if (event && event.pointerType === 'mouse' && event.button > 0) return false;
@@ -56,9 +57,10 @@ export class CharacterCarry {
     // an object in front of the body: its own long press (objects, priority 50)
     const pp = app.props?.pick?.(ndc, { occlusion: false });
     if (pp && pp.distance < hit.distance - 0.01) return false;
-    // Tocco diretto: a limb held still is a pose drag about to start, only the trunk carries
+    // Tocco diretto: a hand, forearm, foot, shin or the head held still is a pose drag about to start
     const limb = event && ctx.direct?.holdPoses?.(event);
-    if (limb) return this._limbHold(limb, x, y, x0 ?? x, y0 ?? y, t0 ?? event.timeStamp);
+    // (the drag is measured from where the finger rests now: the body point under it was picked there)
+    if (limb) return this._limbHold(limb, x, y, t0 ?? event.timeStamp);
     ctx.direct?.cancelPress();
     ctx.direct?.closeMenu();
     return this._begin(hit.character, hit, x, y, event?.pointerId);
@@ -66,10 +68,10 @@ export class CharacterCarry {
 
   /**
    * Long press on a limb (Tocco diretto): nothing lifts. Moving on poses the part as if the
-   * press had moved at once (measured from where it started); released still, the character
-   * menu opens (as for a carry released without moving).
+   * press had moved at once; released still, the character menu opens (as for a carry
+   * released without moving).
    */
-  _limbHold(hit, x, y, x0, y0, t0) {
+  _limbHold(hit, x, y, t0) {
     const { ctx, shell } = this;
     const ch = hit.character;
     ctx.direct.closeMenu();
@@ -80,7 +82,7 @@ export class CharacterCarry {
         if (done || Math.hypot(e.clientX - x, e.clientY - y) < LIMB_SLOP) return;
         done = true;
         shell.hint('');
-        ctx.direct.dragFrom({ id: e.pointerId, x0, y0, t0, hit, type: e.pointerType }, e);
+        ctx.direct.dragFrom({ id: e.pointerId, x0: x, y0: y, t0, hit, type: e.pointerType }, e);
       },
       end: (e, cancelled) => {
         if (done) return;
