@@ -22,9 +22,15 @@
 //
 // Budget (render quality preset, render/device.js): alta 8 lights + the strongest casts a
 // shadow, media 3 without shadows, bassa 2. Farther / weaker sources are culled (their
-// bulbs still glow). Lights are pooled, one per source of the scene up to the budget (lit or
-// not), so switching lamps on and off never changes the number of lights in the shaders (no
-// recompile), only intensities and positions.
+// bulbs still glow). Lights are pooled with a FIXED size per quality preset (alta 6 point +
+// 3 spot slots, media 3 + 1, bassa 2 + 1), created with the first lamp of the session and
+// kept (lit or not, even when lamps are deleted): switching, adding or removing lamps never
+// changes the number of lights in the shaders (each change would recompile ~20 programs: a
+// visible hitch), only intensities and positions. The shadow-capable slots (alta: point 0
+// and spot 0, windows: the nearest sun) keep castShadow; an idle one skips its shadow map
+// render (shadow.autoUpdate false) and casts nothing (shadow.intensity 0).
+// Idle or out-of-range lights are almost free on the GPU: the light loop of every material
+// skips the BRDF of a light whose colour reaching the point is zero (patchLightLoop below).
 import * as THREE from 'three';
 import { setColorFromKelvin, kelvinToHex } from './color.js';
 import { ROLES, TYPE_BY_ID } from '../props/catalog.js';
@@ -34,15 +40,44 @@ import { sourceOf, sourceOfProp, val, windowsOf, isWindowType } from './practica
 import { buildMenuSection, openAmbientMenu, openPracticalMenu } from './practicalsUI.js';
 
 const DEG = Math.PI / 180;
+/** max: lights lit at once; point / spot: pooled slots of each kind (fixed per preset) */
 const BUDGET = {
-  alta: { max: 8, shadows: 1, pointMap: 512, spotMap: 1024, windows: 2, windowMap: 1024, bounce: true },
-  media: { max: 3, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 1024, bounce: false },
-  bassa: { max: 2, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 512, bounce: false },
+  alta: { max: 8, point: 6, spot: 3, shadows: 1, pointMap: 512, spotMap: 1024, windows: 2, windowMap: 1024, bounce: true },
+  media: { max: 3, point: 3, spot: 1, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 1024, bounce: false },
+  bassa: { max: 2, point: 2, spot: 1, shadows: 0, pointMap: 256, spotMap: 512, windows: 1, windowMap: 512, bounce: false },
 };
 /** light-map size of a window's sun (the opening's shape: nothing lit outside the window) */
 const COOKIE_PX = 128;
-/** a pool larger than needed shrinks after this long (each size change recompiles the shaders) */
-const SHRINK_MS = 2500;
+
+// ------------------------------------------------------------------ shader: idle lights skipped
+const RE_CALL = 'RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );';
+let _loopPatched = null;
+/**
+ * The point and spot light loops of three.js call the material's BRDF for every light, even
+ * one whose colour at the point is zero (switched off, out of its range, outside its cone).
+ * The pooled practical lights are often idle: the BRDF is skipped for them (a dynamically
+ * uniform branch: nearly free on the GPU). Edits THREE.ShaderChunk once (idempotent);
+ * materials compiled before are disposed so they recompile. Returns true when in use.
+ */
+export function patchLightLoop(app) {
+  if (_loopPatched !== null) return _loopPatched;
+  let src = THREE.ShaderChunk.lights_fragment_begin;
+  const wrap = (start) => {
+    const i = src.indexOf(start), j = i < 0 ? -1 : src.indexOf(RE_CALL, i), k = i < 0 ? -1 : src.indexOf('#pragma unroll_loop_end', i);
+    if (i < 0 || j < 0 || j > k) return false;
+    src = src.slice(0, j) + `if ( directLight.visible ) { ${RE_CALL} }` + src.slice(j + RE_CALL.length);
+    return true;
+  };
+  // only the exact code we know (a different three.js keeps its own loop)
+  if (!wrap('#if ( NUM_POINT_LIGHTS > 0 ) && defined( RE_Direct )') || !wrap('#if ( NUM_SPOT_LIGHTS > 0 ) && defined( RE_Direct )')) { _loopPatched = false; return false; }
+  THREE.ShaderChunk.lights_fragment_begin = src;
+  app?.scene?.traverse((o) => {
+    if (!o.material) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose();
+  });
+  _loopPatched = true;
+  return true;
+}
 /** studio rig scale while only the scene's own lights should be on (faint fill) */
 const FAINT = { lights: 0, ambient: 0.22 };
 /** practical lights are pushed a little when they are alone (the eye adapts) */
@@ -82,6 +117,7 @@ const noRaycast = () => {};
 export class Practicals extends THREE.EventDispatcher {
   constructor(app, rig) {
     super();
+    patchLightLoop(app);
     this.app = app;
     this.rig = rig;
     this.group = new THREE.Group();
@@ -349,7 +385,6 @@ export class Practicals extends THREE.EventDispatcher {
     }
     // ranking depends on the characters / view when there are more sources than lights
     if (!this._dirty && this._overBudget && now - this._lastRank > 400) this._dirty = true;
-    if (!this._dirty && this._pendingShrink && now - this._lastRank > SHRINK_MS) this._dirty = true;
     if (!this._dirty) return;
     this._dirty = false;
     this._lastRank = now;
@@ -514,60 +549,53 @@ export class Practicals extends THREE.EventDispatcher {
       ranked.push(e);
     }
     ranked.sort((a, b) => b.score - a.score);
-    this._overBudget = ranked.length > budget.max;
-    const chosen = ranked.slice(0, budget.max);
-    // pool sizes follow the SOURCES of the scene, lit or not (up to the budget): switching
-    // lamps on and off never changes the number of lights in the shaders (each size change
-    // recompiles ~20 programs: a visible hitch). Only adding / removing a source (or the
-    // quality preset) resizes it; a smaller need is kept for SHRINK_MS first.
-    const need = { point: 0, spot: 0 };
-    for (const e of chosen) need[e.kind === 'point' ? 'point' : 'spot']++;
-    const avail = { point: 0, spot: 0 };
-    for (const e of this.entries.values()) if (e.src && e.prop.root.visible) avail[e.kind === 'point' ? 'point' : 'spot']++;
-    const want = { point: Math.min(avail.point, budget.max), spot: Math.min(avail.spot, budget.max) };
-    // over the budget in total: each kind keeps what is lit now, the rest is shared by count
-    while (want.point + want.spot > budget.max) {
-      const k = want.point - need.point >= want.spot - need.spot ? 'point' : 'spot';
-      if (want[k] <= need[k]) { want[k === 'point' ? 'spot' : 'point']--; continue; }
-      want[k]--;
+    // the pool: the preset's fixed slots, from the first lamp of the session on (lit or not,
+    // kept when lamps are deleted): lamps switched, added or removed never recompile the
+    // shaders. Only a new quality preset resizes it.
+    if (!this._poolOn && [...this.entries.values()].some((e) => e.src)) this._poolOn = true;
+    for (const kind of ['point', 'spot']) this._resizePool(kind, this._poolOn ? budget[kind] : 0);
+    // the strongest sources, within the preset's total and the slots of each kind
+    const chosen = [], used = { point: 0, spot: 0 };
+    for (const e of ranked) {
+      if (chosen.length >= budget.max) break;
+      const kind = e.kind === 'point' ? 'point' : 'spot';
+      if (used[kind] >= this.pool[kind].length) continue;
+      used[kind]++;
+      chosen.push(e);
     }
+    this._overBudget = chosen.length < ranked.length;
+    // shadows (alta): slot 0 of each kind is shadow-capable for good (a stable program); the
+    // strongest source casts, the other slot 0 (if lit) casts nothing and renders no map
     const shadowsOn = app.renderer.shadowMap.enabled && budget.shadows > 0;
-    const shadowKind = shadowsOn && chosen.length ? (chosen[0].kind === 'point' ? 'point' : 'spot') : null;
-    const now = performance.now();
-    const size = { point: 0, spot: 0 };
-    this._shrink ||= { point: 0, spot: 0 };
-    for (const kind of ['point', 'spot']) {
-      const cur = this.pool[kind].length;
-      if (want[kind] >= cur) { size[kind] = want[kind]; this._shrink[kind] = 0; }
-      else {
-        if (!this._shrink[kind]) this._shrink[kind] = now;
-        size[kind] = now - this._shrink[kind] >= SHRINK_MS ? want[kind] : cur;
-      }
-    }
-    this._pendingShrink = size.point > want.point || size.spot > want.spot;
-    while (size.point + size.spot > budget.max) { const k = size.point - want.point >= size.spot - want.spot ? 'point' : 'spot'; size[k] = Math.max(want[k], size[k] - 1); if (size.point + size.spot > budget.max && size[k] === want[k]) break; }
-    for (const kind of ['point', 'spot']) this._resizePool(kind, size[kind]);
-    // assign: within a kind, the strongest first (slot 0 is the shadow caster)
+    const caster = shadowsOn && chosen.length ? chosen[0] : null;
     const slots = { point: 0, spot: 0 };
     for (const e of chosen) {
       const kind = e.kind === 'point' ? 'point' : 'spot';
       const L = this.pool[kind][slots[kind]++];
-      if (!L) continue;
       this._setupLight(L, e, kind, budget);
       e.lit = true;
+      e.light = L;
     }
+    let shadows = 0;
     for (const kind of ['point', 'spot']) {
       const pool = this.pool[kind];
       for (let i = slots[kind]; i < pool.length; i++) pool[i].intensity = 0;
       for (let i = 0; i < pool.length; i++) {
-        const cast = shadowKind === kind && i === 0 && pool[i].intensity > 0;
-        if (pool[i].castShadow !== cast) { pool[i].castShadow = cast; app.refreshShadows?.(); }
+        const L = pool[i], capable = shadowsOn && i === 0;
+        if (L.castShadow !== capable) { L.castShadow = capable; app.refreshShadows?.(); }
+        const on = capable && !!caster && caster.light === L && L.intensity > 0;
+        L.shadow.intensity = on ? 1 : 0;
+        if (L.shadow.autoUpdate !== on) { L.shadow.autoUpdate = on; if (on) app.refreshShadows?.(); }
+        // a shadow-capable light needs a map, even idle (the core redraws every shadow map
+        // while one is missing): an idle one draws it once
+        if (capable && !L.shadow.map) L.shadow.needsUpdate = true;
+        if (on) shadows++;
       }
     }
     const nWin = this._assignWindows(budget, alone);
     this._stats = {
       sources: [...this.entries.values()].filter((e) => e.src).length, lit, lights: chosen.length,
-      shadows: (shadowKind ? 1 : 0), windows: nWin, pool: this.pool.point.length + this.pool.spot.length,
+      shadows, windows: nWin, pool: this.pool.point.length + this.pool.spot.length,
     };
     this._glowCheck = false;
   }
@@ -753,10 +781,16 @@ export class Practicals extends THREE.EventDispatcher {
       const { sun, bounce } = this.winLights[i], w = wins[i];
       const M = WINDOW_MODES[w.mode] || WINDOW_MODES.giorno;
       const k = w.intensity * (alone ? 1.25 : 1);
-      if (!M.E || k <= 0.001) {
+      // the nearest window's sun keeps castShadow whatever its mode (a stable program: a
+      // closed / dimmed window never recompiles the shaders); off, it renders no shadow map
+      const cast = shadowsOn && i === 0;
+      if (sun.castShadow !== cast) { sun.castShadow = cast; app.refreshShadows?.(); }
+      const on = !!M.E && k > 0.001;
+      if (sun.shadow.autoUpdate !== on) { sun.shadow.autoUpdate = on; if (on && cast) app.refreshShadows?.(); }
+      if (cast && !sun.shadow.map) sun.shadow.needsUpdate = true; // (an idle caster draws its map once)
+      if (!on) {
         sun.intensity = 0;
         if (bounce) bounce.intensity = 0;
-        if (sun.castShadow) { sun.castShadow = false; app.refreshShadows?.(); }
         continue;
       }
       lit++;
@@ -773,8 +807,6 @@ export class Practicals extends THREE.EventDispatcher {
       sun.decay = 2;
       setColorFromKelvin(sun.color, M.kelvin);
       sun.intensity = M.E * k * D * D;
-      const cast = shadowsOn && i === 0;
-      if (sun.castShadow !== cast) { sun.castShadow = cast; app.refreshShadows?.(); }
       const ms = budget.windowMap;
       if (sun.shadow.mapSize.x !== ms) { sun.shadow.mapSize.set(ms, ms); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } }
       sun.shadow.camera.near = D - 1.5;
