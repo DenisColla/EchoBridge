@@ -38,8 +38,12 @@ const REACH_OK = 0.05;
 /** anatomical axes a drag drives (twist needs the rings) */
 const DRAG_KEYS = new Set(['flex', 'abd', 'lat', 'elev', 'prot']);
 const FK_PARTS = new Set(['arm', 'forearm', 'shoulder', 'thigh', 'shin', 'abdomen', 'chest', 'neck']);
-/** parts dragged by their far end (the touched skin of the back barely moves when it bends) */
-const SPINE_LEVER = new Set(['abdomen', 'chest', 'neck']);
+/**
+ * parts dragged by a far lever (the touched skin of the back barely moves when it bends): the
+ * top of the chest for the abdomen and the chest (bending the abdomen carries the whole upper
+ * body), the middle of the head for the neck. [bone, t along it]
+ */
+const SPINE_LEVER = { abdomen: ['spine01', 1], chest: ['spine01', 1], neck: ['head', 0.5] };
 /** the trunk: a long press there carries the character; on any other part it is a pose drag (pose/carry.js) */
 const TRUNK = new Set(['pelvis', 'abdomen', 'chest']);
 const D = Math.PI / 180;
@@ -118,7 +122,8 @@ export class DirectTouch {
     on = !!on;
     if (on === this.suspended) return;
     this._suspended = on;
-    if (on) { this.press = null; this.closeMenu(); }
+    // (the selected part lets go: its rings would only sit there, inert)
+    if (on) { this.press = null; this.closeMenu(); if (this.app.selection.part) this.app.select(this.app.selection.character, null); }
     this.app.dispatchEvent({ type: 'directtouch', suspended: on });
     this.app.invalidate();
   }
@@ -398,12 +403,12 @@ export class DirectTouch {
    * grabbed point as the handle; too close to the pivot (no lever) or `lever` (back and neck:
    * the touched skin barely moves when they bend): the end of the part
    */
-  _handleFor(d, ch, ctrl, lever = false) {
+  _handleFor(d, ch, ctrl, lever = null) {
     const { rig } = this.ctx;
     const piv = rig.worldPos(ch, ctrl.pivotIndex, new THREE.Vector3());
-    const lastName = ctrl.own[ctrl.own.length - 1];
+    const lastName = lever ? lever[0] : ctrl.own[ctrl.own.length - 1];
     const li = rig.model.boneIndex.get(lastName);
-    const end = rig.pointOnBone(ch, li, 1, new THREE.Vector3());
+    const end = rig.pointOnBone(ch, li, lever ? lever[1] : 1, new THREE.Vector3());
     const len = piv.distanceTo(end);
     if (!lever && d.hit.point.distanceTo(piv) >= 0.35 * len) {
       d.hb = d.hit.bone;
@@ -422,12 +427,16 @@ export class DirectTouch {
     const { rig, state, controls } = this.ctx;
     d.kind = 'fk';
     d.dofs = [];
+    // "Il bacino compensa" (abdomen / chest): the pelvis counter-tilts with every change, so
+    // the solver sees it too (else the hips take back most of a side bend and the top of the
+    // back lags far behind the finger)
+    const follow = () => { if (d.follow) this.ctx.follow.update(); };
     const add = (c, damp) => c.axes.forEach((a, k) => {
       if (!DRAG_KEYS.has(a.key) || (a.extra && state.limits)) return;
       d.dofs.push({
         damp,
         get: () => rig.read(ch, c, k),
-        set: (v, clamp) => { const r = rig.write(ch, c, k, v, clamp); rig.refreshControl(ch, c); return clamp && r.clamped; },
+        set: (v, clamp) => { const r = rig.write(ch, c, k, v, clamp); rig.refreshControl(ch, c); follow(); return clamp && r.clamped; },
       });
     });
     add(ctrl, 1);
@@ -435,9 +444,11 @@ export class DirectTouch {
     // helps (damped more: the elbow / knee bends first), so the touched point stays under the finger
     const upper = ctrl.baseId === 'forearm' ? 'arm.' : ctrl.baseId === 'shin' ? 'thigh.' : null;
     if (upper) add(controls.get(upper + ctrl.side), 3);
+    // the chest alone turns a short way (and the hips compensate): the abdomen helps it lean
+    if (ctrl.baseId === 'chest') add(controls.get('abdomen'), 2);
     d.follow = this.ctx.follow.begin(ch, ctrl);
-    this._handleFor(d, ch, ctrl, SPINE_LEVER.has(ctrl.baseId));
-    this.shell.hint(ctrl.label);
+    this._handleFor(d, ch, ctrl, SPINE_LEVER[ctrl.baseId] || null);
+    this.shell.hint(d.hint0 = ctrl.label);
   }
 
   /** finger curl: the three phalanges together (same profile as the Mani panel) */
@@ -466,7 +477,7 @@ export class DirectTouch {
     d.hl = rig.pointOnBone(ch, tip, 1, new THREE.Vector3()).applyMatrix4(_m.copy(ch.bones[tip].matrixWorld).invert());
     d.h0 = { ...this._project(this._handleWorld(d, _v), { x: 0, y: 0 }) };
     if (d.h0.x == null) d.h0 = { x: d.x0, y: d.y0 };
-    this.shell.hint(`${ctrl.label.split(' · ')[0]}: piega il dito`);
+    this.shell.hint(d.hint0 = `${ctrl.label.split(' · ')[0]}: piega il dito`);
   }
 
   /** a limb whose hand / foot is in a contact: the drag swings the elbow / knee */
@@ -490,7 +501,7 @@ export class DirectTouch {
       },
     }];
     this._handleFor(d, ch, ctrl);
-    this.shell.hint(chain.kind === 'arm' ? 'Gomito (la mano resta appoggiata)' : 'Ginocchio (il piede resta appoggiato)');
+    this.shell.hint(d.hint0 = chain.kind === 'arm' ? 'Gomito (la mano resta appoggiata)' : 'Ginocchio (il piede resta appoggiato)');
   }
 
   _safeUpdate(d) {
@@ -530,7 +541,7 @@ export class DirectTouch {
       if (d.follow) ctx.follow.update();
     }
     if (limited && !d.atLimit) haptic('tick');
-    if (limited !== d.atLimit && d.dofs) this.shell.hint(limited ? `${d.ctrl.label} · al limite` : d.kind === 'fk' ? d.ctrl.label : '');
+    if (limited !== d.atLimit && d.dofs) this.shell.hint(limited ? `${d.ctrl.label} · al limite` : d.hint0 || '');
     d.atLimit = limited;
     ctx.edited(ch, false);
     app.invalidate();
